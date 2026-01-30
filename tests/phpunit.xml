@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.5/phpunit.xsd"
+         bootstrap="bootstrap.php"
+         colors="true"
+         testdox="true"
+         stopOnFailure="false">
+    <testsuites>
+        <testsuite name="MySQL Dump Producer Tests">
+            <directory>MySQLDumpProducer</directory>
+        </testsuite>
+        <testsuite name="File Sync Producer Tests">
+            <directory>FileSyncProducer</directory>
+            <exclude>FileSyncProducer/fixtures</exclude>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="DB_HOST" value="127.0.0.1"/>
+        <env name="DB_USER" value="root"/>
+        <env name="DB_PASS" value="my-secret-pw"/>
+        <env name="DB_NAME" value="test_mysql_dump"/>
+    </php>
+</phpunit>

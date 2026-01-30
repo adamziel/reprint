@@ -1,0 +1,25 @@
+{
+    "name": "wordpress/mysql-dump-producer",
+    "description": "MySQL dump producer with cursor-based reentrancy for WordPress data liberation",
+    "type": "library",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=7.4",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "WordPress\\DataLiberation\\": ""
+        }
+    },
+    "scripts": {
+        "test": "cd tests && phpunit --testdox --colors",
+        "test:fast": "cd tests && ./run-tests.sh fast",
+        "test:large": "cd tests && ./run-tests.sh large",
+        "test:coverage": "cd tests && ./run-tests.sh coverage"
+    }
+}

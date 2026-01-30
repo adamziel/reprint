@@ -1,0 +1,6 @@
+vendor
+out.sql
+*.sql
+sql-exports
+/tests/FileSyncProducer/fixtures/*
+*.meta
