@@ -79,12 +79,12 @@ class FileSnapshotStorage implements SnapshotStorage
         // Convert current files array to lookup map
         $current_map = [];
         foreach ($current_files as $file) {
-            $current_map[$file['path']] = $file;
+            $current_map[$file["path"]] = $file;
         }
 
         // Create new index file
-        $new_index_file = $this->index_file . '.new';
-        $new_handle = fopen($new_index_file, 'w');
+        $new_index_file = $this->index_file . ".new";
+        $new_handle = fopen($new_index_file, "w");
         if (!$new_handle) {
             throw new RuntimeException("Could not create new index file");
         }
@@ -92,7 +92,7 @@ class FileSnapshotStorage implements SnapshotStorage
         // Merge with existing index
         if (file_exists($this->index_file)) {
             foreach ($this->get_all_files() as $old_file) {
-                $path = $old_file['path'];
+                $path = $old_file["path"];
 
                 if (isset($current_map[$path])) {
                     // File still exists - update
@@ -100,28 +100,28 @@ class FileSnapshotStorage implements SnapshotStorage
                         $new_handle,
                         "%s\t%d\t%d\tactive\t%d\t0\n",
                         $this->escape_path($path),
-                        $current_map[$path]['ctime'],
-                        $current_map[$path]['size'],
-                        $current_time
+                        $current_map[$path]["ctime"],
+                        $current_map[$path]["size"],
+                        $current_time,
                     );
                     unset($current_map[$path]);
-                } elseif ($old_file['status'] === 'active') {
+                } elseif ($old_file["status"] === "active") {
                     // File was deleted
                     fprintf(
                         $new_handle,
                         "%s\t%d\t%d\tdeleted\t%d\t%d\n",
                         $this->escape_path($path),
-                        $old_file['ctime'],
-                        $old_file['size'],
-                        $old_file['last_seen'],
-                        $current_time
+                        $old_file["ctime"],
+                        $old_file["size"],
+                        $old_file["last_seen"],
+                        $current_time,
                     );
 
                     $deletions[] = [
-                        'path' => $path,
-                        'ctime' => $old_file['ctime'],
-                        'size' => $old_file['size'],
-                        'deleted_at' => $current_time,
+                        "path" => $path,
+                        "ctime" => $old_file["ctime"],
+                        "size" => $old_file["size"],
+                        "deleted_at" => $current_time,
                     ];
                 } else {
                     // Keep deleted files in index
@@ -129,11 +129,11 @@ class FileSnapshotStorage implements SnapshotStorage
                         $new_handle,
                         "%s\t%d\t%d\t%s\t%d\t%d\n",
                         $this->escape_path($path),
-                        $old_file['ctime'],
-                        $old_file['size'],
-                        $old_file['status'],
-                        $old_file['last_seen'],
-                        $old_file['deleted_at']
+                        $old_file["ctime"],
+                        $old_file["size"],
+                        $old_file["status"],
+                        $old_file["last_seen"],
+                        $old_file["deleted_at"],
                     );
                 }
             }
@@ -145,9 +145,9 @@ class FileSnapshotStorage implements SnapshotStorage
                 $new_handle,
                 "%s\t%d\t%d\tactive\t%d\t0\n",
                 $this->escape_path($path),
-                $file['ctime'],
-                $file['size'],
-                $current_time
+                $file["ctime"],
+                $file["size"],
+                $current_time,
             );
         }
 
@@ -167,7 +167,7 @@ class FileSnapshotStorage implements SnapshotStorage
 
         $escaped_path = $this->escape_path($path);
 
-        $handle = fopen($this->index_file, 'r');
+        $handle = fopen($this->index_file, "r");
         if (!$handle) {
             return null;
         }
@@ -177,12 +177,12 @@ class FileSnapshotStorage implements SnapshotStorage
             if (count($parts) >= 6 && $parts[0] === $escaped_path) {
                 fclose($handle);
                 return [
-                    'path' => $this->unescape_path($parts[0]),
-                    'ctime' => (int) $parts[1],
-                    'size' => (int) $parts[2],
-                    'status' => $parts[3],
-                    'last_seen' => (int) $parts[4],
-                    'deleted_at' => (int) $parts[5],
+                    "path" => $this->unescape_path($parts[0]),
+                    "ctime" => (int) $parts[1],
+                    "size" => (int) $parts[2],
+                    "status" => $parts[3],
+                    "last_seen" => (int) $parts[4],
+                    "deleted_at" => (int) $parts[5],
                 ];
             }
         }
@@ -197,7 +197,7 @@ class FileSnapshotStorage implements SnapshotStorage
             return;
         }
 
-        $handle = fopen($this->index_file, 'r');
+        $handle = fopen($this->index_file, "r");
         if (!$handle) {
             return;
         }
@@ -206,12 +206,12 @@ class FileSnapshotStorage implements SnapshotStorage
             $parts = explode("\t", rtrim($line, "\n"));
             if (count($parts) >= 6) {
                 yield [
-                    'path' => $this->unescape_path($parts[0]),
-                    'ctime' => (int) $parts[1],
-                    'size' => (int) $parts[2],
-                    'status' => $parts[3],
-                    'last_seen' => (int) $parts[4],
-                    'deleted_at' => (int) $parts[5],
+                    "path" => $this->unescape_path($parts[0]),
+                    "ctime" => (int) $parts[1],
+                    "size" => (int) $parts[2],
+                    "status" => $parts[3],
+                    "last_seen" => (int) $parts[4],
+                    "deleted_at" => (int) $parts[5],
                 ];
             }
         }
@@ -241,22 +241,22 @@ class FileSnapshotStorage implements SnapshotStorage
      */
     private function normalize_path(string $path): string
     {
-        $parts = explode('/', $path);
+        $parts = explode("/", $path);
         $normalized = [];
 
         foreach ($parts as $part) {
-            if ($part === '' || $part === '.') {
+            if ($part === "" || $part === ".") {
                 // Skip empty parts and current directory references
-                if ($part === '' && count($normalized) === 0) {
+                if ($part === "" && count($normalized) === 0) {
                     // Preserve leading slash for absolute paths
-                    $normalized[] = '';
+                    $normalized[] = "";
                 }
                 continue;
             }
 
-            if ($part === '..') {
+            if ($part === "..") {
                 // Go up one directory
-                if (count($normalized) > 0 && end($normalized) !== '..') {
+                if (count($normalized) > 0 && end($normalized) !== "..") {
                     array_pop($normalized);
                 } else {
                     // Can't go up (relative path starting with ..)
@@ -267,7 +267,7 @@ class FileSnapshotStorage implements SnapshotStorage
             }
         }
 
-        return implode('/', $normalized);
+        return implode("/", $normalized);
     }
 
     public function get_last_sync_time(): ?int
@@ -283,17 +283,20 @@ class FileSnapshotStorage implements SnapshotStorage
 
     private function load_last_sync_time(): void
     {
-        $meta_file = $this->index_file . '.meta';
+        $meta_file = $this->index_file . ".meta";
         if (file_exists($meta_file)) {
             $data = json_decode(file_get_contents($meta_file), true);
-            $this->last_sync_time = $data['last_sync_time'] ?? null;
+            $this->last_sync_time = $data["last_sync_time"] ?? null;
         }
     }
 
     private function save_last_sync_time(): void
     {
-        $meta_file = $this->index_file . '.meta';
-        file_put_contents($meta_file, json_encode(['last_sync_time' => $this->last_sync_time]));
+        $meta_file = $this->index_file . ".meta";
+        file_put_contents(
+            $meta_file,
+            json_encode(["last_sync_time" => $this->last_sync_time]),
+        );
     }
 }
 
@@ -330,7 +333,9 @@ class SqliteSnapshotStorage implements SnapshotStorage
         ');
 
         // Create index for faster queries
-        $this->db->exec('CREATE INDEX IF NOT EXISTS idx_status ON files(status)');
+        $this->db->exec(
+            "CREATE INDEX IF NOT EXISTS idx_status ON files(status)",
+        );
     }
 
     public function update_from_scan(array $current_files): array
@@ -341,33 +346,35 @@ class SqliteSnapshotStorage implements SnapshotStorage
         // Convert current files to lookup map
         $current_map = [];
         foreach ($current_files as $file) {
-            $current_map[$file['path']] = $file;
+            $current_map[$file["path"]] = $file;
         }
 
-        $this->db->exec('BEGIN TRANSACTION');
+        $this->db->exec("BEGIN TRANSACTION");
 
         try {
             // Mark existing active files as deleted if not in current scan
-            $stmt = $this->db->prepare('SELECT path, ctime, size FROM files WHERE status = ?');
-            $stmt->bindValue(1, 'active', SQLITE3_TEXT);
+            $stmt = $this->db->prepare(
+                "SELECT path, ctime, size FROM files WHERE status = ?",
+            );
+            $stmt->bindValue(1, "active", SQLITE3_TEXT);
             $result = $stmt->execute();
 
             while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
-                if (!isset($current_map[$row['path']])) {
+                if (!isset($current_map[$row["path"]])) {
                     // File deleted
                     $update = $this->db->prepare(
-                        'UPDATE files SET status = ?, deleted_at = ? WHERE path = ?'
+                        "UPDATE files SET status = ?, deleted_at = ? WHERE path = ?",
                     );
-                    $update->bindValue(1, 'deleted', SQLITE3_TEXT);
+                    $update->bindValue(1, "deleted", SQLITE3_TEXT);
                     $update->bindValue(2, $current_time, SQLITE3_INTEGER);
-                    $update->bindValue(3, $row['path'], SQLITE3_TEXT);
+                    $update->bindValue(3, $row["path"], SQLITE3_TEXT);
                     $update->execute();
 
                     $deletions[] = [
-                        'path' => $row['path'],
-                        'ctime' => $row['ctime'],
-                        'size' => $row['size'],
-                        'deleted_at' => $current_time,
+                        "path" => $row["path"],
+                        "ctime" => $row["ctime"],
+                        "size" => $row["size"],
+                        "deleted_at" => $current_time,
                     ];
                 }
             }
@@ -385,17 +392,17 @@ class SqliteSnapshotStorage implements SnapshotStorage
 
             foreach ($current_map as $path => $info) {
                 $upsert->bindValue(1, $path, SQLITE3_TEXT);
-                $upsert->bindValue(2, $info['ctime'], SQLITE3_INTEGER);
-                $upsert->bindValue(3, $info['size'], SQLITE3_INTEGER);
-                $upsert->bindValue(4, 'active', SQLITE3_TEXT);
+                $upsert->bindValue(2, $info["ctime"], SQLITE3_INTEGER);
+                $upsert->bindValue(3, $info["size"], SQLITE3_INTEGER);
+                $upsert->bindValue(4, "active", SQLITE3_TEXT);
                 $upsert->bindValue(5, $current_time, SQLITE3_INTEGER);
-                $upsert->bindValue(6, 'active', SQLITE3_TEXT);
+                $upsert->bindValue(6, "active", SQLITE3_TEXT);
                 $upsert->execute();
             }
 
-            $this->db->exec('COMMIT');
+            $this->db->exec("COMMIT");
         } catch (Exception $e) {
-            $this->db->exec('ROLLBACK');
+            $this->db->exec("ROLLBACK");
             throw $e;
         }
 
@@ -404,7 +411,7 @@ class SqliteSnapshotStorage implements SnapshotStorage
 
     public function get_file(string $path): ?array
     {
-        $stmt = $this->db->prepare('SELECT * FROM files WHERE path = ?');
+        $stmt = $this->db->prepare("SELECT * FROM files WHERE path = ?");
         $stmt->bindValue(1, $path, SQLITE3_TEXT);
         $result = $stmt->execute();
         $row = $result->fetchArray(SQLITE3_ASSOC);
@@ -414,7 +421,7 @@ class SqliteSnapshotStorage implements SnapshotStorage
 
     public function get_all_files(): \Generator
     {
-        $result = $this->db->query('SELECT * FROM files');
+        $result = $this->db->query("SELECT * FROM files");
 
         while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
             yield $row;
@@ -423,12 +430,12 @@ class SqliteSnapshotStorage implements SnapshotStorage
 
     public function get_last_sync_time(): ?int
     {
-        $stmt = $this->db->prepare('SELECT value FROM metadata WHERE key = ?');
-        $stmt->bindValue(1, 'last_sync_time', SQLITE3_TEXT);
+        $stmt = $this->db->prepare("SELECT value FROM metadata WHERE key = ?");
+        $stmt->bindValue(1, "last_sync_time", SQLITE3_TEXT);
         $result = $stmt->execute();
         $row = $result->fetchArray(SQLITE3_ASSOC);
 
-        return $row ? (int) $row['value'] : null;
+        return $row ? (int) $row["value"] : null;
     }
 
     public function set_last_sync_time(int $timestamp): void
@@ -437,7 +444,7 @@ class SqliteSnapshotStorage implements SnapshotStorage
             INSERT INTO metadata (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         ');
-        $stmt->bindValue(1, 'last_sync_time', SQLITE3_TEXT);
+        $stmt->bindValue(1, "last_sync_time", SQLITE3_TEXT);
         $stmt->bindValue(2, (string) $timestamp, SQLITE3_TEXT);
         $stmt->execute();
     }
@@ -457,9 +464,9 @@ class SqliteSnapshotStorage implements SnapshotStorage
  */
 class FileSyncProducer
 {
-    const PHASE_SCANNING = 'scanning';
-    const PHASE_STREAMING = 'streaming';
-    const PHASE_FINISHED = 'finished';
+    const PHASE_SCANNING = "scanning";
+    const PHASE_STREAMING = "streaming";
+    const PHASE_FINISHED = "finished";
 
     private $directories; // Array of directories to scan
     private $min_ctime;
@@ -497,18 +504,21 @@ class FileSyncProducer
     {
         // Accept both single directory (string) and multiple directories (array)
         if (is_string($directories)) {
-            $this->directories = [rtrim($directories, '/')];
+            $this->directories = [rtrim($directories, "/")];
         } else {
-            $this->directories = array_map(fn($d) => rtrim($d, '/'), $directories);
+            $this->directories = array_map(
+                fn($d) => rtrim($d, "/"),
+                $directories,
+            );
         }
 
-        $this->snapshot_storage = $options['snapshot_storage'] ?? null;
-        $this->min_ctime = $options['min_ctime'] ?? 0;
-        $this->chunk_size = $options['chunk_size'] ?? (5 * 1024 * 1024); // 5MB default
-        $this->follow_symlinks = $options['follow_symlinks'] ?? true;
+        $this->snapshot_storage = $options["snapshot_storage"] ?? null;
+        $this->min_ctime = $options["min_ctime"] ?? 0;
+        $this->chunk_size = $options["chunk_size"] ?? 5 * 1024 * 1024; // 5MB default
+        $this->follow_symlinks = $options["follow_symlinks"] ?? true;
 
-        if (isset($options['cursor'])) {
-            $this->initialize_from_cursor($options['cursor']);
+        if (isset($options["cursor"])) {
+            $this->initialize_from_cursor($options["cursor"]);
         } else {
             $this->initialize_new();
         }
@@ -553,20 +563,24 @@ class FileSyncProducer
         $cursor = json_decode($cursor_json, true);
         if ($cursor === null && json_last_error() !== JSON_ERROR_NONE) {
             throw new InvalidArgumentException(
-                'Invalid cursor format: cursor must be valid JSON. ' .
-                'JSON error: ' . json_last_error_msg() . '. ' .
-                'Received: ' . substr($cursor_json, 0, 100)
+                "Invalid cursor format: cursor must be valid JSON. " .
+                    "JSON error: " .
+                    json_last_error_msg() .
+                    ". " .
+                    "Received: " .
+                    substr($cursor_json, 0, 100),
             );
         }
         if (!is_array($cursor)) {
             throw new InvalidArgumentException(
-                'Invalid cursor format: cursor must be a JSON object. ' .
-                'Received: ' . substr($cursor_json, 0, 100)
+                "Invalid cursor format: cursor must be a JSON object. " .
+                    "Received: " .
+                    substr($cursor_json, 0, 100),
             );
         }
 
-        $this->phase = $cursor['p'];
-        $this->filesystem_root = $cursor['fsr'] ?? null;
+        $this->phase = $cursor["p"];
+        $this->filesystem_root = $cursor["fsr"] ?? null;
         $this->current_chunk = null;
 
         if ($this->phase === self::PHASE_SCANNING) {
@@ -589,9 +603,9 @@ class FileSyncProducer
             $this->symlink_index = 0;
             $this->deletions = null;
         } elseif ($this->phase === self::PHASE_STREAMING) {
-            $this->files_streamed = $cursor['n'] ?? 0;
-            $this->streaming_file_offset = $cursor['b'] ?? 0;
-            $this->deletions = $cursor['d'] ?? null;
+            $this->files_streamed = $cursor["n"] ?? 0;
+            $this->streaming_file_offset = $cursor["b"] ?? 0;
+            $this->deletions = $cursor["d"] ?? null;
 
             // We need to re-scan to rebuild the scanned_files array
             // This is acceptable because scanning is fast (no I/O to temp files)
@@ -638,11 +652,11 @@ class FileSyncProducer
             $this->scanned_directories[$current_dir] = true;
 
             while (($entry = readdir($handle)) !== false) {
-                if ($entry === '.' || $entry === '..') {
+                if ($entry === "." || $entry === "..") {
                     continue;
                 }
 
-                $full_path = $current_dir . '/' . $entry;
+                $full_path = $current_dir . "/" . $entry;
 
                 // Handle symlinks - just record them, don't follow
                 if (is_link($full_path)) {
@@ -652,9 +666,9 @@ class FileSyncProducer
                         $ctime = @filectime($full_path);
                         if ($ctime !== false) {
                             $this->scanned_symlinks[] = [
-                                'path' => $full_path,
-                                'target' => $target,
-                                'ctime' => $ctime,
+                                "path" => $full_path,
+                                "target" => $target,
+                                "ctime" => $ctime,
                             ];
                         }
                     }
@@ -682,9 +696,9 @@ class FileSyncProducer
                     // Apply min_ctime filter when adding to scanned_files
                     if ($ctime > $this->min_ctime) {
                         $this->scanned_files[] = [
-                            'path' => $full_path,
-                            'ctime' => $ctime,
-                            'size' => $size,
+                            "path" => $full_path,
+                            "ctime" => $ctime,
+                            "size" => $size,
                         ];
                     }
                 }
@@ -694,8 +708,10 @@ class FileSyncProducer
         }
 
         // Sort by ctime, then by path for stable ordering (handles same ctime)
-        usort($this->scanned_files, fn($a, $b) =>
-            $a['ctime'] <=> $b['ctime'] ?: strcmp($a['path'], $b['path'])
+        usort(
+            $this->scanned_files,
+            fn($a, $b) => $a["ctime"] <=> $b["ctime"] ?:
+            strcmp($a["path"], $b["path"]),
         );
 
         // Identify empty directories
@@ -756,7 +772,10 @@ class FileSyncProducer
 
         $this->scan_batch_count = 0;
 
-        while (!empty($this->scan_stack) && $this->scan_batch_count < $this->scan_batch_size) {
+        while (
+            !empty($this->scan_stack) &&
+            $this->scan_batch_count < $this->scan_batch_size
+        ) {
             $current_dir = array_pop($this->scan_stack);
             $handle = @opendir($current_dir);
 
@@ -768,11 +787,11 @@ class FileSyncProducer
             $this->scan_batch_count++;
 
             while (($entry = readdir($handle)) !== false) {
-                if ($entry === '.' || $entry === '..') {
+                if ($entry === "." || $entry === "..") {
                     continue;
                 }
 
-                $full_path = $current_dir . '/' . $entry;
+                $full_path = $current_dir . "/" . $entry;
 
                 if (is_link($full_path)) {
                     $target = readlink($full_path);
@@ -781,19 +800,14 @@ class FileSyncProducer
                         $ctime = @filectime($full_path);
                         if ($ctime !== false) {
                             $this->scanned_symlinks[] = [
-                                'path' => $full_path,
-                                'target' => $target,
-                                'ctime' => $ctime,
+                                "path" => $full_path,
+                                "target" => $target,
+                                "ctime" => $ctime,
                             ];
                         }
                     }
                     continue;
                 } elseif (is_dir($full_path)) {
-                    // Debug: Log directory detection
-                    if (basename($full_path) === '6.9' || preg_match('/\d+\.\d+$/', basename($full_path))) {
-                        error_log("DEBUG scan_step: Found directory: $full_path");
-                    }
-
                     $real_path = realpath($full_path);
                     if ($real_path !== false) {
                         if (isset($this->visited_paths[$real_path])) {
@@ -812,15 +826,10 @@ class FileSyncProducer
                         continue;
                     }
 
-                    // Debug: Check if this looks like a directory path
-                    if (basename($full_path) === '6.9' || preg_match('/\d+\.\d+$/', basename($full_path))) {
-                        error_log("DEBUG scan_step: Adding to scanned_files: $full_path (size: $size, is_dir: " . (is_dir($full_path) ? 'yes' : 'no') . ")");
-                    }
-
                     $this->scanned_files[] = [
-                        'path' => $full_path,
-                        'ctime' => $ctime,
-                        'size' => $size,
+                        "path" => $full_path,
+                        "ctime" => $ctime,
+                        "size" => $size,
                     ];
                 }
             }
@@ -837,7 +846,11 @@ class FileSyncProducer
      */
     private function finalize_scanning(): void
     {
-        error_log("FileSyncProducer: Scanning complete, found " . count($this->scanned_files) . " files");
+        error_log(
+            "FileSyncProducer: Scanning complete, found " .
+                count($this->scanned_files) .
+                " files",
+        );
 
         $all_files = $this->scanned_files;
 
@@ -846,37 +859,59 @@ class FileSyncProducer
             error_log("FileSyncProducer: Loading previous snapshot");
             $previous_snapshot = [];
             foreach ($this->snapshot_storage->get_all_files() as $file) {
-                if ($file['status'] === 'active') {
-                    $previous_snapshot[$file['path']] = [
-                        'ctime' => $file['ctime'],
-                        'size' => $file['size'],
+                if ($file["status"] === "active") {
+                    $previous_snapshot[$file["path"]] = [
+                        "ctime" => $file["ctime"],
+                        "size" => $file["size"],
                     ];
                 }
             }
-            error_log("FileSyncProducer: Loaded " . count($previous_snapshot) . " files from snapshot");
+            error_log(
+                "FileSyncProducer: Loaded " .
+                    count($previous_snapshot) .
+                    " files from snapshot",
+            );
 
             // Filter files to send
             $filtered_files = [];
             foreach ($all_files as $file) {
-                if ($file['ctime'] <= $this->min_ctime) {
+                if ($file["ctime"] <= $this->min_ctime) {
                     continue;
                 }
 
-                $prev = $previous_snapshot[$file['path']] ?? null;
-                if (!$prev || $prev['ctime'] != $file['ctime'] || $prev['size'] != $file['size']) {
+                $prev = $previous_snapshot[$file["path"]] ?? null;
+                if (
+                    !$prev ||
+                    $prev["ctime"] != $file["ctime"] ||
+                    $prev["size"] != $file["size"]
+                ) {
                     $filtered_files[] = $file;
                 }
             }
             $this->scanned_files = $filtered_files;
-            error_log("FileSyncProducer: Filtered to " . count($this->scanned_files) . " files to send");
+            error_log(
+                "FileSyncProducer: Filtered to " .
+                    count($this->scanned_files) .
+                    " files to send",
+            );
 
-            error_log("FileSyncProducer: Updating snapshot with " . count($all_files) . " files");
-            $this->deletions = $this->snapshot_storage->update_from_scan($all_files);
-            error_log("FileSyncProducer: Snapshot updated, found " . count($this->deletions ?? []) . " deletions");
+            error_log(
+                "FileSyncProducer: Updating snapshot with " .
+                    count($all_files) .
+                    " files",
+            );
+            $this->deletions = $this->snapshot_storage->update_from_scan(
+                $all_files,
+            );
+            error_log(
+                "FileSyncProducer: Snapshot updated, found " .
+                    count($this->deletions ?? []) .
+                    " deletions",
+            );
         } else {
             $filtered_files = [];
             foreach ($all_files as $file) {
-                if ($file['ctime'] > $this->min_ctime) {
+                if ($file["ctime"] > $this->min_ctime) {
                     $filtered_files[] = $file;
                 }
             }
@@ -884,8 +919,10 @@ class FileSyncProducer
         }
 
         // Sort by ctime, then by path
-        usort($this->scanned_files, fn($a, $b) =>
-            $a['ctime'] <=> $b['ctime'] ?: strcmp($a['path'], $b['path'])
+        usort(
+            $this->scanned_files,
+            fn($a, $b) => $a["ctime"] <=> $b["ctime"] ?:
+            strcmp($a["path"], $b["path"]),
         );
 
         // Identify empty directories
@@ -896,9 +933,10 @@ class FileSyncProducer
 
         $this->phase = self::PHASE_STREAMING;
         $this->initialize_streaming();
-        error_log("FileSyncProducer: Scanning complete, transitioning to streaming phase");
+        error_log(
+            "FileSyncProducer: Scanning complete, transitioning to streaming phase",
+        );
     }
-
 
     /**
      * Identify directories that contain no files
@@ -908,9 +946,13 @@ class FileSyncProducer
         // Build set of directories that contain files
         $dirs_with_files = [];
         foreach ($all_files as $file) {
-            $dir = dirname($file['path']);
+            $dir = dirname($file["path"]);
             // Mark this directory and all parent directories as having content
-            while (!in_array($dir, $this->directories) && $dir !== '/' && $dir !== '.') {
+            while (
+                !in_array($dir, $this->directories) &&
+                $dir !== "/" &&
+                $dir !== "."
+            ) {
                 $dirs_with_files[$dir] = true;
                 $dir = dirname($dir);
             }
@@ -931,13 +973,6 @@ class FileSyncProducer
 
         // Sort empty directories by path for consistent output
         sort($this->empty_directories);
-
-        // Debug: Log empty directories
-        foreach ($this->empty_directories as $dir) {
-            if (basename($dir) === '6.9' || preg_match('/\d+\.\d+$/', basename($dir))) {
-                error_log("DEBUG: Identified as empty directory: $dir");
-            }
-        }
     }
 
     /**
@@ -948,20 +983,20 @@ class FileSyncProducer
     private function calculate_filesystem_root(): string
     {
         // Start with all scan directories
-        $paths = array_map('realpath', $this->directories);
+        $paths = array_map("realpath", $this->directories);
         $paths = array_filter($paths); // Remove any false values
 
         // Add all symlink target real paths
         foreach ($this->scanned_symlinks as $symlink) {
             // Resolve symlink to absolute path
-            $symlink_path = $symlink['path'];
-            $target = $symlink['target'];
+            $symlink_path = $symlink["path"];
+            $target = $symlink["target"];
 
             // Resolve target relative to symlink's directory
             $symlink_dir = dirname($symlink_path);
-            if ($target[0] !== '/') {
+            if ($target[0] !== "/") {
                 // Relative path - resolve it
-                $target_path = $symlink_dir . '/' . $target;
+                $target_path = $symlink_dir . "/" . $target;
             } else {
                 // Absolute path
                 $target_path = $target;
@@ -974,14 +1009,14 @@ class FileSyncProducer
                 // Symlink target doesn't exist or can't be resolved
                 error_log(
                     "Warning: Cannot resolve symlink target: {$symlink_path} -> {$target} " .
-                    "(resolved to {$target_path})"
+                        "(resolved to {$target_path})",
                 );
             }
         }
 
         // Find common ancestor of all paths
         if (count($paths) === 0) {
-            return '/';
+            return "/";
         }
 
         if (count($paths) === 1) {
@@ -991,14 +1026,14 @@ class FileSyncProducer
         $common = $this->find_common_ancestor($paths);
 
         // If filesystem root is /, that's expected when exporting multiple directories
-        if ($common === '/' || $common === '') {
+        if ($common === "/" || $common === "") {
             if (count($this->directories) > 1) {
                 error_log(
-                    'FileSyncProducer: Using / as filesystem root for multiple directories: ' .
-                    implode(', ', $this->directories)
+                    "FileSyncProducer: Using / as filesystem root for multiple directories: " .
+                        implode(", ", $this->directories),
                 );
             }
-            return '/';
+            return "/";
         }
 
         return $common;
@@ -1010,14 +1045,14 @@ class FileSyncProducer
     private function find_common_ancestor(array $paths): string
     {
         if (empty($paths)) {
-            return '/';
+            return "/";
         }
 
         // Split each path into components
-        $path_parts = array_map(fn($p) => explode('/', trim($p, '/')), $paths);
+        $path_parts = array_map(fn($p) => explode("/", trim($p, "/")), $paths);
 
         // Find shortest path length
-        $min_depth = min(array_map('count', $path_parts));
+        $min_depth = min(array_map("count", $path_parts));
 
         // Find common prefix
         $common_parts = [];
@@ -1040,10 +1075,10 @@ class FileSyncProducer
         }
 
         if (empty($common_parts)) {
-            return '/';
+            return "/";
         }
 
-        return '/' . implode('/', $common_parts);
+        return "/" . implode("/", $common_parts);
     }
 
     private function initialize_streaming(): void
@@ -1060,12 +1095,12 @@ class FileSyncProducer
      */
     private function make_relative_to_root(string $path): string
     {
-        $root = rtrim($this->filesystem_root, '/');
-        $path = rtrim($path, '/');
+        $root = rtrim($this->filesystem_root, "/");
+        $path = rtrim($path, "/");
 
         if (strpos($path, $root) === 0) {
             $relative = substr($path, strlen($root));
-            return $relative ?: '/';
+            return $relative ?: "/";
         }
 
         // Path not under root - return as-is (shouldn't happen after our safety checks)
@@ -1083,8 +1118,8 @@ class FileSyncProducer
             $this->empty_dir_index++;
 
             $this->current_chunk = [
-                'type' => 'directory',
-                'path' => $dir, // Keep full absolute path
+                "type" => "directory",
+                "path" => $dir, // Keep full absolute path
             ];
             return;
         }
@@ -1095,10 +1130,10 @@ class FileSyncProducer
             $this->symlink_index++;
 
             $this->current_chunk = [
-                'type' => 'symlink',
-                'path' => $symlink['path'], // Keep full absolute path
-                'target' => $symlink['target'], // Keep target as-is (relative link)
-                'ctime' => $symlink['ctime'],
+                "type" => "symlink",
+                "path" => $symlink["path"], // Keep full absolute path
+                "target" => $symlink["target"], // Keep target as-is (relative link)
+                "ctime" => $symlink["ctime"],
             ];
             return;
         }
@@ -1119,7 +1154,7 @@ class FileSyncProducer
         // Open next file if needed
         if ($this->streaming_file_handle === null) {
             $file = $this->scanned_files[$this->streaming_index];
-            $this->streaming_file_handle = @fopen($file['path'], 'r');
+            $this->streaming_file_handle = @fopen($file["path"], "r");
 
             if (!$this->streaming_file_handle) {
                 // Skip unreadable files
@@ -1130,15 +1165,19 @@ class FileSyncProducer
 
             // Seek to offset if resuming mid-file
             if ($this->streaming_file_offset > 0) {
-                fseek($this->streaming_file_handle, $this->streaming_file_offset);
+                fseek(
+                    $this->streaming_file_handle,
+                    $this->streaming_file_offset,
+                );
             }
         }
 
         // Read next chunk
         $file = $this->scanned_files[$this->streaming_index];
+
         $data = fread($this->streaming_file_handle, $this->chunk_size);
 
-        if ($data === false || $data === '') {
+        if ($data === false || $data === "") {
             // End of file or error
             fclose($this->streaming_file_handle);
             $this->streaming_file_handle = null;
@@ -1151,8 +1190,8 @@ class FileSyncProducer
         $offset = $this->streaming_file_offset;
         $this->streaming_file_offset += strlen($data);
 
-        $is_first = ($offset === 0);
-        $is_last = (feof($this->streaming_file_handle));
+        $is_first = $offset === 0;
+        $is_last = feof($this->streaming_file_handle);
 
         if ($is_last) {
             fclose($this->streaming_file_handle);
@@ -1163,14 +1202,14 @@ class FileSyncProducer
         }
 
         $this->current_chunk = [
-            'type' => 'file',
-            'path' => $file['path'], // Keep full absolute path
-            'size' => $file['size'],
-            'ctime' => $file['ctime'],
-            'data' => $data,
-            'offset' => $offset,
-            'is_first_chunk' => $is_first,
-            'is_last_chunk' => $is_last,
+            "type" => "file",
+            "path" => $file["path"], // Keep full absolute path
+            "size" => $file["size"],
+            "ctime" => $file["ctime"],
+            "data" => $data,
+            "offset" => $offset,
+            "is_first_chunk" => $is_first,
+            "is_last_chunk" => $is_last,
         ];
     }
 
@@ -1197,17 +1236,17 @@ class FileSyncProducer
     public function get_reentrancy_cursor(): string
     {
         $cursor = [
-            'p' => $this->phase,
-            'fsr' => $this->filesystem_root ?? null, // filesystem root
+            "p" => $this->phase,
+            "fsr" => $this->filesystem_root ?? null, // filesystem root
         ];
 
         if ($this->phase === self::PHASE_STREAMING) {
-            $cursor['n'] = $this->files_streamed;
-            $cursor['b'] = $this->streaming_file_offset;
+            $cursor["n"] = $this->files_streamed;
+            $cursor["b"] = $this->streaming_file_offset;
 
             // Only include deletions if not yet output
             if ($this->files_streamed === 0 && $this->deletions !== null) {
-                $cursor['d'] = $this->deletions;
+                $cursor["d"] = $this->deletions;
             }
         }
 
@@ -1217,29 +1256,33 @@ class FileSyncProducer
     public function get_progress(): array
     {
         $progress = [
-            'phase' => $this->phase,
+            "phase" => $this->phase,
         ];
 
         if ($this->phase === self::PHASE_SCANNING) {
-            $progress['files_found'] = count($this->scanned_files);
-            $progress['directories_pending'] = count($this->scan_stack);
+            $progress["files_found"] = count($this->scanned_files);
+            $progress["directories_pending"] = count($this->scan_stack);
         } elseif ($this->phase === self::PHASE_STREAMING) {
-            $progress['files_total'] = count($this->scanned_files);
-            $progress['files_completed'] = $this->files_streamed;
+            $progress["files_total"] = count($this->scanned_files);
+            $progress["files_completed"] = $this->files_streamed;
 
             if ($this->streaming_index < count($this->scanned_files)) {
                 $file = $this->scanned_files[$this->streaming_index];
-                $progress['current_file'] = [
-                    'path' => $file['path'],
-                    'size' => $file['size'],
-                    'bytes_read' => $this->streaming_file_offset,
-                    'percent' => $file['size'] > 0 ? $this->streaming_file_offset / $file['size'] : 1,
+                $progress["current_file"] = [
+                    "path" => $file["path"],
+                    "size" => $file["size"],
+                    "bytes_read" => $this->streaming_file_offset,
+                    "percent" =>
+                        $file["size"] > 0
+                            ? $this->streaming_file_offset / $file["size"]
+                            : 1,
                 ];
             }
 
-            $progress['percent_complete'] = count($this->scanned_files) > 0
-                ? $this->files_streamed / count($this->scanned_files)
-                : 1;
+            $progress["percent_complete"] =
+                count($this->scanned_files) > 0
+                    ? $this->files_streamed / count($this->scanned_files)
+                    : 1;
         }
 
         return $progress;

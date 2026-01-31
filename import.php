@@ -768,6 +768,13 @@ class ImportClient
             return;
         }
 
+        // Security: path must be absolute (start with /)
+        if ($path[0] !== '/') {
+            throw new RuntimeException(
+                "Security: File path must be absolute: {$path}"
+            );
+        }
+
         // Use full path under filesystem-root
         $local_path = $this->local_path . "/filesystem-root" . $path;
 
@@ -789,15 +796,8 @@ class ImportClient
             // Create parent directory if needed
             $dir = dirname($local_path);
             if (!is_dir($dir)) {
-                // Suppress warning if directory exists (race condition with symlinks/parallel operations)
-                $result = @mkdir($dir, 0755, true);
-                if (!$result && !is_dir($dir)) {
-                    throw new RuntimeException(
-                        "Failed to create directory: {$dir}\n" .
-                            "Error: " .
-                            (error_get_last()["message"] ?? "unknown"),
-                    );
-                }
+                // Check if any component of the path exists as a file and remove it
+                $this->ensure_directory_path($dir);
             }
 
             // Open new file
@@ -841,6 +841,91 @@ class ImportClient
     }
 
     /**
+     * Ensure a directory path exists, removing any files that block it.
+     *
+     * @param string $dir Directory path to ensure
+     * @throws RuntimeException if directory cannot be created or is outside allowed path
+     */
+    private function ensure_directory_path(string $dir): void
+    {
+        // Security: Ensure path is under filesystem-root
+        $filesystem_root_base = $this->local_path . "/filesystem-root";
+        $real_filesystem_root = realpath($filesystem_root_base);
+        if ($real_filesystem_root === false) {
+            // filesystem-root doesn't exist yet, create it first
+            if (!is_dir($filesystem_root_base)) {
+                mkdir($filesystem_root_base, 0755, true);
+            }
+            $real_filesystem_root = realpath($filesystem_root_base);
+        }
+
+        // Resolve the target path (or what it would be)
+        // For non-existent paths, resolve the parent and append the final component
+        $check_path = $dir;
+        while (!file_exists($check_path) && $check_path !== dirname($check_path)) {
+            $check_path = dirname($check_path);
+        }
+
+        if (file_exists($check_path)) {
+            $real_check = realpath($check_path);
+            if ($real_check === false || strpos($real_check, $real_filesystem_root) !== 0) {
+                throw new RuntimeException(
+                    "Security: Refusing to create directory outside filesystem-root: {$dir}"
+                );
+            }
+        }
+
+        if (is_dir($dir)) {
+            return;
+        }
+
+        // For absolute paths starting with /, build from root
+        // For relative paths, build incrementally
+        $is_absolute = $dir[0] === '/';
+        $parts = explode('/', $dir);
+        $current = '';
+
+        foreach ($parts as $i => $part) {
+            // Skip empty parts except for the first one in absolute paths
+            if ($part === '') {
+                if ($i === 0 && $is_absolute) {
+                    $current = '/';
+                }
+                continue;
+            }
+
+            // Build path incrementally
+            if ($current === '') {
+                $current = $part;
+            } elseif ($current === '/') {
+                $current = '/' . $part;
+            } else {
+                $current .= '/' . $part;
+            }
+
+            // Remove file if blocking directory creation
+            if (is_file($current)) {
+                error_log("ImportClient: Removing file blocking directory creation: {$current}");
+                if (!unlink($current)) {
+                    throw new RuntimeException(
+                        "Failed to remove file blocking directory: {$current}"
+                    );
+                }
+            }
+
+            // Create directory if it doesn't exist
+            if (!is_dir($current)) {
+                if (!mkdir($current, 0755) && !is_dir($current)) {
+                    throw new RuntimeException(
+                        "Failed to create directory: {$current}\n" .
+                        "Error: " . (error_get_last()["message"] ?? "unknown")
+                    );
+                }
+            }
+        }
+    }
+
+    /**
      * Handle a directory chunk (create empty directory).
      */
     private function handle_directory_chunk(array $chunk): void
@@ -852,17 +937,18 @@ class ImportClient
             return;
         }
 
+        // Security: path must be absolute (start with /)
+        if ($path[0] !== '/') {
+            throw new RuntimeException(
+                "Security: Directory path must be absolute: {$path}"
+            );
+        }
+
         // Use full path under filesystem-root
         $local_path = $this->local_path . "/filesystem-root" . $path;
 
-        // Create directory if it doesn't exist
-        if (!is_dir($local_path)) {
-            if (!mkdir($local_path, 0755, true) && !is_dir($local_path)) {
-                throw new RuntimeException(
-                    "Failed to create directory: {$local_path}",
-                );
-            }
-        }
+        // Create directory, removing any files that block the path
+        $this->ensure_directory_path($local_path);
     }
 
     /**
@@ -882,6 +968,13 @@ class ImportClient
         // Skip if path or target is missing/empty
         if (!$path || $target === false || $target === "") {
             // return;
+        }
+
+        // Security: path must be absolute (start with /)
+        if ($path[0] !== '/') {
+            throw new RuntimeException(
+                "Security: Symlink path must be absolute: {$path}"
+            );
         }
 
         // Use full path under filesystem-root
@@ -947,6 +1040,13 @@ class ImportClient
         $data = json_decode($body, true);
         if (!$data || !isset($data["path"])) {
             return;
+        }
+
+        // Security: path must be absolute (start with /)
+        if (!isset($data["path"][0]) || $data["path"][0] !== '/') {
+            throw new RuntimeException(
+                "Security: Deletion path must be absolute: " . ($data["path"] ?? "empty")
+            );
         }
 
         $local_path = $this->local_path . "/filesystem-root" . $data["path"];
