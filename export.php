@@ -6,7 +6,11 @@
  * - SQL database exports with cursor-based resumption
  * - File synchronization with cursor-based resumption
  *
- * Cursors are output to stdout as part of the stream (never written to disk).
+ * CURSOR ENCODING CONTRACT:
+ * - Internal: Cursors are JSON strings (e.g., {"p":"streaming","n":123})
+ * - HTTP transmission: Cursors are base64-encoded in X-Cursor header (outgoing) and X-Export-Cursor header (incoming)
+ * - This file is responsible for encoding when sending and decoding when receiving
+ * - Producers (FileSyncProducer, MySQLDumpProducer) work with JSON strings only, never base64
  */
 
 if (file_exists("./secrets.php")) {
@@ -18,6 +22,8 @@ if (
     !isset($_GET["SECRET_KEY"]) ||
     $_GET["SECRET_KEY"] !== SECRET_KEY
 ) {
+    http_response_code(403);
+    error_log("Invalid secret key");
     die("Invalid secret key");
 }
 
@@ -84,6 +90,11 @@ function export_sql(
         $mysql,
         $producer_options,
     );
+
+    // Disable output buffering for immediate response
+    if (ob_get_level()) {
+        ob_end_flush();
+    }
 
     // Initialize multipart boundary
     $boundary = "boundary-" . bin2hex(random_bytes(16));
@@ -181,43 +192,59 @@ function export_files(
     int $max_memory,
     float $memory_threshold,
 ): array {
-    $directory = $config["directory"] ?? null;
-    if (!$directory) {
+    $directories_input = $config["directory"] ?? null;
+    if (!$directories_input) {
         throw new InvalidArgumentException(
             "directory is required for files operation",
         );
     }
 
-    // Expand ~ to home directory
-    if ($directory[0] === "~") {
-        $home = getenv("HOME") ?: (getenv("USERPROFILE") ?: "/");
-        $directory = $home . substr($directory, 1);
+    // Handle multiple directories (array or single string)
+    $directories = [];
+    $dir_list = is_array($directories_input)
+        ? $directories_input
+        : [$directories_input];
+
+    foreach ($dir_list as $directory) {
+        if (empty($directory)) {
+            continue;
+        }
+
+        // Expand ~ to home directory
+        if ($directory[0] === "~") {
+            $home = getenv("HOME") ?: (getenv("USERPROFILE") ?: "/");
+            $directory = $home . substr($directory, 1);
+        }
+
+        // Convert to absolute path if relative
+        if ($directory[0] !== "/") {
+            $directory = __DIR__ . "/" . $directory;
+        }
+
+        // Resolve realpath
+        $real_directory = realpath($directory);
+        if ($real_directory === false) {
+            throw new InvalidArgumentException(
+                "directory does not exist or is not accessible: {$directory}\n" .
+                    "Current working directory: " .
+                    getcwd() .
+                    "\n" .
+                    "Script directory: " .
+                    __DIR__ .
+                    "\n" .
+                    "User: " .
+                    (function_exists("posix_getpwuid")
+                        ? posix_getpwuid(posix_geteuid())["name"]
+                        : "unknown"),
+            );
+        }
+
+        $directories[] = $real_directory;
     }
 
-    // Convert to absolute path if relative
-    if ($directory[0] !== "/") {
-        $directory = __DIR__ . "/" . $directory;
+    if (empty($directories)) {
+        throw new InvalidArgumentException("No valid directories specified");
     }
-
-    // Resolve realpath
-    $real_directory = realpath($directory);
-    if ($real_directory === false) {
-        throw new InvalidArgumentException(
-            "directory does not exist or is not accessible: {$directory}\n" .
-                "Current working directory: " .
-                getcwd() .
-                "\n" .
-                "Script directory: " .
-                __DIR__ .
-                "\n" .
-                "User: " .
-                (function_exists("posix_getpwuid")
-                    ? posix_getpwuid(posix_geteuid())["name"]
-                    : "unknown"),
-        );
-    }
-
-    $directory = $real_directory;
 
     // File sync options
     $sync_options = [
@@ -247,21 +274,42 @@ function export_files(
         );
     }
 
-    $sync = new FileSyncProducer($directory, $sync_options);
+    $sync = new FileSyncProducer($directories, $sync_options);
+
+    // Disable output buffering for immediate response
+    if (ob_get_level()) {
+        ob_end_flush();
+    }
 
     // Initialize multipart boundary
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
 
+    // Output initial progress chunk immediately
+    $initial_progress = $sync->get_progress();
+    $initial_progress_json = json_encode($initial_progress);
+    $initial_cursor = $sync->get_reentrancy_cursor();
+    echo "--{$boundary}\r\n";
+    echo "Content-Type: application/json\r\n";
+    echo "Content-Length: " . strlen($initial_progress_json) . "\r\n";
+    echo "X-Chunk-Type: progress\r\n";
+    echo "X-Cursor: " . base64_encode($initial_cursor) . "\r\n";
+    echo "\r\n";
+    echo $initial_progress_json;
+    echo "\r\n";
+    flush();
+
     $chunks_processed = 0;
     $files_completed = 0;
     $bytes_processed = 0;
-    $last_progress_output = 0;
+    $last_progress_output = microtime(true);
     $deletions_output = false;
     $metadata_sent = false;
+    $iterations = 0;
 
     // Process chunks
     while ($sync->next_chunk()) {
+        $iterations++;
         $chunk = $sync->get_current_chunk();
         $progress = $sync->get_progress();
 
@@ -283,6 +331,7 @@ function export_files(
             echo "\r\n";
             echo $metadata_json;
             echo "\r\n";
+            flush(); // Force output immediately
 
             $metadata_sent = true;
         }
@@ -304,6 +353,7 @@ function export_files(
                     echo "\r\n";
                     echo $deletion_json;
                     echo "\r\n";
+                    flush(); // Force output immediately
                 }
             }
             $deletions_output = true;
@@ -311,9 +361,9 @@ function export_files(
 
         // During scanning/sorting phases, chunk will be null - output progress
         if ($chunk === null) {
-            // Output progress chunk (throttled to once every 3 seconds)
+            // Output progress chunk (throttled to once every 3 seconds, except first one)
             $now = microtime(true);
-            if ($now - $last_progress_output >= 3.0) {
+            if ($iterations === 1 || $now - $last_progress_output >= 3.0) {
                 $progress_json = json_encode($progress);
                 $cursor = $sync->get_reentrancy_cursor();
 
@@ -325,6 +375,7 @@ function export_files(
                 echo "\r\n";
                 echo $progress_json;
                 echo "\r\n";
+                flush(); // Force output immediately
 
                 $last_progress_output = $now;
             }
@@ -357,6 +408,7 @@ function export_files(
             echo "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n";
             echo "\r\n";
             echo "\r\n";
+            flush(); // Force output immediately
         } elseif ($chunk_type === "symlink") {
             // Output symlink chunk
             echo "--{$boundary}\r\n";
@@ -371,6 +423,7 @@ function export_files(
             echo "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n";
             echo "\r\n";
             echo "\r\n";
+            flush(); // Force output immediately
         } else {
             // Track stats
             $chunks_processed++;
@@ -401,6 +454,7 @@ function export_files(
             echo "\r\n";
             echo $data;
             echo "\r\n";
+            flush(); // Force output immediately
         }
 
         // Check limits
@@ -515,14 +569,43 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
         // Parse configuration from CLI or HTTP
         $config = $is_cli ? parse_cli_config() : parse_http_config();
 
-        // Get cursor from environment/headers
+        // Decode cursor from base64 to JSON
+        // Cursor is ALWAYS base64-encoded in transit (GET param, header, or env var)
+        // Cursor is ALWAYS JSON when decoded
+
+        // First, check if cursor was already set from GET/POST params
         if (!isset($config["cursor"])) {
-            $cursor = $is_cli
+            // Try header or environment variable
+            $config["cursor"] = $is_cli
                 ? getenv("EXPORT_CURSOR")
                 : $_SERVER["HTTP_X_EXPORT_CURSOR"] ?? null;
-            if ($cursor && $cursor !== "") {
-                $config["cursor"] = $cursor;
+        }
+
+        // If cursor exists (from any source), decode it
+        if (isset($config["cursor"]) && $config["cursor"] !== "" && $config["cursor"] !== null) {
+            $cursor_b64 = $config["cursor"];
+
+            // Cursor MUST be base64-encoded
+            $cursor_json = base64_decode($cursor_b64, true);
+            if ($cursor_json === false) {
+                throw new InvalidArgumentException(
+                    "Cursor must be base64-encoded. Received invalid base64: " .
+                    substr($cursor_b64, 0, 50)
+                );
             }
+
+            // Decoded cursor MUST be valid JSON
+            $cursor_data = json_decode($cursor_json, true);
+            if ($cursor_data === null && json_last_error() !== JSON_ERROR_NONE) {
+                throw new InvalidArgumentException(
+                    "Cursor must be valid JSON after base64 decoding. " .
+                    "JSON error: " . json_last_error_msg() . ". " .
+                    "Base64: " . substr($cursor_b64, 0, 50)
+                );
+            }
+
+            // Store the JSON string (not the decoded array)
+            $config["cursor"] = $cursor_json;
         }
 
         /**
@@ -563,7 +646,7 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
             );
         }
 
-        $max_execution_time = $config["max_execution_time"] ?? 30;
+        $max_execution_time = $config["max_execution_time"] ?? 5;
         $memory_threshold = $config["memory_threshold"] ?? 0.8;
 
         // Parse memory limit

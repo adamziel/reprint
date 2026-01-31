@@ -724,7 +724,7 @@ class MySQLDumpProducer
     /**
      * Gets the reentrancy cursor for resuming.
      *
-     * @return string JSON-encoded cursor.
+     * @return string JSON string (NOT base64-encoded). Caller is responsible for base64 encoding if needed for HTTP transmission.
      */
     public function get_reentrancy_cursor()
     {
@@ -743,12 +743,20 @@ class MySQLDumpProducer
     /**
      * Initializes the producer from a cursor.
      *
-     * @param string $cursor The cursor to initialize from.
+     * @param string $cursor JSON string (NOT base64-encoded). Must be valid JSON.
+     * @throws InvalidArgumentException if cursor is not valid JSON
      */
     private function initialize_from_cursor($cursor)
     {
         $cursor_data = json_decode($cursor, true);
-        if ($cursor_data) {
+        if ($cursor_data === null && json_last_error() !== JSON_ERROR_NONE) {
+            throw new InvalidArgumentException(
+                'Invalid cursor format: cursor must be valid JSON. ' .
+                'JSON error: ' . json_last_error_msg() . '. ' .
+                'Received: ' . substr($cursor, 0, 100)
+            );
+        }
+        if (is_array($cursor_data)) {
             $this->current_table = $cursor_data["current_table"] ?? null;
             $this->current_pk_columns =
                 $cursor_data["current_pk_columns"] ?? null;

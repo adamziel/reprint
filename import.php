@@ -475,7 +475,6 @@ class ImportClient
     {
         $cursor = $state["files_cursor"] ?? null;
         $complete = false;
-        $previous_fingerprint = null;
 
         while (!$complete) {
             $url = $this->build_url("files", $cursor);
@@ -484,7 +483,6 @@ class ImportClient
             $context->file_handle = null;
             $context->file_path = null;
             $context->file_ctime = null;
-            $context->chunk_fingerprints = [];
 
             $context->on_chunk = function ($chunk) use (
                 &$cursor,
@@ -494,37 +492,7 @@ class ImportClient
                 $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
 
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
-                // Build fingerprint for this chunk
-                $fingerprint_data = ["type" => $chunk_type];
-                if ($chunk_type === "file") {
-                    $fingerprint_data["path"] =
-                        $chunk["headers"]["x-file-path"] ?? "";
-                    $fingerprint_data["offset"] =
-                        $chunk["headers"]["x-chunk-offset"] ?? "";
-                    $fingerprint_data["size"] =
-                        $chunk["headers"]["x-chunk-size"] ?? "";
-                } elseif ($chunk_type === "directory") {
-                    $fingerprint_data["path"] =
-                        $chunk["headers"]["x-directory-path"] ?? "";
-                } elseif ($chunk_type === "symlink") {
-                    $fingerprint_data["path"] =
-                        $chunk["headers"]["x-symlink-path"] ?? "";
-                    $fingerprint_data["target"] =
-                        $chunk["headers"]["x-symlink-target"] ?? "";
-                } elseif ($chunk_type === "progress") {
-                    $fingerprint_data["body"] = $chunk["body"] ?? "";
-                } elseif ($chunk_type === "completion") {
-                    $fingerprint_data["status"] =
-                        $chunk["headers"]["x-status"] ?? "";
-                    $fingerprint_data["chunks"] =
-                        $chunk["headers"]["x-chunks-processed"] ?? "";
-                    $fingerprint_data["files"] =
-                        $chunk["headers"]["x-files-completed"] ?? "";
-                } elseif ($chunk_type === "deletion") {
-                    $fingerprint_data["body"] = $chunk["body"] ?? "";
-                }
-                $context->chunk_fingerprints[] = json_encode($fingerprint_data);
+                error_log("ImportClient: Received chunk type: $chunk_type, cursor: " . substr($cursor ?? 'null', 0, 50));
 
                 // Debug: Log what chunk types we're receiving
                 static $chunk_counts = [];
@@ -569,6 +537,7 @@ class ImportClient
 
                     $complete =
                         ($chunk["headers"]["x-status"] ?? "") === "complete";
+                    error_log("ImportClient: Completion chunk received, status=" . ($chunk["headers"]["x-status"] ?? "missing") . ", complete=" . ($complete ? 'true' : 'false'));
 
                     $progress_data = [
                         "phase" => "files",
@@ -594,19 +563,6 @@ class ImportClient
 
             $this->fetch_streaming($url, $cursor, $context);
 
-            // Detect stuck state (same chunks as previous operation)
-            $current_fingerprint = implode("|", $context->chunk_fingerprints);
-            if (
-                $previous_fingerprint !== null &&
-                $current_fingerprint === $previous_fingerprint
-            ) {
-                throw new RuntimeException(
-                    "Import stuck: received identical chunks in two consecutive operations. Are we stuck? " .
-                        "Phase: files",
-                );
-            }
-            $previous_fingerprint = $current_fingerprint;
-
             // Save cursor for resumption
             if (!$complete) {
                 $state["files_cursor"] = $cursor;
@@ -622,7 +578,6 @@ class ImportClient
     {
         $cursor = $state["sql_cursor"] ?? null;
         $complete = false;
-        $previous_fingerprint = null;
         $sql_file = $this->local_path . "/db.sql";
 
         // Open in write mode if no cursor (starting fresh), append mode if resuming
@@ -649,26 +604,6 @@ class ImportClient
 
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
-                    // Build fingerprint for this chunk
-                    $fingerprint_data = ["type" => $chunk_type];
-                    if ($chunk_type === "sql") {
-                        // Hash the body content for SQL chunks
-                        $fingerprint_data["hash"] = md5($chunk["body"] ?? "");
-                        $fingerprint_data["length"] = strlen(
-                            $chunk["body"] ?? "",
-                        );
-                    } elseif ($chunk_type === "progress") {
-                        $fingerprint_data["body"] = $chunk["body"] ?? "";
-                    } elseif ($chunk_type === "completion") {
-                        $fingerprint_data["status"] =
-                            $chunk["headers"]["x-status"] ?? "";
-                        $fingerprint_data["batches"] =
-                            $chunk["headers"]["x-batches-processed"] ?? "";
-                    }
-                    $context->chunk_fingerprints[] = json_encode(
-                        $fingerprint_data,
-                    );
-
                     if ($chunk_type === "sql") {
                         fwrite($sql_handle, $chunk["body"]);
                     } elseif ($chunk_type === "progress") {
@@ -693,22 +628,6 @@ class ImportClient
                 };
 
                 $this->fetch_streaming($url, $cursor, $context);
-
-                // Detect stuck state (same chunks as previous operation)
-                $current_fingerprint = implode(
-                    "|",
-                    $context->chunk_fingerprints,
-                );
-                if (
-                    $previous_fingerprint !== null &&
-                    $current_fingerprint === $previous_fingerprint
-                ) {
-                    throw new RuntimeException(
-                        "Import stuck: received identical chunks in two consecutive operations. " .
-                            "Phase: sql",
-                    );
-                }
-                $previous_fingerprint = $current_fingerprint;
 
                 // Save cursor for resumption
                 if (!$complete) {
@@ -740,7 +659,6 @@ class ImportClient
         }
 
         $complete = false;
-        $previous_fingerprint = null;
 
         while (!$complete) {
             $url = $this->build_url("files", $cursor, [
@@ -751,7 +669,6 @@ class ImportClient
             $context->file_handle = null;
             $context->file_path = null;
             $context->file_ctime = null;
-            $context->chunk_fingerprints = [];
 
             $context->on_chunk = function ($chunk) use (
                 &$cursor,
@@ -761,37 +678,6 @@ class ImportClient
                 $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
 
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
-                // Build fingerprint for this chunk
-                $fingerprint_data = ["type" => $chunk_type];
-                if ($chunk_type === "file") {
-                    $fingerprint_data["path"] =
-                        $chunk["headers"]["x-file-path"] ?? "";
-                    $fingerprint_data["offset"] =
-                        $chunk["headers"]["x-chunk-offset"] ?? "";
-                    $fingerprint_data["size"] =
-                        $chunk["headers"]["x-chunk-size"] ?? "";
-                } elseif ($chunk_type === "directory") {
-                    $fingerprint_data["path"] =
-                        $chunk["headers"]["x-directory-path"] ?? "";
-                } elseif ($chunk_type === "symlink") {
-                    $fingerprint_data["path"] =
-                        $chunk["headers"]["x-symlink-path"] ?? "";
-                    $fingerprint_data["target"] =
-                        $chunk["headers"]["x-symlink-target"] ?? "";
-                } elseif ($chunk_type === "progress") {
-                    $fingerprint_data["body"] = $chunk["body"] ?? "";
-                } elseif ($chunk_type === "completion") {
-                    $fingerprint_data["status"] =
-                        $chunk["headers"]["x-status"] ?? "";
-                    $fingerprint_data["chunks"] =
-                        $chunk["headers"]["x-chunks-processed"] ?? "";
-                    $fingerprint_data["files"] =
-                        $chunk["headers"]["x-files-completed"] ?? "";
-                } elseif ($chunk_type === "deletion") {
-                    $fingerprint_data["body"] = $chunk["body"] ?? "";
-                }
-                $context->chunk_fingerprints[] = json_encode($fingerprint_data);
 
                 if ($chunk_type === "metadata") {
                     $this->handle_metadata_chunk($chunk, $context);
@@ -837,19 +723,6 @@ class ImportClient
             };
 
             $this->fetch_streaming($url, $cursor, $context);
-
-            // Detect stuck state (same chunks as previous operation)
-            $current_fingerprint = implode("|", $context->chunk_fingerprints);
-            if (
-                $previous_fingerprint !== null &&
-                $current_fingerprint === $previous_fingerprint
-            ) {
-                throw new RuntimeException(
-                    "Import stuck: received identical chunks in two consecutive operations. " .
-                        "Phase: deltas",
-                );
-            }
-            $previous_fingerprint = $current_fingerprint;
 
             // Save cursor for resumption
             if (!$complete) {
@@ -916,13 +789,13 @@ class ImportClient
             // Create parent directory if needed
             $dir = dirname($local_path);
             if (!is_dir($dir)) {
-                $result = mkdir($dir, 0755, true);
+                // Suppress warning if directory exists (race condition with symlinks/parallel operations)
+                $result = @mkdir($dir, 0755, true);
                 if (!$result && !is_dir($dir)) {
                     throw new RuntimeException(
                         "Failed to create directory: {$dir}\n" .
                             "Error: " .
-                            error_get_last()["message"] ??
-                            "unknown",
+                            (error_get_last()["message"] ?? "unknown"),
                     );
                 }
             }
@@ -1137,6 +1010,8 @@ class ImportClient
         ?string $cursor,
         StreamingContext $context,
     ): void {
+        error_log("ImportClient: Fetching URL: $url");
+        $this->output_progress(["debug" => "Requesting: $url"]);
         $ch = curl_init($url);
 
         $parser = null;
@@ -1188,6 +1063,7 @@ class ImportClient
                         }
 
                         if ($boundary_value !== "") {
+                            error_log("ImportClient: Creating multipart parser with boundary: $boundary_value");
                             $parser = new MultipartStreamParser(
                                 $boundary_value,
                                 function ($event) use (
@@ -1245,6 +1121,11 @@ class ImportClient
                 // If no parser yet, we might be receiving an error response
                 if (!$parser) {
                     $error_body .= $data;
+                    static $logged_no_parser = false;
+                    if (!$logged_no_parser && strlen($error_body) > 0) {
+                        error_log("ImportClient: No parser, accumulating error body (first 500 chars): " . substr($error_body, 0, 500));
+                        $logged_no_parser = true;
+                    }
                 }
 
                 if ($parser) {
@@ -1292,7 +1173,10 @@ class ImportClient
             },
         ]);
 
+        error_log("ImportClient: Executing curl request...");
+        $this->output_progress(["debug" => "Waiting for server response..."]);
         $result = curl_exec($ch);
+        error_log("ImportClient: curl_exec completed, result=" . ($result === false ? 'false' : 'true'));
 
         if (curl_errno($ch)) {
             $error = curl_error($ch);
@@ -1422,7 +1306,6 @@ class StreamingContext
     public $file_handle = null;
     public $file_path = null;
     public $file_ctime = null;
-    public $chunk_fingerprints = [];
     public $filesystem_root = null;
 }
 
@@ -1441,9 +1324,10 @@ if (
         echo "\n";
         echo "Arguments:\n";
         echo "  remote-url   URL to export.php script with required parameters:\n";
-        echo "               - directory: Directory to export (required)\n";
+        echo "               - directory: Directory to export (use directory[] for multiple)\n";
         echo "               - SECRET_KEY: Authentication key (required)\n";
         echo "               Example: http://example.com/export.php?directory=/var/www/html&SECRET_KEY=xxx\n";
+        echo "               Multiple: http://example.com/export.php?directory[]=/srv&directory[]=/wordpress&SECRET_KEY=xxx\n";
         echo "  local-path   Local directory to store imported data\n";
         echo "\n";
         echo "Options:\n";
