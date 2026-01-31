@@ -151,14 +151,19 @@ abstract class FileSyncProducerTestBase extends TestCase
     }
 
     /**
-     * Get list of files from chunks
+     * Get list of files from chunks (excludes directory chunks)
      */
     protected function getFilesFromChunks(array $chunks): array
     {
         $files = [];
 
         foreach ($chunks as $chunk) {
-            if ($chunk['is_first_chunk']) {
+            // Skip directory chunks
+            if (isset($chunk['type']) && $chunk['type'] === 'directory') {
+                continue;
+            }
+
+            if (isset($chunk['is_first_chunk']) && $chunk['is_first_chunk']) {
                 $files[] = $chunk['path'];
             }
         }
@@ -174,8 +179,11 @@ abstract class FileSyncProducerTestBase extends TestCase
         $content = '';
 
         foreach ($chunks as $chunk) {
-            if ($chunk['path'] === $path) {
-                $content .= $chunk['data'];
+            // Match by exact path or by suffix (for relative paths)
+            $chunkPath = $chunk['path'] ?? '';
+            if ($chunkPath === $path || str_ends_with($chunkPath, '/' . basename($path)) ||
+                str_ends_with($path, $chunkPath)) {
+                $content .= $chunk['data'] ?? '';
             }
         }
 

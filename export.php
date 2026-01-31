@@ -9,6 +9,27 @@
  * Cursors are output to stdout as part of the stream (never written to disk).
  */
 
+if (file_exists("./secrets.php")) {
+    require_once "./secrets.php";
+}
+
+if (
+    !defined("SECRET_KEY") ||
+    !isset($_GET["SECRET_KEY"]) ||
+    $_GET["SECRET_KEY"] !== SECRET_KEY
+) {
+    die("Invalid secret key");
+}
+
+// Uncomment if you want to declare the configuration here instead of
+// passing it via env or $_GET:
+if (false) {
+    define("DB_HOST", "your-db-host");
+    define("DB_USER", "your-db-user");
+    define("DB_PASSWORD", "your-db-password");
+    define("DB_NAME", "your-db-name");
+}
+
 require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/class-file-sync-producer.php";
 
@@ -167,16 +188,40 @@ function export_files(
         );
     }
 
-    if (!is_dir($directory)) {
+    // Expand ~ to home directory
+    if ($directory[0] === "~") {
+        $home = getenv("HOME") ?: (getenv("USERPROFILE") ?: "/");
+        $directory = $home . substr($directory, 1);
+    }
+
+    // Convert to absolute path if relative
+    if ($directory[0] !== "/") {
+        $directory = __DIR__ . "/" . $directory;
+    }
+
+    // Resolve realpath
+    $real_directory = realpath($directory);
+    if ($real_directory === false) {
         throw new InvalidArgumentException(
-            "directory does not exist: {$directory}",
+            "directory does not exist or is not accessible: {$directory}\n" .
+                "Current working directory: " .
+                getcwd() .
+                "\n" .
+                "Script directory: " .
+                __DIR__ .
+                "\n" .
+                "User: " .
+                (function_exists("posix_getpwuid")
+                    ? posix_getpwuid(posix_geteuid())["name"]
+                    : "unknown"),
         );
     }
+
+    $directory = $real_directory;
 
     // File sync options
     $sync_options = [
         "min_ctime" => $config["min_ctime"] ?? 0,
-        "max_files" => $config["max_files"] ?? 1000,
         "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024, // 5MB
     ];
 
@@ -184,9 +229,21 @@ function export_files(
         $sync_options["cursor"] = $config["cursor"];
     }
 
+    // Set up snapshot storage for deletion detection
+    // Use session_id for automatic snapshot file naming
     if (isset($config["snapshot_path"])) {
         $sync_options["snapshot_storage"] = new FileSnapshotStorage(
             $config["snapshot_path"],
+        );
+    } elseif (isset($config["session_id"])) {
+        // Auto-generate snapshot path from session ID
+        $snapshot_dir = sys_get_temp_dir() . "/export-snapshots";
+        if (!is_dir($snapshot_dir)) {
+            mkdir($snapshot_dir, 0755, true);
+        }
+        $snapshot_file = $snapshot_dir . "/" . $config["session_id"] . ".tsv";
+        $sync_options["snapshot_storage"] = new FileSnapshotStorage(
+            $snapshot_file,
         );
     }
 
@@ -201,32 +258,51 @@ function export_files(
     $bytes_processed = 0;
     $last_progress_output = 0;
     $deletions_output = false;
+    $metadata_sent = false;
 
     // Process chunks
     while ($sync->next_chunk()) {
         $chunk = $sync->get_current_chunk();
         $progress = $sync->get_progress();
 
+        // Output metadata once when we first enter streaming phase
+        if (!$metadata_sent && $progress["phase"] === "streaming") {
+            $filesystem_root = $sync->get_filesystem_root();
+            $metadata = [
+                "filesystem_root" => $filesystem_root,
+            ];
+            $metadata_json = json_encode($metadata);
+
+            echo "--{$boundary}\r\n";
+            echo "Content-Type: application/json\r\n";
+            echo "Content-Length: " . strlen($metadata_json) . "\r\n";
+            echo "X-Chunk-Type: metadata\r\n";
+            echo "X-Filesystem-Root: " .
+                base64_encode($filesystem_root) .
+                "\r\n";
+            echo "\r\n";
+            echo $metadata_json;
+            echo "\r\n";
+
+            $metadata_sent = true;
+        }
+
         // Output deletions once when we first enter streaming phase
-        // This must be BEFORE the chunk null check so deletions are output even when no files change
+        // This must be AFTER metadata so filesystem root is known
         if (!$deletions_output && $progress["phase"] === "streaming") {
             $deletions = $sync->get_deletions();
-            if (count($deletions) > 0) {
+            if ($deletions && count($deletions) > 0) {
                 foreach ($deletions as $deletion) {
+                    $deletion_json = json_encode($deletion);
                     $cursor = $sync->get_reentrancy_cursor();
 
                     echo "--{$boundary}\r\n";
-                    echo "Content-Type: application/octet-stream\r\n";
-                    echo "Content-Length: 0\r\n";
+                    echo "Content-Type: application/json\r\n";
+                    echo "Content-Length: " . strlen($deletion_json) . "\r\n";
                     echo "X-Chunk-Type: deletion\r\n";
                     echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-                    echo "X-Deleted-Path: " .
-                        base64_encode($deletion["path"]) .
-                        "\r\n";
-                    echo "X-Deleted-Ctime: " . $deletion["ctime"] . "\r\n";
-                    echo "X-Deleted-Size: " . $deletion["size"] . "\r\n";
-                    echo "X-Deleted-At: " . $deletion["deleted_at"] . "\r\n";
                     echo "\r\n";
+                    echo $deletion_json;
                     echo "\r\n";
                 }
             }
@@ -238,58 +314,16 @@ function export_files(
             // Output progress chunk (throttled to once every 3 seconds)
             $now = microtime(true);
             if ($now - $last_progress_output >= 3.0) {
+                $progress_json = json_encode($progress);
                 $cursor = $sync->get_reentrancy_cursor();
 
                 echo "--{$boundary}\r\n";
-                echo "Content-Type: application/octet-stream\r\n";
-                echo "Content-Length: 0\r\n";
+                echo "Content-Type: application/json\r\n";
+                echo "Content-Length: " . strlen($progress_json) . "\r\n";
                 echo "X-Chunk-Type: progress\r\n";
                 echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-                echo "X-Progress-Phase: " . $progress["phase"] . "\r\n";
-
-                // Phase-specific progress details
-                if (isset($progress["files_total"])) {
-                    echo "X-Progress-Files-Total: " .
-                        $progress["files_total"] .
-                        "\r\n";
-                }
-                if (isset($progress["files_completed"])) {
-                    echo "X-Progress-Files-Completed: " .
-                        $progress["files_completed"] .
-                        "\r\n";
-                }
-                if (isset($progress["percent_complete"])) {
-                    echo "X-Progress-Percent: " .
-                        round($progress["percent_complete"] * 100, 2) .
-                        "\r\n";
-                }
-                if (isset($progress["directories_pending"])) {
-                    echo "X-Progress-Directories-Pending: " .
-                        $progress["directories_pending"] .
-                        "\r\n";
-                }
-                if (isset($progress["chunks_sorted"])) {
-                    echo "X-Progress-Chunks-Sorted: " .
-                        $progress["chunks_sorted"] .
-                        "\r\n";
-                }
-                if (isset($progress["current_file"])) {
-                    $file = $progress["current_file"];
-                    echo "X-Progress-Current-File: " .
-                        base64_encode($file["path"]) .
-                        "\r\n";
-                    echo "X-Progress-Current-File-Size: " .
-                        $file["size"] .
-                        "\r\n";
-                    echo "X-Progress-Current-File-Bytes: " .
-                        $file["bytes_read"] .
-                        "\r\n";
-                    echo "X-Progress-Current-File-Percent: " .
-                        round($file["percent"] * 100, 2) .
-                        "\r\n";
-                }
-
                 echo "\r\n";
+                echo $progress_json;
                 echo "\r\n";
 
                 $last_progress_output = $now;
@@ -309,34 +343,65 @@ function export_files(
             continue;
         }
 
-        // Track stats
-        $chunks_processed++;
-        $bytes_processed += $chunk["chunk_size"];
-        if ($chunk["is_first_chunk"]) {
-            $files_completed++;
-        }
-
-        // Output file chunk as multipart
-        $data = $chunk["data"];
+        // Handle different chunk types
+        $chunk_type = $chunk["type"] ?? "file";
         $cursor = $sync->get_reentrancy_cursor();
 
-        echo "--{$boundary}\r\n";
-        echo "Content-Type: application/octet-stream\r\n";
-        echo "Content-Length: " . strlen($data) . "\r\n";
-        echo "X-Chunk-Type: file\r\n";
-        echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-        echo "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n";
-        echo "X-File-Size: " . $chunk["size"] . "\r\n";
-        echo "X-File-Ctime: " . $chunk["ctime"] . "\r\n";
-        echo "X-Chunk-Offset: " . $chunk["offset"] . "\r\n";
-        echo "X-Chunk-Size: " . $chunk["chunk_size"] . "\r\n";
-        echo "X-First-Chunk: " .
-            ($chunk["is_first_chunk"] ? "1" : "0") .
-            "\r\n";
-        echo "X-Last-Chunk: " . ($chunk["is_last_chunk"] ? "1" : "0") . "\r\n";
-        echo "\r\n";
-        echo $data;
-        echo "\r\n";
+        if ($chunk_type === "directory") {
+            // Output directory chunk
+            echo "--{$boundary}\r\n";
+            echo "Content-Type: application/octet-stream\r\n";
+            echo "Content-Length: 0\r\n";
+            echo "X-Chunk-Type: directory\r\n";
+            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
+            echo "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n";
+            echo "\r\n";
+            echo "\r\n";
+        } elseif ($chunk_type === "symlink") {
+            // Output symlink chunk
+            echo "--{$boundary}\r\n";
+            echo "Content-Type: application/octet-stream\r\n";
+            echo "Content-Length: 0\r\n";
+            echo "X-Chunk-Type: symlink\r\n";
+            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
+            echo "X-Symlink-Path: " . base64_encode($chunk["path"]) . "\r\n";
+            echo "X-Symlink-Target: " .
+                base64_encode($chunk["target"]) .
+                "\r\n";
+            echo "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n";
+            echo "\r\n";
+            echo "\r\n";
+        } else {
+            // Track stats
+            $chunks_processed++;
+            $bytes_processed += strlen($chunk["data"]);
+            if ($chunk["is_first_chunk"]) {
+                $files_completed++;
+            }
+
+            // Output file chunk as multipart
+            $data = $chunk["data"];
+
+            echo "--{$boundary}\r\n";
+            echo "Content-Type: application/octet-stream\r\n";
+            echo "Content-Length: " . strlen($data) . "\r\n";
+            echo "X-Chunk-Type: file\r\n";
+            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
+            echo "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n";
+            echo "X-File-Size: " . $chunk["size"] . "\r\n";
+            echo "X-File-Ctime: " . $chunk["ctime"] . "\r\n";
+            echo "X-Chunk-Offset: " . $chunk["offset"] . "\r\n";
+            echo "X-Chunk-Size: " . strlen($data) . "\r\n";
+            echo "X-First-Chunk: " .
+                ($chunk["is_first_chunk"] ? "1" : "0") .
+                "\r\n";
+            echo "X-Last-Chunk: " .
+                ($chunk["is_last_chunk"] ? "1" : "0") .
+                "\r\n";
+            echo "\r\n";
+            echo $data;
+            echo "\r\n";
+        }
 
         // Check limits
         if (
@@ -355,6 +420,12 @@ function export_files(
     $progress = $sync->get_progress();
     $is_complete = $progress["phase"] === "finished";
     $status = $is_complete ? "complete" : "partial";
+
+    // Log completion
+    error_log(
+        "Export completion: status={$status}, phase={$progress["phase"]}, " .
+            "chunks={$chunks_processed}, files={$files_completed}, bytes={$bytes_processed}",
+    );
 
     echo "--{$boundary}\r\n";
     echo "Content-Type: application/octet-stream\r\n";
@@ -477,8 +548,8 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
          *   For file operations:
          *   - directory: Directory to scan (required for files operation)
          *   - snapshot_path: Optional snapshot file path for change detection
+         *   - session_id: Auto-generate snapshot path from session ID
          *   - min_ctime: Minimum creation time filter (default: 0)
-         *   - max_files: Maximum files to process (default: 1000)
          *   - chunk_size: File chunk size in bytes (default: 5MB)
          *
          * @return array Result with:
@@ -562,7 +633,6 @@ function parse_cli_config(): array
             if (
                 in_array($key, [
                     "max_execution_time",
-                    "max_files",
                     "min_ctime",
                     "chunk_size",
                     "fragments_per_batch",
@@ -598,7 +668,6 @@ function parse_http_config(): array
         if (
             in_array($key, [
                 "max_execution_time",
-                "max_files",
                 "min_ctime",
                 "chunk_size",
                 "fragments_per_batch",

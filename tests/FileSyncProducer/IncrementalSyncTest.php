@@ -199,24 +199,4 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         $this->assertGreaterThanOrEqual(1, count($files), 'Should sync files from cutoff time onward');
     }
 
-    public function testMaxFilesWithMinCtime()
-    {
-        // Create files in two batches
-        $files = [];
-        for ($i = 1; $i <= 10; $i++) {
-            $files["file{$i}.txt"] = "Content {$i}";
-        }
-
-        $dir = $this->createTestDirectory('max-with-filter', $files);
-
-        // Sync with both filters
-        $sync = new \FileSyncProducer($dir, [
-            'min_ctime' => 0,
-            'max_files' => 5
-        ]);
-        $chunks = $this->processAllChunks($sync);
-        $files = $this->getFilesFromChunks($chunks);
-
-        $this->assertCount(5, $files, 'Should respect max_files even with min_ctime');
-    }
 }

@@ -65,7 +65,8 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
         ]);
 
         $chunks = $this->processAllChunks($sync);
-        $fileChunks = array_filter($chunks, fn($c) => $c['path'] === $dir . '/large.txt');
+        // Filter chunks by filename (paths are now relative to filesystem root)
+        $fileChunks = array_filter($chunks, fn($c) => str_ends_with($c['path'] ?? '', '/large.txt'));
 
         $this->assertGreaterThan(1, count($fileChunks), 'Large file should be split into multiple chunks');
 
@@ -108,26 +109,6 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
         $files = $this->getFilesFromChunks($chunks);
 
         $this->assertCount(4, $files, 'Should handle files with special characters');
-    }
-
-    public function testMaxFilesLimit()
-    {
-        $dir = $this->createTestDirectory('limited', [
-            'file1.txt' => '1',
-            'file2.txt' => '2',
-            'file3.txt' => '3',
-            'file4.txt' => '4',
-            'file5.txt' => '5'
-        ]);
-
-        $sync = new \FileSyncProducer($dir, [
-            'max_files' => 3
-        ]);
-
-        $chunks = $this->processAllChunks($sync);
-        $files = $this->getFilesFromChunks($chunks);
-
-        $this->assertCount(3, $files, 'Should respect max_files limit');
     }
 
     public function testProgressTracking()

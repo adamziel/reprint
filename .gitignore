@@ -4,3 +4,6 @@ out.sql
 sql-exports
 /tests/FileSyncProducer/fixtures/*
 *.meta
+adamadam.blog-export
+adamadam-blog-export
+secrets.php

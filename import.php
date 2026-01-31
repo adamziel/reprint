@@ -9,6 +9,9 @@
  * - Progress reporting via JSON lines to stdout
  * - Three-phase import: files, SQL, then file deltas
  */
+error_reporting(E_ALL);
+ini_set("display_errors", 1);
+ini_set("display_startup_errors", 1);
 
 /**
  * Streaming multipart parser.
@@ -319,6 +322,7 @@ class ImportClient
     private $state_file;
     private $last_progress_output = 0;
     private $progress_throttle = 1.0; // seconds
+    private $session_id;
 
     public function __construct(string $remote_url, string $local_path)
     {
@@ -326,25 +330,87 @@ class ImportClient
         $this->local_path = rtrim($local_path, "/");
         $this->state_file = $this->local_path . "/.import-state.json";
 
+        // Generate or load session ID for snapshot tracking on server
+        $this->session_id = $this->get_or_create_session_id();
+
         // Create directories
         if (!is_dir($this->local_path)) {
             mkdir($this->local_path, 0755, true);
         }
-        if (!is_dir($this->local_path . "/document-root")) {
-            mkdir($this->local_path . "/document-root", 0755, true);
+        if (!is_dir($this->local_path . "/filesystem-root")) {
+            mkdir($this->local_path . "/filesystem-root", 0755, true);
         }
     }
 
     /**
      * Run the import process.
+     *
+     * @param array $options Options for controlling import behavior:
+     *   - only_files: Import only files phase
+     *   - only_sql: Import only SQL phase
+     *   - only_deltas: Import only file deltas phase
+     *   - reset: Reset state and start fresh
      */
-    public function run(): void
+    public function run(array $options = []): void
     {
         $state = $this->load_state();
 
+        // Handle reset option
+        if ($options["reset"] ?? false) {
+            $state = [
+                "phase" => "init",
+                "files_cursor" => null,
+                "sql_cursor" => null,
+                "deltas_cursor" => null,
+                "last_sync_time" => null,
+            ];
+            $this->save_state($state);
+            $this->output_progress([
+                "status" => "reset",
+                "message" => "State reset",
+            ]);
+        }
+
         try {
+            // Determine which phases to run
+            $run_files =
+                !($options["only_sql"] ?? false) &&
+                !($options["only_deltas"] ?? false);
+            $run_sql =
+                !($options["only_files"] ?? false) &&
+                !($options["only_deltas"] ?? false);
+            $run_deltas =
+                !($options["only_files"] ?? false) &&
+                !($options["only_sql"] ?? false);
+
+            // If only_* option specified, force that phase and reset its cursor
+            if ($options["only_files"] ?? false) {
+                $run_files = true;
+                $run_sql = false;
+                $run_deltas = false;
+                $state["phase"] = "files";
+                $state["files_cursor"] = null; // Force re-download
+            }
+            if ($options["only_sql"] ?? false) {
+                $run_files = false;
+                $run_sql = true;
+                $run_deltas = false;
+                $state["phase"] = "sql";
+                $state["sql_cursor"] = null; // Force re-download
+            }
+            if ($options["only_deltas"] ?? false) {
+                $run_files = false;
+                $run_sql = false;
+                $run_deltas = true;
+                $state["phase"] = "deltas";
+                $state["deltas_cursor"] = null; // Force re-download
+            }
+
             // Phase 1: Download files
-            if ($state["phase"] === "files" || $state["phase"] === "init") {
+            if (
+                $run_files &&
+                ($state["phase"] === "files" || $state["phase"] === "init")
+            ) {
                 $this->output_progress([
                     "status" => "starting",
                     "phase" => "files",
@@ -359,7 +425,7 @@ class ImportClient
             }
 
             // Phase 2: Download SQL
-            if ($state["phase"] === "sql") {
+            if ($run_sql && $state["phase"] === "sql") {
                 $this->output_progress([
                     "status" => "starting",
                     "phase" => "sql",
@@ -372,13 +438,22 @@ class ImportClient
             }
 
             // Phase 3: Download file deltas (changes since last sync)
-            if ($state["phase"] === "deltas") {
-                $this->output_progress([
-                    "status" => "starting",
-                    "phase" => "deltas",
-                ]);
-                $this->download_file_deltas($state);
-                $state["deltas_cursor"] = null;
+            if ($run_deltas && $state["phase"] === "deltas") {
+                // Skip deltas if we just did files (no point getting deltas right after full sync)
+                if ($options["only_files"] ?? false) {
+                    $this->output_progress([
+                        "status" => "skipped",
+                        "phase" => "deltas",
+                        "message" => "Skipping deltas after full file download",
+                    ]);
+                } else {
+                    $this->output_progress([
+                        "status" => "starting",
+                        "phase" => "deltas",
+                    ]);
+                    $this->download_file_deltas($state);
+                    $state["deltas_cursor"] = null;
+                }
                 $state["phase"] = "complete";
                 $this->save_state($state);
             }
@@ -429,6 +504,14 @@ class ImportClient
                         $chunk["headers"]["x-chunk-offset"] ?? "";
                     $fingerprint_data["size"] =
                         $chunk["headers"]["x-chunk-size"] ?? "";
+                } elseif ($chunk_type === "directory") {
+                    $fingerprint_data["path"] =
+                        $chunk["headers"]["x-directory-path"] ?? "";
+                } elseif ($chunk_type === "symlink") {
+                    $fingerprint_data["path"] =
+                        $chunk["headers"]["x-symlink-path"] ?? "";
+                    $fingerprint_data["target"] =
+                        $chunk["headers"]["x-symlink-target"] ?? "";
                 } elseif ($chunk_type === "progress") {
                     $fingerprint_data["body"] = $chunk["body"] ?? "";
                 } elseif ($chunk_type === "completion") {
@@ -443,8 +526,33 @@ class ImportClient
                 }
                 $context->chunk_fingerprints[] = json_encode($fingerprint_data);
 
-                if ($chunk_type === "file") {
+                // Debug: Log what chunk types we're receiving
+                static $chunk_counts = [];
+                $chunk_counts[$chunk_type] =
+                    ($chunk_counts[$chunk_type] ?? 0) + 1;
+                if (
+                    $chunk_counts[$chunk_type] === 1 ||
+                    $chunk_counts[$chunk_type] % 10 === 0
+                ) {
+                    error_log(
+                        "Chunk type received: {$chunk_type} (count: {$chunk_counts[$chunk_type]})",
+                    );
+                }
+
+                if ($chunk_type === "metadata") {
+                    $this->handle_metadata_chunk($chunk, $context);
+                } elseif ($chunk_type === "file") {
+                    error_log(
+                        "Processing file chunk: " .
+                            base64_decode(
+                                $chunk["headers"]["x-file-path"] ?? "",
+                            ),
+                    );
                     $this->handle_file_chunk($chunk, $context);
+                } elseif ($chunk_type === "directory") {
+                    $this->handle_directory_chunk($chunk);
+                } elseif ($chunk_type === "symlink") {
+                    $this->handle_symlink_chunk($chunk);
                 } elseif ($chunk_type === "deletion") {
                     $this->handle_deletion($chunk);
                 } elseif ($chunk_type === "progress") {
@@ -461,24 +569,26 @@ class ImportClient
 
                     $complete =
                         ($chunk["headers"]["x-status"] ?? "") === "complete";
-                    $this->output_progress(
-                        [
-                            "phase" => "files",
-                            "status" =>
-                                $chunk["headers"]["x-status"] ?? "unknown",
-                            "chunks_processed" =>
-                                (int) ($chunk["headers"][
-                                    "x-chunks-processed"
-                                ] ?? 0),
-                            "files_completed" =>
-                                (int) ($chunk["headers"]["x-files-completed"] ??
-                                    0),
-                            "bytes_processed" =>
-                                (int) ($chunk["headers"]["x-bytes-processed"] ??
-                                    0),
-                        ],
-                        true,
-                    );
+
+                    $progress_data = [
+                        "phase" => "files",
+                        "status" => $chunk["headers"]["x-status"] ?? "unknown",
+                        "chunks_processed" =>
+                            (int) ($chunk["headers"]["x-chunks-processed"] ??
+                                0),
+                        "files_completed" =>
+                            (int) ($chunk["headers"]["x-files-completed"] ?? 0),
+                        "bytes_processed" =>
+                            (int) ($chunk["headers"]["x-bytes-processed"] ?? 0),
+                    ];
+
+                    // Add max_files info if available
+                    if (isset($chunk["headers"]["x-max-files-limit"])) {
+                        $progress_data["max_files_limit"] =
+                            (int) $chunk["headers"]["x-max-files-limit"];
+                    }
+
+                    $this->output_progress($progress_data, true);
                 }
             };
 
@@ -491,7 +601,7 @@ class ImportClient
                 $current_fingerprint === $previous_fingerprint
             ) {
                 throw new RuntimeException(
-                    "Import stuck: received identical chunks in two consecutive operations. We may be stuck? " .
+                    "Import stuck: received identical chunks in two consecutive operations. Are we stuck? " .
                         "Phase: files",
                 );
             }
@@ -514,6 +624,8 @@ class ImportClient
         $complete = false;
         $previous_fingerprint = null;
         $sql_file = $this->local_path . "/db.sql";
+
+        // Open in write mode if no cursor (starting fresh), append mode if resuming
         $sql_handle = fopen($sql_file, $cursor ? "a" : "w");
 
         if (!$sql_handle) {
@@ -616,6 +728,17 @@ class ImportClient
     {
         $cursor = $state["deltas_cursor"] ?? null;
         $min_ctime = $state["last_sync_time"] ?? 0;
+
+        // If no last_sync_time, this is the first run - skip deltas
+        if ($min_ctime === 0 || $min_ctime === null) {
+            $this->output_progress([
+                "status" => "skipped",
+                "phase" => "deltas",
+                "message" => "No previous sync time - skipping deltas",
+            ]);
+            return;
+        }
+
         $complete = false;
         $previous_fingerprint = null;
 
@@ -648,6 +771,14 @@ class ImportClient
                         $chunk["headers"]["x-chunk-offset"] ?? "";
                     $fingerprint_data["size"] =
                         $chunk["headers"]["x-chunk-size"] ?? "";
+                } elseif ($chunk_type === "directory") {
+                    $fingerprint_data["path"] =
+                        $chunk["headers"]["x-directory-path"] ?? "";
+                } elseif ($chunk_type === "symlink") {
+                    $fingerprint_data["path"] =
+                        $chunk["headers"]["x-symlink-path"] ?? "";
+                    $fingerprint_data["target"] =
+                        $chunk["headers"]["x-symlink-target"] ?? "";
                 } elseif ($chunk_type === "progress") {
                     $fingerprint_data["body"] = $chunk["body"] ?? "";
                 } elseif ($chunk_type === "completion") {
@@ -662,8 +793,12 @@ class ImportClient
                 }
                 $context->chunk_fingerprints[] = json_encode($fingerprint_data);
 
-                if ($chunk_type === "file") {
+                if ($chunk_type === "metadata") {
+                    $this->handle_metadata_chunk($chunk, $context);
+                } elseif ($chunk_type === "file") {
                     $this->handle_file_chunk($chunk, $context);
+                } elseif ($chunk_type === "symlink") {
+                    $this->handle_symlink_chunk($chunk);
                 } elseif ($chunk_type === "deletion") {
                     $this->handle_deletion($chunk);
                 } elseif ($chunk_type === "progress") {
@@ -725,6 +860,26 @@ class ImportClient
     }
 
     /**
+     * Handle a metadata chunk from multipart response.
+     */
+    private function handle_metadata_chunk(
+        array $chunk,
+        StreamingContext $context,
+    ): void {
+        $headers = $chunk["headers"];
+        $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "");
+
+        if ($filesystem_root) {
+            $context->filesystem_root = $filesystem_root;
+            error_log("Filesystem root: {$filesystem_root}");
+            $this->output_progress([
+                "type" => "metadata",
+                "filesystem_root" => $filesystem_root,
+            ]);
+        }
+    }
+
+    /**
      * Handle a file chunk from multipart response.
      */
     private function handle_file_chunk(
@@ -740,12 +895,12 @@ class ImportClient
             return;
         }
 
-        // Make path relative to document-root
-        $local_path = $this->local_path . "/document-root" . $path;
-        $dir = dirname($local_path);
+        // Use full path under filesystem-root
+        $local_path = $this->local_path . "/filesystem-root" . $path;
 
-        if (!is_dir($dir)) {
-            mkdir($dir, 0755, true);
+        // Log path mapping for debugging
+        if ($is_first) {
+            error_log("File mapping: {$path} -> {$local_path}");
         }
 
         // Open file on first chunk
@@ -758,8 +913,34 @@ class ImportClient
                 }
             }
 
+            // Create parent directory if needed
+            $dir = dirname($local_path);
+            if (!is_dir($dir)) {
+                $result = mkdir($dir, 0755, true);
+                if (!$result && !is_dir($dir)) {
+                    throw new RuntimeException(
+                        "Failed to create directory: {$dir}\n" .
+                            "Error: " .
+                            error_get_last()["message"] ??
+                            "unknown",
+                    );
+                }
+            }
+
             // Open new file
             $context->file_handle = fopen($local_path, "wb");
+            if (!$context->file_handle) {
+                $error = error_get_last();
+                throw new RuntimeException(
+                    "Failed to open file for writing: {$local_path}\n" .
+                        "Parent directory: {$dir}\n" .
+                        "Directory exists: " .
+                        (is_dir($dir) ? "yes" : "no") .
+                        "\n" .
+                        "Error: " .
+                        ($error["message"] ?? "unknown"),
+                );
+            }
             $context->file_path = $local_path;
             $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
         }
@@ -787,6 +968,104 @@ class ImportClient
     }
 
     /**
+     * Handle a directory chunk (create empty directory).
+     */
+    private function handle_directory_chunk(array $chunk): void
+    {
+        $headers = $chunk["headers"];
+        $path = base64_decode($headers["x-directory-path"] ?? "");
+
+        if (!$path) {
+            return;
+        }
+
+        // Use full path under filesystem-root
+        $local_path = $this->local_path . "/filesystem-root" . $path;
+
+        // Create directory if it doesn't exist
+        if (!is_dir($local_path)) {
+            if (!mkdir($local_path, 0755, true) && !is_dir($local_path)) {
+                throw new RuntimeException(
+                    "Failed to create directory: {$local_path}",
+                );
+            }
+        }
+    }
+
+    /**
+     * Handle a symlink chunk (recreate symlink in filesystem).
+     *
+     * Symlinks are safely recreated because we download the complete directory
+     * tree including all symlink targets. The paths are relative to the
+     * filesystem root which prevents directory traversal outside the import directory.
+     */
+    private function handle_symlink_chunk(array $chunk): void
+    {
+        $headers = $chunk["headers"];
+        $path = base64_decode($headers["x-symlink-path"] ?? "");
+        $target = base64_decode($headers["x-symlink-target"] ?? "");
+        $ctime = (int) ($headers["x-symlink-ctime"] ?? 0);
+
+        // Skip if path or target is missing/empty
+        if (!$path || $target === false || $target === "") {
+            // return;
+        }
+
+        // Use full path under filesystem-root
+        $local_path = realpath($this->local_path . "/filesystem-root") . $path;
+
+        // Remove existing file/symlink if present
+        if (file_exists($local_path) || is_link($local_path)) {
+            error_log("Deleting existing file/symlink: {$local_path}");
+            unlink($local_path);
+        }
+
+        // Log symlink creation for debugging
+        error_log("Creating symlink: {$local_path} -> {$target}");
+
+        // Create parent directory
+        $dir = dirname($local_path);
+        if (!is_dir($dir)) {
+            if (!mkdir($dir, 0755, true) && !is_dir($dir)) {
+                // Log error and skip this symlink
+                error_log("Failed to create directory for symlink: {$dir}");
+                $this->output_progress([
+                    "type" => "symlink_error",
+                    "path" => $path,
+                    "target" => $target,
+                    "error" => "Failed to create parent directory",
+                ]);
+                return;
+            }
+        }
+
+        // Create symlink
+        $symlink_result = symlink($target, $local_path);
+        if (true !== $symlink_result || !is_link($local_path)) {
+            // Log error and skip this symlink
+            error_log("Failed to create symlink: {$local_path} -> {$target}");
+            $this->output_progress([
+                "type" => "symlink_error",
+                "path" => $path,
+                "target" => $target,
+                "error" => "Failed to create symlink",
+            ]);
+            return;
+        }
+
+        // Try to set the ctime (may not work on all systems)
+        if ($ctime > 0) {
+            @touch($local_path, $ctime);
+        }
+
+        $this->output_progress([
+            "type" => "symlink",
+            "path" => $path,
+            "target" => $target,
+        ]);
+    }
+
+    /**
      * Handle a deletion notification.
      */
     private function handle_deletion(array $chunk): void
@@ -797,9 +1076,13 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->local_path . "/document-root" . $data["path"];
+        $local_path = $this->local_path . "/filesystem-root" . $data["path"];
         if (file_exists($local_path)) {
-            @unlink($local_path);
+            if (true !== @unlink($local_path)) {
+                error_log("Failed to delete file: {$local_path}");
+            } else {
+                error_log("Deleted file: {$local_path}");
+            }
         }
 
         $this->output_progress([
@@ -838,6 +1121,11 @@ class ImportClient
             $params["cursor"] = $cursor;
         }
 
+        // Add session_id for snapshot tracking (enables deletion detection)
+        if ($this->session_id) {
+            $params["session_id"] = $this->session_id;
+        }
+
         return $url . $separator . http_build_query($params);
     }
 
@@ -855,6 +1143,9 @@ class ImportClient
         $current_chunk = null;
         $bytes_received = 0;
         $last_heartbeat = microtime(true);
+        $last_progress_check = microtime(true);
+        $last_bytes_received = 0;
+        $error_body = "";
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => true,
@@ -947,15 +1238,47 @@ class ImportClient
                 &$parser,
                 &$bytes_received,
                 &$last_heartbeat,
+                &$last_progress_check,
+                &$last_bytes_received,
+                &$error_body,
             ) {
+                // If no parser yet, we might be receiving an error response
+                if (!$parser) {
+                    $error_body .= $data;
+                }
+
                 if ($parser) {
                     $parser->feed($data);
                 }
 
                 $bytes_received += strlen($data);
 
-                // Output heartbeat every second
+                // Check for stuck/slow transfer every 5 seconds
                 $now = microtime(true);
+                if ($now - $last_progress_check >= 5.0) {
+                    $bytes_since_check = $bytes_received - $last_bytes_received;
+                    $rate = $bytes_since_check / 5.0; // bytes per second
+
+                    echo json_encode([
+                        "progress_check" => true,
+                        "bytes_received" => $bytes_received,
+                        "bytes_last_5s" => $bytes_since_check,
+                        "rate_bps" => round($rate),
+                    ]) . "\n";
+                    flush();
+
+                    // If we're receiving less than 1KB/s for 5 seconds, something is wrong
+                    if ($bytes_since_check < 1024 && $bytes_received > 0) {
+                        error_log(
+                            "Warning: Slow transfer detected - {$bytes_since_check} bytes in 5 seconds",
+                        );
+                    }
+
+                    $last_progress_check = $now;
+                    $last_bytes_received = $bytes_received;
+                }
+
+                // Output heartbeat every second
                 if ($now - $last_heartbeat >= 1.0) {
                     echo json_encode([
                         "heartbeat" => true,
@@ -981,8 +1304,48 @@ class ImportClient
         curl_close($ch);
 
         if ($http_code !== 200) {
-            throw new RuntimeException("HTTP error {$http_code}");
+            $error_msg = "HTTP error {$http_code}";
+
+            // Try to parse error response as JSON
+            if ($error_body) {
+                $error_data = json_decode($error_body, true);
+                if ($error_data && isset($error_data["error"])) {
+                    $error_msg .= ": " . $error_data["error"];
+                    if (isset($error_data["trace"])) {
+                        $error_msg .=
+                            "\n\nStack trace:\n" . $error_data["trace"];
+                    }
+                } else {
+                    // Not JSON, show raw body
+                    $error_msg .=
+                        "\n\nResponse: " . substr($error_body, 0, 500);
+                }
+            }
+
+            throw new RuntimeException($error_msg);
         }
+    }
+
+    /**
+     * Get or create a session ID for snapshot tracking.
+     * Session ID is persistent across import runs.
+     */
+    private function get_or_create_session_id(): string
+    {
+        $session_file = $this->local_path . "/.import-session-id";
+
+        if (file_exists($session_file)) {
+            $session_id = trim(file_get_contents($session_file));
+            if ($session_id) {
+                return $session_id;
+            }
+        }
+
+        // Generate new session ID
+        $session_id = "import-" . bin2hex(random_bytes(16));
+        file_put_contents($session_file, $session_id);
+
+        return $session_id;
     }
 
     /**
@@ -1060,44 +1423,100 @@ class StreamingContext
     public $file_path = null;
     public $file_ctime = null;
     public $chunk_fingerprints = [];
+    public $filesystem_root = null;
 }
 
 // ============================================================================
 // CLI Entry Point
 // ============================================================================
 
-if (PHP_SAPI !== "cli") {
-    die("This script must be run from the command line\n");
-}
+// Only run CLI logic if this file is executed directly (not included/required)
+if (
+    PHP_SAPI === "cli" &&
+    isset($argv) &&
+    realpath($argv[0] ?? "") === __FILE__
+) {
+    if ($argc < 3) {
+        echo "Usage: php import.php <remote-url> <local-path> [options]\n";
+        echo "\n";
+        echo "Arguments:\n";
+        echo "  remote-url   URL to export.php script with required parameters:\n";
+        echo "               - directory: Directory to export (required)\n";
+        echo "               - SECRET_KEY: Authentication key (required)\n";
+        echo "               Example: http://example.com/export.php?directory=/var/www/html&SECRET_KEY=xxx\n";
+        echo "  local-path   Local directory to store imported data\n";
+        echo "\n";
+        echo "Options:\n";
+        echo "  --only-files     Import only files (initial download)\n";
+        echo "  --only-sql       Import only database dump\n";
+        echo "  --only-deltas    Import only file changes since last sync\n";
+        echo "  --reset          Reset state and start fresh import\n";
+        echo "\n";
+        echo "Notes:\n";
+        echo "  - Snapshot tracking is automatic (enables deletion detection)\n";
+        echo "  - Session ID is stored in <local-path>/.import-session-id\n";
+        echo "  - Snapshots are stored on the server in /tmp/export-snapshots/\n";
+        echo "\n";
+        echo "Examples:\n";
+        echo "  # Full import (files, then SQL, then deltas)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www/html&SECRET_KEY=xxx' ./backup\n";
+        echo "\n";
+        echo "  # Re-download just the database\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --only-sql\n";
+        echo "\n";
+        echo "  # Get file updates only (detects deletions via snapshot)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --only-deltas\n";
+        echo "\n";
+        echo "  # Start fresh (ignores previous state)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --reset\n";
+        echo "\n";
+        echo "Output:\n";
+        echo "  - Progress is reported as JSON lines to stdout\n";
+        echo "  - SQL data is written to <local-path>/db.sql\n";
+        echo "  - Files are written to <local-path>/filesystem-root/\n";
+        echo "  - Script can be interrupted and will resume on next run\n";
+        exit(1);
+    }
 
-if ($argc < 3) {
-    echo "Usage: php import.php <remote-url> <local-path>\n";
-    echo "\n";
-    echo "Arguments:\n";
-    echo "  remote-url   URL to export.php script (e.g., http://example.com/export.php)\n";
-    echo "  local-path   Local directory to store imported data\n";
-    echo "\n";
-    echo "Example:\n";
-    echo "  php import.php http://example.com/export.php?directory=/var/www/html ./backup\n";
-    echo "\n";
-    echo "Output:\n";
-    echo "  - Progress is reported as JSON lines to stdout\n";
-    echo "  - SQL data is written to <local-path>/db.sql\n";
-    echo "  - Files are written to <local-path>/document-root/\n";
-    echo "  - Script can be interrupted and will resume on next run\n";
-    exit(1);
-}
+    $remote_url = $argv[1];
+    $local_path = $argv[2];
 
-$remote_url = $argv[1];
-$local_path = $argv[2];
+    // Parse options
+    $options = [
+        "only_files" => false,
+        "only_sql" => false,
+        "only_deltas" => false,
+        "reset" => false,
+    ];
 
-try {
-    $client = new ImportClient($remote_url, $local_path);
-    $client->run();
-    exit(0);
-} catch (Exception $e) {
-    fwrite(STDERR, "Error: " . $e->getMessage() . "\n");
-    fwrite(STDERR, $e->getTraceAsString() . "\n");
-    exit(1);
+    for ($i = 3; $i < $argc; $i++) {
+        switch ($argv[$i]) {
+            case "--only-files":
+                $options["only_files"] = true;
+                break;
+            case "--only-sql":
+                $options["only_sql"] = true;
+                break;
+            case "--only-deltas":
+                $options["only_deltas"] = true;
+                break;
+            case "--reset":
+                $options["reset"] = true;
+                break;
+            default:
+                fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
+                exit(1);
+        }
+    }
+
+    try {
+        $client = new ImportClient($remote_url, $local_path);
+        $client->run($options);
+        exit(0);
+    } catch (Exception $e) {
+        fwrite(STDERR, "Error: " . $e->getMessage() . "\n");
+        fwrite(STDERR, $e->getTraceAsString() . "\n");
+        exit(1);
+    }
 }
 

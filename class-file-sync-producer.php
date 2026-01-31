@@ -235,6 +235,41 @@ class FileSnapshotStorage implements SnapshotStorage
         return base64_decode($path, true) ?: $path;
     }
 
+    /**
+     * Normalize a file path by resolving . and .. components.
+     * Does NOT follow symlinks - only resolves path syntax.
+     */
+    private function normalize_path(string $path): string
+    {
+        $parts = explode('/', $path);
+        $normalized = [];
+
+        foreach ($parts as $part) {
+            if ($part === '' || $part === '.') {
+                // Skip empty parts and current directory references
+                if ($part === '' && count($normalized) === 0) {
+                    // Preserve leading slash for absolute paths
+                    $normalized[] = '';
+                }
+                continue;
+            }
+
+            if ($part === '..') {
+                // Go up one directory
+                if (count($normalized) > 0 && end($normalized) !== '..') {
+                    array_pop($normalized);
+                } else {
+                    // Can't go up (relative path starting with ..)
+                    $normalized[] = $part;
+                }
+            } else {
+                $normalized[] = $part;
+            }
+        }
+
+        return implode('/', $normalized);
+    }
+
     public function get_last_sync_time(): ?int
     {
         return $this->last_sync_time;
@@ -428,10 +463,11 @@ class FileSyncProducer
 
     private $directory;
     private $min_ctime;
-    private $max_files;
     private $chunk_size;
     private $snapshot_storage;
     private $deletions;
+    private $follow_symlinks;
+    private $filesystem_root; // Common ancestor of scan dir and all symlink targets
 
     // State
     private $phase;
@@ -442,20 +478,26 @@ class FileSyncProducer
     private $scan_current_dir; // Current directory being scanned
     private $scan_dir_handle; // Directory handle
     private $scanned_files; // Array of found files (sorted by ctime after scanning)
+    private $scanned_directories; // Array of directories encountered
+    private $scanned_symlinks; // Array of symlinks to preserve
+    private $visited_paths; // Set of visited real paths (for cycle detection)
 
     // Streaming state
     private $streaming_index; // Current index in scanned_files array
     private $streaming_file_handle;
     private $streaming_file_offset;
     private $files_streamed;
+    private $empty_directories; // Empty directories to output
+    private $empty_dir_index; // Current index in empty_directories
+    private $symlink_index; // Current index in scanned_symlinks
 
     public function __construct(string $directory, array $options = [])
     {
         $this->directory = rtrim($directory, '/');
         $this->snapshot_storage = $options['snapshot_storage'] ?? null;
         $this->min_ctime = $options['min_ctime'] ?? 0;
-        $this->max_files = $options['max_files'] ?? 1000;
         $this->chunk_size = $options['chunk_size'] ?? (5 * 1024 * 1024); // 5MB default
+        $this->follow_symlinks = $options['follow_symlinks'] ?? true;
 
         if (isset($options['cursor'])) {
             $this->initialize_from_cursor($options['cursor']);
@@ -473,12 +515,18 @@ class FileSyncProducer
         $this->scan_current_dir = null;
         $this->scan_dir_handle = null;
         $this->scanned_files = [];
+        $this->scanned_directories = [];
+        $this->scanned_symlinks = [];
+        $this->visited_paths = [];
 
         // Initialize streaming state
         $this->streaming_index = 0;
         $this->streaming_file_handle = null;
         $this->streaming_file_offset = 0;
         $this->files_streamed = 0;
+        $this->empty_directories = [];
+        $this->empty_dir_index = 0;
+        $this->symlink_index = 0;
 
         $this->current_chunk = null;
         $this->deletions = null;
@@ -492,6 +540,7 @@ class FileSyncProducer
         }
 
         $this->phase = $cursor['p'];
+        $this->filesystem_root = $cursor['fsr'] ?? null;
         $this->current_chunk = null;
 
         if ($this->phase === self::PHASE_SCANNING) {
@@ -527,7 +576,20 @@ class FileSyncProducer
     private function rescan_for_resume(): void
     {
         $this->scanned_files = [];
+        $this->scanned_directories = [];
+        $this->scanned_symlinks = [];
+        $this->visited_paths = [];
+        $this->empty_directories = [];
+        $this->empty_dir_index = 0;
+        $this->symlink_index = 0;
+
         $stack = [$this->directory];
+
+        // Track root directory
+        $root_real = realpath($this->directory);
+        if ($root_real !== false) {
+            $this->visited_paths[$root_real] = true;
+        }
 
         while (!empty($stack)) {
             $current_dir = array_pop($stack);
@@ -537,6 +599,8 @@ class FileSyncProducer
                 continue;
             }
 
+            $this->scanned_directories[$current_dir] = true;
+
             while (($entry = readdir($handle)) !== false) {
                 if ($entry === '.' || $entry === '..') {
                     continue;
@@ -544,11 +608,31 @@ class FileSyncProducer
 
                 $full_path = $current_dir . '/' . $entry;
 
-                if (is_dir($full_path)) {
+                // Handle symlinks - just record them, don't follow
+                if (is_link($full_path)) {
+                    $target = readlink($full_path);
+                    if ($target !== false) {
+                        $this->scanned_symlinks[] = [
+                            'path' => $full_path,
+                            'target' => $target,
+                            'ctime' => filectime($full_path),
+                        ];
+                    }
+                    continue;
+                } elseif (is_dir($full_path)) {
+                    $real_path = realpath($full_path);
+                    if ($real_path !== false) {
+                        if (isset($this->visited_paths[$real_path])) {
+                            continue;
+                        }
+                        $this->visited_paths[$real_path] = true;
+                    }
                     $stack[] = $full_path;
                 } elseif (is_file($full_path)) {
+                    // Always scan all files
                     $ctime = filectime($full_path);
-                    if ($ctime > $this->min_ctime) {
+                    // Apply min_ctime filter when adding to scanned_files
+                    if ($ctime >= $this->min_ctime) {
                         $this->scanned_files[] = [
                             'path' => $full_path,
                             'ctime' => $ctime,
@@ -562,12 +646,16 @@ class FileSyncProducer
         }
 
         // Sort by ctime
-        usort($this->scanned_files, fn($a, $b) => $a['ctime'] <=> $b['ctime']);
+        // Sort by ctime, then by path for stable ordering (handles same ctime)
+usort($this->scanned_files, fn($a, $b) =>
+    $a['ctime'] <=> $b['ctime'] ?: strcmp($a['path'], $b['path'])
+);
 
-        // Limit to max_files
-        if (count($this->scanned_files) > $this->max_files) {
-            $this->scanned_files = array_slice($this->scanned_files, 0, $this->max_files);
-        }
+        // Identify empty directories
+        $this->identify_empty_directories($this->scanned_files);
+
+        // Calculate filesystem root (common ancestor of scan dir and all symlink targets)
+        $this->filesystem_root = $this->calculate_filesystem_root();
     }
 
     /**
@@ -602,6 +690,12 @@ class FileSyncProducer
     {
         $all_files = [];
 
+        // Track root directory
+        $root_real = realpath($this->directory);
+        if ($root_real !== false) {
+            $this->visited_paths[$root_real] = true;
+        }
+
         while (!empty($this->scan_stack)) {
             $current_dir = array_pop($this->scan_stack);
             $handle = @opendir($current_dir);
@@ -610,6 +704,9 @@ class FileSyncProducer
                 continue;
             }
 
+            // Track this directory
+            $this->scanned_directories[$current_dir] = true;
+
             while (($entry = readdir($handle)) !== false) {
                 if ($entry === '.' || $entry === '..') {
                     continue;
@@ -617,27 +714,47 @@ class FileSyncProducer
 
                 $full_path = $current_dir . '/' . $entry;
 
-                if (is_dir($full_path)) {
-                    $this->scan_stack[] = $full_path;
-                } elseif (is_file($full_path)) {
-                    $ctime = filectime($full_path);
-
-                    if ($ctime > $this->min_ctime) {
-                        $all_files[] = [
+                // Handle symlinks - just record them, don't follow
+                if (is_link($full_path)) {
+                    $target = readlink($full_path);
+                    if ($target !== false) {
+                        $this->scanned_symlinks[] = [
                             'path' => $full_path,
-                            'ctime' => $ctime,
-                            'size' => filesize($full_path),
+                            'target' => $target,
+                            'ctime' => filectime($full_path),
                         ];
                     }
+                    // Don't follow symlinks - if the target is inside the scan directory,
+                    // we'll find it during normal recursive scanning
+                    continue;
+                } elseif (is_dir($full_path)) {
+                    // Regular directory
+                    $real_path = realpath($full_path);
+                    if ($real_path !== false) {
+                        // Check for cycles (shouldn't happen with regular dirs, but be safe)
+                        if (isset($this->visited_paths[$real_path])) {
+                            continue;
+                        }
+                        $this->visited_paths[$real_path] = true;
+                    }
+                    $this->scan_stack[] = $full_path;
+                } elseif (is_file($full_path)) {
+                    // Regular file - always scan all files
+                    $ctime = filectime($full_path);
+                    $all_files[] = [
+                        'path' => $full_path,
+                        'ctime' => $ctime,
+                        'size' => filesize($full_path),
+                    ];
                 }
             }
 
             closedir($handle);
         }
 
-        // If we have snapshot storage, load previous snapshot and filter to changed files
+        // If we have snapshot storage, use it to filter and detect deletions
         if ($this->snapshot_storage) {
-            // Load previous snapshot into map
+            // Load previous snapshot into map BEFORE updating
             $previous_snapshot = [];
             foreach ($this->snapshot_storage->get_all_files() as $file) {
                 if ($file['status'] === 'active') {
@@ -648,35 +765,186 @@ class FileSyncProducer
                 }
             }
 
-            // Filter to only changed files
+            // Filter files to send based on:
+            // 1. min_ctime filter (if set)
+            // 2. Changed since last snapshot (new file or ctime/size changed)
             foreach ($all_files as $file) {
-                $prev = $previous_snapshot[$file['path']] ?? null;
+                // Apply min_ctime filter
+                if ($file['ctime'] < $this->min_ctime) {
+                    continue;
+                }
 
-                // Include file if:
-                // - It's new (not in previous snapshot)
-                // - Or its ctime or size changed
+                // Apply snapshot filter (only send changed files)
+                $prev = $previous_snapshot[$file['path']] ?? null;
                 if (!$prev || $prev['ctime'] != $file['ctime'] || $prev['size'] != $file['size']) {
                     $this->scanned_files[] = $file;
                 }
             }
 
-            // Update snapshot and get deletions (after filtering)
+            // Now update snapshot and detect deletions (after filtering)
             $this->deletions = $this->snapshot_storage->update_from_scan($all_files);
         } else {
-            // No snapshot storage - include all files
-            $this->scanned_files = $all_files;
+            // No snapshot storage - filter by min_ctime only
+            foreach ($all_files as $file) {
+                if ($file['ctime'] >= $this->min_ctime) {
+                    $this->scanned_files[] = $file;
+                }
+            }
         }
 
         // Sort by ctime
-        usort($this->scanned_files, fn($a, $b) => $a['ctime'] <=> $b['ctime']);
+        // Sort by ctime, then by path for stable ordering (handles same ctime)
+usort($this->scanned_files, fn($a, $b) =>
+    $a['ctime'] <=> $b['ctime'] ?: strcmp($a['path'], $b['path'])
+);
 
-        // Limit to max_files
-        if (count($this->scanned_files) > $this->max_files) {
-            $this->scanned_files = array_slice($this->scanned_files, 0, $this->max_files);
-        }
+        // Identify empty directories
+        $this->identify_empty_directories($all_files);
+
+        // Calculate filesystem root (common ancestor of scan dir and all symlink targets)
+        $this->filesystem_root = $this->calculate_filesystem_root();
 
         $this->phase = self::PHASE_STREAMING;
         $this->initialize_streaming();
+    }
+
+    /**
+     * Identify directories that contain no files
+     */
+    private function identify_empty_directories(array $all_files): void
+    {
+        // Build set of directories that contain files
+        $dirs_with_files = [];
+        foreach ($all_files as $file) {
+            $dir = dirname($file['path']);
+            // Mark this directory and all parent directories as having content
+            while ($dir !== $this->directory && $dir !== '/' && $dir !== '.') {
+                $dirs_with_files[$dir] = true;
+                $dir = dirname($dir);
+            }
+        }
+
+        // Find directories with no files (excluding root directory)
+        $this->empty_directories = [];
+        foreach (array_keys($this->scanned_directories) as $dir) {
+            // Skip the root directory itself
+            if ($dir === $this->directory) {
+                continue;
+            }
+
+            if (!isset($dirs_with_files[$dir])) {
+                $this->empty_directories[] = $dir;
+            }
+        }
+
+        // Sort empty directories by path for consistent output
+        sort($this->empty_directories);
+    }
+
+    /**
+     * Calculate the filesystem root - the common ancestor of the scan directory
+     * and all symlink targets. This allows us to export the full directory tree
+     * needed to preserve symlinks.
+     */
+    private function calculate_filesystem_root(): string
+    {
+        // Start with the scan directory
+        $paths = [realpath($this->directory)];
+
+        // Add all symlink target real paths
+        foreach ($this->scanned_symlinks as $symlink) {
+            // Resolve symlink to absolute path
+            $symlink_path = $symlink['path'];
+            $target = $symlink['target'];
+
+            // Resolve target relative to symlink's directory
+            $symlink_dir = dirname($symlink_path);
+            if ($target[0] !== '/') {
+                // Relative path - resolve it
+                $target_path = $symlink_dir . '/' . $target;
+            } else {
+                // Absolute path
+                $target_path = $target;
+            }
+
+            $real_target = realpath($target_path);
+            if ($real_target !== false) {
+                $paths[] = $real_target;
+            } else {
+                // Symlink target doesn't exist or can't be resolved
+                error_log(
+                    "Warning: Cannot resolve symlink target: {$symlink_path} -> {$target} " .
+                    "(resolved to {$target_path})"
+                );
+            }
+        }
+
+        // Find common ancestor of all paths
+        if (count($paths) === 0) {
+            return '/';
+        }
+
+        if (count($paths) === 1) {
+            return $paths[0];
+        }
+
+        $common = $this->find_common_ancestor($paths);
+
+        // Warn if filesystem root is very shallow, but allow it
+        // Users might legitimately export from /var, /home, /opt, etc.
+        if ($common === '/' || $common === '') {
+            error_log(
+                'Warning: Filesystem root is / - exporting from root directory. ' .
+                'This may include more files than intended. ' .
+                'Scan directory: ' . $this->directory
+            );
+            // Use scan directory as fallback
+            return realpath($this->directory);
+        }
+
+        return $common;
+    }
+
+    /**
+     * Find the common ancestor directory of multiple paths.
+     */
+    private function find_common_ancestor(array $paths): string
+    {
+        if (empty($paths)) {
+            return '/';
+        }
+
+        // Split each path into components
+        $path_parts = array_map(fn($p) => explode('/', trim($p, '/')), $paths);
+
+        // Find shortest path length
+        $min_depth = min(array_map('count', $path_parts));
+
+        // Find common prefix
+        $common_parts = [];
+        for ($i = 0; $i < $min_depth; $i++) {
+            $part = $path_parts[0][$i];
+            $all_match = true;
+
+            foreach ($path_parts as $parts) {
+                if ($parts[$i] !== $part) {
+                    $all_match = false;
+                    break;
+                }
+            }
+
+            if ($all_match) {
+                $common_parts[] = $part;
+            } else {
+                break;
+            }
+        }
+
+        if (empty($common_parts)) {
+            return '/';
+        }
+
+        return '/' . implode('/', $common_parts);
     }
 
     private function initialize_streaming(): void
@@ -688,11 +956,55 @@ class FileSyncProducer
     }
 
     /**
+     * Convert an absolute path to be relative to the filesystem root.
+     * This allows us to recreate the directory structure under filesystem-root/
+     */
+    private function make_relative_to_root(string $path): string
+    {
+        $root = rtrim($this->filesystem_root, '/');
+        $path = rtrim($path, '/');
+
+        if (strpos($path, $root) === 0) {
+            $relative = substr($path, strlen($root));
+            return $relative ?: '/';
+        }
+
+        // Path not under root - return as-is (shouldn't happen after our safety checks)
+        return $path;
+    }
+
+    /**
      * Stream file chunks incrementally
      */
     private function stream_step(): void
     {
-        // Check if we're done streaming
+        // Output empty directory chunks first
+        if ($this->empty_dir_index < count($this->empty_directories)) {
+            $dir = $this->empty_directories[$this->empty_dir_index];
+            $this->empty_dir_index++;
+
+            $this->current_chunk = [
+                'type' => 'directory',
+                'path' => $dir, // Keep full absolute path
+            ];
+            return;
+        }
+
+        // Output symlink chunks second
+        if ($this->symlink_index < count($this->scanned_symlinks)) {
+            $symlink = $this->scanned_symlinks[$this->symlink_index];
+            $this->symlink_index++;
+
+            $this->current_chunk = [
+                'type' => 'symlink',
+                'path' => $symlink['path'], // Keep full absolute path
+                'target' => $symlink['target'], // Keep target as-is (relative link)
+                'ctime' => $symlink['ctime'],
+            ];
+            return;
+        }
+
+        // Check if we're done streaming files
         if ($this->streaming_index >= count($this->scanned_files)) {
             // Close any open file handle
             if ($this->streaming_file_handle) {
@@ -752,7 +1064,8 @@ class FileSyncProducer
         }
 
         $this->current_chunk = [
-            'path' => $file['path'],
+            'type' => 'file',
+            'path' => $file['path'], // Keep full absolute path
             'size' => $file['size'],
             'ctime' => $file['ctime'],
             'data' => $data,
@@ -772,9 +1085,17 @@ class FileSyncProducer
         return $this->deletions;
     }
 
+    public function get_filesystem_root(): ?string
+    {
+        return $this->filesystem_root;
+    }
+
     public function get_reentrancy_cursor(): string
     {
-        $cursor = ['p' => $this->phase];
+        $cursor = [
+            'p' => $this->phase,
+            'fsr' => $this->filesystem_root ?? null, // filesystem root
+        ];
 
         if ($this->phase === self::PHASE_STREAMING) {
             $cursor['n'] = $this->files_streamed;
