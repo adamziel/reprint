@@ -62,6 +62,16 @@ TODO:
 * ?: The migration source keeps track of all such modified files and moves them to the end of the synchronization queue.
      If they're reached again, and they're modified again, ... (?) ...
 
+#### Other considered ways of traversing the filesystem
+
+* A `(ctime, byte offset)` cursor. We'd still need to keep track of the filename for when multiple files have the same ctime.
+* A `(ctime, filename)` ordered traversal. It wouldn't save us much work, as we'd still need to run a full scan of the filesystem
+  on every incremental synchronization to detect deletions. On top of that, it is impractical. First, you need to always sort the
+  entire directory tree by ctime before you can start streaming the data. That may take some time and HTTP requests in PHP land. Second,
+  there is no clear stop for the traversal. Any file that keeps changing will keep moving to the end of the queue, and meanwhile the files
+  we have already seen may also get their ctime updated.
+  
+
 ### Open questions
 
 * How to negotiate symlinks pointing outside of the requested root directories?
