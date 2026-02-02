@@ -87,7 +87,7 @@ This is why we're budgeting our resource usage in a few ways:
 * Memory usage limit on the remote host – it gracefully ends the request once we exceed the budget.
 * Request backoff to make space for other requests (TODO)
 
-### Open questions and todos
+### Open questions
 
 * How do we choose resource budgets for each host / runtime?
     start = microtime(); do_thing(); took = microtime() - start; usleep( max( 0.5, (2 * took ) ) );
@@ -101,8 +101,20 @@ This is why we're budgeting our resource usage in a few ways:
 * How to negotiate symlinks pointing outside of the requested root directories?
 * Should we include a sequence ID with each file chunk for consistency checks?
 * Should we include crc32 checksums for each transmitted chunk? Seems excessive since TCP+TLS both already give us strong consistency guarantees?
+
+### Todos
+
+* Auto-constraining resource usage
+* Display nice progress information in the terminal (since that will also allow us to display it on the web)
 * When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
   what it was doing when we've killed it (e.g. appending a partial state to the local file).
+* Turn it into a WordPress plugin 
+* Automated test suite to cover all the usual corner cases
+* Double check we're generating a useful, append-only audit log for every export call
+
+### Out of scope for this initial version
+
+* Secure site-to-site tunnel any more advanced than defining a hardcoded ACCESS_KEY constant
 
 ### Transport
 
