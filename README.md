@@ -71,9 +71,28 @@ TODO:
   there is no clear stop for the traversal. Any file that keeps changing will keep moving to the end of the queue, and meanwhile the files
   we have already seen may also get their ctime updated.
   
+### Resource management
+
+We need to be careful about the resource usage or we risk web hosts blocking us.
+
+Most WordPress sites are on low-end servers and have limited resources at their disposal.
+Some hosts monitor the usage and block sites that use too much CPU or memory. Since we're using
+PHP as a site export backend, we'll naturally use more resources than we'd need if we did it over SSH.
+We need to use network connections and block PHP workers, we need to run PHP programs that are slower
+than their C counterparts, and so on.
+
+This is why we're budgeting our resource usage in a few ways:
+
+* Execution time limit on the remote host – it gracefully ends the request once we exceed the budget.
+* Memory usage limit on the remote host – it gracefully ends the request once we exceed the budget.
+* Request backoff to make space for other requests
+
+    start = microtime(); do_thing(); took = microtime() - start; usleep( max( 0.5, (2 * took ) ) );
 
 ### Open questions
 
+* How do we choose resource budgets for each host / runtime?
+* Can we, somehow, budget CPU usage?
 * How to negotiate symlinks pointing outside of the requested root directories?
 * Should we include a sequence ID with each file chunk for consistency checks?
 * Should we include crc32 checksums for each transmitted chunk? Seems excessive since TCP+TLS both already give us strong consistency guarantees?
