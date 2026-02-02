@@ -311,6 +311,101 @@ function export_sql(
 }
 
 /**
+ * Create or load an export session.
+ * Sessions store client file state for delta detection.
+ *
+ * @param string|null $session_id Existing session ID or null to create new
+ * @param string|null $client_state_gz Compressed client file state (gzipped TSV: path\tctime\n)
+ * @return array Array with 'session_id' and 'snapshot_storage'
+ */
+function get_or_create_export_session(?string $session_id, ?string $client_state_gz): array
+{
+    $sessions_dir = sys_get_temp_dir() . '/export-sessions';
+    if (!is_dir($sessions_dir)) {
+        mkdir($sessions_dir, 0755, true);
+    }
+
+    // If session_id provided, try to load it
+    if ($session_id !== null) {
+        // Validate session_id (alphanumeric only for security)
+        if (!preg_match('/^[a-zA-Z0-9_-]{16,64}$/', $session_id)) {
+            throw new InvalidArgumentException("Invalid session_id format");
+        }
+
+        $session_file = $sessions_dir . '/' . $session_id . '.tsv';
+        if (file_exists($session_file)) {
+            return [
+                'session_id' => $session_id,
+                'snapshot_storage' => new FileSnapshotStorage($session_file),
+            ];
+        }
+
+        // Session expired or doesn't exist, treat as new session
+        error_log("Export session not found: {$session_id}, creating new session");
+    }
+
+    // Create new session
+    $new_session_id = bin2hex(random_bytes(16));
+    $session_file = $sessions_dir . '/' . $new_session_id . '.tsv';
+
+    // If client state provided, decode from base64, decompress and store it
+    if ($client_state_gz !== null && $client_state_gz !== '') {
+        // Decode from base64
+        $client_state_gz_binary = base64_decode($client_state_gz, true);
+        if ($client_state_gz_binary === false) {
+            throw new InvalidArgumentException("Failed to base64 decode client state");
+        }
+
+        // Decompress
+        $client_state = @gzdecode($client_state_gz_binary);
+        if ($client_state === false) {
+            throw new InvalidArgumentException("Failed to decompress client state");
+        }
+
+        // Parse client state (TSV format: path\tctime\n)
+        // Convert to snapshot format and write to session file
+        $handle = fopen($session_file, 'w');
+        if (!$handle) {
+            throw new RuntimeException("Failed to create session file");
+        }
+
+        $lines = explode("\n", trim($client_state));
+        foreach ($lines as $line) {
+            if (trim($line) === '') continue;
+
+            $parts = explode("\t", $line);
+            if (count($parts) >= 2) {
+                $path = $parts[0];
+                $ctime = (int)$parts[1];
+                $size = (int)($parts[2] ?? 0);
+
+                // Write in snapshot format: path\tctime\tsize\tactive\tlast_seen\tdeleted_at
+                fprintf(
+                    $handle,
+                    "%s\t%d\t%d\tactive\t%d\t0\n",
+                    base64_encode($path),
+                    $ctime,
+                    $size,
+                    time()
+                );
+            }
+        }
+        fclose($handle);
+
+        error_log("Export session created: {$new_session_id} with " . count($lines) . " client files");
+    } else {
+        // No client state = full export (create empty snapshot)
+        touch($session_file);
+        error_log("Export session created: {$new_session_id} (full export, no client state)");
+    }
+
+    return [
+        'session_id' => $new_session_id,
+        'snapshot_storage' => new FileSnapshotStorage($session_file),
+    ];
+}
+
+/**
  * Handle file export operation.
  */
 function export_files(
@@ -374,32 +469,23 @@ function export_files(
         throw new InvalidArgumentException("No valid directories specified");
     }
 
+    // Get or create export session
+    // Client sends compressed state on first request or uses session_id on subsequent
+    $session_id = $config["session_id"] ?? null;
+    $client_state_gz = $config["client_state_gz"] ?? null;
+
+    $session = get_or_create_export_session($session_id, $client_state_gz);
+    $session_id = $session['session_id'];
+
     // File sync options
     $sync_options = [
         "min_ctime" => $config["min_ctime"] ?? 0,
         "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024, // 5MB
+        "snapshot_storage" => $session['snapshot_storage'],
     ];
 
     if (isset($config["cursor"])) {
         $sync_options["cursor"] = $config["cursor"];
-    }
-
-    // Set up snapshot storage for deletion detection
-    // Use session_id for automatic snapshot file naming
-    if (isset($config["snapshot_path"])) {
-        $sync_options["snapshot_storage"] = new FileSnapshotStorage(
-            $config["snapshot_path"],
-        );
-    } elseif (isset($config["session_id"])) {
-        // Auto-generate snapshot path from session ID
-        $snapshot_dir = sys_get_temp_dir() . "/export-snapshots";
-        if (!is_dir($snapshot_dir)) {
-            mkdir($snapshot_dir, 0755, true);
-        }
-        $snapshot_file = $snapshot_dir . "/" . $config["session_id"] . ".tsv";
-        $sync_options["snapshot_storage"] = new FileSnapshotStorage(
-            $snapshot_file,
-        );
     }
 
     $sync = new FileSyncProducer($directories, $sync_options);
@@ -446,6 +532,7 @@ function export_files(
             $filesystem_root = $sync->get_filesystem_root();
             $metadata = [
                 "filesystem_root" => $filesystem_root,
+                "session_id" => $session_id,
             ];
             $metadata_json = json_encode($metadata);
 
@@ -453,6 +540,7 @@ function export_files(
             echo "Content-Type: application/json\r\n";
             echo "Content-Length: " . strlen($metadata_json) . "\r\n";
             echo "X-Chunk-Type: metadata\r\n";
+            echo "X-Session-Id: " . $session_id . "\r\n";
             echo "X-Filesystem-Root: " .
                 base64_encode($filesystem_root) .
                 "\r\n";

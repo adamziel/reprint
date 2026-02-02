@@ -323,12 +323,22 @@ class ImportClient
     private $last_progress_output = 0;
     private $progress_throttle = 1.0; // seconds
     private $session_id;
+    private $index_file; // Local index of imported files for delta detection
+    private $audit_log; // Audit log file for all operations
+    private $verbose_mode = false; // Whether to show verbose output
+    private $is_tty; // Whether stdout is a TTY
+    private $files_imported = 0; // Counter for imported files
 
     public function __construct(string $remote_url, string $local_path)
     {
         $this->remote_url = rtrim($remote_url, "?&");
         $this->local_path = rtrim($local_path, "/");
         $this->state_file = $this->local_path . "/.import-state.json";
+        $this->index_file = $this->local_path . "/.import-index.tsv";
+        $this->audit_log = $this->local_path . "/.import-audit.log";
+
+        // Detect TTY for progress display
+        $this->is_tty = function_exists('posix_isatty') && posix_isatty(STDOUT);
 
         // Generate or load session ID for snapshot tracking on server
         $this->session_id = $this->get_or_create_session_id();
@@ -343,6 +353,212 @@ class ImportClient
     }
 
     /**
+     * Load local file index for delta detection.
+     * Format: path\tctime\tsize\n
+     * Later entries override earlier ones (append-only optimization).
+     *
+     * @return array Map of path => ['ctime' => int, 'size' => int]
+     */
+    private function load_local_index(): array
+    {
+        if (!file_exists($this->index_file)) {
+            return [];
+        }
+
+        $index = [];
+        $handle = @fopen($this->index_file, "r");
+        if (!$handle) {
+            return [];
+        }
+
+        while (($line = fgets($handle)) !== false) {
+            $parts = explode("\t", trim($line));
+            if (count($parts) >= 3) {
+                $path = $parts[0];
+                $ctime = (int) $parts[1];
+                $size = (int) $parts[2];
+                // Later entries override (handles appends)
+                $index[$path] = ["ctime" => $ctime, "size" => $size];
+            }
+        }
+
+        fclose($handle);
+        return $index;
+    }
+
+    /**
+     * Save local file index atomically.
+     *
+     * @param array $index Map of path => ['ctime' => int, 'size' => int]
+     */
+    private function save_local_index(array $index): void
+    {
+        $temp_file = $this->index_file . ".tmp";
+        $handle = fopen($temp_file, "w");
+        if (!$handle) {
+            throw new RuntimeException("Failed to create temp index file");
+        }
+
+        foreach ($index as $path => $info) {
+            fprintf(
+                $handle,
+                "%s\t%d\t%d\n",
+                $path,
+                $info["ctime"],
+                $info["size"],
+            );
+        }
+
+        fclose($handle);
+
+        // Atomic rename
+        if (!rename($temp_file, $this->index_file)) {
+            @unlink($temp_file);
+            throw new RuntimeException("Failed to update index file");
+        }
+    }
+
+    /**
+     * Add or update a file in the local index (append-only for performance).
+     *
+     * @param string $path File path (relative to filesystem-root)
+     * @param int $ctime File ctime
+     * @param int $size File size
+     */
+    private function index_file_entry(
+        string $path,
+        int $ctime,
+        int $size,
+    ): void {
+        // Append to index file (much faster than rewriting)
+        $line = sprintf("%s\t%d\t%d\n", $path, $ctime, $size);
+        file_put_contents($this->index_file, $line, FILE_APPEND | LOCK_EX);
+    }
+
+    /**
+     * Remove a file from the local index.
+     * This requires rewriting the entire index (rare operation).
+     *
+     * @param string $path File path to remove
+     */
+    private function unindex_file_entry(string $path): void
+    {
+        $index = $this->load_local_index();
+        if (isset($index[$path])) {
+            unset($index[$path]);
+            $this->save_local_index($index);
+            $this->audit_log("Unindexed: {$path}", false);
+        }
+    }
+
+    /**
+     * Compact the index file by removing duplicates and deleted entries.
+     * This rewrites the entire file but should be called rarely.
+     */
+    private function compact_index(): void
+    {
+        $index = $this->load_local_index();
+        $this->save_local_index($index);
+        $this->audit_log("Index compacted: " . count($index) . " files", false);
+    }
+
+    /**
+     * Get compressed client state for delta detection.
+     * Format: gzipped TSV (path\tctime\tsize\n)
+     *
+     * @return string|null Compressed client state or null if index is empty
+     */
+    private function get_compressed_client_state(): ?string
+    {
+        $index = $this->load_local_index();
+        if (empty($index)) {
+            return null;
+        }
+
+        $tsv = "";
+        foreach ($index as $path => $info) {
+            $tsv .= $path . "\t" . $info["ctime"] . "\t" . $info["size"] . "\n";
+        }
+
+        $compressed = gzencode($tsv, 6); // Level 6 compression
+        if ($compressed === false) {
+            throw new RuntimeException("Failed to compress client state");
+        }
+
+        $this->audit_log(
+            sprintf(
+                "Compressed client state: %d files, %d bytes -> %d bytes (%.1f%% reduction)",
+                count($index),
+                strlen($tsv),
+                strlen($compressed),
+                100 * (1 - strlen($compressed) / strlen($tsv))
+            ),
+            false
+        );
+
+        return $compressed;
+    }
+
+    /**
+     * Log to audit file (always) and optionally to console.
+     *
+     * @param string $message Message to log
+     * @param bool $to_console Whether to also output to console (respects verbose mode)
+     */
+    private function audit_log(string $message, bool $to_console = true): void
+    {
+        $timestamp = date('Y-m-d H:i:s');
+        $log_line = "[{$timestamp}] {$message}\n";
+
+        // Always write to audit log
+        file_put_contents($this->audit_log, $log_line, FILE_APPEND);
+
+        // Output to console if verbose mode or if explicitly requested
+        if ($to_console && $this->verbose_mode) {
+            echo $log_line;
+        }
+    }
+
+    /**
+     * Show progress in a single refreshing line (TTY mode only).
+     * Truncates long messages to fit terminal width.
+     *
+     * @param string $message Progress message
+     */
+    private function show_progress_line(string $message): void
+    {
+        if ($this->is_tty && !$this->verbose_mode) {
+            // Get terminal width (default 80 if can't detect)
+            $width = 80;
+            if (function_exists('exec')) {
+                $tput_cols = @exec('tput cols 2>/dev/null');
+                if ($tput_cols && is_numeric($tput_cols)) {
+                    $width = (int)$tput_cols;
+                }
+            }
+
+            // Truncate message if too long, leaving room for "..."
+            if (strlen($message) > $width - 3) {
+                $message = substr($message, 0, $width - 3) . '...';
+            }
+
+            // Clear line and write progress
+            echo "\r\033[K" . $message;
+            flush();
+        }
+    }
+
+    /**
+     * Clear progress line and move to next line (TTY mode only).
+     */
+    private function clear_progress_line(): void
+    {
+        if ($this->is_tty && !$this->verbose_mode) {
+            echo "\r\033[K";
+        }
+    }
+
+    /**
      * Run the import process.
      *
      * @param array $options Options for controlling import behavior:
@@ -350,9 +566,11 @@ class ImportClient
      *   - only_sql: Import only SQL phase
      *   - only_deltas: Import only file deltas phase
      *   - reset: Reset state and start fresh
+     *   - verbose: Enable verbose output
      */
     public function run(array $options = []): void
     {
+        $this->verbose_mode = $options["verbose"] ?? false;
         $state = $this->load_state();
 
         // Handle reset option
@@ -456,6 +674,17 @@ class ImportClient
                 }
                 $state["phase"] = "complete";
                 $this->save_state($state);
+
+                // Show completion message
+                $this->clear_progress_line();
+                $index = $this->load_local_index();
+                $index_size = count($index);
+                $this->audit_log("Import complete: {$index_size} files indexed", true);
+
+                if (!$this->verbose_mode) {
+                    echo "Import complete: {$index_size} files indexed\n";
+                    echo "Audit log: {$this->audit_log}\n";
+                }
             }
 
             $this->output_progress(["status" => "complete"]);
@@ -475,8 +704,19 @@ class ImportClient
     {
         $cursor = $state["files_cursor"] ?? null;
         $complete = false;
+        $is_first_request = ($cursor === null);
 
         while (!$complete) {
+            // On first request, send compressed client state for delta detection
+            $post_data = null;
+            if ($is_first_request) {
+                $client_state_gz = $this->get_compressed_client_state();
+                if ($client_state_gz !== null) {
+                    $post_data = ["client_state_gz" => base64_encode($client_state_gz)];
+                }
+                $is_first_request = false;
+            }
+
             $url = $this->build_url("files", $cursor);
 
             $context = new StreamingContext();
@@ -492,9 +732,12 @@ class ImportClient
                 $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
 
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-                error_log("ImportClient: Received chunk type: $chunk_type, cursor: " . substr($cursor ?? 'null', 0, 50));
+                $this->audit_log(
+                    "Received chunk: $chunk_type",
+                    false
+                );
 
-                // Debug: Log what chunk types we're receiving
+                // Debug: Log what chunk types we're receiving (audit only)
                 static $chunk_counts = [];
                 $chunk_counts[$chunk_type] =
                     ($chunk_counts[$chunk_type] ?? 0) + 1;
@@ -502,19 +745,21 @@ class ImportClient
                     $chunk_counts[$chunk_type] === 1 ||
                     $chunk_counts[$chunk_type] % 10 === 0
                 ) {
-                    error_log(
+                    $this->audit_log(
                         "Chunk type received: {$chunk_type} (count: {$chunk_counts[$chunk_type]})",
+                        false
                     );
                 }
 
                 if ($chunk_type === "metadata") {
                     $this->handle_metadata_chunk($chunk, $context);
                 } elseif ($chunk_type === "file") {
-                    error_log(
+                    $this->audit_log(
                         "Processing file chunk: " .
                             base64_decode(
                                 $chunk["headers"]["x-file-path"] ?? "",
                             ),
+                        false
                     );
                     $this->handle_file_chunk($chunk, $context);
                 } elseif ($chunk_type === "directory") {
@@ -537,7 +782,13 @@ class ImportClient
 
                     $complete =
                         ($chunk["headers"]["x-status"] ?? "") === "complete";
-                    error_log("ImportClient: Completion chunk received, status=" . ($chunk["headers"]["x-status"] ?? "missing") . ", complete=" . ($complete ? 'true' : 'false'));
+                    $this->audit_log(
+                        "Completion chunk received, status=" .
+                            ($chunk["headers"]["x-status"] ?? "missing") .
+                            ", complete=" .
+                            ($complete ? "true" : "false"),
+                        false
+                    );
 
                     $progress_data = [
                         "phase" => "files",
@@ -561,7 +812,7 @@ class ImportClient
                 }
             };
 
-            $this->fetch_streaming($url, $cursor, $context);
+            $this->fetch_streaming($url, $cursor, $context, $post_data ?? null);
 
             // Save cursor for resumption
             if (!$complete) {
@@ -627,7 +878,7 @@ class ImportClient
                     }
                 };
 
-                $this->fetch_streaming($url, $cursor, $context);
+                $this->fetch_streaming($url, $cursor, $context, $post_data ?? null);
 
                 // Save cursor for resumption
                 if (!$complete) {
@@ -722,7 +973,7 @@ class ImportClient
                 }
             };
 
-            $this->fetch_streaming($url, $cursor, $context);
+            $this->fetch_streaming($url, $cursor, $context, $post_data ?? null);
 
             // Save cursor for resumption
             if (!$complete) {
@@ -741,14 +992,17 @@ class ImportClient
     ): void {
         $headers = $chunk["headers"];
         $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "");
+        $session_id = $headers["x-session-id"] ?? null;
+
+        // Store session ID for future requests
+        if ($session_id && $session_id !== $this->session_id) {
+            $this->session_id = $session_id;
+            $this->audit_log("Session ID: {$session_id}", false);
+        }
 
         if ($filesystem_root) {
             $context->filesystem_root = $filesystem_root;
-            error_log("Filesystem root: {$filesystem_root}");
-            $this->output_progress([
-                "type" => "metadata",
-                "filesystem_root" => $filesystem_root,
-            ]);
+            $this->audit_log("Filesystem root: {$filesystem_root}", false);
         }
     }
 
@@ -769,18 +1023,32 @@ class ImportClient
         }
 
         // Security: path must be absolute (start with /)
-        if ($path[0] !== '/') {
+        if ($path[0] !== "/") {
             throw new RuntimeException(
-                "Security: File path must be absolute: {$path}"
+                "Security: File path must be absolute: {$path}",
             );
         }
 
         // Use full path under filesystem-root
         $local_path = $this->local_path . "/filesystem-root" . $path;
 
-        // Log path mapping for debugging
+        // Log path mapping and show progress
         if ($is_first) {
-            error_log("File mapping: {$path} -> {$local_path}");
+            $this->files_imported++;
+            $this->audit_log("Importing: {$path}", false);
+
+            // Show relative path (remove leading /)
+            $relative_path = ltrim($path, '/');
+
+            // Truncate from the left if too long (keep the end which is more distinctive)
+            $max_path_len = 60;
+            if (strlen($relative_path) > $max_path_len) {
+                $relative_path = '...' . substr($relative_path, -(($max_path_len - 3)));
+            }
+
+            $this->show_progress_line(
+                sprintf("[%d files] %s", $this->files_imported, $relative_path)
+            );
         }
 
         // Open file on first chunk
@@ -834,6 +1102,17 @@ class ImportClient
                 touch($context->file_path, $context->file_ctime);
             }
 
+            // Index the file after successful write (append-only for speed)
+            $file_size = (int) ($headers["x-file-size"] ?? 0);
+            if ($context->file_ctime) {
+                $this->index_file_entry(
+                    $path,
+                    $context->file_ctime,
+                    $file_size,
+                );
+                $this->audit_log("Indexed: {$path} (ctime={$context->file_ctime}, size={$file_size})", false);
+            }
+
             $context->file_handle = null;
             $context->file_path = null;
             $context->file_ctime = null;
@@ -862,15 +1141,21 @@ class ImportClient
         // Resolve the target path (or what it would be)
         // For non-existent paths, resolve the parent and append the final component
         $check_path = $dir;
-        while (!file_exists($check_path) && $check_path !== dirname($check_path)) {
+        while (
+            !file_exists($check_path) &&
+            $check_path !== dirname($check_path)
+        ) {
             $check_path = dirname($check_path);
         }
 
         if (file_exists($check_path)) {
             $real_check = realpath($check_path);
-            if ($real_check === false || strpos($real_check, $real_filesystem_root) !== 0) {
+            if (
+                $real_check === false ||
+                strpos($real_check, $real_filesystem_root) !== 0
+            ) {
                 throw new RuntimeException(
-                    "Security: Refusing to create directory outside filesystem-root: {$dir}"
+                    "Security: Refusing to create directory outside filesystem-root: {$dir}",
                 );
             }
         }
@@ -881,34 +1166,34 @@ class ImportClient
 
         // For absolute paths starting with /, build from root
         // For relative paths, build incrementally
-        $is_absolute = $dir[0] === '/';
-        $parts = explode('/', $dir);
-        $current = '';
+        $is_absolute = $dir[0] === "/";
+        $parts = explode("/", $dir);
+        $current = "";
 
         foreach ($parts as $i => $part) {
             // Skip empty parts except for the first one in absolute paths
-            if ($part === '') {
+            if ($part === "") {
                 if ($i === 0 && $is_absolute) {
-                    $current = '/';
+                    $current = "/";
                 }
                 continue;
             }
 
             // Build path incrementally
-            if ($current === '') {
+            if ($current === "") {
                 $current = $part;
-            } elseif ($current === '/') {
-                $current = '/' . $part;
+            } elseif ($current === "/") {
+                $current = "/" . $part;
             } else {
-                $current .= '/' . $part;
+                $current .= "/" . $part;
             }
 
             // Remove file if blocking directory creation
             if (is_file($current)) {
-                error_log("ImportClient: Removing file blocking directory creation: {$current}");
+                $this->audit_log("Removing file blocking directory: {$current}", true);
                 if (!unlink($current)) {
                     throw new RuntimeException(
-                        "Failed to remove file blocking directory: {$current}"
+                        "Failed to remove file blocking directory: {$current}",
                     );
                 }
             }
@@ -918,7 +1203,8 @@ class ImportClient
                 if (!mkdir($current, 0755) && !is_dir($current)) {
                     throw new RuntimeException(
                         "Failed to create directory: {$current}\n" .
-                        "Error: " . (error_get_last()["message"] ?? "unknown")
+                            "Error: " .
+                            (error_get_last()["message"] ?? "unknown"),
                     );
                 }
             }
@@ -938,9 +1224,9 @@ class ImportClient
         }
 
         // Security: path must be absolute (start with /)
-        if ($path[0] !== '/') {
+        if ($path[0] !== "/") {
             throw new RuntimeException(
-                "Security: Directory path must be absolute: {$path}"
+                "Security: Directory path must be absolute: {$path}",
             );
         }
 
@@ -971,9 +1257,9 @@ class ImportClient
         }
 
         // Security: path must be absolute (start with /)
-        if ($path[0] !== '/') {
+        if ($path[0] !== "/") {
             throw new RuntimeException(
-                "Security: Symlink path must be absolute: {$path}"
+                "Security: Symlink path must be absolute: {$path}",
             );
         }
 
@@ -982,19 +1268,19 @@ class ImportClient
 
         // Remove existing file/symlink if present
         if (file_exists($local_path) || is_link($local_path)) {
-            error_log("Deleting existing file/symlink: {$local_path}");
+            $this->audit_log("Deleting existing file/symlink: {$local_path}", false);
             unlink($local_path);
         }
 
         // Log symlink creation for debugging
-        error_log("Creating symlink: {$local_path} -> {$target}");
+        $this->audit_log("Creating symlink: {$local_path} -> {$target}", false);
 
         // Create parent directory
         $dir = dirname($local_path);
         if (!is_dir($dir)) {
             if (!mkdir($dir, 0755, true) && !is_dir($dir)) {
                 // Log error and skip this symlink
-                error_log("Failed to create directory for symlink: {$dir}");
+                $this->audit_log("Failed to create directory for symlink: {$dir}", true);
                 $this->output_progress([
                     "type" => "symlink_error",
                     "path" => $path,
@@ -1009,7 +1295,7 @@ class ImportClient
         $symlink_result = symlink($target, $local_path);
         if (true !== $symlink_result || !is_link($local_path)) {
             // Log error and skip this symlink
-            error_log("Failed to create symlink: {$local_path} -> {$target}");
+            $this->audit_log("Failed to create symlink: {$local_path} -> {$target}", true);
             $this->output_progress([
                 "type" => "symlink_error",
                 "path" => $path,
@@ -1043,18 +1329,30 @@ class ImportClient
         }
 
         // Security: path must be absolute (start with /)
-        if (!isset($data["path"][0]) || $data["path"][0] !== '/') {
+        if (!isset($data["path"][0]) || $data["path"][0] !== "/") {
             throw new RuntimeException(
-                "Security: Deletion path must be absolute: " . ($data["path"] ?? "empty")
+                "Security: Deletion path must be absolute: " .
+                    ($data["path"] ?? "empty"),
             );
         }
 
         $local_path = $this->local_path . "/filesystem-root" . $data["path"];
         if (file_exists($local_path)) {
             if (true !== @unlink($local_path)) {
-                error_log("Failed to delete file: {$local_path}");
+                $this->audit_log("Failed to delete: {$data["path"]}", true);
             } else {
-                error_log("Deleted file: {$local_path}");
+                $this->audit_log("Deleted: {$data["path"]}", false);
+
+                // Show relative path for deletion
+                $relative_path = ltrim($data["path"], '/');
+                $max_path_len = 60;
+                if (strlen($relative_path) > $max_path_len) {
+                    $relative_path = '...' . substr($relative_path, -(($max_path_len - 3)));
+                }
+                $this->show_progress_line("Deleted: " . $relative_path);
+
+                // Remove from index after successful deletion
+                $this->unindex_file_entry($data["path"]);
             }
         }
 
@@ -1110,7 +1408,7 @@ class ImportClient
         ?string $cursor,
         StreamingContext $context,
     ): void {
-        error_log("ImportClient: Fetching URL: $url");
+        $this->audit_log("Fetching URL: $url", false);
         $this->output_progress(["debug" => "Requesting: $url"]);
         $ch = curl_init($url);
 
@@ -1122,10 +1420,30 @@ class ImportClient
         $last_bytes_received = 0;
         $error_body = "";
 
+        // Build headers to look like a real browser
+        $headers = [
+            'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language: en-US,en;q=0.9',
+            'Accept-Encoding: gzip, deflate, br',
+            'Cache-Control: no-cache',
+            'Pragma: no-cache',
+            'Connection: keep-alive',
+            'Upgrade-Insecure-Requests: 1',
+            'Sec-Fetch-Dest: document',
+            'Sec-Fetch-Mode: navigate',
+            'Sec-Fetch-Site: none',
+            'Sec-Fetch-User: ?1',
+        ];
+
+        if ($cursor) {
+            $headers[] = "X-Export-Cursor: {$cursor}";
+        }
+
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_TIMEOUT => 300,
-            CURLOPT_HTTPHEADER => $cursor ? ["X-Export-Cursor: {$cursor}"] : [],
+            CURLOPT_HTTPHEADER => $headers,
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
                 &$parser,
                 $context,
@@ -1163,7 +1481,10 @@ class ImportClient
                         }
 
                         if ($boundary_value !== "") {
-                            error_log("ImportClient: Creating multipart parser with boundary: $boundary_value");
+                            $this->audit_log(
+                                "Creating multipart parser with boundary: $boundary_value",
+                                false
+                            );
                             $parser = new MultipartStreamParser(
                                 $boundary_value,
                                 function ($event) use (
@@ -1223,7 +1544,11 @@ class ImportClient
                     $error_body .= $data;
                     static $logged_no_parser = false;
                     if (!$logged_no_parser && strlen($error_body) > 0) {
-                        error_log("ImportClient: No parser, accumulating error body (first 500 chars): " . substr($error_body, 0, 500));
+                        $this->audit_log(
+                            "No parser, accumulating error body (first 500 chars): " .
+                                substr($error_body, 0, 500),
+                            false
+                        );
                         $logged_no_parser = true;
                     }
                 }
@@ -1240,18 +1565,22 @@ class ImportClient
                     $bytes_since_check = $bytes_received - $last_bytes_received;
                     $rate = $bytes_since_check / 5.0; // bytes per second
 
-                    echo json_encode([
-                        "progress_check" => true,
-                        "bytes_received" => $bytes_received,
-                        "bytes_last_5s" => $bytes_since_check,
-                        "rate_bps" => round($rate),
-                    ]) . "\n";
-                    flush();
+                    // Only output progress_check in verbose mode or non-TTY
+                    if ($this->verbose_mode || !$this->is_tty) {
+                        echo json_encode([
+                            "progress_check" => true,
+                            "bytes_received" => $bytes_received,
+                            "bytes_last_5s" => $bytes_since_check,
+                            "rate_bps" => round($rate),
+                        ]) . "\n";
+                        flush();
+                    }
 
                     // If we're receiving less than 1KB/s for 5 seconds, something is wrong
                     if ($bytes_since_check < 1024 && $bytes_received > 0) {
-                        error_log(
+                        $this->audit_log(
                             "Warning: Slow transfer detected - {$bytes_since_check} bytes in 5 seconds",
+                            false
                         );
                     }
 
@@ -1259,13 +1588,15 @@ class ImportClient
                     $last_bytes_received = $bytes_received;
                 }
 
-                // Output heartbeat every second
+                // Output heartbeat every second (only in verbose/non-TTY mode)
                 if ($now - $last_heartbeat >= 1.0) {
-                    echo json_encode([
-                        "heartbeat" => true,
-                        "bytes_received" => $bytes_received,
-                    ]) . "\n";
-                    flush();
+                    if ($this->verbose_mode || !$this->is_tty) {
+                        echo json_encode([
+                            "heartbeat" => true,
+                            "bytes_received" => $bytes_received,
+                        ]) . "\n";
+                        flush();
+                    }
                     $last_heartbeat = $now;
                 }
 
@@ -1273,10 +1604,14 @@ class ImportClient
             },
         ]);
 
-        error_log("ImportClient: Executing curl request...");
+        $this->audit_log("Executing curl request...", false);
         $this->output_progress(["debug" => "Waiting for server response..."]);
         $result = curl_exec($ch);
-        error_log("ImportClient: curl_exec completed, result=" . ($result === false ? 'false' : 'true'));
+        $this->audit_log(
+            "curl_exec completed, result=" .
+                ($result === false ? "false" : "true"),
+            false
+        );
 
         if (curl_errno($ch)) {
             $error = curl_error($ch);
@@ -1370,12 +1705,18 @@ class ImportClient
 
     /**
      * Output progress as JSON line.
+     * Only outputs in verbose mode or non-TTY mode (for programmatic consumption).
      *
      * @param array $data Progress data to output
      * @param bool $force Force output regardless of throttle
      */
     private function output_progress(array $data, bool $force = false): void
     {
+        // In TTY non-verbose mode, suppress JSON output (use show_progress_line instead)
+        if ($this->is_tty && !$this->verbose_mode) {
+            return;
+        }
+
         $now = microtime(true);
 
         // Always output status changes
@@ -1435,6 +1776,7 @@ if (
         echo "  --only-sql       Import only database dump\n";
         echo "  --only-deltas    Import only file changes since last sync\n";
         echo "  --reset          Reset state and start fresh import\n";
+        echo "  --verbose        Show detailed logs (default: show progress only)\n";
         echo "\n";
         echo "Notes:\n";
         echo "  - Snapshot tracking is automatic (enables deletion detection)\n";
@@ -1471,6 +1813,7 @@ if (
         "only_sql" => false,
         "only_deltas" => false,
         "reset" => false,
+        "verbose" => false,
     ];
 
     for ($i = 3; $i < $argc; $i++) {
@@ -1486,6 +1829,10 @@ if (
                 break;
             case "--reset":
                 $options["reset"] = true;
+                break;
+            case "--verbose":
+            case "-v":
+                $options["verbose"] = true;
                 break;
             default:
                 fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
