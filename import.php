@@ -732,35 +732,10 @@ class ImportClient
                 $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
 
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-                $this->audit_log(
-                    "Received chunk: $chunk_type",
-                    false
-                );
-
-                // Debug: Log what chunk types we're receiving (audit only)
-                static $chunk_counts = [];
-                $chunk_counts[$chunk_type] =
-                    ($chunk_counts[$chunk_type] ?? 0) + 1;
-                if (
-                    $chunk_counts[$chunk_type] === 1 ||
-                    $chunk_counts[$chunk_type] % 10 === 0
-                ) {
-                    $this->audit_log(
-                        "Chunk type received: {$chunk_type} (count: {$chunk_counts[$chunk_type]})",
-                        false
-                    );
-                }
 
                 if ($chunk_type === "metadata") {
                     $this->handle_metadata_chunk($chunk, $context);
                 } elseif ($chunk_type === "file") {
-                    $this->audit_log(
-                        "Processing file chunk: " .
-                            base64_decode(
-                                $chunk["headers"]["x-file-path"] ?? "",
-                            ),
-                        false
-                    );
                     $this->handle_file_chunk($chunk, $context);
                 } elseif ($chunk_type === "directory") {
                     $this->handle_directory_chunk($chunk);
@@ -1032,10 +1007,27 @@ class ImportClient
         // Use full path under filesystem-root
         $local_path = $this->local_path . "/filesystem-root" . $path;
 
-        // Log path mapping and show progress
+        // Open file on first chunk
         if ($is_first) {
             $this->files_imported++;
-            $this->audit_log("Importing: {$path}", false);
+
+            // Check if file exists locally
+            $exists_locally = file_exists($local_path);
+            $local_size = $exists_locally ? filesize($local_path) : 0;
+            $file_size = (int) ($headers["x-file-size"] ?? 0);
+
+            // Log file import with useful context
+            $this->audit_log(
+                sprintf(
+                    "File: %s (remote_size=%d, ctime=%d, local_exists=%s, local_size=%d)",
+                    $path,
+                    $file_size,
+                    (int) ($headers["x-file-ctime"] ?? 0),
+                    $exists_locally ? 'yes' : 'no',
+                    $local_size
+                ),
+                false
+            );
 
             // Show relative path (remove leading /)
             $relative_path = ltrim($path, '/');
@@ -1051,7 +1043,7 @@ class ImportClient
             );
         }
 
-        // Open file on first chunk
+        // Open file handle on first chunk
         if ($is_first) {
             // Close previous file if any
             if ($context->file_handle) {
@@ -1104,13 +1096,18 @@ class ImportClient
 
             // Index the file after successful write (append-only for speed)
             $file_size = (int) ($headers["x-file-size"] ?? 0);
+            $final_size = file_exists($context->file_path) ? filesize($context->file_path) : 0;
+
             if ($context->file_ctime) {
                 $this->index_file_entry(
                     $path,
                     $context->file_ctime,
                     $file_size,
                 );
-                $this->audit_log("Indexed: {$path} (ctime={$context->file_ctime}, size={$file_size})", false);
+                $this->audit_log(
+                    sprintf("  Indexed (wrote %d bytes)", $final_size),
+                    false
+                );
             }
 
             $context->file_handle = null;
@@ -1235,6 +1232,8 @@ class ImportClient
 
         // Create directory, removing any files that block the path
         $this->ensure_directory_path($local_path);
+
+        $this->audit_log("Directory: {$path}", false);
     }
 
     /**
@@ -1268,12 +1267,8 @@ class ImportClient
 
         // Remove existing file/symlink if present
         if (file_exists($local_path) || is_link($local_path)) {
-            $this->audit_log("Deleting existing file/symlink: {$local_path}", false);
             unlink($local_path);
         }
-
-        // Log symlink creation for debugging
-        $this->audit_log("Creating symlink: {$local_path} -> {$target}", false);
 
         // Create parent directory
         $dir = dirname($local_path);
@@ -1309,6 +1304,8 @@ class ImportClient
         if ($ctime > 0) {
             @touch($local_path, $ctime);
         }
+
+        $this->audit_log("Symlink: {$path} -> {$target}", false);
 
         $this->output_progress([
             "type" => "symlink",
