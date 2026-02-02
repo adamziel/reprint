@@ -7,3 +7,5 @@ sql-exports
 adamadam.blog-export
 adamadam-blog-export
 secrets.php
+exports.sh
+bluehost-export

@@ -40,6 +40,111 @@ require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/class-file-sync-producer.php";
 
 /**
+ * Extract database credentials from wp-config.php using PHP tokenizer.
+ *
+ * @param array $directories Array of directory paths to search for wp-config.php
+ * @return array|null Array with db_host, db_name, db_user, db_password or null if not found
+ */
+function extract_db_credentials_from_wp_config(array $directories): ?array
+{
+    // Search for wp-config.php in provided directories
+    $wp_config_path = null;
+    foreach ($directories as $dir) {
+        $path = rtrim($dir, '/') . '/wp-config.php';
+        if (file_exists($path)) {
+            $wp_config_path = $path;
+            break;
+        }
+    }
+
+    if ($wp_config_path === null) {
+        return null;
+    }
+
+    try {
+        $content = file_get_contents($wp_config_path);
+        if ($content === false) {
+            return null;
+        }
+
+        $tokens = token_get_all($content);
+        $credentials = [];
+
+        // State machine to parse define('CONSTANT', 'value')
+        $state = 'search'; // search, found_define, found_open_paren, found_constant, found_comma
+        $current_constant = null;
+
+        for ($i = 0; $i < count($tokens); $i++) {
+            $token = $tokens[$i];
+
+            // Skip whitespace
+            if (is_array($token) && $token[0] === T_WHITESPACE) {
+                continue;
+            }
+
+            if ($state === 'search') {
+                // Look for 'define' function call
+                if (is_array($token) && $token[0] === T_STRING && strtolower($token[1]) === 'define') {
+                    $state = 'found_define';
+                }
+            } elseif ($state === 'found_define') {
+                // Expect opening parenthesis
+                if ($token === '(') {
+                    $state = 'found_open_paren';
+                } else {
+                    $state = 'search';
+                }
+            } elseif ($state === 'found_open_paren') {
+                // Expect constant name (string)
+                if (is_array($token) && ($token[0] === T_CONSTANT_ENCAPSED_STRING)) {
+                    $constant_name = trim($token[1], '\'"');
+                    if (in_array($constant_name, ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'])) {
+                        $current_constant = $constant_name;
+                        $state = 'found_constant';
+                    } else {
+                        $state = 'search';
+                    }
+                } else {
+                    $state = 'search';
+                }
+            } elseif ($state === 'found_constant') {
+                // Expect comma
+                if ($token === ',') {
+                    $state = 'found_comma';
+                } else {
+                    $state = 'search';
+                }
+            } elseif ($state === 'found_comma') {
+                // Expect value (string)
+                if (is_array($token) && ($token[0] === T_CONSTANT_ENCAPSED_STRING)) {
+                    $value = trim($token[1], '\'"');
+                    $credentials[$current_constant] = $value;
+                }
+                $state = 'search';
+            }
+        }
+
+        // Check if we found all required credentials
+        $required = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'];
+        foreach ($required as $key) {
+            if (!isset($credentials[$key])) {
+                return null;
+            }
+        }
+
+        return [
+            'db_host' => $credentials['DB_HOST'],
+            'db_name' => $credentials['DB_NAME'],
+            'db_user' => $credentials['DB_USER'],
+            'db_password' => $credentials['DB_PASSWORD'],
+        ];
+    } catch (Exception $e) {
+        error_log("Failed to extract credentials from wp-config.php: " . $e->getMessage());
+        return null;
+    }
+}
+
+/**
  * Handle SQL export operation.
  */
 function export_sql(
@@ -49,22 +154,45 @@ function export_sql(
     int $max_memory,
     float $memory_threshold,
 ): array {
-    // Database configuration
-    $db_host =
-        $config["db_host"] ??
-        (defined("DB_HOST") ? DB_HOST : (getenv("DB_HOST") ?: "127.0.0.1"));
-    $db_name =
-        $config["db_name"] ??
-        (defined("DB_NAME") ? DB_NAME : (getenv("DB_NAME") ?: "sakila"));
-    $db_user =
-        $config["db_user"] ??
-        (defined("DB_USER") ? DB_USER : (getenv("DB_USER") ?: "root"));
-    $db_password =
-        $config["db_password"] ??
-        (defined("DB_PASSWORD")
-            ? DB_PASSWORD
-            : (getenv("DB_PASSWORD") ?:
-            "my-secret-pw"));
+    // Try to get credentials from config, constants, env vars, or wp-config.php
+    $db_host = $config["db_host"] ?? (defined("DB_HOST") ? DB_HOST : getenv("DB_HOST"));
+    $db_name = $config["db_name"] ?? (defined("DB_NAME") ? DB_NAME : getenv("DB_NAME"));
+    $db_user = $config["db_user"] ?? (defined("DB_USER") ? DB_USER : getenv("DB_USER"));
+    $db_password = $config["db_password"] ?? (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
+
+    // If any credentials are missing, try to extract from wp-config.php
+    // Use directory parameter to locate wp-config.php
+    if (!$db_host || !$db_name || !$db_user || $db_password === false) {
+        $directories = [];
+        if (isset($config["directory"])) {
+            $directories = is_array($config["directory"])
+                ? $config["directory"]
+                : [$config["directory"]];
+        }
+
+        if (!empty($directories)) {
+            $wp_credentials = extract_db_credentials_from_wp_config($directories);
+            if ($wp_credentials !== null) {
+                $db_host = $db_host ?: $wp_credentials['db_host'];
+                $db_name = $db_name ?: $wp_credentials['db_name'];
+                $db_user = $db_user ?: $wp_credentials['db_user'];
+                $db_password = $db_password !== false ? $db_password : $wp_credentials['db_password'];
+            }
+        }
+    }
+
+    // Validate that we have all required credentials
+    if (!$db_host || !$db_name || !$db_user || $db_password === false) {
+        throw new InvalidArgumentException(
+            "Database credentials not found. Please provide via config, environment variables, " .
+            "PHP constants, or ensure wp-config.php exists with valid credentials. " .
+            "Missing: " .
+            (!$db_host ? "db_host " : "") .
+            (!$db_name ? "db_name " : "") .
+            (!$db_user ? "db_user " : "") .
+            ($db_password === false ? "db_password" : "")
+        );
+    }
 
     $fragments_per_batch = $config["fragments_per_batch"] ?? 1000;
 
