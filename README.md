@@ -75,6 +75,8 @@ TODO:
 ### Open questions
 
 * How to negotiate symlinks pointing outside of the requested root directories?
+* Should we include a sequence ID with each file chunk for consistency checks?
+* Should we include crc32 checksums for each transmitted chunk? Seems excessive since TCP+TLS both already give us strong consistency guarantees?
 
 ### Transport
 
