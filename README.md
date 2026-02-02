@@ -85,17 +85,24 @@ This is why we're budgeting our resource usage in a few ways:
 
 * Execution time limit on the remote host – it gracefully ends the request once we exceed the budget.
 * Memory usage limit on the remote host – it gracefully ends the request once we exceed the budget.
-* Request backoff to make space for other requests
+* Request backoff to make space for other requests (TODO)
 
-    start = microtime(); do_thing(); took = microtime() - start; usleep( max( 0.5, (2 * took ) ) );
-
-### Open questions
+### Open questions and todos
 
 * How do we choose resource budgets for each host / runtime?
+    start = microtime(); do_thing(); took = microtime() - start; usleep( max( 0.5, (2 * took ) ) );
+    you can also if bite_size = default; ……. while ….. if ( took > threshold ) { bite_size = bite_size / 2 } else if ( took < other threshold ) { bite_size++ }
+    for things like number of rows and or files or bytes or whatever transferred at a time
+    [7:52 PM]so if performance gets poor it backs off hard. if performance is good it bumps up slow (edited) 
+    [7:53 PM]you can also threshold… like if took > a then sleep 2x; if took > b then sleep 4x; if took > c then sleep 8x
+    [7:53 PM]you should be able to make some combination of things that backs off as necessary (edited) 
+    [7:54 PM]not simple. but if you get someone deactivated and banned .25 though a migration you’re gonna have a bad time
 * Can we, somehow, budget CPU usage?
 * How to negotiate symlinks pointing outside of the requested root directories?
 * Should we include a sequence ID with each file chunk for consistency checks?
 * Should we include crc32 checksums for each transmitted chunk? Seems excessive since TCP+TLS both already give us strong consistency guarantees?
+* When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
+  what it was doing when we've killed it (e.g. appending a partial state to the local file).
 
 ### Transport
 
