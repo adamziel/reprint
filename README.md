@@ -52,6 +52,35 @@ root directory.
 since the last synchronization. If it has, the migration source will communicate that via a dedicated multipart chunk and move on to
 the next file.
 
+### Migration index
+
+As the migration target receives files from the migration source, it builds a local index of all the paths, ctimes, and filesizes
+it has seen. Later on, we'll use this index for incremental synchronization to get files changed since the last sync. Here's how
+that works:
+
+1. The migration target requests the stream of files from the migration source. The request carries a cursor and the next relevant
+   chunk of the index.
+2. The migration source uses two lists: 1. its own filesystem, starting at the path stored in the cursor 2. the received index chunk.
+   It advances through both lists, finds discrepancies, and responds with the relevant upsertion and deletion chunks.
+
+The alternative approach that is not implemented here:
+
+The migration source computes a new index and sends it back to the migration target. The migration target then advances through both
+lists, computes a delta, and requests any changed files from the migration source. In this approach, we always have to wait for the index
+before we can start streaming data, and we also need more round trips (index down, diffs up). The upside is that the logic seems
+simpler.
+
+### Volatile files
+
+Sometimes a file will keep changing every minute and we'll start streaming it, but won't finish before it's modified again. In that case,
+the **migration target** chooses how to handle it. A few choices are:
+
+* Stop the migration, tell the user we can't migrate this file (or multiple files).
+* Stop the migration, ask the user if that file is okay to ignore. Chances are it's a log, a cache, or some other volatile artifact
+  that doesn't matter that much.
+* Retry a few more times.
+* Just ignore that file (and tell the user).
+
 #### Other considered ways of traversing the filesystem
 
 * A `(ctime, byte offset)` cursor. We'd still need to keep track of the filename for when multiple files have the same ctime.
@@ -89,14 +118,13 @@ This is why we're budgeting our resource usage in a few ways:
     [7:54 PM]not simple. but if you get someone deactivated and banned .25 though a migration you’re gonna have a bad time
 * Can we, somehow, budget CPU usage?
 * How to negotiate symlinks pointing outside of the requested root directories?
-* How do we handle files that keep changing during the sync and in between HTTP calls? Just flag them to the importer and let the
-  user decide?
 * Should we include a sequence ID with each file chunk for consistency checks?
 * Should we include crc32 checksums for each transmitted chunk? Seems excessive since TCP+TLS both already give us strong consistency guarantees?
 
 ### Todos
 
 * Auto-constraining resource usage
+* Tell the user when a volatile file can't be synchronized
 * Display nice progress information in the terminal (since that will also allow us to display it on the web)
 * When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
   what it was doing when we've killed it (e.g. appending a partial state to the local file). So, if we wrote some bytes

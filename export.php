@@ -453,55 +453,38 @@ function endpoint_file_chunk(
         throw new InvalidArgumentException("No valid directories specified");
     }
 
-    // Session handling for client state across multiple requests
-    $session_id = $config["session_id"] ?? null;
-    $session_file = null;
+    // Stateless client index slice (per-request)
+    $client_index_file = null;
+    $client_slice_start = isset($_POST["client_index_slice_start"])
+        ? (int) $_POST["client_index_slice_start"]
+        : null;
+    $client_slice_len = isset($_POST["client_index_slice_len"])
+        ? (int) $_POST["client_index_slice_len"]
+        : null;
+    $client_slice_total = isset($_POST["client_index_total"])
+        ? (int) $_POST["client_index_total"]
+        : null;
 
-    // Create or load session
-    if ($session_id) {
-        // Load existing session
-        error_log("Loading existing session: {$session_id}");
-        $session = load_file_sync_session($session_id);
-        $session_file = $session["session_file"];
-    } elseif (isset($_FILES["client_index_gz"])) {
-        // Create new session with uploaded client index
-        $upload_size = $_FILES["client_index_gz"]["size"] ?? "unknown";
-        error_log(
-            sprintf(
-                "Creating new session | client_index_gz upload=%s bytes",
-                $upload_size,
-            ),
-        );
-        $session = create_file_sync_session_from_upload(
-            $_FILES["client_index_gz"],
-        );
-        $session_id = $session["session_id"];
-        $session_file = $session["session_file"];
-    } elseif (isset($config["client_index_file"])) {
-        // Create new session from CLI-provided file path
-        error_log(
-            sprintf(
-                "Creating new session | client_index_file=%s",
-                $config["client_index_file"],
-            ),
-        );
-        $session = create_file_sync_session_from_path(
-            $config["client_index_file"],
-        );
-        $session_id = $session["session_id"];
-        $session_file = $session["session_file"];
-    } else {
-        // No session, no client index = full sync
-        error_log("FULL SYNC | No session or client index provided");
-        $session_file = null;
-        $session_id = null;
+    if (isset($_FILES["client_index_slice_gz"])) {
+        $client_index_file = $_FILES["client_index_slice_gz"]["tmp_name"] ?? null;
+        if ($client_index_file === null || !is_uploaded_file($client_index_file)) {
+            throw new InvalidArgumentException("client_index_slice_gz upload missing or invalid");
+        }
+        if ($client_slice_start === null || $client_slice_len === null) {
+            throw new InvalidArgumentException(
+                "client_index_slice_start and client_index_slice_len are required when uploading a slice",
+            );
+        }
     }
 
     // File sync options
     $sync_options = [
         "min_ctime" => $config["min_ctime"] ?? 0,
         "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024, // 5MB
-        "client_index_file" => $session_file, // Path to gzipped session file for streaming
+        "client_index_file" => $client_index_file, // Path to gzipped slice
+        "client_slice_start" => $client_slice_start,
+        "client_slice_len" => $client_slice_len,
+        "client_slice_total" => $client_slice_total,
     ];
 
     if (isset($config["cursor"])) {
@@ -518,11 +501,6 @@ function endpoint_file_chunk(
     // Initialize multipart boundary
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
-
-    // Send session_id in header so client can use it for subsequent requests
-    if ($session_id) {
-        header("X-Session-Id: {$session_id}");
-    }
 
     // Output initial progress chunk immediately
     $initial_progress = $sync->get_progress();
@@ -687,8 +665,9 @@ function endpoint_file_chunk(
             flush(); // Force output immediately
         }
 
-        // Check limits
+        // Check limits or wait for client slice
         if (
+            $sync->is_waiting_for_client_slice() ||
             !should_continue(
                 $script_start,
                 $max_execution_time,
@@ -703,7 +682,9 @@ function endpoint_file_chunk(
     // Output completion chunk with stats in headers
     $progress = $sync->get_progress();
     $is_complete = $progress["phase"] === "finished";
-    $status = $is_complete ? "complete" : "partial";
+    $status = $is_complete
+        ? "complete"
+        : ($sync->is_waiting_for_client_slice() ? "need_client_slice" : "partial");
 
     // Log completion
     error_log(

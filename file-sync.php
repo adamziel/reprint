@@ -144,7 +144,6 @@ function load_file_sync_session(string $session_id): array
  */
 class FileSyncProducer
 {
-    const PHASE_SCANNING = "scanning";
     const PHASE_STREAMING = "streaming";
     const PHASE_FINISHED = "finished";
 
@@ -160,28 +159,21 @@ class FileSyncProducer
     private $phase;
     private $current_chunk;
 
-    // Scanning state
-    private $scan_stack;
-    private $scan_current_dir;
-    private $scan_dir_handle;
-    private $scanned_files; // Array of file metadata (path, ctime, size) - sorted by path
-    private $scanned_directories;
-    private $scanned_symlinks;
-    private $visited_paths;
-    private $scan_batch_size;
-    private $scan_batch_count;
+    // Traversal state: stack of frames (dir, last child name emitted, entries cached)
+    private $traversal_stack;
 
     // Streaming state (two-pointer merge)
-    private $server_index; // Current index in scanned_files array
     private $client_stream; // gzopen handle for client index file
     private $client_offset; // Byte offset in client stream (for gzseek)
     private $client_current_line; // Cached current line from client stream
+    private $client_slice_start; // Start offset of current client slice
+    private $client_slice_len; // Length of current client slice
+    private $client_slice_total; // Total bytes in full client index (optional)
+    private $waiting_for_client_slice; // Whether we need the next slice from client
     private $streaming_file_handle; // Handle for current file being streamed
     private $streaming_file_offset; // Byte offset in current file
+    private $current_file_meta; // ['path','ctime','size']
     private $files_streamed;
-    private $empty_directories;
-    private $empty_dir_index;
-    private $symlink_index;
 
     public function __construct(string|array $directories, array $options = [])
     {
@@ -196,6 +188,9 @@ class FileSyncProducer
         }
 
         $this->client_index_file = $options["client_index_file"] ?? null;
+        $this->client_slice_start = $options["client_slice_start"] ?? 0;
+        $this->client_slice_len = $options["client_slice_len"] ?? null;
+        $this->client_slice_total = $options["client_slice_total"] ?? null;
         $this->min_ctime = $options["min_ctime"] ?? 0;
         $this->chunk_size = $options["chunk_size"] ?? 5 * 1024 * 1024; // 5MB default
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
@@ -209,30 +204,30 @@ class FileSyncProducer
 
     private function initialize_new(): void
     {
-        $this->phase = self::PHASE_SCANNING;
+        $this->phase = self::PHASE_STREAMING;
 
-        // Initialize scanning state
-        $this->scan_stack = $this->directories;
-        $this->scan_current_dir = null;
-        $this->scan_dir_handle = null;
-        $this->scanned_files = [];
-        $this->scanned_directories = [];
-        $this->scanned_symlinks = [];
-        $this->visited_paths = [];
-        $this->scan_batch_size = 10; // Scan 10 directories per chunk
-        $this->scan_batch_count = 0;
+        // Initialize traversal stack with root directories (sorted)
+        $dirs = $this->directories;
+        sort($dirs, SORT_STRING);
+        $this->filesystem_root = $dirs[0] ?? "/";
+        $this->traversal_stack = [];
+        foreach (array_reverse($dirs) as $dir) {
+            $this->traversal_stack[] = [
+                "dir" => $dir,
+                "last" => null, // last emitted child name
+                "entries" => null,
+            ];
+        }
 
         // Initialize streaming state
-        $this->server_index = 0;
         $this->client_stream = null;
         $this->client_offset = 0;
         $this->client_current_line = null;
+        $this->waiting_for_client_slice = false;
         $this->streaming_file_handle = null;
         $this->streaming_file_offset = 0;
+        $this->current_file_meta = null;
         $this->files_streamed = 0;
-        $this->empty_directories = [];
-        $this->empty_dir_index = 0;
-        $this->symlink_index = 0;
 
         $this->current_chunk = null;
         $this->deletions_count = 0;
@@ -251,41 +246,26 @@ class FileSyncProducer
         $this->filesystem_root = $cursor["fsr"] ?? null;
         $this->current_chunk = null;
 
-        if ($this->phase === self::PHASE_SCANNING) {
-            // Restart scanning (simpler than saving full scan state)
-            $this->scan_stack = $this->directories;
-            $this->scan_current_dir = null;
-            $this->scan_dir_handle = null;
-            $this->scanned_files = [];
-            $this->scanned_directories = [];
-            $this->scanned_symlinks = [];
-            $this->visited_paths = [];
-            $this->scan_batch_size = 10;
-            $this->scan_batch_count = 0;
-            $this->server_index = 0;
-            $this->client_stream = null;
-            $this->client_offset = 0;
-            $this->client_current_line = null;
-            $this->streaming_file_handle = null;
-            $this->streaming_file_offset = 0;
-            $this->files_streamed = 0;
-            $this->empty_directories = [];
-            $this->empty_dir_index = 0;
-            $this->symlink_index = 0;
-            $this->deletions_count = 0;
-        } elseif ($this->phase === self::PHASE_STREAMING) {
+        if ($this->phase === self::PHASE_STREAMING) {
             $this->files_streamed = $cursor["n"] ?? 0;
             $this->streaming_file_offset = $cursor["b"] ?? 0;
-            $this->deletions_count = 0;
-
-            // Two-pointer merge state
-            $this->server_index = $cursor["si"] ?? 0;
+            $this->current_file_meta = $cursor["cf"] ?? null;
+            $this->deletions_count = $cursor["dc"] ?? 0;
             $this->client_offset = $cursor["co"] ?? 0;
+            $this->client_slice_total = $cursor["ct"] ?? $this->client_slice_total;
+
             $this->client_current_line = null; // Will be read when streaming resumes
             $this->client_stream = null; // Will be opened when streaming starts
 
-            // Re-scan to rebuild scanned_files array
-            $this->rescan_for_resume();
+            // Rebuild traversal stack (entries will be reloaded)
+            $this->traversal_stack = [];
+            foreach ($cursor["ts"] ?? [] as $frame) {
+                $this->traversal_stack[] = [
+                    "dir" => $frame["d"],
+                    "last" => $frame["l"] ?? null,
+                    "entries" => null,
+                ];
+            }
 
             $this->streaming_file_handle = null;
         } else {
@@ -293,115 +273,12 @@ class FileSyncProducer
         }
     }
 
-    private function rescan_for_resume(): void
-    {
-        $this->scanned_files = [];
-        $this->scanned_directories = [];
-        $this->scanned_symlinks = [];
-        $this->visited_paths = [];
-        $this->empty_directories = [];
-        $this->empty_dir_index = 0;
-        $this->symlink_index = 0;
-
-        $stack = $this->directories;
-
-        foreach ($this->directories as $dir) {
-            $root_real = realpath($dir);
-            if ($root_real !== false) {
-                $this->visited_paths[$root_real] = true;
-            }
-        }
-
-        while (!empty($stack)) {
-            $current_dir = array_pop($stack);
-            $handle = @opendir($current_dir);
-
-            if (!$handle) {
-                continue;
-            }
-
-            $this->scanned_directories[$current_dir] = true;
-
-            while (($entry = readdir($handle)) !== false) {
-                if ($entry === "." || $entry === "..") {
-                    continue;
-                }
-
-                $full_path = $current_dir . "/" . $entry;
-
-                if (is_link($full_path)) {
-                    $target = readlink($full_path);
-                    if ($target !== false) {
-                        $ctime = @filectime($full_path);
-                        if ($ctime !== false) {
-                            $this->scanned_symlinks[] = [
-                                "path" => $full_path,
-                                "target" => $target,
-                                "ctime" => $ctime,
-                            ];
-                        }
-                    }
-                    continue;
-                } elseif (is_dir($full_path)) {
-                    $real_path = realpath($full_path);
-                    if ($real_path !== false) {
-                        if (isset($this->visited_paths[$real_path])) {
-                            continue;
-                        }
-                        $this->visited_paths[$real_path] = true;
-                    }
-                    $stack[] = $full_path;
-                } elseif (is_file($full_path)) {
-                    $ctime = @filectime($full_path);
-                    $size = @filesize($full_path);
-
-                    if ($ctime === false || $size === false) {
-                        continue;
-                    }
-
-                    // Apply min_ctime filter during scan
-                    if ($this->min_ctime > 0 && $ctime <= $this->min_ctime) {
-                        continue;
-                    }
-
-                    $this->scanned_files[] = [
-                        "path" => $full_path,
-                        "ctime" => $ctime,
-                        "size" => $size,
-                    ];
-                }
-            }
-
-            closedir($handle);
-        }
-
-        // Sort by path for two-pointer merge
-        usort($this->scanned_files, fn($a, $b) => strcmp($a["path"], $b["path"]));
-
-        error_log(
-            "Rescanned for resume: " .
-                count($this->scanned_files) .
-                " files (sorted by path)",
-        );
-    }
+    // Rescanning no longer needed; traversal stack encodes position.
 
     public function next_chunk(): bool
     {
         if ($this->phase === self::PHASE_FINISHED) {
             return false;
-        }
-
-        if ($this->phase === self::PHASE_SCANNING) {
-            $scan_complete = $this->scan_step();
-
-            if ($scan_complete) {
-                $this->finalize_scanning();
-                // Fall through to streaming
-            } else {
-                // More scanning to do
-                $this->current_chunk = null;
-                return true;
-            }
         }
 
         if ($this->phase === self::PHASE_STREAMING) {
@@ -412,192 +289,9 @@ class FileSyncProducer
         return false;
     }
 
-    private function scan_step(): bool
-    {
-        // Initialize visited paths for root directories
-        static $initialized_roots = false;
-        if (!$initialized_roots) {
-            foreach ($this->directories as $dir) {
-                $real = realpath($dir);
-                if ($real !== false) {
-                    $this->visited_paths[$real] = true;
-                }
-            }
-            $initialized_roots = true;
-        }
+    // Scanning removed; traversal happens during streaming.
 
-        $this->scan_batch_count = 0;
-
-        while (
-            !empty($this->scan_stack) &&
-            $this->scan_batch_count < $this->scan_batch_size
-        ) {
-            $current_dir = array_pop($this->scan_stack);
-            $handle = @opendir($current_dir);
-
-            if (!$handle) {
-                continue;
-            }
-
-            $this->scanned_directories[$current_dir] = true;
-            $this->scan_batch_count++;
-
-            while (($entry = readdir($handle)) !== false) {
-                if ($entry === "." || $entry === "..") {
-                    continue;
-                }
-
-                $full_path = $current_dir . "/" . $entry;
-
-                if (is_link($full_path)) {
-                    $target = readlink($full_path);
-                    if ($target !== false) {
-                        $ctime = @filectime($full_path);
-                        if ($ctime !== false) {
-                            $this->scanned_symlinks[] = [
-                                "path" => $full_path,
-                                "target" => $target,
-                                "ctime" => $ctime,
-                            ];
-                        }
-                    }
-                    continue;
-                } elseif (is_dir($full_path)) {
-                    $real_path = realpath($full_path);
-                    if ($real_path !== false) {
-                        if (isset($this->visited_paths[$real_path])) {
-                            continue;
-                        }
-                        $this->visited_paths[$real_path] = true;
-                    }
-                    $this->scan_stack[] = $full_path;
-                } elseif (is_file($full_path)) {
-                    $ctime = @filectime($full_path);
-                    $size = @filesize($full_path);
-
-                    if ($ctime === false || $size === false) {
-                        continue;
-                    }
-
-                    // Apply min_ctime filter during scan
-                    if ($this->min_ctime > 0 && $ctime <= $this->min_ctime) {
-                        continue;
-                    }
-
-                    $this->scanned_files[] = [
-                        "path" => $full_path,
-                        "ctime" => $ctime,
-                        "size" => $size,
-                    ];
-                }
-            }
-
-            closedir($handle);
-        }
-
-        return empty($this->scan_stack);
-    }
-
-    private function finalize_scanning(): void
-    {
-        error_log(
-            "FileSyncProducer: Scanning complete, found " .
-                count($this->scanned_files) .
-                " files",
-        );
-
-        // Sort scanned files by path for two-pointer merge
-        usort($this->scanned_files, fn($a, $b) => strcmp($a["path"], $b["path"]));
-
-        error_log(
-            "FileSyncProducer: Sorted " .
-                count($this->scanned_files) .
-                " server files by path",
-        );
-
-        // Identify empty directories (needed for first-sync)
-        $this->identify_empty_directories();
-
-        // Calculate filesystem root
-        $this->filesystem_root = $this->calculate_filesystem_root();
-
-        $this->phase = self::PHASE_STREAMING;
-        $this->initialize_streaming();
-
-        error_log(
-            "FileSyncProducer: Transitioning to streaming phase | " .
-                "Two-pointer merge will run incrementally",
-        );
-    }
-
-    private function identify_empty_directories(): void
-    {
-        // Build set of directories that contain files
-        $dirs_with_files = [];
-        foreach ($this->scanned_files as $file) {
-            $dir = dirname($file["path"]);
-            while ($dir !== "/" && $dir !== ".") {
-                $dirs_with_files[$dir] = true;
-                $dir = dirname($dir);
-            }
-        }
-
-        // Empty directories = scanned directories - directories with files
-        // Only for first-sync (no client index)
-        if ($this->client_index_file === null) {
-            foreach (array_keys($this->scanned_directories) as $dir) {
-                // Skip root scan directories themselves
-                if (in_array($dir, $this->directories)) {
-                    continue;
-                }
-
-                if (!isset($dirs_with_files[$dir])) {
-                    $this->empty_directories[] = $dir;
-                }
-            }
-        }
-
-        error_log(
-            "FileSyncProducer: Found " .
-                count($this->empty_directories) .
-                " empty directories",
-        );
-    }
-
-    private function calculate_filesystem_root(): string
-    {
-        $all_paths = array_merge(
-            array_column($this->scanned_files, "path"),
-            array_column($this->scanned_symlinks, "path"),
-        );
-
-        if (empty($all_paths)) {
-            return $this->directories[0] ?? "/";
-        }
-
-        $common = $all_paths[0];
-        foreach ($all_paths as $path) {
-            while (strpos($path, $common) !== 0) {
-                $common = dirname($common);
-                if ($common === "/" || $common === ".") {
-                    break;
-                }
-            }
-        }
-
-        return $common;
-    }
-
-    private function initialize_streaming(): void
-    {
-        $this->server_index = 0;
-        $this->client_stream = null;
-        $this->client_offset = 0;
-        $this->client_current_line = null;
-        $this->streaming_file_handle = null;
-        $this->streaming_file_offset = 0;
-        $this->files_streamed = 0;
-    }
+    // Directory utilities removed with scanless traversal.
 
     /**
      * Incremental two-pointer merge streaming.
@@ -605,31 +299,13 @@ class FileSyncProducer
      */
     private function stream_step(): void
     {
-        // 1. Output empty directories first (only for first-sync)
-        if (
-            $this->client_index_file === null &&
-            $this->empty_dir_index < count($this->empty_directories)
-        ) {
-            $dir = $this->empty_directories[$this->empty_dir_index];
-            $this->empty_dir_index++;
-            $this->current_chunk = ["type" => "directory", "path" => $dir];
+        // If waiting for next client slice, halt until new request provides it
+        if ($this->waiting_for_client_slice) {
+            $this->current_chunk = null;
             return;
         }
 
-        // 2. Output symlinks second
-        if ($this->symlink_index < count($this->scanned_symlinks)) {
-            $symlink = $this->scanned_symlinks[$this->symlink_index];
-            $this->symlink_index++;
-            $this->current_chunk = [
-                "type" => "symlink",
-                "path" => $symlink["path"],
-                "target" => $symlink["target"],
-                "ctime" => $symlink["ctime"],
-            ];
-            return;
-        }
-
-        // 3. Open client stream if needed (delta mode)
+        // Open client stream if needed (delta mode)
         if ($this->client_index_file && $this->client_stream === null) {
             $this->client_stream = gzopen($this->client_index_file, "r");
             if (!$this->client_stream) {
@@ -638,25 +314,28 @@ class FileSyncProducer
                 );
             }
 
-            // Seek to saved position if resuming
-            if ($this->client_offset > 0) {
-                gzseek($this->client_stream, $this->client_offset);
-                error_log(
-                    "Resuming client stream at offset " . $this->client_offset,
+            // Validate slice start
+            if ($this->client_slice_start !== null && $this->client_slice_start !== $this->client_offset) {
+                throw new RuntimeException(
+                    "Client slice start does not match expected offset: expected {$this->client_offset}, got {$this->client_slice_start}",
                 );
+            }
+
+            if ($this->client_slice_start > 0) {
+                gzseek($this->client_stream, 0);
             }
 
             error_log("Opened client index stream for two-pointer merge");
         }
 
-        // 4. Two-pointer merge loop
-        while (true) {
-            // Get next server file
-            $server_file =
-                $this->server_index < count($this->scanned_files)
-                    ? $this->scanned_files[$this->server_index]
-                    : null;
+        // If currently mid-file, continue streaming that file
+        if ($this->current_file_meta !== null && $this->streaming_file_handle !== null) {
+            $this->stream_file_chunk($this->current_file_meta);
+            return;
+        }
 
+        // Two-pointer merge loop
+        while (true) {
             // Get next client line if not cached
             if ($this->client_stream && $this->client_current_line === null) {
                 $line = gzgets($this->client_stream);
@@ -674,12 +353,38 @@ class FileSyncProducer
                     }
                 }
                 // Update offset after reading
-                $this->client_offset = gztell($this->client_stream);
+                $this->client_offset = $this->client_slice_start + gztell($this->client_stream);
+
+                // Slice exhausted and more expected? request next slice
+                if ($line === false || gzeof($this->client_stream)) {
+                    $slice_end = $this->client_slice_start + ($this->client_slice_len ?? 0);
+                    $has_more =
+                        $this->client_slice_total !== null &&
+                        $slice_end < $this->client_slice_total;
+                    if ($has_more) {
+                        $this->waiting_for_client_slice = true;
+                        if ($this->client_stream) {
+                            gzclose($this->client_stream);
+                            $this->client_stream = null;
+                        }
+                        $this->current_chunk = null;
+                        return;
+                    }
+                }
             }
 
-            $client_file = $this->client_current_line;
+            // Get next server file or structural chunk
+            $server_file = $this->get_next_server_file();
+            if ($this->current_chunk !== null && ($server_file === null && $this->current_file_meta === null)) {
+                // A directory/symlink chunk was prepared
+                return;
+            }
+            if ($server_file === null && $this->current_file_meta !== null) {
+                $server_file = $this->current_file_meta;
+            }
 
             // Both lists exhausted?
+            $client_file = $this->client_current_line;
             if ($server_file === null && $client_file === null) {
                 if ($this->client_stream) {
                     gzclose($this->client_stream);
@@ -730,8 +435,8 @@ class FileSyncProducer
                     return;
                 } else {
                     // UNCHANGED → skip both
-                    $this->server_index++;
                     $this->client_current_line = null;
+                    $this->current_file_meta = null;
                     continue;
                 }
             } elseif ($cmp < 0) {
@@ -755,7 +460,114 @@ class FileSyncProducer
     }
 
     /**
+     * Fetch next server file in lexicographic DFS order.
+     * Populates $this->current_chunk for directory/symlink emissions.
+     */
+    /**
+     * Fetch the next server file (or structural chunk) in lexicographic DFS order.
+     *
+     * - Traverses the filesystem without pre-scanning.
+     * - Ensures paths are globally sorted by visiting per-directory entries sorted lexicographically.
+     * - Emits directory/symlink as current_chunk (returns null) or returns file metadata for streaming.
+     */
+    private function get_next_server_file(): ?array
+    {
+        while (!empty($this->traversal_stack)) {
+            $idx = count($this->traversal_stack) - 1;
+            $frame =& $this->traversal_stack[$idx];
+
+            // Load entries if first visit; compute start index based on last
+            if ($frame["entries"] === null) {
+                $entries = @scandir($frame["dir"]);
+                if ($entries === false) {
+                    array_pop($this->traversal_stack);
+                    continue;
+                }
+                $entries = array_values(
+                    array_filter(
+                        $entries,
+                        fn($e) => $e !== "." && $e !== "..",
+                    ),
+                );
+                sort($entries, SORT_STRING);
+                $frame["entries"] = $entries;
+
+                if ($this->client_index_file === null && count($entries) === 0) {
+                    // Empty directory emission (first-sync only)
+                    array_pop($this->traversal_stack);
+                    $this->current_chunk = [
+                        "type" => "directory",
+                        "path" => $frame["dir"],
+                    ];
+                    return null;
+                }
+            }
+
+            // Find next entry strictly greater than last emitted in this dir
+            $start = $frame["pos"] ?? 0;
+            if ($frame["last"] !== null) {
+                $start = $this->binary_search_next($frame["entries"], $frame["last"]);
+            }
+
+            if ($start >= count($frame["entries"])) {
+                array_pop($this->traversal_stack);
+                continue;
+            }
+
+            $entry = $frame["entries"][$start];
+            $frame["last"] = $entry;
+            $frame["pos"] = $start + 1;
+            $path = $frame["dir"] . "/" . $entry;
+
+            if (is_link($path)) {
+                $target = readlink($path);
+                $ctime = @filectime($path);
+                $this->current_chunk = [
+                    "type" => "symlink",
+                    "path" => $path,
+                    "target" => $target !== false ? $target : "",
+                    "ctime" => $ctime !== false ? $ctime : 0,
+                ];
+                return null;
+            }
+
+            if (is_dir($path)) {
+                $this->traversal_stack[] = [
+                    "dir" => $path,
+                    "pos" => 0,
+                    "entries" => null,
+                ];
+                continue;
+            }
+
+            if (is_file($path)) {
+                $ctime = @filectime($path);
+                $size = @filesize($path);
+                if ($ctime === false || $size === false) {
+                    continue;
+                }
+                if ($this->min_ctime > 0 && $ctime <= $this->min_ctime) {
+                    continue;
+                }
+                $this->current_file_meta = [
+                    "path" => $path,
+                    "ctime" => $ctime,
+                    "size" => $size,
+                ];
+                $this->streaming_file_offset = 0;
+                return $this->current_file_meta;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Stream a chunk from the current file.
+     */
+    /**
+     * Stream the current file in fixed-size chunks, updating cursor state as we go.
+     * Assumes $this->current_file_meta is set and traversal has positioned us on this file.
      */
     private function stream_file_chunk(array $file): void
     {
@@ -765,8 +577,7 @@ class FileSyncProducer
 
             if (!$this->streaming_file_handle) {
                 // Skip unreadable file
-                $this->server_index++;
-                $this->files_streamed++;
+                $this->current_file_meta = null;
                 return;
             }
 
@@ -783,8 +594,8 @@ class FileSyncProducer
             fclose($this->streaming_file_handle);
             $this->streaming_file_handle = null;
             $this->streaming_file_offset = 0;
-            $this->server_index++;
             $this->files_streamed++;
+            $this->current_file_meta = null;
             return;
         }
 
@@ -810,8 +621,8 @@ class FileSyncProducer
             fclose($this->streaming_file_handle);
             $this->streaming_file_handle = null;
             $this->streaming_file_offset = 0;
-            $this->server_index++;
             $this->files_streamed++;
+            $this->current_file_meta = null;
         }
     }
 
@@ -820,6 +631,10 @@ class FileSyncProducer
         return $this->current_chunk;
     }
 
+    /**
+     * Serialize current streaming state for resumption.
+     * Includes traversal stack, current file offset/meta, and client stream offset.
+     */
     public function get_reentrancy_cursor(): string
     {
         $cursor = [
@@ -830,8 +645,14 @@ class FileSyncProducer
         if ($this->phase === self::PHASE_STREAMING) {
             $cursor["n"] = $this->files_streamed;
             $cursor["b"] = $this->streaming_file_offset;
-            $cursor["si"] = $this->server_index; // Server pointer
-            $cursor["co"] = $this->client_offset; // Client byte offset
+            $cursor["co"] = $this->client_offset; // Client byte offset (absolute)
+            $cursor["ct"] = $this->client_slice_total;
+            $cursor["cf"] = $this->current_file_meta;
+            $cursor["dc"] = $this->deletions_count;
+            $cursor["ts"] = array_map(
+                fn($f) => ["d" => $f["dir"], "l" => $f["last"], "p" => $f["pos"] ?? 0],
+                $this->traversal_stack,
+            );
 
         }
 
@@ -844,30 +665,20 @@ class FileSyncProducer
             "phase" => $this->phase,
         ];
 
-        if ($this->phase === self::PHASE_SCANNING) {
-            $progress["files_found"] = count($this->scanned_files);
-            $progress["directories_pending"] = count($this->scan_stack);
-        } elseif ($this->phase === self::PHASE_STREAMING) {
-            $progress["files_total"] = count($this->scanned_files);
+        if ($this->phase === self::PHASE_STREAMING) {
             $progress["files_completed"] = $this->files_streamed;
+            $progress["waiting_for_client_slice"] = $this->waiting_for_client_slice;
+            $progress["client_offset"] = $this->client_offset;
+            $progress["client_total"] = $this->client_slice_total;
 
-            if ($this->server_index < count($this->scanned_files)) {
-                $file = $this->scanned_files[$this->server_index];
+            if ($this->current_file_meta) {
+                $file = $this->current_file_meta;
                 $progress["current_file"] = [
                     "path" => $file["path"],
                     "size" => $file["size"],
                     "bytes_read" => $this->streaming_file_offset,
-                    "percent" =>
-                        $file["size"] > 0
-                            ? $this->streaming_file_offset / $file["size"]
-                            : 1,
                 ];
             }
-
-            $progress["percent_complete"] =
-                count($this->scanned_files) > 0
-                    ? $this->files_streamed / count($this->scanned_files)
-                    : 1;
         }
 
         return $progress;
@@ -881,5 +692,10 @@ class FileSyncProducer
     public function get_filesystem_root(): ?string
     {
         return $this->filesystem_root;
+    }
+
+    public function is_waiting_for_client_slice(): bool
+    {
+        return $this->waiting_for_client_slice;
     }
 }

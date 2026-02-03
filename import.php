@@ -322,7 +322,10 @@ class ImportClient
     private $state_file;
     private $last_progress_output = 0;
     private $progress_throttle = 1.0; // seconds
-    private $index_file; // Local index of imported files for delta detection
+    private $index_file; // Local index of imported files for delta detection (sorted TSV)
+    private $index_updates_file; // Temp file collecting sorted index updates this run
+    private $index_updates_handle;
+    private $index_updates_count = 0;
     private $audit_log; // Audit log file for all operations
     private $verbose_mode = false; // Whether to show verbose output
     private $is_tty; // Whether stdout is a TTY
@@ -362,147 +365,7 @@ class ImportClient
         }
     }
 
-    /**
-     * Load local file index for delta detection.
-     * Format: path\tctime\tsize\n
-     * Later entries override earlier ones (append-only optimization).
-     *
-     * @return array Map of path => ['ctime' => int, 'size' => int]
-     */
-    private function load_local_index(): array
-    {
-        if (!file_exists($this->index_file)) {
-            return [];
-        }
-
-        $index = [];
-        $handle = @fopen($this->index_file, "r");
-        if (!$handle) {
-            return [];
-        }
-
-        while (($line = fgets($handle)) !== false) {
-            $parts = explode("\t", trim($line));
-            if (count($parts) >= 3) {
-                $path = $parts[0];
-                $ctime = (int) $parts[1];
-                $size = (int) $parts[2];
-                // Later entries override (handles appends)
-                $index[$path] = ["ctime" => $ctime, "size" => $size];
-            }
-        }
-
-        fclose($handle);
-        return $index;
-    }
-
-    /**
-     * Save local file index atomically.
-     *
-     * @param array $index Map of path => ['ctime' => int, 'size' => int]
-     */
-    private function save_local_index(array $index): void
-    {
-        $temp_file = $this->index_file . ".tmp";
-        $handle = fopen($temp_file, "w");
-        if (!$handle) {
-            throw new RuntimeException("Failed to create temp index file");
-        }
-
-        foreach ($index as $path => $info) {
-            fprintf(
-                $handle,
-                "%s\t%d\t%d\n",
-                $path,
-                $info["ctime"],
-                $info["size"],
-            );
-        }
-
-        fclose($handle);
-
-        // Atomic rename
-        if (!rename($temp_file, $this->index_file)) {
-            @unlink($temp_file);
-            throw new RuntimeException("Failed to update index file");
-        }
-    }
-
-    /**
-     * Add or update a file in the local index (UPSERT operation).
-     * Updates existing entries in place, appends new ones.
-     * Maintains order: server order is preserved.
-     *
-     * @param string $path File path (relative to filesystem-root)
-     * @param int $ctime File ctime
-     * @param int $size File size
-     */
-    private function index_file_entry(string $path, int $ctime, int $size): void
-    {
-        $new_line = sprintf("%s\t%d\t%d", $path, $ctime, $size);
-
-        // If index doesn't exist, create it
-        if (!file_exists($this->index_file)) {
-            file_put_contents($this->index_file, $new_line . "\n", LOCK_EX);
-            return;
-        }
-
-        // Read existing index
-        $lines = file($this->index_file, FILE_IGNORE_NEW_LINES);
-        $found = false;
-
-        // Update existing entry in place
-        foreach ($lines as $i => $line) {
-            if (empty($line)) {
-                continue;
-            }
-            $parts = explode("\t", $line);
-            if (count($parts) >= 1 && $parts[0] === $path) {
-                $lines[$i] = $new_line;
-                $found = true;
-                break;
-            }
-        }
-
-        if (!$found) {
-            // Append new entry (maintains server order)
-            $lines[] = $new_line;
-        }
-
-        // Write entire index back
-        file_put_contents(
-            $this->index_file,
-            implode("\n", $lines) . "\n",
-            LOCK_EX
-        );
-    }
-
-    /**
-     * Remove a file from the local index.
-     * This requires rewriting the entire index (rare operation).
-     *
-     * @param string $path File path to remove
-     */
-    private function unindex_file_entry(string $path): void
-    {
-        $index = $this->load_local_index();
-        if (isset($index[$path])) {
-            unset($index[$path]);
-            $this->save_local_index($index);
-            $this->audit_log("Unindexed: {$path}", false);
-        }
-    }
-
-    /**
-     * Compact the index file by removing duplicates and deleted entries.
-     * This rewrites the entire file but should be called rarely.
-     */
-    private function compact_index(): void
-    {
-        $index = $this->load_local_index();
-        $this->save_local_index($index);
-        $this->audit_log("Index compacted: " . count($index) . " files", false);
-    }
+    // Legacy index in-memory helpers removed; index is maintained via streaming merge.
 
     /**
      * Get compressed client state for delta detection.
@@ -512,44 +375,53 @@ class ImportClient
      */
     private function get_compressed_client_index_file(): ?string
     {
-        $index = $this->load_local_index();
-        if (empty($index)) {
+        if (!file_exists($this->index_file)) {
             return null;
         }
 
-        // Sort index by path (bytewise) for two-pointer merge on server
-        ksort($index, SORT_STRING);
+        $source = fopen($this->index_file, "r");
+        if (!$source) {
+            return null;
+        }
 
         $temp_file = tempnam(sys_get_temp_dir(), "client-index-");
         if ($temp_file === false) {
+            fclose($source);
             throw new RuntimeException("Failed to create temp index file");
         }
 
         $gz = gzopen($temp_file, "w6"); // Level 6 compression
         if (!$gz) {
+            fclose($source);
             @unlink($temp_file);
             throw new RuntimeException("Failed to open temp index file");
         }
 
         $tsv_bytes = 0;
-        foreach ($index as $path => $info) {
-            $line = $path . "\t" . $info["ctime"] . "\t" . $info["size"] . "\n";
+        $lines = 0;
+        while (($line = fgets($source)) !== false) {
+            if ($line === "" || $line === "\n") {
+                continue;
+            }
             $tsv_bytes += strlen($line);
             gzwrite($gz, $line);
+            $lines++;
         }
 
         gzclose($gz);
+        fclose($source);
 
         $compressed_bytes = filesize($temp_file);
         $compressed_bytes = $compressed_bytes === false ? 0 : $compressed_bytes;
-        $reduction = $tsv_bytes > 0
-            ? 100 * (1 - $compressed_bytes / $tsv_bytes)
-            : 0;
+        $reduction =
+            $tsv_bytes > 0
+                ? 100 * (1 - $compressed_bytes / $tsv_bytes)
+                : 0;
 
         $this->audit_log(
             sprintf(
                 "Compressed client index: %d files, %d bytes -> %d bytes (%.1f%% reduction)",
-                count($index),
+                $lines,
                 $tsv_bytes,
                 $compressed_bytes,
                 $reduction,
@@ -741,7 +613,7 @@ class ImportClient
         } else {
             // Resuming - reset counter to 0 for this session (we'll count new completions)
             $this->files_imported = 0;
-            $index_size = $has_index ? count($this->load_local_index()) : 0;
+            $index_size = $has_index ? $this->index_count() : 0;
 
             $this->audit_log(
                 sprintf(
@@ -771,7 +643,7 @@ class ImportClient
         $this->save_state($this->state);
 
         $this->clear_progress_line();
-        $index_size = count($this->load_local_index());
+        $index_size = $this->index_count();
         $this->audit_log("files-sync-initial complete: {$index_size} files indexed", true);
 
         if (!$this->verbose_mode) {
@@ -842,7 +714,7 @@ class ImportClient
             $this->state["files_imported"] = 0;
             $this->save_state($this->state);
 
-            $index_size = count($this->load_local_index());
+            $index_size = $this->index_count();
             $this->audit_log(
                 "START files-sync-delta | session=" . substr($this->state[$session_key], 0, 12) .
                 " | index_files={$index_size}",
@@ -858,7 +730,7 @@ class ImportClient
         } else {
             // Resuming delta sync - reset counter to 0 for this session
             $this->files_imported = 0;
-            $index_size = count($this->load_local_index());
+            $index_size = $this->index_count();
 
             $this->audit_log(
                 sprintf(
@@ -888,7 +760,7 @@ class ImportClient
         $this->save_state($this->state);
 
         $this->clear_progress_line();
-        $index_size = count($this->load_local_index());
+        $index_size = $this->index_count();
         $this->audit_log("files-sync-delta complete: {$index_size} files indexed", true);
 
         if (!$this->verbose_mode) {
@@ -1016,11 +888,11 @@ class ImportClient
         string $session_key
     ): void {
         $cursor = $this->state[$cursor_key] ?? null;
-        $session_id = $this->state["server_session_id"] ?? null;
+        $client_index_offset = $this->state["client_index_offset"] ?? 0;
         $complete = false;
 
         // Log current progress at start of request
-        $current_indexed = count($this->load_local_index());
+        $current_indexed = $this->index_count();
         $has_cursor = $cursor !== null;
         $this->audit_log(
             sprintf(
@@ -1032,70 +904,34 @@ class ImportClient
             false
         );
 
-        // Send client state for delta detection ONLY on fresh start (no cursor)
-        // If resuming with cursor, server already has our session
+        // Send client index in slices each request when delta mode
         $post_data = null;
-        $client_index_temp_path = null;
-        if ($send_client_state && $cursor === null) {
+        $this->begin_index_updates();
+        if ($send_client_state) {
             $has_index = file_exists($this->index_file);
             if (!$has_index) {
                 throw new Exception(
                     "Cannot use files-delta mode without existing index. Use files-first-sync first.",
                 );
             }
-
-            $client_index_temp_path = $this->get_compressed_client_index_file();
-            if ($client_index_temp_path !== null) {
-                $post_data = [
-                    "client_index_gz" => new CURLFile(
-                        $client_index_temp_path,
-                        "application/gzip",
-                        "client-index.tsv.gz",
-                    ),
-                ];
-                $index_size = count($this->load_local_index());
-                $compressed_size = filesize($client_index_temp_path);
-                $compressed_size = $compressed_size === false
-                    ? 0
-                    : $compressed_size;
-                $this->audit_log(
-                    sprintf(
-                        "DELTA MODE | Sending client_index_gz upload | %d files | %d bytes compressed | Server MUST only send changed/new/deleted files",
-                        $index_size,
-                        $compressed_size,
-                    ),
-                    true,
-                );
-
-                if (!$this->verbose_mode) {
-                    echo sprintf(
-                        "Sending index with %d files to server for delta detection\n",
-                        $index_size,
-                    );
-                    echo "Server will only send changed/new/deleted files\n";
-                }
-            }
-        } elseif ($send_client_state && $cursor !== null) {
-            $this->audit_log(
-                "DELTA MODE | Resuming from cursor - using existing server session (not sending client_index_gz again)",
-                true,
-            );
+            $post_data = $this->build_index_slice_postdata($client_index_offset);
         }
 
         while (!$complete) {
-            $url = $this->build_url("file_chunk", $cursor, [], $session_id);
+            $url = $this->build_url("file_chunk", $cursor, [], null);
 
             $context = new StreamingContext();
             $context->file_handle = null;
             $context->file_path = null;
             $context->file_ctime = null;
 
-            $context->on_chunk = function ($chunk) use (
-                &$cursor,
-                &$complete,
-                $context,
-                $cursor_key,
-            ) {
+        $context->on_chunk = function ($chunk) use (
+            &$cursor,
+            &$complete,
+            $context,
+            $cursor_key,
+            &$client_index_offset
+        ) {
                 // Check if shutdown was requested
                 if ($this->shutdown_requested) {
                     throw new RuntimeException("Shutdown requested");
@@ -1131,25 +967,33 @@ class ImportClient
                     $this->handle_deletion($chunk);
                 } elseif ($chunk_type === "progress") {
                     $this->handle_progress($chunk, "files");
-                } elseif ($chunk_type === "completion") {
-                    // Close any open file handle
-                    if ($context->file_handle) {
-                        fclose($context->file_handle);
-                        if ($context->file_ctime && $context->file_path) {
+            } elseif ($chunk_type === "completion") {
+                // Close any open file handle
+                if ($context->file_handle) {
+                    fclose($context->file_handle);
+                    if ($context->file_ctime && $context->file_path) {
                             touch($context->file_path, $context->file_ctime);
                         }
                         $context->file_handle = null;
                     }
 
-                    $complete =
-                        ($chunk["headers"]["x-status"] ?? "") === "complete";
-                    $this->audit_log(
-                        "Completion chunk received, status=" .
-                            ($chunk["headers"]["x-status"] ?? "missing") .
-                            ", complete=" .
-                            ($complete ? "true" : "false"),
-                        false,
-                    );
+                $status = $chunk["headers"]["x-status"] ?? "";
+                $complete = $status === "complete";
+                if ($status === "need_client_slice") {
+                    $context->need_client_slice = true;
+                    // Advance offset to current cursor client offset
+                    $client_index_offset = $cursor
+                        ? json_decode(base64_decode($cursor), true)["co"] ?? $client_index_offset
+                        : $client_index_offset;
+                    $context->next_client_offset = $client_index_offset;
+                }
+                $this->audit_log(
+                    "Completion chunk received, status=" .
+                        ($status ?: "missing") .
+                        ", complete=" .
+                        ($complete ? "true" : "false"),
+                    false,
+                );
 
                     $progress_data = [
                         "phase" => "files",
@@ -1173,20 +1017,34 @@ class ImportClient
                 }
             };
 
+            $context->need_client_slice = false;
+            $context->next_client_offset = $client_index_offset;
+
             $this->fetch_streaming($url, $cursor, $context, $post_data);
-            if ($client_index_temp_path !== null) {
-                @unlink($client_index_temp_path);
-                $client_index_temp_path = null;
-            }
 
             // Save cursor for resumption (keep it even when complete for reference)
             $this->state[$cursor_key] = $cursor;
             $this->state["files_imported"] = $this->files_imported;
+            $this->state["client_index_offset"] = $client_index_offset;
             $this->save_state($this->state);
 
-            // Only send client_index_gz on first request
-            $post_data = null;
+            // Prepare next slice if requested
+            if (
+                isset($context->need_client_slice) &&
+                $context->need_client_slice === true
+            ) {
+                $client_index_offset = $context->next_client_offset;
+                $post_data = $this->build_index_slice_postdata(
+                    $client_index_offset
+                );
+                $complete = false;
+            } else {
+                $post_data = null;
+            }
         }
+
+        // Merge index updates once the run is complete
+        $this->finalize_index_updates();
     }
 
     /**
@@ -1429,14 +1287,14 @@ class ImportClient
                 touch($context->file_path, $context->file_ctime);
             }
 
-            // Index the file after successful write (append-only for speed)
+            // Index update (streamed, no in-memory sort)
             $file_size = (int) ($headers["x-file-size"] ?? 0);
             $final_size = file_exists($context->file_path)
                 ? filesize($context->file_path)
                 : 0;
 
             if ($context->file_ctime) {
-                $this->index_file_entry(
+                $this->record_index_update_file(
                     $path,
                     $context->file_ctime,
                     $file_size,
@@ -1547,6 +1405,312 @@ class ImportClient
                 }
             }
         }
+    }
+
+    /**
+     * Start collecting index updates into a temp file for streaming merge.
+     */
+    private function begin_index_updates(): void
+    {
+        if ($this->index_updates_handle) {
+            return;
+        }
+        $tmp = tempnam(sys_get_temp_dir(), "index-updates-");
+        if ($tmp === false) {
+            throw new RuntimeException("Failed to create temp index updates file");
+        }
+        $this->index_updates_file = $tmp;
+        $this->index_updates_handle = fopen($tmp, "w");
+        if (!$this->index_updates_handle) {
+            throw new RuntimeException("Failed to open temp index updates file");
+        }
+        $this->index_updates_count = 0;
+    }
+
+    /**
+     * Record a file upsert into the index updates stream.
+     */
+    private function record_index_update_file(
+        string $path,
+        int $ctime,
+        int $size
+    ): void {
+        if (!$this->index_updates_handle) {
+            $this->begin_index_updates();
+        }
+        $line = sprintf("F\t%s\t%d\t%d\n", $path, $ctime, $size);
+        fwrite($this->index_updates_handle, $line);
+        $this->index_updates_count++;
+    }
+
+    /**
+     * Record a deletion into the index updates stream.
+     */
+    private function record_index_update_deletion(string $path): void
+    {
+        if (!$this->index_updates_handle) {
+            $this->begin_index_updates();
+        }
+        $line = sprintf("D\t%s\n", $path);
+        fwrite($this->index_updates_handle, $line);
+        $this->index_updates_count++;
+    }
+
+    /**
+     * Merge the collected updates with the existing sorted index without loading it into memory.
+     */
+    private function finalize_index_updates(): void
+    {
+        if ($this->index_updates_handle) {
+            fclose($this->index_updates_handle);
+            $this->index_updates_handle = null;
+        }
+
+        if ($this->index_updates_count === 0) {
+            if ($this->index_updates_file) {
+                @unlink($this->index_updates_file);
+            }
+            return;
+        }
+
+        $updates_path = $this->index_updates_file;
+        $new_index = $this->index_file . ".new";
+
+        $old_handle = file_exists($this->index_file)
+            ? fopen($this->index_file, "r")
+            : null;
+        $upd_handle = fopen($updates_path, "r");
+        $new_handle = fopen($new_index, "w");
+
+        if (!$upd_handle || !$new_handle) {
+            throw new RuntimeException("Failed to merge index updates");
+        }
+
+        $old = $this->read_index_line($old_handle);
+        $upd = $this->read_update_line($upd_handle);
+
+        while ($old !== null || $upd !== null) {
+            if ($upd === null) {
+                fwrite(
+                    $new_handle,
+                    sprintf(
+                        "%s\t%d\t%d\n",
+                        $old["path"],
+                        $old["ctime"],
+                        $old["size"],
+                    ),
+                );
+                $old = $this->read_index_line($old_handle);
+                continue;
+            }
+
+            if ($old === null) {
+                if (!$upd["delete"]) {
+                    fwrite(
+                        $new_handle,
+                        sprintf(
+                            "%s\t%d\t%d\n",
+                            $upd["path"],
+                            $upd["ctime"],
+                            $upd["size"],
+                        ),
+                    );
+                }
+                $upd = $this->read_update_line($upd_handle);
+                continue;
+            }
+
+            $cmp = strcmp($old["path"], $upd["path"]);
+            if ($cmp === 0) {
+                if (!$upd["delete"]) {
+                    fwrite(
+                        $new_handle,
+                        sprintf(
+                            "%s\t%d\t%d\n",
+                            $upd["path"],
+                            $upd["ctime"],
+                            $upd["size"],
+                        ),
+                    );
+                }
+                $old = $this->read_index_line($old_handle);
+                $upd = $this->read_update_line($upd_handle);
+            } elseif ($cmp < 0) {
+                fwrite(
+                    $new_handle,
+                    sprintf(
+                        "%s\t%d\t%d\n",
+                        $old["path"],
+                        $old["ctime"],
+                        $old["size"],
+                    ),
+                );
+                $old = $this->read_index_line($old_handle);
+            } else {
+                if (!$upd["delete"]) {
+                    fwrite(
+                        $new_handle,
+                        sprintf(
+                            "%s\t%d\t%d\n",
+                            $upd["path"],
+                            $upd["ctime"],
+                            $upd["size"],
+                        ),
+                    );
+                }
+                $upd = $this->read_update_line($upd_handle);
+            }
+        }
+
+        if ($old_handle) {
+            fclose($old_handle);
+        }
+        fclose($upd_handle);
+        fclose($new_handle);
+
+        if (!rename($new_index, $this->index_file)) {
+            throw new RuntimeException("Failed to replace index file");
+        }
+
+        @unlink($updates_path);
+    }
+
+    /**
+     * Read one TSV record from the on-disk index.
+     */
+    private function read_index_line($handle): ?array
+    {
+        if (!$handle) {
+            return null;
+        }
+        while (($line = fgets($handle)) !== false) {
+            $line = trim($line);
+            if ($line === "") {
+                continue;
+            }
+            $parts = explode("\t", $line);
+            if (count($parts) >= 3) {
+                return [
+                    "path" => $parts[0],
+                    "ctime" => (int) $parts[1],
+                    "size" => (int) $parts[2],
+                ];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Read one update record (F/D) from the updates file.
+     */
+    private function read_update_line($handle): ?array
+    {
+        if (!$handle) {
+            return null;
+        }
+        while (($line = fgets($handle)) !== false) {
+            $line = trim($line);
+            if ($line === "") {
+                continue;
+            }
+            $parts = explode("\t", $line);
+            if (count($parts) < 2) {
+                continue;
+            }
+            if ($parts[0] === "D") {
+                return [
+                    "path" => $parts[1],
+                    "delete" => true,
+                    "ctime" => 0,
+                    "size" => 0,
+                ];
+            } elseif ($parts[0] === "F" && count($parts) >= 4) {
+                return [
+                    "path" => $parts[1],
+                    "delete" => false,
+                    "ctime" => (int) $parts[2],
+                    "size" => (int) $parts[3],
+                ];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Count entries in the on-disk index without loading it.
+     */
+    private function index_count(): int
+    {
+        if (!file_exists($this->index_file)) {
+            return 0;
+        }
+        $h = fopen($this->index_file, "r");
+        if (!$h) {
+            return 0;
+        }
+        $c = 0;
+        while (fgets($h) !== false) {
+            $c++;
+        }
+        fclose($h);
+        return $c;
+    }
+
+    /**
+     * Build a compressed slice of the local index starting at given offset.
+     *
+     * @param int $offset Byte offset in the TSV index file
+     * @param int $max_len Maximum uncompressed bytes to include (default 512KB)
+     * @return array|null POST data array with file and slice metadata, or null if no more data
+     */
+    private function build_index_slice_postdata(
+        int $offset,
+        int $max_len = 524288,
+    ): ?array {
+        if (!file_exists($this->index_file)) {
+            return null;
+        }
+        $total = filesize($this->index_file);
+        if ($total === false || $offset >= $total) {
+            return null;
+        }
+
+        $handle = fopen($this->index_file, "r");
+        if (!$handle) {
+            throw new RuntimeException("Failed to open index file for slicing");
+        }
+        if (fseek($handle, $offset) !== 0) {
+            fclose($handle);
+            throw new RuntimeException("Failed to seek index file to offset {$offset}");
+        }
+
+        $data = fread($handle, $max_len);
+        fclose($handle);
+        if ($data === false || $data === "") {
+            return null;
+        }
+
+        $gz = gzencode($data, 6);
+        if ($gz === false) {
+            throw new RuntimeException("Failed to compress index slice");
+        }
+
+        $tmp = tempnam(sys_get_temp_dir(), "index-slice-");
+        if ($tmp === false) {
+            throw new RuntimeException("Failed to create temp slice file");
+        }
+        file_put_contents($tmp, $gz);
+
+        return [
+            "client_index_slice_gz" => new CURLFile(
+                $tmp,
+                "application/gzip",
+                "client-index-slice.gz",
+            ),
+            "client_index_slice_start" => $offset,
+            "client_index_slice_len" => strlen($data),
+            "client_index_total" => $total,
+        ];
     }
 
     /**
@@ -1697,7 +1861,7 @@ class ImportClient
                 $this->show_progress_line("Deleted: " . $relative_path);
 
                 // Remove from index after successful deletion
-                $this->unindex_file_entry($data["path"]);
+                $this->record_index_update_deletion($data["path"]);
             }
         }
 
@@ -2138,7 +2302,7 @@ class ImportClient
             $cursor_info[] = "sql_cursor=saved";
         }
 
-        $indexed = count($this->load_local_index());
+        $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run
 
         $this->audit_log(
@@ -2176,7 +2340,7 @@ class ImportClient
         $this->clear_progress_line();
 
         // Log final progress before exit
-        $indexed = count($this->load_local_index());
+        $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Files completed in this run
         $current_command = $this->state["current_command"] ?? "unknown";
 
