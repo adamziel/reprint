@@ -139,7 +139,7 @@ function load_file_sync_session(string $session_id): array
  * Two-pointer merge:
  * - Server list: Sorted array of file metadata in memory
  * - Client list: Streamed from gzipped file with gzopen/gzgets
- * - Compare on-the-fly, emit NEW/MODIFIED files, track DELETED files
+ * - Compare on-the-fly, emit NEW/MODIFIED files, emit DELETED files
  * - Cursor saves positions in both lists for resumption
  */
 class FileSyncProducer
@@ -152,7 +152,7 @@ class FileSyncProducer
     private $min_ctime;
     private $chunk_size;
     private $client_index_file; // Path to gzipped client index file for streaming
-    private $deletions; // Array of deleted files found during merge
+    private $deletions_count; // Count of deleted files emitted during merge
     private $follow_symlinks;
     private $filesystem_root;
 
@@ -235,7 +235,7 @@ class FileSyncProducer
         $this->symlink_index = 0;
 
         $this->current_chunk = null;
-        $this->deletions = [];
+        $this->deletions_count = 0;
     }
 
     private function initialize_from_cursor(string $cursor_json): void
@@ -272,11 +272,11 @@ class FileSyncProducer
             $this->empty_directories = [];
             $this->empty_dir_index = 0;
             $this->symlink_index = 0;
-            $this->deletions = [];
+            $this->deletions_count = 0;
         } elseif ($this->phase === self::PHASE_STREAMING) {
             $this->files_streamed = $cursor["n"] ?? 0;
             $this->streaming_file_offset = $cursor["b"] ?? 0;
-            $this->deletions = $cursor["d"] ?? [];
+            $this->deletions_count = 0;
 
             // Two-pointer merge state
             $this->server_index = $cursor["si"] ?? 0;
@@ -693,7 +693,7 @@ class FileSyncProducer
                 $this->current_chunk = null;
                 error_log(
                     "Two-pointer merge complete | Total deletions: " .
-                        count($this->deletions),
+                        $this->deletions_count,
                 );
                 return;
             }
@@ -706,14 +706,16 @@ class FileSyncProducer
 
             // Client only (DELETED file)
             if ($server_file === null) {
-                $this->deletions[] = [
+                $this->deletions_count++;
+                $this->current_chunk = [
+                    "type" => "deletion",
                     "path" => $client_file["path"],
                     "ctime" => $client_file["ctime"],
                     "size" => $client_file["size"],
                     "deleted_at" => time(),
                 ];
                 $this->client_current_line = null; // Consume
-                continue; // Get next pair
+                return; // Yield one deletion at a time
             }
 
             // Both exist - compare paths
@@ -738,14 +740,16 @@ class FileSyncProducer
                 return;
             } else {
                 // Client comes first → DELETED file
-                $this->deletions[] = [
+                $this->deletions_count++;
+                $this->current_chunk = [
+                    "type" => "deletion",
                     "path" => $client_file["path"],
                     "ctime" => $client_file["ctime"],
                     "size" => $client_file["size"],
                     "deleted_at" => time(),
                 ];
                 $this->client_current_line = null;
-                continue;
+                return;
             }
         }
     }
@@ -829,10 +833,6 @@ class FileSyncProducer
             $cursor["si"] = $this->server_index; // Server pointer
             $cursor["co"] = $this->client_offset; // Client byte offset
 
-            // Only include deletions if not yet output
-            if ($this->files_streamed === 0 && !empty($this->deletions)) {
-                $cursor["d"] = $this->deletions;
-            }
         }
 
         return json_encode($cursor);
@@ -875,7 +875,7 @@ class FileSyncProducer
 
     public function get_deletions(): array
     {
-        return $this->deletions ?? [];
+        return [];
     }
 
     public function get_filesystem_root(): ?string

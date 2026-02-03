@@ -542,7 +542,6 @@ function endpoint_file_chunk(
     $files_completed = 0;
     $bytes_processed = 0;
     $last_progress_output = microtime(true);
-    $deletions_output = false;
     $metadata_sent = false;
     $iterations = 0;
 
@@ -573,29 +572,6 @@ function endpoint_file_chunk(
             flush(); // Force output immediately
 
             $metadata_sent = true;
-        }
-
-        // Output deletions once when we first enter streaming phase
-        // This must be AFTER metadata so filesystem root is known
-        if (!$deletions_output && $progress["phase"] === "streaming") {
-            $deletions = $sync->get_deletions();
-            if ($deletions && count($deletions) > 0) {
-                foreach ($deletions as $deletion) {
-                    $deletion_json = json_encode($deletion);
-                    $cursor = $sync->get_reentrancy_cursor();
-
-                    echo "--{$boundary}\r\n";
-                    echo "Content-Type: application/json\r\n";
-                    echo "Content-Length: " . strlen($deletion_json) . "\r\n";
-                    echo "X-Chunk-Type: deletion\r\n";
-                    echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-                    echo "\r\n";
-                    echo $deletion_json;
-                    echo "\r\n";
-                    flush(); // Force output immediately
-                }
-            }
-            $deletions_output = true;
         }
 
         // During scanning/sorting phases, chunk will be null - output progress
@@ -661,6 +637,21 @@ function endpoint_file_chunk(
                 "\r\n";
             echo "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n";
             echo "\r\n";
+            echo "\r\n";
+            flush(); // Force output immediately
+        } elseif ($chunk_type === "deletion") {
+            // Output deletion chunk
+            $deletion = $chunk;
+            unset($deletion["type"]);
+            $deletion_json = json_encode($deletion);
+
+            echo "--{$boundary}\r\n";
+            echo "Content-Type: application/json\r\n";
+            echo "Content-Length: " . strlen($deletion_json) . "\r\n";
+            echo "X-Chunk-Type: deletion\r\n";
+            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
+            echo "\r\n";
+            echo $deletion_json;
             echo "\r\n";
             flush(); // Force output immediately
         } else {
