@@ -322,12 +322,15 @@ class ImportClient
     private $state_file;
     private $last_progress_output = 0;
     private $progress_throttle = 1.0; // seconds
-    private $session_id;
     private $index_file; // Local index of imported files for delta detection
     private $audit_log; // Audit log file for all operations
     private $verbose_mode = false; // Whether to show verbose output
     private $is_tty; // Whether stdout is a TTY
     private $files_imported = 0; // Counter for imported files
+    private $state; // Current import state
+    private $chunks_since_save = 0; // Track chunks for periodic saves
+    private $shutdown_requested = false; // Flag for graceful shutdown
+    private $current_curl_handle = null; // Active curl handle for abort
 
     public function __construct(string $remote_url, string $local_path)
     {
@@ -338,10 +341,17 @@ class ImportClient
         $this->audit_log = $this->local_path . "/.import-audit.log";
 
         // Detect TTY for progress display
-        $this->is_tty = function_exists('posix_isatty') && posix_isatty(STDOUT);
+        $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
 
-        // Generate or load session ID for snapshot tracking on server
-        $this->session_id = $this->get_or_create_session_id();
+        // Register signal handlers for graceful shutdown
+        if (function_exists("pcntl_signal")) {
+            // Enable async signals (PHP 7.1+) so signals work during blocking operations
+            if (function_exists("pcntl_async_signals")) {
+                pcntl_async_signals(true);
+            }
+            pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
+            pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
+        }
 
         // Create directories
         if (!is_dir($this->local_path)) {
@@ -425,11 +435,8 @@ class ImportClient
      * @param int $ctime File ctime
      * @param int $size File size
      */
-    private function index_file_entry(
-        string $path,
-        int $ctime,
-        int $size,
-    ): void {
+    private function index_file_entry(string $path, int $ctime, int $size): void
+    {
         // Append to index file (much faster than rewriting)
         $line = sprintf("%s\t%d\t%d\n", $path, $ctime, $size);
         file_put_contents($this->index_file, $line, FILE_APPEND | LOCK_EX);
@@ -491,9 +498,9 @@ class ImportClient
                 count($index),
                 strlen($tsv),
                 strlen($compressed),
-                100 * (1 - strlen($compressed) / strlen($tsv))
+                100 * (1 - strlen($compressed) / strlen($tsv)),
             ),
-            false
+            false,
         );
 
         return $compressed;
@@ -507,7 +514,7 @@ class ImportClient
      */
     private function audit_log(string $message, bool $to_console = true): void
     {
-        $timestamp = date('Y-m-d H:i:s');
+        $timestamp = date("Y-m-d H:i:s");
         $log_line = "[{$timestamp}] {$message}\n";
 
         // Always write to audit log
@@ -530,16 +537,16 @@ class ImportClient
         if ($this->is_tty && !$this->verbose_mode) {
             // Get terminal width (default 80 if can't detect)
             $width = 80;
-            if (function_exists('exec')) {
-                $tput_cols = @exec('tput cols 2>/dev/null');
+            if (function_exists("exec")) {
+                $tput_cols = @exec("tput cols 2>/dev/null");
                 if ($tput_cols && is_numeric($tput_cols)) {
-                    $width = (int)$tput_cols;
+                    $width = (int) $tput_cols;
                 }
             }
 
             // Truncate message if too long, leaving room for "..."
             if (strlen($message) > $width - 3) {
-                $message = substr($message, 0, $width - 3) . '...';
+                $message = substr($message, 0, $width - 3) . "...";
             }
 
             // Clear line and write progress
@@ -565,124 +572,135 @@ class ImportClient
      *   - only_files: Import only files phase
      *   - only_sql: Import only SQL phase
      *   - only_deltas: Import only file deltas phase
-     *   - reset: Reset state and start fresh
+     *   - fresh: Start fresh import (new session, ignore existing state)
      *   - verbose: Enable verbose output
      */
     public function run(array $options = []): void
     {
         $this->verbose_mode = $options["verbose"] ?? false;
-        $state = $this->load_state();
+        $mode = $options["mode"] ?? "files-first-sync";
+        $this->state = $this->load_state();
 
-        // Handle reset option
-        if ($options["reset"] ?? false) {
-            $state = [
-                "phase" => "init",
-                "files_cursor" => null,
-                "sql_cursor" => null,
-                "deltas_cursor" => null,
-                "last_sync_time" => null,
-            ];
-            $this->save_state($state);
-            $this->output_progress([
-                "status" => "reset",
-                "message" => "State reset",
-            ]);
+        // Map mode to cursor key and session key
+        $cursor_key_map = [
+            "sql" => "sql_cursor",
+            "files-first-sync" => "files_first_sync_cursor",
+            "files-delta" => "files_delta_cursor",
+        ];
+        $session_key_map = [
+            "sql" => "sql_session_id",
+            "files-first-sync" => "files_first_sync_session_id",
+            "files-delta" => "files_delta_session_id",
+        ];
+
+        $cursor_key = $cursor_key_map[$mode];
+        $session_key = $session_key_map[$mode];
+
+        // Check if we have an existing session for this mode
+        $has_cursor = ($this->state[$cursor_key] ?? null) !== null;
+        $has_session = !empty($this->state[$session_key] ?? null);
+        $has_index = file_exists($this->index_file);
+        $index_size = $has_index ? count($this->load_local_index()) : 0;
+
+        // If no session for this mode, create one
+        if (!$has_session) {
+            $this->state[$session_key] =
+                "import-" . bin2hex(random_bytes(16));
+            $this->save_state($this->state);
+        }
+
+        // Restore file counter from state (only for file modes)
+        if (str_starts_with($mode, "files-")) {
+            $this->files_imported = $this->state["files_imported"] ?? 0;
+        }
+
+        // Log start/resume with detailed information
+        $session_id = $this->state[$session_key];
+        $cursor_value = $this->state[$cursor_key] ?? null;
+
+        if ($has_cursor) {
+            $log_msg = sprintf(
+                "RESUME %s | session=%s | cursor=%s | indexed_files=%d | files_imported=%d",
+                $mode,
+                substr($session_id, 0, 12),
+                $cursor_value ? substr($cursor_value, 0, 20) . "..." : "null",
+                $index_size,
+                $this->files_imported,
+            );
+            $this->audit_log($log_msg, true);
+
+            if (!$this->verbose_mode) {
+                echo sprintf("Resuming %s\n", $mode);
+                echo sprintf("  Session: %s\n", substr($session_id, 0, 12));
+                echo sprintf("  Cursor: %s\n", $cursor_value ? substr($cursor_value, 0, 40) . "..." : "none");
+                echo sprintf("  Already indexed: %d files\n", $index_size);
+                if (str_starts_with($mode, "files-")) {
+                    echo sprintf(
+                        "  Files imported this session: %d\n",
+                        $this->files_imported,
+                    );
+                }
+            }
+        } else {
+            $log_msg = sprintf(
+                "START %s | session=%s | cursor=null | indexed_files=%d | files_imported=0",
+                $mode,
+                substr($session_id, 0, 12),
+                $index_size,
+            );
+            $this->audit_log($log_msg, true);
+
+            if (!$this->verbose_mode) {
+                echo sprintf("Starting %s\n", $mode);
+                echo sprintf("  Session: %s\n", substr($session_id, 0, 12));
+                if ($index_size > 0 && $mode === "files-delta") {
+                    echo sprintf(
+                        "  Using index with %d files for delta detection\n",
+                        $index_size,
+                    );
+                }
+            }
         }
 
         try {
-            // Determine which phases to run
-            $run_files =
-                !($options["only_sql"] ?? false) &&
-                !($options["only_deltas"] ?? false);
-            $run_sql =
-                !($options["only_files"] ?? false) &&
-                !($options["only_deltas"] ?? false);
-            $run_deltas =
-                !($options["only_files"] ?? false) &&
-                !($options["only_sql"] ?? false);
+            // Execute the specified mode
+            $this->state["current_mode"] = $mode;
+            $this->save_state($this->state);
 
-            // If only_* option specified, force that phase and reset its cursor
-            if ($options["only_files"] ?? false) {
-                $run_files = true;
-                $run_sql = false;
-                $run_deltas = false;
-                $state["phase"] = "files";
-                $state["files_cursor"] = null; // Force re-download
-            }
-            if ($options["only_sql"] ?? false) {
-                $run_files = false;
-                $run_sql = true;
-                $run_deltas = false;
-                $state["phase"] = "sql";
-                $state["sql_cursor"] = null; // Force re-download
-            }
-            if ($options["only_deltas"] ?? false) {
-                $run_files = false;
-                $run_sql = false;
-                $run_deltas = true;
-                $state["phase"] = "deltas";
-                $state["deltas_cursor"] = null; // Force re-download
-            }
-
-            // Phase 1: Download files
-            if (
-                $run_files &&
-                ($state["phase"] === "files" || $state["phase"] === "init")
-            ) {
-                $this->output_progress([
-                    "status" => "starting",
-                    "phase" => "files",
-                ]);
-                $state["phase"] = "files";
-                $this->save_state($state);
-
-                $this->download_files($state);
-                $state["files_cursor"] = null;
-                $state["phase"] = "sql";
-                $this->save_state($state);
-            }
-
-            // Phase 2: Download SQL
-            if ($run_sql && $state["phase"] === "sql") {
+            // Execute mode
+            if ($mode === "sql") {
                 $this->output_progress([
                     "status" => "starting",
                     "phase" => "sql",
                 ]);
-                $this->download_sql($state);
-                $state["sql_cursor"] = null;
-                $state["phase"] = "deltas";
-                $state["last_sync_time"] = time();
-                $this->save_state($state);
+                $this->download_sql($cursor_key, $session_key);
+            } elseif ($mode === "files-first-sync" || $mode === "files-delta") {
+                $this->output_progress([
+                    "status" => "starting",
+                    "phase" => "files",
+                ]);
+                $send_client_state = $mode === "files-delta";
+                $this->download_files($cursor_key, $send_client_state, $session_key);
             }
 
-            // Phase 3: Download file deltas (changes since last sync)
-            if ($run_deltas && $state["phase"] === "deltas") {
-                // Skip deltas if we just did files (no point getting deltas right after full sync)
-                if ($options["only_files"] ?? false) {
-                    $this->output_progress([
-                        "status" => "skipped",
-                        "phase" => "deltas",
-                        "message" => "Skipping deltas after full file download",
-                    ]);
-                } else {
-                    $this->output_progress([
-                        "status" => "starting",
-                        "phase" => "deltas",
-                    ]);
-                    $this->download_file_deltas($state);
-                    $state["deltas_cursor"] = null;
-                }
-                $state["phase"] = "complete";
-                $this->save_state($state);
-
-                // Show completion message
-                $this->clear_progress_line();
+            // Show completion message
+            $this->clear_progress_line();
+            if (str_starts_with($mode, "files-")) {
                 $index = $this->load_local_index();
                 $index_size = count($index);
-                $this->audit_log("Import complete: {$index_size} files indexed", true);
+                $this->audit_log(
+                    "Import complete: {$index_size} files indexed",
+                    true,
+                );
 
                 if (!$this->verbose_mode) {
                     echo "Import complete: {$index_size} files indexed\n";
+                    echo "Audit log: {$this->audit_log}\n";
+                }
+            } elseif ($mode === "sql") {
+                $this->audit_log("SQL import complete", true);
+                if (!$this->verbose_mode) {
+                    echo "SQL import complete\n";
                     echo "Audit log: {$this->audit_log}\n";
                 }
             }
@@ -699,25 +717,49 @@ class ImportClient
 
     /**
      * Download files from remote.
+     *
+     * @param string $cursor_key State key for cursor (e.g. 'files_first_sync_cursor')
+     * @param bool $send_client_state Whether to send client state for delta detection
+     * @param string $session_key State key for session ID
      */
-    private function download_files(array &$state): void
-    {
-        $cursor = $state["files_cursor"] ?? null;
+    private function download_files(
+        string $cursor_key,
+        bool $send_client_state,
+        string $session_key
+    ): void {
+        $cursor = $this->state[$cursor_key] ?? null;
+        $session_id = $this->state[$session_key] ?? null;
         $complete = false;
-        $is_first_request = ($cursor === null);
 
-        while (!$complete) {
-            // On first request, send compressed client state for delta detection
-            $post_data = null;
-            if ($is_first_request) {
-                $client_state_gz = $this->get_compressed_client_state();
-                if ($client_state_gz !== null) {
-                    $post_data = ["client_state_gz" => base64_encode($client_state_gz)];
-                }
-                $is_first_request = false;
+        // Send client state for delta detection if requested
+        $post_data = null;
+        if ($send_client_state) {
+            $has_index = file_exists($this->index_file);
+            if (!$has_index) {
+                throw new Exception(
+                    "Cannot use files-delta mode without existing index. Use files-first-sync first.",
+                );
             }
 
-            $url = $this->build_url("files", $cursor);
+            $client_state_gz = $this->get_compressed_client_state();
+            if ($client_state_gz !== null) {
+                $post_data = [
+                    "client_state_gz" => base64_encode($client_state_gz),
+                ];
+                $index_size = count($this->load_local_index());
+                $this->audit_log(
+                    sprintf(
+                        "Sending client state for delta detection (%d files, %d bytes compressed)",
+                        $index_size,
+                        strlen($client_state_gz),
+                    ),
+                    false,
+                );
+            }
+        }
+
+        while (!$complete) {
+            $url = $this->build_url("files", $cursor, [], $session_id);
 
             $context = new StreamingContext();
             $context->file_handle = null;
@@ -728,8 +770,28 @@ class ImportClient
                 &$cursor,
                 &$complete,
                 $context,
+                $cursor_key,
             ) {
+                // Check if shutdown was requested
+                if ($this->shutdown_requested) {
+                    throw new RuntimeException("Shutdown requested");
+                }
+
+                // Allow signal handlers to run
+                if (function_exists("pcntl_signal_dispatch")) {
+                    pcntl_signal_dispatch();
+                }
+
                 $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
+
+                // Save cursor periodically (every 50 chunks)
+                $this->chunks_since_save++;
+                if ($this->chunks_since_save >= 50) {
+                    $this->state[$cursor_key] = $cursor;
+                    $this->state["files_imported"] = $this->files_imported;
+                    $this->save_state($this->state);
+                    $this->chunks_since_save = 0;
+                }
 
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
@@ -762,7 +824,7 @@ class ImportClient
                             ($chunk["headers"]["x-status"] ?? "missing") .
                             ", complete=" .
                             ($complete ? "true" : "false"),
-                        false
+                        false,
                     );
 
                     $progress_data = [
@@ -787,22 +849,31 @@ class ImportClient
                 }
             };
 
-            $this->fetch_streaming($url, $cursor, $context, $post_data ?? null);
+            $this->fetch_streaming($url, $cursor, $context, $post_data);
 
-            // Save cursor for resumption
-            if (!$complete) {
-                $state["files_cursor"] = $cursor;
-                $this->save_state($state);
-            }
+            // Save cursor for resumption (keep it even when complete for reference)
+            $this->state[$cursor_key] = $cursor;
+            $this->state["files_imported"] = $this->files_imported;
+            $this->save_state($this->state);
+
+            // Only send client_state_gz on first request
+            $post_data = null;
         }
     }
 
     /**
      * Download SQL from remote.
      */
-    private function download_sql(array &$state): void
+    /**
+     * Download SQL from remote.
+     *
+     * @param string $cursor_key State key for cursor (e.g. 'sql_cursor')
+     * @param string $session_key State key for session ID
+     */
+    private function download_sql(string $cursor_key, string $session_key): void
     {
-        $cursor = $state["sql_cursor"] ?? null;
+        $cursor = $this->state[$cursor_key] ?? null;
+        $session_id = $this->state[$session_key] ?? null;
         $complete = false;
         $sql_file = $this->local_path . "/db.sql";
 
@@ -815,7 +886,7 @@ class ImportClient
 
         try {
             while (!$complete) {
-                $url = $this->build_url("sql", $cursor);
+                $url = $this->build_url("sql", $cursor, [], $session_id);
 
                 $context = new StreamingContext();
                 $context->sql_handle = $sql_handle;
@@ -826,7 +897,25 @@ class ImportClient
                     $sql_handle,
                     $context,
                 ) {
+                    // Check if shutdown was requested
+                    if ($this->shutdown_requested) {
+                        throw new RuntimeException("Shutdown requested");
+                    }
+
+                    // Allow signal handlers to run
+                    if (function_exists("pcntl_signal_dispatch")) {
+                        pcntl_signal_dispatch();
+                    }
+
                     $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
+
+                    // Save cursor periodically (every 50 chunks)
+                    $this->chunks_since_save++;
+                    if ($this->chunks_since_save >= 50) {
+                        $this->state[$cursor_key] = $cursor;
+                        $this->save_state($this->state);
+                        $this->chunks_since_save = 0;
+                    }
 
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
@@ -853,13 +942,16 @@ class ImportClient
                     }
                 };
 
-                $this->fetch_streaming($url, $cursor, $context, $post_data ?? null);
+                $this->fetch_streaming(
+                    $url,
+                    $cursor,
+                    $context,
+                    $post_data ?? null,
+                );
 
-                // Save cursor for resumption
-                if (!$complete) {
-                    $state["sql_cursor"] = $cursor;
-                    $this->save_state($state);
-                }
+                // Save cursor for resumption (keep it even when complete for reference)
+                $this->state[$cursor_key] = $cursor;
+                $this->save_state($this->state);
             }
         } finally {
             fclose($sql_handle);
@@ -869,95 +961,6 @@ class ImportClient
     /**
      * Download file deltas (changes since last sync).
      */
-    private function download_file_deltas(array &$state): void
-    {
-        $cursor = $state["deltas_cursor"] ?? null;
-        $min_ctime = $state["last_sync_time"] ?? 0;
-
-        // If no last_sync_time, this is the first run - skip deltas
-        if ($min_ctime === 0 || $min_ctime === null) {
-            $this->output_progress([
-                "status" => "skipped",
-                "phase" => "deltas",
-                "message" => "No previous sync time - skipping deltas",
-            ]);
-            return;
-        }
-
-        $complete = false;
-
-        while (!$complete) {
-            $url = $this->build_url("files", $cursor, [
-                "min_ctime" => $min_ctime,
-            ]);
-
-            $context = new StreamingContext();
-            $context->file_handle = null;
-            $context->file_path = null;
-            $context->file_ctime = null;
-
-            $context->on_chunk = function ($chunk) use (
-                &$cursor,
-                &$complete,
-                $context,
-            ) {
-                $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
-
-                $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
-                if ($chunk_type === "metadata") {
-                    $this->handle_metadata_chunk($chunk, $context);
-                } elseif ($chunk_type === "file") {
-                    $this->handle_file_chunk($chunk, $context);
-                } elseif ($chunk_type === "symlink") {
-                    $this->handle_symlink_chunk($chunk);
-                } elseif ($chunk_type === "deletion") {
-                    $this->handle_deletion($chunk);
-                } elseif ($chunk_type === "progress") {
-                    $this->handle_progress($chunk, "deltas");
-                } elseif ($chunk_type === "completion") {
-                    // Close any open file handle
-                    if ($context->file_handle) {
-                        fclose($context->file_handle);
-                        if ($context->file_ctime && $context->file_path) {
-                            touch($context->file_path, $context->file_ctime);
-                        }
-                        $context->file_handle = null;
-                    }
-
-                    $complete =
-                        ($chunk["headers"]["x-status"] ?? "") === "complete";
-                    $this->output_progress(
-                        [
-                            "phase" => "deltas",
-                            "status" =>
-                                $chunk["headers"]["x-status"] ?? "unknown",
-                            "chunks_processed" =>
-                                (int) ($chunk["headers"][
-                                    "x-chunks-processed"
-                                ] ?? 0),
-                            "files_completed" =>
-                                (int) ($chunk["headers"]["x-files-completed"] ??
-                                    0),
-                            "bytes_processed" =>
-                                (int) ($chunk["headers"]["x-bytes-processed"] ??
-                                    0),
-                        ],
-                        true,
-                    );
-                }
-            };
-
-            $this->fetch_streaming($url, $cursor, $context, $post_data ?? null);
-
-            // Save cursor for resumption
-            if (!$complete) {
-                $state["deltas_cursor"] = $cursor;
-                $this->save_state($state);
-            }
-        }
-    }
-
     /**
      * Handle a metadata chunk from multipart response.
      */
@@ -967,12 +970,16 @@ class ImportClient
     ): void {
         $headers = $chunk["headers"];
         $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "");
-        $session_id = $headers["x-session-id"] ?? null;
+        $server_session_id = $headers["x-session-id"] ?? null;
 
-        // Store session ID for future requests
-        if ($session_id && $session_id !== $this->session_id) {
-            $this->session_id = $session_id;
-            $this->audit_log("Session ID: {$session_id}", false);
+        // Store server's session ID for future requests
+        if (
+            $server_session_id &&
+            $server_session_id !== ($this->state["server_session_id"] ?? null)
+        ) {
+            $this->state["server_session_id"] = $server_session_id;
+            $this->save_state($this->state);
+            $this->audit_log("Server session ID: {$server_session_id}", false);
         }
 
         if ($filesystem_root) {
@@ -1023,23 +1030,24 @@ class ImportClient
                     $path,
                     $file_size,
                     (int) ($headers["x-file-ctime"] ?? 0),
-                    $exists_locally ? 'yes' : 'no',
-                    $local_size
+                    $exists_locally ? "yes" : "no",
+                    $local_size,
                 ),
-                false
+                false,
             );
 
             // Show relative path (remove leading /)
-            $relative_path = ltrim($path, '/');
+            $relative_path = ltrim($path, "/");
 
             // Truncate from the left if too long (keep the end which is more distinctive)
             $max_path_len = 60;
             if (strlen($relative_path) > $max_path_len) {
-                $relative_path = '...' . substr($relative_path, -(($max_path_len - 3)));
+                $relative_path =
+                    "..." . substr($relative_path, -($max_path_len - 3));
             }
 
             $this->show_progress_line(
-                sprintf("[%d files] %s", $this->files_imported, $relative_path)
+                sprintf("[%d files] %s", $this->files_imported, $relative_path),
             );
         }
 
@@ -1096,7 +1104,9 @@ class ImportClient
 
             // Index the file after successful write (append-only for speed)
             $file_size = (int) ($headers["x-file-size"] ?? 0);
-            $final_size = file_exists($context->file_path) ? filesize($context->file_path) : 0;
+            $final_size = file_exists($context->file_path)
+                ? filesize($context->file_path)
+                : 0;
 
             if ($context->file_ctime) {
                 $this->index_file_entry(
@@ -1106,7 +1116,7 @@ class ImportClient
                 );
                 $this->audit_log(
                     sprintf("  Indexed (wrote %d bytes)", $final_size),
-                    false
+                    false,
                 );
             }
 
@@ -1187,7 +1197,10 @@ class ImportClient
 
             // Remove file if blocking directory creation
             if (is_file($current)) {
-                $this->audit_log("Removing file blocking directory: {$current}", true);
+                $this->audit_log(
+                    "Removing file blocking directory: {$current}",
+                    true,
+                );
                 if (!unlink($current)) {
                     throw new RuntimeException(
                         "Failed to remove file blocking directory: {$current}",
@@ -1275,7 +1288,10 @@ class ImportClient
         if (!is_dir($dir)) {
             if (!mkdir($dir, 0755, true) && !is_dir($dir)) {
                 // Log error and skip this symlink
-                $this->audit_log("Failed to create directory for symlink: {$dir}", true);
+                $this->audit_log(
+                    "Failed to create directory for symlink: {$dir}",
+                    true,
+                );
                 $this->output_progress([
                     "type" => "symlink_error",
                     "path" => $path,
@@ -1290,7 +1306,10 @@ class ImportClient
         $symlink_result = symlink($target, $local_path);
         if (true !== $symlink_result || !is_link($local_path)) {
             // Log error and skip this symlink
-            $this->audit_log("Failed to create symlink: {$local_path} -> {$target}", true);
+            $this->audit_log(
+                "Failed to create symlink: {$local_path} -> {$target}",
+                true,
+            );
             $this->output_progress([
                 "type" => "symlink_error",
                 "path" => $path,
@@ -1341,10 +1360,11 @@ class ImportClient
                 $this->audit_log("Deleted: {$data["path"]}", false);
 
                 // Show relative path for deletion
-                $relative_path = ltrim($data["path"], '/');
+                $relative_path = ltrim($data["path"], "/");
                 $max_path_len = 60;
                 if (strlen($relative_path) > $max_path_len) {
-                    $relative_path = '...' . substr($relative_path, -(($max_path_len - 3)));
+                    $relative_path =
+                        "..." . substr($relative_path, -($max_path_len - 3));
                 }
                 $this->show_progress_line("Deleted: " . $relative_path);
 
@@ -1380,6 +1400,7 @@ class ImportClient
         string $operation,
         ?string $cursor,
         array $params = [],
+        ?string $session_id = null
     ): string {
         $url = $this->remote_url;
         $separator = strpos($url, "?") === false ? "?" : "&";
@@ -1389,9 +1410,9 @@ class ImportClient
             $params["cursor"] = $cursor;
         }
 
-        // Add session_id for snapshot tracking (enables deletion detection)
-        if ($this->session_id) {
-            $params["session_id"] = $this->session_id;
+        // Add session_id for server-side cursor/snapshot tracking
+        if ($session_id) {
+            $params["session_id"] = $session_id;
         }
 
         return $url . $separator . http_build_query($params);
@@ -1404,10 +1425,37 @@ class ImportClient
         string $url,
         ?string $cursor,
         StreamingContext $context,
+        ?array $post_data = null,
     ): void {
-        $this->audit_log("Fetching URL: $url", false);
-        $this->output_progress(["debug" => "Requesting: $url"]);
+        // Log HTTP request details
+        $parsed_url = parse_url($url);
+        $query_params = [];
+        if (isset($parsed_url["query"])) {
+            parse_str($parsed_url["query"], $query_params);
+        }
+
+        $log_parts = [
+            "HTTP_REQUEST",
+            $post_data ? "POST" : "GET",
+            $parsed_url["path"] ?? "/",
+        ];
+
+        if (isset($query_params["phase"])) {
+            $log_parts[] = "phase=" . $query_params["phase"];
+        }
+        if ($cursor) {
+            $log_parts[] = "cursor=" . substr($cursor, 0, 20) . "...";
+        }
+        if ($post_data && isset($post_data["client_state_gz"])) {
+            $log_parts[] = "client_state_gz=" . strlen($post_data["client_state_gz"]) . "b";
+        }
+
+        $this->audit_log(implode(" | ", $log_parts), false);
+
         $ch = curl_init($url);
+
+        // Store curl handle so signal handler can abort it
+        $this->current_curl_handle = $ch;
 
         $parser = null;
         $current_chunk = null;
@@ -1419,22 +1467,28 @@ class ImportClient
 
         // Build headers to look like a real browser
         $headers = [
-            'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language: en-US,en;q=0.9',
-            'Accept-Encoding: gzip, deflate, br',
-            'Cache-Control: no-cache',
-            'Pragma: no-cache',
-            'Connection: keep-alive',
-            'Upgrade-Insecure-Requests: 1',
-            'Sec-Fetch-Dest: document',
-            'Sec-Fetch-Mode: navigate',
-            'Sec-Fetch-Site: none',
-            'Sec-Fetch-User: ?1',
+            "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language: en-US,en;q=0.9",
+            "Accept-Encoding: gzip, deflate, br",
+            "Cache-Control: no-cache",
+            "Pragma: no-cache",
+            "Connection: keep-alive",
+            "Upgrade-Insecure-Requests: 1",
+            "Sec-Fetch-Dest: document",
+            "Sec-Fetch-Mode: navigate",
+            "Sec-Fetch-Site: none",
+            "Sec-Fetch-User: ?1",
         ];
 
         if ($cursor) {
             $headers[] = "X-Export-Cursor: {$cursor}";
+        }
+
+        // Configure POST data if provided
+        if ($post_data !== null) {
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($post_data));
         }
 
         curl_setopt_array($ch, [
@@ -1480,7 +1534,7 @@ class ImportClient
                         if ($boundary_value !== "") {
                             $this->audit_log(
                                 "Creating multipart parser with boundary: $boundary_value",
-                                false
+                                false,
                             );
                             $parser = new MultipartStreamParser(
                                 $boundary_value,
@@ -1544,7 +1598,7 @@ class ImportClient
                         $this->audit_log(
                             "No parser, accumulating error body (first 500 chars): " .
                                 substr($error_body, 0, 500),
-                            false
+                            false,
                         );
                         $logged_no_parser = true;
                     }
@@ -1577,7 +1631,7 @@ class ImportClient
                     if ($bytes_since_check < 1024 && $bytes_received > 0) {
                         $this->audit_log(
                             "Warning: Slow transfer detected - {$bytes_since_check} bytes in 5 seconds",
-                            false
+                            false,
                         );
                     }
 
@@ -1607,7 +1661,7 @@ class ImportClient
         $this->audit_log(
             "curl_exec completed, result=" .
                 ($result === false ? "false" : "true"),
-            false
+            false,
         );
 
         if (curl_errno($ch)) {
@@ -1618,6 +1672,9 @@ class ImportClient
 
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
+
+        // Clear curl handle reference
+        $this->current_curl_handle = null;
 
         if ($http_code !== 200) {
             $error_msg = "HTTP error {$http_code}";
@@ -1643,49 +1700,55 @@ class ImportClient
     }
 
     /**
-     * Get or create a session ID for snapshot tracking.
-     * Session ID is persistent across import runs.
-     */
-    private function get_or_create_session_id(): string
-    {
-        $session_file = $this->local_path . "/.import-session-id";
-
-        if (file_exists($session_file)) {
-            $session_id = trim(file_get_contents($session_file));
-            if ($session_id) {
-                return $session_id;
-            }
-        }
-
-        // Generate new session ID
-        $session_id = "import-" . bin2hex(random_bytes(16));
-        file_put_contents($session_file, $session_id);
-
-        return $session_id;
-    }
-
-    /**
      * Load import state from disk.
      */
     private function load_state(): array
     {
         if (!file_exists($this->state_file)) {
             return [
-                "phase" => "init",
-                "files_cursor" => null,
+                "current_mode" => null,
+                // Per-mode session IDs
+                "sql_session_id" => null,
+                "files_first_sync_session_id" => null,
+                "files_delta_session_id" => null,
+                // Per-mode cursors
                 "sql_cursor" => null,
-                "deltas_cursor" => null,
-                "last_sync_time" => null,
+                "files_first_sync_cursor" => null,
+                "files_delta_cursor" => null,
+                // Files imported counter (for file modes)
+                "files_imported" => 0,
             ];
         }
 
         $state = json_decode(file_get_contents($this->state_file), true);
+
+        // Initialize cursor/session keys if missing
+        $state["current_mode"] = $state["current_mode"] ?? null;
+        $state["sql_session_id"] = $state["sql_session_id"] ?? null;
+        $state["files_first_sync_session_id"] =
+            $state["files_first_sync_session_id"] ?? null;
+        $state["files_delta_session_id"] =
+            $state["files_delta_session_id"] ?? null;
+        $state["sql_cursor"] = $state["sql_cursor"] ?? null;
+        $state["files_first_sync_cursor"] =
+            $state["files_first_sync_cursor"] ?? null;
+        $state["files_delta_cursor"] = $state["files_delta_cursor"] ?? null;
+        $state["files_imported"] = $state["files_imported"] ?? 0;
+
+        // Ensure files_imported exists (for backwards compatibility)
+        if (!isset($state["files_imported"])) {
+            $state["files_imported"] = 0;
+        }
+
         return $state ?: [
                 "phase" => "init",
+                "session_id" => "import-" . bin2hex(random_bytes(16)),
+                "server_session_id" => null,
                 "files_cursor" => null,
                 "sql_cursor" => null,
                 "deltas_cursor" => null,
                 "last_sync_time" => null,
+                "files_imported" => 0,
             ];
     }
 
@@ -1698,6 +1761,60 @@ class ImportClient
             $this->state_file,
             json_encode($state, JSON_PRETTY_PRINT),
         );
+    }
+
+    /**
+     * Handle shutdown signals (SIGINT, SIGTERM).
+     * Saves state before exiting.
+     */
+    public function handle_shutdown(int $signal): void
+    {
+        // Prevent multiple signal handling
+        static $already_shutting_down = false;
+        if ($already_shutting_down) {
+            // Force kill on second signal
+            if (
+                function_exists("posix_kill") &&
+                function_exists("posix_getpid")
+            ) {
+                posix_kill(posix_getpid(), SIGKILL);
+            }
+            die("\nForced exit.\n");
+        }
+        $already_shutting_down = true;
+
+        $this->shutdown_requested = true;
+        $this->clear_progress_line();
+
+        if (!$this->verbose_mode) {
+            echo "\nInterrupted - saving state...\n";
+            flush();
+        }
+
+        // Save current state (with timeout protection)
+        try {
+            $this->save_state($this->state);
+        } catch (Exception $e) {
+            echo "Warning: Failed to save state: " . $e->getMessage() . "\n";
+            flush();
+        }
+
+        if (!$this->verbose_mode) {
+            echo "State saved. Exiting...\n";
+            flush();
+        }
+
+        // CRITICAL: Use SIGKILL for immediate termination
+        // Regular exit() hangs because PHP's shutdown sequence tries to
+        // close the curl handle gracefully, which blocks waiting for server.
+        // curl_close() also hangs when called during an active curl_exec().
+        // SIGKILL bypasses all cleanup and terminates at OS level immediately.
+        if (function_exists("posix_kill") && function_exists("posix_getpid")) {
+            posix_kill(posix_getpid(), SIGKILL);
+        }
+
+        // Fallback if posix functions not available
+        die();
     }
 
     /**
@@ -1769,29 +1886,35 @@ if (
         echo "  local-path   Local directory to store imported data\n";
         echo "\n";
         echo "Options:\n";
-        echo "  --only-files     Import only files (initial download)\n";
-        echo "  --only-sql       Import only database dump\n";
-        echo "  --only-deltas    Import only file changes since last sync\n";
-        echo "  --reset          Reset state and start fresh import\n";
-        echo "  --verbose        Show detailed logs (default: show progress only)\n";
+        echo "  --mode=MODE      Import mode (sql|files-first-sync|files-delta)\n";
+        echo "                   Default: files-first-sync if no index, files-delta if index exists\n";
+        echo "  --verbose, -v    Show detailed logs (default: show progress only)\n";
+        echo "\n";
+        echo "Modes:\n";
+        echo "  sql              Download database dump only\n";
+        echo "  files-first-sync Download all files (no delta detection)\n";
+        echo "  files-delta      Download only changed files (requires existing index)\n";
         echo "\n";
         echo "Notes:\n";
-        echo "  - Snapshot tracking is automatic (enables deletion detection)\n";
-        echo "  - Session ID is stored in <local-path>/.import-session-id\n";
-        echo "  - Snapshots are stored on the server in /tmp/export-snapshots/\n";
+        echo "  - Each mode tracks its own cursor - interrupted imports auto-resume\n";
+        echo "  - Index (.import-index.tsv) enables delta detection (only changed files)\n";
+        echo "  - Server compares client index with filesystem to detect changes/deletions\n";
         echo "\n";
         echo "Examples:\n";
-        echo "  # Full import (files, then SQL, then deltas)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www/html&SECRET_KEY=xxx' ./backup\n";
+        echo "  # First import (downloads everything)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --mode=files-first-sync\n";
         echo "\n";
-        echo "  # Re-download just the database\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --only-sql\n";
+        echo "  # Resume interrupted import (automatically continues from cursor)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --mode=files-first-sync\n";
         echo "\n";
-        echo "  # Get file updates only (detects deletions via snapshot)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --only-deltas\n";
+        echo "  # Pull delta (only download changed/new/deleted files)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --mode=files-delta\n";
         echo "\n";
-        echo "  # Start fresh (ignores previous state)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --reset\n";
+        echo "  # Download database only\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --mode=sql\n";
+        echo "\n";
+        echo "  # Auto mode (detects based on index presence)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup\n";
         echo "\n";
         echo "Output:\n";
         echo "  - Progress is reported as JSON lines to stdout\n";
@@ -1806,35 +1929,34 @@ if (
 
     // Parse options
     $options = [
-        "only_files" => false,
-        "only_sql" => false,
-        "only_deltas" => false,
-        "reset" => false,
+        "mode" => null, // sql|files-first-sync|files-delta
         "verbose" => false,
     ];
 
     for ($i = 3; $i < $argc; $i++) {
-        switch ($argv[$i]) {
-            case "--only-files":
-                $options["only_files"] = true;
-                break;
-            case "--only-sql":
-                $options["only_sql"] = true;
-                break;
-            case "--only-deltas":
-                $options["only_deltas"] = true;
-                break;
-            case "--reset":
-                $options["reset"] = true;
-                break;
-            case "--verbose":
-            case "-v":
-                $options["verbose"] = true;
-                break;
-            default:
-                fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
+        if (preg_match('/^--mode=(.+)$/', $argv[$i], $matches)) {
+            $mode = $matches[1];
+            if (!in_array($mode, ["sql", "files-first-sync", "files-delta"])) {
+                fwrite(
+                    STDERR,
+                    "Invalid mode: {$mode}. Must be: sql, files-first-sync, or files-delta\n",
+                );
                 exit(1);
+            }
+            $options["mode"] = $mode;
+        } elseif ($argv[$i] === "--verbose" || $argv[$i] === "-v") {
+            $options["verbose"] = true;
+        } else {
+            fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
+            exit(1);
         }
+    }
+
+    // Default mode: files-first-sync if no index, files-delta if index exists
+    if ($options["mode"] === null) {
+        $index_file = $local_path . "/.import-index.tsv";
+        $has_index = file_exists($index_file);
+        $options["mode"] = $has_index ? "files-delta" : "files-first-sync";
     }
 
     try {
