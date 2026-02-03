@@ -315,11 +315,10 @@ class ExportImportTest extends TestCase
         ];
 
         // Include export.php but prevent it from executing
-        // We'll call export_files() directly
+        // We'll call endpoint_file_chunk() directly
         require_once __DIR__ . '/../../export.php';
 
         $config = [
-            'operation' => 'files',
             'directory' => $directory,
         ];
 
@@ -333,7 +332,7 @@ class ExportImportTest extends TestCase
         }
         $memory_threshold = 0.8;
 
-        export_files($config, $script_start, $max_execution_time, $max_memory, $memory_threshold);
+        endpoint_file_chunk($config, $script_start, $max_execution_time, $max_memory, $memory_threshold);
 
         $output = ob_get_clean();
 

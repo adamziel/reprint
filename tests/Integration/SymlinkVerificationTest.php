@@ -46,7 +46,7 @@ class SymlinkVerificationTest extends TestCase
 
         ob_start();
         $config = ['directory' => $this->sourceDir . '/srv/htdocs'];
-        export_files($config, microtime(true), 30, PHP_INT_MAX, 0.8);
+        endpoint_file_chunk($config, microtime(true), 30, PHP_INT_MAX, 0.8);
         $exportData = ob_get_clean();
 
         $this->assertNotEmpty($exportData, 'Export should produce data');

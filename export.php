@@ -50,7 +50,7 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
     // Search for wp-config.php in provided directories
     $wp_config_path = null;
     foreach ($directories as $dir) {
-        $path = rtrim($dir, '/') . '/wp-config.php';
+        $path = rtrim($dir, "/") . "/wp-config.php";
         if (file_exists($path)) {
             $wp_config_path = $path;
             break;
@@ -71,7 +71,7 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
         $credentials = [];
 
         // State machine to parse define('CONSTANT', 'value')
-        $state = 'search'; // search, found_define, found_open_paren, found_constant, found_comma
+        $state = "search"; // search, found_define, found_open_paren, found_constant, found_comma
         $current_constant = null;
 
         for ($i = 0; $i < count($tokens); $i++) {
@@ -82,50 +82,67 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
                 continue;
             }
 
-            if ($state === 'search') {
+            if ($state === "search") {
                 // Look for 'define' function call
-                if (is_array($token) && $token[0] === T_STRING && strtolower($token[1]) === 'define') {
-                    $state = 'found_define';
+                if (
+                    is_array($token) &&
+                    $token[0] === T_STRING &&
+                    strtolower($token[1]) === "define"
+                ) {
+                    $state = "found_define";
                 }
-            } elseif ($state === 'found_define') {
+            } elseif ($state === "found_define") {
                 // Expect opening parenthesis
-                if ($token === '(') {
-                    $state = 'found_open_paren';
+                if ($token === "(") {
+                    $state = "found_open_paren";
                 } else {
-                    $state = 'search';
+                    $state = "search";
                 }
-            } elseif ($state === 'found_open_paren') {
+            } elseif ($state === "found_open_paren") {
                 // Expect constant name (string)
-                if (is_array($token) && ($token[0] === T_CONSTANT_ENCAPSED_STRING)) {
+                if (
+                    is_array($token) &&
+                    $token[0] === T_CONSTANT_ENCAPSED_STRING
+                ) {
                     $constant_name = trim($token[1], '\'"');
-                    if (in_array($constant_name, ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'])) {
+                    if (
+                        in_array($constant_name, [
+                            "DB_HOST",
+                            "DB_NAME",
+                            "DB_USER",
+                            "DB_PASSWORD",
+                        ])
+                    ) {
                         $current_constant = $constant_name;
-                        $state = 'found_constant';
+                        $state = "found_constant";
                     } else {
-                        $state = 'search';
+                        $state = "search";
                     }
                 } else {
-                    $state = 'search';
+                    $state = "search";
                 }
-            } elseif ($state === 'found_constant') {
+            } elseif ($state === "found_constant") {
                 // Expect comma
-                if ($token === ',') {
-                    $state = 'found_comma';
+                if ($token === ",") {
+                    $state = "found_comma";
                 } else {
-                    $state = 'search';
+                    $state = "search";
                 }
-            } elseif ($state === 'found_comma') {
+            } elseif ($state === "found_comma") {
                 // Expect value (string)
-                if (is_array($token) && ($token[0] === T_CONSTANT_ENCAPSED_STRING)) {
+                if (
+                    is_array($token) &&
+                    $token[0] === T_CONSTANT_ENCAPSED_STRING
+                ) {
                     $value = trim($token[1], '\'"');
                     $credentials[$current_constant] = $value;
                 }
-                $state = 'search';
+                $state = "search";
             }
         }
 
         // Check if we found all required credentials
-        $required = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'];
+        $required = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"];
         foreach ($required as $key) {
             if (!isset($credentials[$key])) {
                 return null;
@@ -133,21 +150,31 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
         }
 
         return [
-            'db_host' => $credentials['DB_HOST'],
-            'db_name' => $credentials['DB_NAME'],
-            'db_user' => $credentials['DB_USER'],
-            'db_password' => $credentials['DB_PASSWORD'],
+            "db_host" => $credentials["DB_HOST"],
+            "db_name" => $credentials["DB_NAME"],
+            "db_user" => $credentials["DB_USER"],
+            "db_password" => $credentials["DB_PASSWORD"],
         ];
     } catch (Exception $e) {
-        error_log("Failed to extract credentials from wp-config.php: " . $e->getMessage());
+        error_log(
+            "Failed to extract credentials from wp-config.php: " .
+                $e->getMessage(),
+        );
         return null;
     }
 }
 
 /**
- * Handle SQL export operation.
+ * Endpoint: Get next chunk of SQL data.
+ *
+ * @param array $config Configuration with optional cursor for resumption
+ * @param float $script_start Script execution start time
+ * @param int $max_execution_time Maximum execution time in seconds
+ * @param int $max_memory Maximum memory in bytes
+ * @param float $memory_threshold Memory usage threshold (0.0-1.0)
+ * @return array Result with status and stats
  */
-function export_sql(
+function endpoint_sql_chunk(
     array $config,
     float $script_start,
     int $max_execution_time,
@@ -155,10 +182,18 @@ function export_sql(
     float $memory_threshold,
 ): array {
     // Try to get credentials from config, constants, env vars, or wp-config.php
-    $db_host = $config["db_host"] ?? (defined("DB_HOST") ? DB_HOST : getenv("DB_HOST"));
-    $db_name = $config["db_name"] ?? (defined("DB_NAME") ? DB_NAME : getenv("DB_NAME"));
-    $db_user = $config["db_user"] ?? (defined("DB_USER") ? DB_USER : getenv("DB_USER"));
-    $db_password = $config["db_password"] ?? (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
+    $db_host =
+        $config["db_host"] ??
+        (defined("DB_HOST") ? DB_HOST : getenv("DB_HOST"));
+    $db_name =
+        $config["db_name"] ??
+        (defined("DB_NAME") ? DB_NAME : getenv("DB_NAME"));
+    $db_user =
+        $config["db_user"] ??
+        (defined("DB_USER") ? DB_USER : getenv("DB_USER"));
+    $db_password =
+        $config["db_password"] ??
+        (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
 
     // If any credentials are missing, try to extract from wp-config.php
     // Use directory parameter to locate wp-config.php
@@ -171,12 +206,17 @@ function export_sql(
         }
 
         if (!empty($directories)) {
-            $wp_credentials = extract_db_credentials_from_wp_config($directories);
+            $wp_credentials = extract_db_credentials_from_wp_config(
+                $directories,
+            );
             if ($wp_credentials !== null) {
-                $db_host = $db_host ?: $wp_credentials['db_host'];
-                $db_name = $db_name ?: $wp_credentials['db_name'];
-                $db_user = $db_user ?: $wp_credentials['db_user'];
-                $db_password = $db_password !== false ? $db_password : $wp_credentials['db_password'];
+                $db_host = $db_host ?: $wp_credentials["db_host"];
+                $db_name = $db_name ?: $wp_credentials["db_name"];
+                $db_user = $db_user ?: $wp_credentials["db_user"];
+                $db_password =
+                    $db_password !== false
+                        ? $db_password
+                        : $wp_credentials["db_password"];
             }
         }
     }
@@ -185,12 +225,12 @@ function export_sql(
     if (!$db_host || !$db_name || !$db_user || $db_password === false) {
         throw new InvalidArgumentException(
             "Database credentials not found. Please provide via config, environment variables, " .
-            "PHP constants, or ensure wp-config.php exists with valid credentials. " .
-            "Missing: " .
-            (!$db_host ? "db_host " : "") .
-            (!$db_name ? "db_name " : "") .
-            (!$db_user ? "db_user " : "") .
-            ($db_password === false ? "db_password" : "")
+                "PHP constants, or ensure wp-config.php exists with valid credentials. " .
+                "Missing: " .
+                (!$db_host ? "db_host " : "") .
+                (!$db_name ? "db_name " : "") .
+                (!$db_user ? "db_user " : "") .
+                ($db_password === false ? "db_password" : ""),
         );
     }
 
@@ -311,6 +351,20 @@ function export_sql(
 }
 
 /**
+ * Endpoint: Create a new file transfer session.
+ *
+ * @param array $config Configuration with optional session_id and client_state_gz
+ * @return array Result with session_id and snapshot_storage
+ */
+function endpoint_create_file_session(array $config): array
+{
+    $session_id = $config["session_id"] ?? null;
+    $client_state_gz = $config["client_state_gz"] ?? null;
+
+    return create_file_session($session_id, $client_state_gz);
+}
+
+/**
  * Create or load an export session.
  * Sessions store client file state for delta detection.
  *
@@ -318,9 +372,11 @@ function export_sql(
  * @param string|null $client_state_gz Compressed client file state (gzipped TSV: path\tctime\n)
  * @return array Array with 'session_id' and 'snapshot_storage'
  */
-function get_or_create_export_session(?string $session_id, ?string $client_state_gz): array
-{
-    $sessions_dir = sys_get_temp_dir() . '/export-sessions';
+function create_file_session(
+    ?string $session_id,
+    ?string $client_state_gz,
+): array {
+    $sessions_dir = sys_get_temp_dir() . "/export-sessions";
     if (!is_dir($sessions_dir)) {
         mkdir($sessions_dir, 0755, true);
     }
@@ -332,52 +388,61 @@ function get_or_create_export_session(?string $session_id, ?string $client_state
             throw new InvalidArgumentException("Invalid session_id format");
         }
 
-        $session_file = $sessions_dir . '/' . $session_id . '.tsv';
+        $session_file = $sessions_dir . "/" . $session_id . ".tsv";
         if (file_exists($session_file)) {
             return [
-                'session_id' => $session_id,
-                'snapshot_storage' => new FileSnapshotStorage($session_file),
+                "session_id" => $session_id,
+                "snapshot_storage" => new FileSnapshotStorage($session_file),
             ];
         }
 
         // Session expired or doesn't exist, treat as new session
-        error_log("Export session not found: {$session_id}, creating new session");
+        error_log(
+            "Export session not found: {$session_id}, creating new session",
+        );
     }
 
     // Create new session
     $new_session_id = bin2hex(random_bytes(16));
-    $session_file = $sessions_dir . '/' . $new_session_id . '.tsv';
+    $session_file = $sessions_dir . "/" . $new_session_id . ".tsv";
 
     // If client state provided, decode from base64, decompress and store it
-    if ($client_state_gz !== null && $client_state_gz !== '') {
+    if ($client_state_gz !== null && $client_state_gz !== "") {
         // Decode from base64
         $client_state_gz_binary = base64_decode($client_state_gz, true);
         if ($client_state_gz_binary === false) {
-            throw new InvalidArgumentException("Failed to base64 decode client state");
+            throw new InvalidArgumentException(
+                "Failed to base64 decode client state",
+            );
         }
 
         // Decompress
         $client_state = @gzdecode($client_state_gz_binary);
         if ($client_state === false) {
-            throw new InvalidArgumentException("Failed to decompress client state");
+            throw new InvalidArgumentException(
+                "Failed to decompress client state",
+            );
         }
 
         // Parse client state (TSV format: path\tctime\n)
         // Convert to snapshot format and write to session file
-        $handle = fopen($session_file, 'w');
+        $handle = fopen($session_file, "w");
         if (!$handle) {
             throw new RuntimeException("Failed to create session file");
         }
 
         $lines = explode("\n", trim($client_state));
+        $file_count = 0;
         foreach ($lines as $line) {
-            if (trim($line) === '') continue;
+            if (trim($line) === "") {
+                continue;
+            }
 
             $parts = explode("\t", $line);
             if (count($parts) >= 2) {
                 $path = $parts[0];
-                $ctime = (int)$parts[1];
-                $size = (int)($parts[2] ?? 0);
+                $ctime = (int) $parts[1];
+                $size = (int) ($parts[2] ?? 0);
 
                 // Write in snapshot format: path\tctime\tsize\tactive\tlast_seen\tdeleted_at
                 fprintf(
@@ -386,29 +451,41 @@ function get_or_create_export_session(?string $session_id, ?string $client_state
                     base64_encode($path),
                     $ctime,
                     $size,
-                    time()
+                    time(),
                 );
+                $file_count++;
             }
         }
         fclose($handle);
 
-        error_log("Export session created: {$new_session_id} with " . count($lines) . " client files");
+        error_log(
+            "DELTA DETECTION | Created session {$new_session_id} | Received {$file_count} files from client | Server will only send NEW/MODIFIED/DELETED files",
+        );
     } else {
         // No client state = full export (create empty snapshot)
         touch($session_file);
-        error_log("Export session created: {$new_session_id} (full export, no client state)");
+        error_log(
+            "Export session created: {$new_session_id} (full export, no client state)",
+        );
     }
 
     return [
-        'session_id' => $new_session_id,
-        'snapshot_storage' => new FileSnapshotStorage($session_file),
+        "session_id" => $new_session_id,
+        "snapshot_storage" => new FileSnapshotStorage($session_file),
     ];
 }
 
 /**
- * Handle file export operation.
+ * Endpoint: Get next chunk of file data in a given file transfer session.
+ *
+ * @param array $config Configuration with optional cursor and session info
+ * @param float $script_start Script execution start time
+ * @param int $max_execution_time Maximum execution time in seconds
+ * @param int $max_memory Maximum memory in bytes
+ * @param float $memory_threshold Memory usage threshold (0.0-1.0)
+ * @return array Result with status and stats
  */
-function export_files(
+function endpoint_file_chunk(
     array $config,
     float $script_start,
     int $max_execution_time,
@@ -434,6 +511,7 @@ function export_files(
         }
 
         // Expand ~ to home directory
+        // @TODO: Expand this as a path segment as well
         if ($directory[0] === "~") {
             $home = getenv("HOME") ?: (getenv("USERPROFILE") ?: "/");
             $directory = $home . substr($directory, 1);
@@ -474,14 +552,24 @@ function export_files(
     $session_id = $config["session_id"] ?? null;
     $client_state_gz = $config["client_state_gz"] ?? null;
 
-    $session = get_or_create_export_session($session_id, $client_state_gz);
-    $session_id = $session['session_id'];
+    error_log(
+        sprintf(
+            "DELTA DETECTION | session_id=%s | client_state_gz=%s bytes",
+            $session_id ?? "null",
+            $client_state_gz ? strlen($client_state_gz) : "0",
+        ),
+    );
+
+    $session = create_file_session($session_id, $client_state_gz);
+    $session_id = $session["session_id"];
+
+    error_log(sprintf("Using export session: %s", $session_id));
 
     // File sync options
     $sync_options = [
         "min_ctime" => $config["min_ctime"] ?? 0,
         "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024, // 5MB
-        "snapshot_storage" => $session['snapshot_storage'],
+        "snapshot_storage" => $session["snapshot_storage"],
     ];
 
     if (isset($config["cursor"])) {
@@ -798,7 +886,11 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
         }
 
         // If cursor exists (from any source), decode it
-        if (isset($config["cursor"]) && $config["cursor"] !== "" && $config["cursor"] !== null) {
+        if (
+            isset($config["cursor"]) &&
+            $config["cursor"] !== "" &&
+            $config["cursor"] !== null
+        ) {
             $cursor_b64 = $config["cursor"];
 
             // Cursor MUST be base64-encoded
@@ -806,17 +898,23 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
             if ($cursor_json === false) {
                 throw new InvalidArgumentException(
                     "Cursor must be base64-encoded. Received invalid base64: " .
-                    substr($cursor_b64, 0, 50)
+                        substr($cursor_b64, 0, 50),
                 );
             }
 
             // Decoded cursor MUST be valid JSON
             $cursor_data = json_decode($cursor_json, true);
-            if ($cursor_data === null && json_last_error() !== JSON_ERROR_NONE) {
+            if (
+                $cursor_data === null &&
+                json_last_error() !== JSON_ERROR_NONE
+            ) {
                 throw new InvalidArgumentException(
                     "Cursor must be valid JSON after base64 decoding. " .
-                    "JSON error: " . json_last_error_msg() . ". " .
-                    "Base64: " . substr($cursor_b64, 0, 50)
+                        "JSON error: " .
+                        json_last_error_msg() .
+                        ". " .
+                        "Base64: " .
+                        substr($cursor_b64, 0, 50),
                 );
             }
 
@@ -824,41 +922,12 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
             $config["cursor"] = $cursor_json;
         }
 
-        /**
-         * Export operation configuration and execution.
-         *
-         * Output is always multipart/mixed format.
-         *
-         * @param array $config Configuration array with:
-         *   - operation: 'sql' or 'files' (required)
-         *   - cursor: Optional cursor string for resumption
-         *   - max_execution_time: Maximum seconds to run (default: 30)
-         *   - memory_threshold: Stop at this fraction of memory_limit (default: 0.8)
-         *
-         *   For SQL operations:
-         *   - db_host: Database host (default: from DB_HOST constant or env or '127.0.0.1')
-         *   - db_name: Database name (default: from DB_NAME constant or env or 'sakila')
-         *   - db_user: Database user (default: from DB_USER constant or env or 'root')
-         *   - db_password: Database password (default: from DB_PASSWORD constant or env or 'my-secret-pw')
-         *   - fragments_per_batch: SQL fragments per batch (default: 1000)
-         *   - string_encoding: 'base64' or 'escape' (default: 'base64')
-         *   - create_table_query: Include CREATE TABLE statements (default: true)
-         *
-         *   For file operations:
-         *   - directory: Directory to scan (required for files operation)
-         *   - snapshot_path: Optional snapshot file path for change detection
-         *   - session_id: Auto-generate snapshot path from session ID
-         *   - min_ctime: Minimum creation time filter (default: 0)
-         *   - chunk_size: File chunk size in bytes (default: 5MB)
-         *
-         * @return array Result with:
-         *   - status: 'complete' or 'partial'
-         *   - stats: Array of statistics (memory_used, time_elapsed, etc.)
-         */
-        $operation = $config["operation"] ?? null;
-        if (!$operation || !in_array($operation, ["sql", "files"])) {
+        // Route to endpoint handlers based on explicit endpoint parameter
+        $endpoint = $config["endpoint"] ?? null;
+        if (!$endpoint) {
             throw new InvalidArgumentException(
-                "operation must be 'sql' or 'files' (got '{$operation}')",
+                "endpoint parameter is required. " .
+                    "Valid endpoints: 'create_file_session', 'file_chunk', 'sql_chunk'",
             );
         }
 
@@ -875,23 +944,49 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
 
         $script_start = microtime(true);
 
-        // Route to appropriate handler
-        if ($operation === "sql") {
-            $result = export_sql(
-                $config,
-                $script_start,
-                $max_execution_time,
-                $max_memory,
-                $memory_threshold,
-            );
-        } else {
-            $result = export_files(
-                $config,
-                $script_start,
-                $max_execution_time,
-                $max_memory,
-                $memory_threshold,
-            );
+        // Dispatch to appropriate endpoint
+        switch ($endpoint) {
+            case "create_file_session":
+                $result = endpoint_create_file_session($config);
+                // Return session info as JSON for this endpoint
+                if (!$is_cli) {
+                    header("Content-Type: application/json");
+                    echo json_encode([
+                        "session_id" => $result["session_id"],
+                    ]);
+                } else {
+                    echo json_encode(
+                        ["session_id" => $result["session_id"]],
+                        JSON_PRETTY_PRINT,
+                    ) . "\n";
+                }
+                break;
+
+            case "file_chunk":
+                $result = endpoint_file_chunk(
+                    $config,
+                    $script_start,
+                    $max_execution_time,
+                    $max_memory,
+                    $memory_threshold,
+                );
+                break;
+
+            case "sql_chunk":
+                $result = endpoint_sql_chunk(
+                    $config,
+                    $script_start,
+                    $max_execution_time,
+                    $max_memory,
+                    $memory_threshold,
+                );
+                break;
+
+            default:
+                throw new InvalidArgumentException(
+                    "Invalid endpoint: '{$endpoint}'. " .
+                        "Valid endpoints: 'create_file_session', 'file_chunk', 'sql_chunk'",
+                );
         }
     } catch (Exception $e) {
         if ($is_cli) {

@@ -429,7 +429,9 @@ class ImportClient
     }
 
     /**
-     * Add or update a file in the local index (append-only for performance).
+     * Add or update a file in the local index (UPSERT operation).
+     * Updates existing entries in place, appends new ones.
+     * Maintains order: server order is preserved.
      *
      * @param string $path File path (relative to filesystem-root)
      * @param int $ctime File ctime
@@ -437,9 +439,42 @@ class ImportClient
      */
     private function index_file_entry(string $path, int $ctime, int $size): void
     {
-        // Append to index file (much faster than rewriting)
-        $line = sprintf("%s\t%d\t%d\n", $path, $ctime, $size);
-        file_put_contents($this->index_file, $line, FILE_APPEND | LOCK_EX);
+        $new_line = sprintf("%s\t%d\t%d", $path, $ctime, $size);
+
+        // If index doesn't exist, create it
+        if (!file_exists($this->index_file)) {
+            file_put_contents($this->index_file, $new_line . "\n", LOCK_EX);
+            return;
+        }
+
+        // Read existing index
+        $lines = file($this->index_file, FILE_IGNORE_NEW_LINES);
+        $found = false;
+
+        // Update existing entry in place
+        foreach ($lines as $i => $line) {
+            if (empty($line)) {
+                continue;
+            }
+            $parts = explode("\t", $line);
+            if (count($parts) >= 1 && $parts[0] === $path) {
+                $lines[$i] = $new_line;
+                $found = true;
+                break;
+            }
+        }
+
+        if (!$found) {
+            // Append new entry (maintains server order)
+            $lines[] = $new_line;
+        }
+
+        // Write entire index back
+        file_put_contents(
+            $this->index_file,
+            implode("\n", $lines) . "\n",
+            LOCK_EX
+        );
     }
 
     /**
@@ -728,12 +763,14 @@ class ImportClient
         string $session_key
     ): void {
         $cursor = $this->state[$cursor_key] ?? null;
-        $session_id = $this->state[$session_key] ?? null;
+        // Use server's session_id if available, otherwise use our own
+        $session_id = $this->state["server_session_id"] ?? $this->state[$session_key] ?? null;
         $complete = false;
 
-        // Send client state for delta detection if requested
+        // Send client state for delta detection ONLY on fresh start (no cursor)
+        // If resuming with cursor, server already has our session
         $post_data = null;
-        if ($send_client_state) {
+        if ($send_client_state && $cursor === null) {
             $has_index = file_exists($this->index_file);
             if (!$has_index) {
                 throw new Exception(
@@ -749,17 +786,30 @@ class ImportClient
                 $index_size = count($this->load_local_index());
                 $this->audit_log(
                     sprintf(
-                        "Sending client state for delta detection (%d files, %d bytes compressed)",
+                        "DELTA MODE | Sending client_state_gz | %d files | %d bytes compressed | Server MUST only send changed/new/deleted files",
                         $index_size,
                         strlen($client_state_gz),
                     ),
-                    false,
+                    true,
                 );
+
+                if (!$this->verbose_mode) {
+                    echo sprintf(
+                        "Sending index with %d files to server for delta detection\n",
+                        $index_size,
+                    );
+                    echo "Server will only send changed/new/deleted files\n";
+                }
             }
+        } elseif ($send_client_state && $cursor !== null) {
+            $this->audit_log(
+                "DELTA MODE | Resuming from cursor - using existing server session (not sending client_state_gz again)",
+                true,
+            );
         }
 
         while (!$complete) {
-            $url = $this->build_url("files", $cursor, [], $session_id);
+            $url = $this->build_url("file_chunk", $cursor, [], $session_id);
 
             $context = new StreamingContext();
             $context->file_handle = null;
@@ -886,7 +936,7 @@ class ImportClient
 
         try {
             while (!$complete) {
-                $url = $this->build_url("sql", $cursor, [], $session_id);
+                $url = $this->build_url("sql_chunk", $cursor, [], $session_id);
 
                 $context = new StreamingContext();
                 $context->sql_handle = $sql_handle;
@@ -972,14 +1022,14 @@ class ImportClient
         $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "");
         $server_session_id = $headers["x-session-id"] ?? null;
 
-        // Store server's session ID for future requests
+        // Store server's session ID for future requests (CRITICAL for delta detection)
         if (
             $server_session_id &&
             $server_session_id !== ($this->state["server_session_id"] ?? null)
         ) {
             $this->state["server_session_id"] = $server_session_id;
             $this->save_state($this->state);
-            $this->audit_log("Server session ID: {$server_session_id}", false);
+            $this->audit_log("Server session ID: {$server_session_id} (will use this for delta detection)", true);
         }
 
         if ($filesystem_root) {
@@ -1394,10 +1444,10 @@ class ImportClient
     }
 
     /**
-     * Build request URL with operation and cursor.
+     * Build request URL with endpoint and cursor.
      */
     private function build_url(
-        string $operation,
+        string $endpoint,
         ?string $cursor,
         array $params = [],
         ?string $session_id = null
@@ -1405,7 +1455,7 @@ class ImportClient
         $url = $this->remote_url;
         $separator = strpos($url, "?") === false ? "?" : "&";
 
-        $params["operation"] = $operation;
+        $params["endpoint"] = $endpoint;
         if ($cursor) {
             $params["cursor"] = $cursor;
         }
