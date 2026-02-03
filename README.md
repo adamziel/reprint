@@ -18,11 +18,6 @@ import.php <export.php URL>?SECRET_KEY=<key> <local directory to export to> --re
 import.php <export.php URL>?SECRET_KEY=<key> <local directory to export to> --refresh-files
 ```
 
-## Todo
-
-- [ ] Directory tree snapshots – store root-relative path. Don't store the entire absolute path, it inflates the snapshot size.
-- [ ] Multipart handling – do we need to check for boundary presence in our chunk when Content-Length is also present?
-
 ## File synchronization
 
 ### Synchronization approach
@@ -56,11 +51,6 @@ root directory.
 `ctime` is not strictly required for traversal, but the migration source can use it to tell if the streamed file has been modified
 since the last synchronization. If it has, the migration source will communicate that via a dedicated multipart chunk and move on to
 the next file.
-
-TODO:
-* ?: It is the responsibility of the migration target to keep track of all modified files and re-request them later on.
-* ?: The migration source keeps track of all such modified files and moves them to the end of the synchronization queue.
-     If they're reached again, and they're modified again, ... (?) ...
 
 #### Other considered ways of traversing the filesystem
 
@@ -99,6 +89,8 @@ This is why we're budgeting our resource usage in a few ways:
     [7:54 PM]not simple. but if you get someone deactivated and banned .25 though a migration you’re gonna have a bad time
 * Can we, somehow, budget CPU usage?
 * How to negotiate symlinks pointing outside of the requested root directories?
+* How do we handle files that keep changing during the sync and in between HTTP calls? Just flag them to the importer and let the
+  user decide?
 * Should we include a sequence ID with each file chunk for consistency checks?
 * Should we include crc32 checksums for each transmitted chunk? Seems excessive since TCP+TLS both already give us strong consistency guarantees?
 
@@ -107,10 +99,18 @@ This is why we're budgeting our resource usage in a few ways:
 * Auto-constraining resource usage
 * Display nice progress information in the terminal (since that will also allow us to display it on the web)
 * When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
-  what it was doing when we've killed it (e.g. appending a partial state to the local file).
+  what it was doing when we've killed it (e.g. appending a partial state to the local file). So, if we wrote some bytes
+  to the file but did not update the cursor yet, make sure the next run will know we're only expected to have so many
+  bytes and will truncate the excess bytes beyond that expected size.
 * Turn it into a WordPress plugin 
 * Automated test suite to cover all the usual corner cases
-* Double check we're generating a useful, append-only audit log for every export call
+* Multipart handling – do we need to check for boundary presence in our chunk when Content-Length is also present?
+* ?: It is the responsibility of the migration target to keep track of all modified files and re-request them later on.
+* ?: The migration source keeps track of all such modified files and moves them to the end of the synchronization queue.
+     If they're reached again, and they're modified again, ... (?) ...
+✅ Double check we're generating a useful, append-only audit log for every export call
+❌ Directory tree snapshots – store root-relative path. Don't store the entire absolute path, it inflates the snapshot size.
+  ^ this is okay, repetitive paths gzip exceptionally well.
 
 ### Out of scope for this initial version
 

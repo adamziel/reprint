@@ -508,37 +508,56 @@ class ImportClient
      * Get compressed client state for delta detection.
      * Format: gzipped TSV (path\tctime\tsize\n)
      *
-     * @return string|null Compressed client state or null if index is empty
+     * @return string|null Path to gzipped client state or null if index is empty
      */
-    private function get_compressed_client_state(): ?string
+    private function get_compressed_client_index_file(): ?string
     {
         $index = $this->load_local_index();
         if (empty($index)) {
             return null;
         }
 
-        $tsv = "";
-        foreach ($index as $path => $info) {
-            $tsv .= $path . "\t" . $info["ctime"] . "\t" . $info["size"] . "\n";
+        // Sort index by path (bytewise) for two-pointer merge on server
+        ksort($index, SORT_STRING);
+
+        $temp_file = tempnam(sys_get_temp_dir(), "client-index-");
+        if ($temp_file === false) {
+            throw new RuntimeException("Failed to create temp index file");
         }
 
-        $compressed = gzencode($tsv, 6); // Level 6 compression
-        if ($compressed === false) {
-            throw new RuntimeException("Failed to compress client state");
+        $gz = gzopen($temp_file, "w6"); // Level 6 compression
+        if (!$gz) {
+            @unlink($temp_file);
+            throw new RuntimeException("Failed to open temp index file");
         }
+
+        $tsv_bytes = 0;
+        foreach ($index as $path => $info) {
+            $line = $path . "\t" . $info["ctime"] . "\t" . $info["size"] . "\n";
+            $tsv_bytes += strlen($line);
+            gzwrite($gz, $line);
+        }
+
+        gzclose($gz);
+
+        $compressed_bytes = filesize($temp_file);
+        $compressed_bytes = $compressed_bytes === false ? 0 : $compressed_bytes;
+        $reduction = $tsv_bytes > 0
+            ? 100 * (1 - $compressed_bytes / $tsv_bytes)
+            : 0;
 
         $this->audit_log(
             sprintf(
-                "Compressed client state: %d files, %d bytes -> %d bytes (%.1f%% reduction)",
+                "Compressed client index: %d files, %d bytes -> %d bytes (%.1f%% reduction)",
                 count($index),
-                strlen($tsv),
-                strlen($compressed),
-                100 * (1 - strlen($compressed) / strlen($tsv)),
+                $tsv_bytes,
+                $compressed_bytes,
+                $reduction,
             ),
             false,
         );
 
-        return $compressed;
+        return $temp_file;
     }
 
     /**
@@ -720,8 +739,8 @@ class ImportClient
                 echo "  Session: " . substr($this->state[$session_key], 0, 12) . "\n";
             }
         } else {
-            // Resuming
-            $this->files_imported = $this->state["files_imported"] ?? 0;
+            // Resuming - reset counter to 0 for this session (we'll count new completions)
+            $this->files_imported = 0;
             $index_size = $has_index ? count($this->load_local_index()) : 0;
 
             $this->audit_log(
@@ -837,8 +856,8 @@ class ImportClient
                 echo "  Server will send only changed/new/deleted files\n";
             }
         } else {
-            // Resuming delta sync
-            $this->files_imported = $this->state["files_imported"] ?? 0;
+            // Resuming delta sync - reset counter to 0 for this session
+            $this->files_imported = 0;
             $index_size = count($this->load_local_index());
 
             $this->audit_log(
@@ -997,13 +1016,26 @@ class ImportClient
         string $session_key
     ): void {
         $cursor = $this->state[$cursor_key] ?? null;
-        // Use server's session_id if available, otherwise use our own
-        $session_id = $this->state["server_session_id"] ?? $this->state[$session_key] ?? null;
+        $session_id = $this->state["server_session_id"] ?? null;
         $complete = false;
+
+        // Log current progress at start of request
+        $current_indexed = count($this->load_local_index());
+        $has_cursor = $cursor !== null;
+        $this->audit_log(
+            sprintf(
+                "START REQUEST | %s | cursor=%s | indexed=%d files",
+                $send_client_state ? "DELTA" : "INITIAL",
+                $has_cursor ? "YES" : "NO",
+                $current_indexed
+            ),
+            false
+        );
 
         // Send client state for delta detection ONLY on fresh start (no cursor)
         // If resuming with cursor, server already has our session
         $post_data = null;
+        $client_index_temp_path = null;
         if ($send_client_state && $cursor === null) {
             $has_index = file_exists($this->index_file);
             if (!$has_index) {
@@ -1012,17 +1044,25 @@ class ImportClient
                 );
             }
 
-            $client_state_gz = $this->get_compressed_client_state();
-            if ($client_state_gz !== null) {
+            $client_index_temp_path = $this->get_compressed_client_index_file();
+            if ($client_index_temp_path !== null) {
                 $post_data = [
-                    "client_state_gz" => base64_encode($client_state_gz),
+                    "client_index_gz" => new CURLFile(
+                        $client_index_temp_path,
+                        "application/gzip",
+                        "client-index.tsv.gz",
+                    ),
                 ];
                 $index_size = count($this->load_local_index());
+                $compressed_size = filesize($client_index_temp_path);
+                $compressed_size = $compressed_size === false
+                    ? 0
+                    : $compressed_size;
                 $this->audit_log(
                     sprintf(
-                        "DELTA MODE | Sending client_state_gz | %d files | %d bytes compressed | Server MUST only send changed/new/deleted files",
+                        "DELTA MODE | Sending client_index_gz upload | %d files | %d bytes compressed | Server MUST only send changed/new/deleted files",
                         $index_size,
-                        strlen($client_state_gz),
+                        $compressed_size,
                     ),
                     true,
                 );
@@ -1037,7 +1077,7 @@ class ImportClient
             }
         } elseif ($send_client_state && $cursor !== null) {
             $this->audit_log(
-                "DELTA MODE | Resuming from cursor - using existing server session (not sending client_state_gz again)",
+                "DELTA MODE | Resuming from cursor - using existing server session (not sending client_index_gz again)",
                 true,
             );
         }
@@ -1134,13 +1174,17 @@ class ImportClient
             };
 
             $this->fetch_streaming($url, $cursor, $context, $post_data);
+            if ($client_index_temp_path !== null) {
+                @unlink($client_index_temp_path);
+                $client_index_temp_path = null;
+            }
 
             // Save cursor for resumption (keep it even when complete for reference)
             $this->state[$cursor_key] = $cursor;
             $this->state["files_imported"] = $this->files_imported;
             $this->save_state($this->state);
 
-            // Only send client_state_gz on first request
+            // Only send client_index_gz on first request
             $post_data = null;
         }
     }
@@ -1159,6 +1203,18 @@ class ImportClient
         $cursor = $this->state[$cursor_key] ?? null;
         $session_id = $this->state[$session_key] ?? null;
         $complete = false;
+
+        // Log current progress at start of request
+        $sql_size = file_exists($this->sql_file) ? filesize($this->sql_file) : 0;
+        $has_cursor = $cursor !== null;
+        $this->audit_log(
+            sprintf(
+                "START SQL REQUEST | cursor=%s | sql_size=%s",
+                $has_cursor ? "YES" : "NO",
+                $this->format_bytes($sql_size)
+            ),
+            false
+        );
         $sql_file = $this->local_path . "/db.sql";
 
         // Open in write mode if no cursor (starting fresh), append mode if resuming
@@ -1254,17 +1310,6 @@ class ImportClient
     ): void {
         $headers = $chunk["headers"];
         $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "");
-        $server_session_id = $headers["x-session-id"] ?? null;
-
-        // Store server's session ID for future requests (CRITICAL for delta detection)
-        if (
-            $server_session_id &&
-            $server_session_id !== ($this->state["server_session_id"] ?? null)
-        ) {
-            $this->state["server_session_id"] = $server_session_id;
-            $this->save_state($this->state);
-            $this->audit_log("Server session ID: {$server_session_id} (will use this for delta detection)", true);
-        }
 
         if ($filesystem_root) {
             $context->filesystem_root = $filesystem_root;
@@ -1300,8 +1345,6 @@ class ImportClient
 
         // Open file on first chunk
         if ($is_first) {
-            $this->files_imported++;
-
             // Check if file exists locally
             $exists_locally = file_exists($local_path);
             $local_size = $exists_locally ? filesize($local_path) : 0;
@@ -1398,6 +1441,7 @@ class ImportClient
                     $context->file_ctime,
                     $file_size,
                 );
+                $this->files_imported++; // Count completed files only
                 $this->audit_log(
                     sprintf("  Indexed (wrote %d bytes)", $final_size),
                     false,
@@ -1694,7 +1738,7 @@ class ImportClient
             $params["cursor"] = $cursor;
         }
 
-        // Add session_id for server-side cursor/snapshot tracking
+        // Add session_id for server to load client state
         if ($session_id) {
             $params["session_id"] = $session_id;
         }
@@ -1730,8 +1774,19 @@ class ImportClient
         if ($cursor) {
             $log_parts[] = "cursor=" . substr($cursor, 0, 20) . "...";
         }
-        if ($post_data && isset($post_data["client_state_gz"])) {
-            $log_parts[] = "client_state_gz=" . strlen($post_data["client_state_gz"]) . "b";
+        if ($post_data && isset($post_data["client_index_gz"])) {
+            $client_index_part = $post_data["client_index_gz"];
+            if ($client_index_part instanceof CURLFile) {
+                $upload_path = $client_index_part->getFilename();
+                $upload_size = is_string($upload_path)
+                    ? filesize($upload_path)
+                    : false;
+                $upload_size = $upload_size === false ? 0 : $upload_size;
+                $log_parts[] = "client_index_gz_file=" . $upload_size . "b";
+            } else {
+                $log_parts[] =
+                    "client_index_gz=" . strlen((string) $client_index_part) . "b";
+            }
         }
 
         $this->audit_log(implode(" | ", $log_parts), false);
@@ -1772,7 +1827,18 @@ class ImportClient
         // Configure POST data if provided
         if ($post_data !== null) {
             curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($post_data));
+            $has_file = false;
+            foreach ($post_data as $value) {
+                if ($value instanceof CURLFile) {
+                    $has_file = true;
+                    break;
+                }
+            }
+            curl_setopt(
+                $ch,
+                CURLOPT_POSTFIELDS,
+                $has_file ? $post_data : http_build_query($post_data),
+            );
         }
 
         curl_setopt_array($ch, [
@@ -1861,6 +1927,18 @@ class ImportClient
                                 },
                             );
                         }
+                    }
+                }
+
+                // Extract X-Session-Id header from server
+                if (stripos($header_line, "X-Session-Id:") === 0) {
+                    $session_id = trim(substr($header_line, 13)); // 13 = strlen("X-Session-Id:")
+                    if ($session_id !== "") {
+                        $this->state["server_session_id"] = $session_id;
+                        $this->audit_log(
+                            "Received session_id from server: {$session_id}",
+                            false,
+                        );
                     }
                 }
 
@@ -1963,6 +2041,9 @@ class ImportClient
         if ($http_code !== 200) {
             $error_msg = "HTTP error {$http_code}";
 
+            // Log what we received
+            $this->audit_log("HTTP error {$http_code} | error_body length: " . strlen($error_body), true);
+
             // Try to parse error response as JSON
             if ($error_body) {
                 $error_data = json_decode($error_body, true);
@@ -1975,8 +2056,14 @@ class ImportClient
                 } else {
                     // Not JSON, show raw body
                     $error_msg .=
-                        "\n\nResponse: " . substr($error_body, 0, 500);
+                        "\n\nResponse: " . substr($error_body, 0, 1000);
                 }
+            } else {
+                // No error body captured - server might have sent multipart response
+                // Check server error log for details
+                $error_msg .= "\n\nNo error body received. Check server error log at:\n";
+                $error_msg .= "  " . dirname(parse_url($url, PHP_URL_PATH)) . "/error_log\n";
+                $error_msg .= "  or enable display_errors on the server";
             }
 
             throw new RuntimeException($error_msg);
@@ -2038,6 +2125,31 @@ class ImportClient
             $this->state_file,
             json_encode($state, JSON_PRETTY_PRINT),
         );
+
+        // Log cursor save with current progress
+        $cursor_info = [];
+        if (isset($state["files_sync_initial_cursor"])) {
+            $cursor_info[] = "initial_cursor=saved";
+        }
+        if (isset($state["files_sync_delta_cursor"])) {
+            $cursor_info[] = "delta_cursor=saved";
+        }
+        if (isset($state["sql_sync_cursor"])) {
+            $cursor_info[] = "sql_cursor=saved";
+        }
+
+        $indexed = count($this->load_local_index());
+        $files_imported = $this->files_imported; // Completed in this run
+
+        $this->audit_log(
+            sprintf(
+                "SAVE CURSOR | total_indexed=%d | completed_this_run=%d | %s",
+                $indexed,
+                $files_imported,
+                implode(", ", $cursor_info)
+            ),
+            false
+        );
     }
 
     /**
@@ -2063,21 +2175,42 @@ class ImportClient
         $this->shutdown_requested = true;
         $this->clear_progress_line();
 
+        // Log final progress before exit
+        $indexed = count($this->load_local_index());
+        $files_imported = $this->files_imported; // Files completed in this run
+        $current_command = $this->state["current_command"] ?? "unknown";
+
+        $this->audit_log(
+            sprintf(
+                "SHUTDOWN REQUESTED | command=%s | total_indexed=%d files | completed_this_run=%d files",
+                $current_command,
+                $indexed,
+                $files_imported
+            ),
+            true
+        );
+
         if (!$this->verbose_mode) {
             echo "\nInterrupted - saving state...\n";
+            echo "  Command: {$current_command}\n";
+            echo "  Total files indexed: {$indexed}\n";
+            echo "  Files completed in this run: {$files_imported}\n";
             flush();
         }
 
         // Save current state (with timeout protection)
         try {
             $this->save_state($this->state);
+            if (!$this->verbose_mode) {
+                echo "✓ State saved successfully\n";
+            }
         } catch (Exception $e) {
             echo "Warning: Failed to save state: " . $e->getMessage() . "\n";
             flush();
         }
 
         if (!$this->verbose_mode) {
-            echo "State saved. Exiting...\n";
+            echo "Exiting...\n";
             flush();
         }
 
@@ -2253,4 +2386,3 @@ if (
         exit(1);
     }
 }
-

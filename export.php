@@ -13,6 +13,35 @@
  * - Producers (FileSyncProducer, MySQLDumpProducer) work with JSON strings only, never base64
  */
 
+// Global error handler to send errors back to client
+set_error_handler(function ($errno, $errstr, $errfile, $errline) {
+    $error = [
+        "error" => "PHP Error: $errstr",
+        "file" => $errfile,
+        "line" => $errline,
+        "type" => $errno,
+    ];
+    error_log("Export error: " . json_encode($error));
+    http_response_code(500);
+    header("Content-Type: application/json");
+    echo json_encode($error);
+    exit(1);
+});
+
+set_exception_handler(function ($e) {
+    $error = [
+        "error" => get_class($e) . ": " . $e->getMessage(),
+        "file" => $e->getFile(),
+        "line" => $e->getLine(),
+        "trace" => $e->getTraceAsString(),
+    ];
+    error_log("Export exception: " . json_encode($error));
+    http_response_code(500);
+    header("Content-Type: application/json");
+    echo json_encode($error);
+    exit(1);
+});
+
 if (file_exists("./secrets.php")) {
     require_once "./secrets.php";
 }
@@ -37,7 +66,7 @@ if (false) {
 }
 
 require_once __DIR__ . "/class-mysql-dump-producer.php";
-require_once __DIR__ . "/class-file-sync-producer.php";
+require_once __DIR__ . "/file-sync.php";
 
 /**
  * Extract database credentials from wp-config.php using PHP tokenizer.
@@ -353,128 +382,9 @@ function endpoint_sql_chunk(
 /**
  * Endpoint: Create a new file transfer session.
  *
- * @param array $config Configuration with optional session_id and client_state_gz
+ * @param array $config Configuration with optional session_id
  * @return array Result with session_id and snapshot_storage
  */
-function endpoint_create_file_session(array $config): array
-{
-    $session_id = $config["session_id"] ?? null;
-    $client_state_gz = $config["client_state_gz"] ?? null;
-
-    return create_file_session($session_id, $client_state_gz);
-}
-
-/**
- * Create or load an export session.
- * Sessions store client file state for delta detection.
- *
- * @param string|null $session_id Existing session ID or null to create new
- * @param string|null $client_state_gz Compressed client file state (gzipped TSV: path\tctime\n)
- * @return array Array with 'session_id' and 'snapshot_storage'
- */
-function create_file_session(
-    ?string $session_id,
-    ?string $client_state_gz,
-): array {
-    $sessions_dir = sys_get_temp_dir() . "/export-sessions";
-    if (!is_dir($sessions_dir)) {
-        mkdir($sessions_dir, 0755, true);
-    }
-
-    // If session_id provided, try to load it
-    if ($session_id !== null) {
-        // Validate session_id (alphanumeric only for security)
-        if (!preg_match('/^[a-zA-Z0-9_-]{16,64}$/', $session_id)) {
-            throw new InvalidArgumentException("Invalid session_id format");
-        }
-
-        $session_file = $sessions_dir . "/" . $session_id . ".tsv";
-        if (file_exists($session_file)) {
-            return [
-                "session_id" => $session_id,
-                "snapshot_storage" => new FileSnapshotStorage($session_file),
-            ];
-        }
-
-        // Session expired or doesn't exist, treat as new session
-        error_log(
-            "Export session not found: {$session_id}, creating new session",
-        );
-    }
-
-    // Create new session
-    $new_session_id = bin2hex(random_bytes(16));
-    $session_file = $sessions_dir . "/" . $new_session_id . ".tsv";
-
-    // If client state provided, decode from base64, decompress and store it
-    if ($client_state_gz !== null && $client_state_gz !== "") {
-        // Decode from base64
-        $client_state_gz_binary = base64_decode($client_state_gz, true);
-        if ($client_state_gz_binary === false) {
-            throw new InvalidArgumentException(
-                "Failed to base64 decode client state",
-            );
-        }
-
-        // Decompress
-        $client_state = @gzdecode($client_state_gz_binary);
-        if ($client_state === false) {
-            throw new InvalidArgumentException(
-                "Failed to decompress client state",
-            );
-        }
-
-        // Parse client state (TSV format: path\tctime\n)
-        // Convert to snapshot format and write to session file
-        $handle = fopen($session_file, "w");
-        if (!$handle) {
-            throw new RuntimeException("Failed to create session file");
-        }
-
-        $lines = explode("\n", trim($client_state));
-        $file_count = 0;
-        foreach ($lines as $line) {
-            if (trim($line) === "") {
-                continue;
-            }
-
-            $parts = explode("\t", $line);
-            if (count($parts) >= 2) {
-                $path = $parts[0];
-                $ctime = (int) $parts[1];
-                $size = (int) ($parts[2] ?? 0);
-
-                // Write in snapshot format: path\tctime\tsize\tactive\tlast_seen\tdeleted_at
-                fprintf(
-                    $handle,
-                    "%s\t%d\t%d\tactive\t%d\t0\n",
-                    base64_encode($path),
-                    $ctime,
-                    $size,
-                    time(),
-                );
-                $file_count++;
-            }
-        }
-        fclose($handle);
-
-        error_log(
-            "DELTA DETECTION | Created session {$new_session_id} | Received {$file_count} files from client | Server will only send NEW/MODIFIED/DELETED files",
-        );
-    } else {
-        // No client state = full export (create empty snapshot)
-        touch($session_file);
-        error_log(
-            "Export session created: {$new_session_id} (full export, no client state)",
-        );
-    }
-
-    return [
-        "session_id" => $new_session_id,
-        "snapshot_storage" => new FileSnapshotStorage($session_file),
-    ];
-}
-
 /**
  * Endpoint: Get next chunk of file data in a given file transfer session.
  *
@@ -506,10 +416,6 @@ function endpoint_file_chunk(
         : [$directories_input];
 
     foreach ($dir_list as $directory) {
-        if (empty($directory)) {
-            continue;
-        }
-
         // Expand ~ to home directory
         // @TODO: Expand this as a path segment as well
         if ($directory[0] === "~") {
@@ -547,29 +453,55 @@ function endpoint_file_chunk(
         throw new InvalidArgumentException("No valid directories specified");
     }
 
-    // Get or create export session
-    // Client sends compressed state on first request or uses session_id on subsequent
+    // Session handling for client state across multiple requests
     $session_id = $config["session_id"] ?? null;
-    $client_state_gz = $config["client_state_gz"] ?? null;
+    $session_file = null;
 
-    error_log(
-        sprintf(
-            "DELTA DETECTION | session_id=%s | client_state_gz=%s bytes",
-            $session_id ?? "null",
-            $client_state_gz ? strlen($client_state_gz) : "0",
-        ),
-    );
-
-    $session = create_file_session($session_id, $client_state_gz);
-    $session_id = $session["session_id"];
-
-    error_log(sprintf("Using export session: %s", $session_id));
+    // Create or load session
+    if ($session_id) {
+        // Load existing session
+        error_log("Loading existing session: {$session_id}");
+        $session = load_file_sync_session($session_id);
+        $session_file = $session["session_file"];
+    } elseif (isset($_FILES["client_index_gz"])) {
+        // Create new session with uploaded client index
+        $upload_size = $_FILES["client_index_gz"]["size"] ?? "unknown";
+        error_log(
+            sprintf(
+                "Creating new session | client_index_gz upload=%s bytes",
+                $upload_size,
+            ),
+        );
+        $session = create_file_sync_session_from_upload(
+            $_FILES["client_index_gz"],
+        );
+        $session_id = $session["session_id"];
+        $session_file = $session["session_file"];
+    } elseif (isset($config["client_index_file"])) {
+        // Create new session from CLI-provided file path
+        error_log(
+            sprintf(
+                "Creating new session | client_index_file=%s",
+                $config["client_index_file"],
+            ),
+        );
+        $session = create_file_sync_session_from_path(
+            $config["client_index_file"],
+        );
+        $session_id = $session["session_id"];
+        $session_file = $session["session_file"];
+    } else {
+        // No session, no client index = full sync
+        error_log("FULL SYNC | No session or client index provided");
+        $session_file = null;
+        $session_id = null;
+    }
 
     // File sync options
     $sync_options = [
         "min_ctime" => $config["min_ctime"] ?? 0,
         "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024, // 5MB
-        "snapshot_storage" => $session["snapshot_storage"],
+        "client_index_file" => $session_file, // Path to gzipped session file for streaming
     ];
 
     if (isset($config["cursor"])) {
@@ -586,6 +518,11 @@ function endpoint_file_chunk(
     // Initialize multipart boundary
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+
+    // Send session_id in header so client can use it for subsequent requests
+    if ($session_id) {
+        header("X-Session-Id: {$session_id}");
+    }
 
     // Output initial progress chunk immediately
     $initial_progress = $sync->get_progress();
@@ -620,7 +557,6 @@ function endpoint_file_chunk(
             $filesystem_root = $sync->get_filesystem_root();
             $metadata = [
                 "filesystem_root" => $filesystem_root,
-                "session_id" => $session_id,
             ];
             $metadata_json = json_encode($metadata);
 
@@ -628,7 +564,6 @@ function endpoint_file_chunk(
             echo "Content-Type: application/json\r\n";
             echo "Content-Length: " . strlen($metadata_json) . "\r\n";
             echo "X-Chunk-Type: metadata\r\n";
-            echo "X-Session-Id: " . $session_id . "\r\n";
             echo "X-Filesystem-Root: " .
                 base64_encode($filesystem_root) .
                 "\r\n";
