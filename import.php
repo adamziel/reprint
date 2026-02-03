@@ -601,143 +601,47 @@ class ImportClient
     }
 
     /**
-     * Run the import process.
+     * Run the import process with explicit command validation.
      *
-     * @param array $options Options for controlling import behavior:
-     *   - only_files: Import only files phase
-     *   - only_sql: Import only SQL phase
-     *   - only_deltas: Import only file deltas phase
-     *   - fresh: Start fresh import (new session, ignore existing state)
-     *   - verbose: Enable verbose output
+     * @param array $options Options:
+     *   - command: Required. One of: files-sync-initial, files-sync-delta, sql-sync
+     *   - restart: Optional. Force restart of completed command
+     *   - verbose: Optional. Enable verbose output
      */
     public function run(array $options = []): void
     {
         $this->verbose_mode = $options["verbose"] ?? false;
-        $mode = $options["mode"] ?? "files-first-sync";
+        $command = $options["command"] ?? null;
+        $restart = $options["restart"] ?? false;
+
+        if (!$command) {
+            throw new InvalidArgumentException(
+                "Command is required. Valid commands: files-sync-initial, files-sync-delta, sql-sync"
+            );
+        }
+
+        if (!in_array($command, ["files-sync-initial", "files-sync-delta", "sql-sync"])) {
+            throw new InvalidArgumentException(
+                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, sql-sync"
+            );
+        }
+
         $this->state = $this->load_state();
 
-        // Map mode to cursor key and session key
-        $cursor_key_map = [
-            "sql" => "sql_cursor",
-            "files-first-sync" => "files_first_sync_cursor",
-            "files-delta" => "files_delta_cursor",
-        ];
-        $session_key_map = [
-            "sql" => "sql_session_id",
-            "files-first-sync" => "files_first_sync_session_id",
-            "files-delta" => "files_delta_session_id",
-        ];
-
-        $cursor_key = $cursor_key_map[$mode];
-        $session_key = $session_key_map[$mode];
-
-        // Check if we have an existing session for this mode
-        $has_cursor = ($this->state[$cursor_key] ?? null) !== null;
-        $has_session = !empty($this->state[$session_key] ?? null);
-        $has_index = file_exists($this->index_file);
-        $index_size = $has_index ? count($this->load_local_index()) : 0;
-
-        // If no session for this mode, create one
-        if (!$has_session) {
-            $this->state[$session_key] =
-                "import-" . bin2hex(random_bytes(16));
-            $this->save_state($this->state);
-        }
-
-        // Restore file counter from state (only for file modes)
-        if (str_starts_with($mode, "files-")) {
-            $this->files_imported = $this->state["files_imported"] ?? 0;
-        }
-
-        // Log start/resume with detailed information
-        $session_id = $this->state[$session_key];
-        $cursor_value = $this->state[$cursor_key] ?? null;
-
-        if ($has_cursor) {
-            $log_msg = sprintf(
-                "RESUME %s | session=%s | cursor=%s | indexed_files=%d | files_imported=%d",
-                $mode,
-                substr($session_id, 0, 12),
-                $cursor_value ? substr($cursor_value, 0, 20) . "..." : "null",
-                $index_size,
-                $this->files_imported,
-            );
-            $this->audit_log($log_msg, true);
-
-            if (!$this->verbose_mode) {
-                echo sprintf("Resuming %s\n", $mode);
-                echo sprintf("  Session: %s\n", substr($session_id, 0, 12));
-                echo sprintf("  Cursor: %s\n", $cursor_value ? substr($cursor_value, 0, 40) . "..." : "none");
-                echo sprintf("  Already indexed: %d files\n", $index_size);
-                if (str_starts_with($mode, "files-")) {
-                    echo sprintf(
-                        "  Files imported this session: %d\n",
-                        $this->files_imported,
-                    );
-                }
-            }
-        } else {
-            $log_msg = sprintf(
-                "START %s | session=%s | cursor=null | indexed_files=%d | files_imported=0",
-                $mode,
-                substr($session_id, 0, 12),
-                $index_size,
-            );
-            $this->audit_log($log_msg, true);
-
-            if (!$this->verbose_mode) {
-                echo sprintf("Starting %s\n", $mode);
-                echo sprintf("  Session: %s\n", substr($session_id, 0, 12));
-                if ($index_size > 0 && $mode === "files-delta") {
-                    echo sprintf(
-                        "  Using index with %d files for delta detection\n",
-                        $index_size,
-                    );
-                }
-            }
-        }
-
+        // Dispatch to appropriate command handler
         try {
-            // Execute the specified mode
-            $this->state["current_mode"] = $mode;
-            $this->save_state($this->state);
+            switch ($command) {
+                case "files-sync-initial":
+                    $this->run_files_sync_initial($restart);
+                    break;
 
-            // Execute mode
-            if ($mode === "sql") {
-                $this->output_progress([
-                    "status" => "starting",
-                    "phase" => "sql",
-                ]);
-                $this->download_sql($cursor_key, $session_key);
-            } elseif ($mode === "files-first-sync" || $mode === "files-delta") {
-                $this->output_progress([
-                    "status" => "starting",
-                    "phase" => "files",
-                ]);
-                $send_client_state = $mode === "files-delta";
-                $this->download_files($cursor_key, $send_client_state, $session_key);
-            }
+                case "files-sync-delta":
+                    $this->run_files_sync_delta($restart);
+                    break;
 
-            // Show completion message
-            $this->clear_progress_line();
-            if (str_starts_with($mode, "files-")) {
-                $index = $this->load_local_index();
-                $index_size = count($index);
-                $this->audit_log(
-                    "Import complete: {$index_size} files indexed",
-                    true,
-                );
-
-                if (!$this->verbose_mode) {
-                    echo "Import complete: {$index_size} files indexed\n";
-                    echo "Audit log: {$this->audit_log}\n";
-                }
-            } elseif ($mode === "sql") {
-                $this->audit_log("SQL import complete", true);
-                if (!$this->verbose_mode) {
-                    echo "SQL import complete\n";
-                    echo "Audit log: {$this->audit_log}\n";
-                }
+                case "sql-sync":
+                    $this->run_sql_sync($restart);
+                    break;
             }
 
             $this->output_progress(["status" => "complete"]);
@@ -747,6 +651,336 @@ class ImportClient
                 "error" => $e->getMessage(),
             ]);
             throw $e;
+        }
+    }
+
+    /**
+     * Command: files-sync-initial
+     *
+     * Rules:
+     * - If target directory is empty: request new session id, start sync
+     * - If not empty and last state is files-sync-initial: resume using cursor
+     * - If restart flag: clear state and start fresh
+     * - Otherwise: error
+     */
+    private function run_files_sync_initial(bool $restart): void
+    {
+        $cursor_key = "files_sync_initial_cursor";
+        $session_key = "files_sync_initial_session_id";
+        $status_key = "files_sync_initial_status";
+
+        $has_cursor = !empty($this->state[$cursor_key] ?? null);
+        $has_index = file_exists($this->index_file);
+        $current_status = $this->state[$status_key] ?? null;
+        $filesystem_root = $this->local_path . "/filesystem-root";
+        $is_empty = !is_dir($filesystem_root) ||
+                    (count(scandir($filesystem_root)) <= 2); // only . and ..
+
+        // Handle restart flag
+        if ($restart) {
+            $this->audit_log("RESTART | Clearing files-sync-initial state and starting fresh", true);
+            $this->state[$cursor_key] = null;
+            $this->state[$session_key] = null;
+            $this->state[$status_key] = null;
+            $this->state["files_imported"] = 0;
+            $this->save_state($this->state);
+            $has_cursor = false;
+            $current_status = null;
+        }
+
+        // Check if already completed
+        if ($current_status === "complete" && !$restart) {
+            throw new RuntimeException(
+                "files-sync-initial already completed. Use --restart flag to start over."
+            );
+        }
+
+        // Validate state
+        if (!$is_empty && !$has_cursor) {
+            throw new RuntimeException(
+                "Target directory is not empty and no cursor found. " .
+                "Either clear the target directory or use --restart flag."
+            );
+        }
+
+        // If empty or restarting, create new session
+        if ($is_empty || !$has_cursor) {
+            $this->state[$session_key] = "import-" . bin2hex(random_bytes(16));
+            $this->state[$status_key] = "in_progress";
+            $this->state["files_imported"] = 0;
+            $this->save_state($this->state);
+
+            $this->audit_log(
+                "START files-sync-initial | session=" . substr($this->state[$session_key], 0, 12),
+                true
+            );
+
+            if (!$this->verbose_mode) {
+                echo "Starting files-sync-initial\n";
+                echo "  Session: " . substr($this->state[$session_key], 0, 12) . "\n";
+            }
+        } else {
+            // Resuming
+            $this->files_imported = $this->state["files_imported"] ?? 0;
+            $index_size = $has_index ? count($this->load_local_index()) : 0;
+
+            $this->audit_log(
+                sprintf(
+                    "RESUME files-sync-initial | session=%s | cursor=%s | indexed_files=%d",
+                    substr($this->state[$session_key], 0, 12),
+                    substr($this->state[$cursor_key], 0, 20) . "...",
+                    $index_size
+                ),
+                true
+            );
+
+            if (!$this->verbose_mode) {
+                echo "Resuming files-sync-initial\n";
+                echo "  Session: " . substr($this->state[$session_key], 0, 12) . "\n";
+                echo "  Already indexed: {$index_size} files\n";
+            }
+        }
+
+        $this->state["current_command"] = "files-sync-initial";
+        $this->save_state($this->state);
+
+        // Execute sync (no client state for initial sync)
+        $this->download_files($cursor_key, false, $session_key);
+
+        // Mark as complete
+        $this->state[$status_key] = "complete";
+        $this->save_state($this->state);
+
+        $this->clear_progress_line();
+        $index_size = count($this->load_local_index());
+        $this->audit_log("files-sync-initial complete: {$index_size} files indexed", true);
+
+        if (!$this->verbose_mode) {
+            echo "files-sync-initial complete: {$index_size} files indexed\n";
+            echo "Audit log: {$this->audit_log}\n";
+        }
+    }
+
+    /**
+     * Command: files-sync-delta
+     *
+     * Rules:
+     * - If has index and just finished files-sync-initial: request new session with gzipped index
+     * - If in progress (has cursor): resume using cursor
+     * - If already completed: require --restart flag
+     * - Otherwise: error
+     */
+    private function run_files_sync_delta(bool $restart): void
+    {
+        $cursor_key = "files_sync_delta_cursor";
+        $session_key = "files_sync_delta_session_id";
+        $status_key = "files_sync_delta_status";
+
+        $has_cursor = !empty($this->state[$cursor_key] ?? null);
+        $has_index = file_exists($this->index_file);
+        $current_status = $this->state[$status_key] ?? null;
+        $initial_status = $this->state["files_sync_initial_status"] ?? null;
+
+        // Handle restart flag
+        if ($restart) {
+            $this->audit_log("RESTART | Clearing files-sync-delta state and starting fresh", true);
+            $this->state[$cursor_key] = null;
+            $this->state[$session_key] = null;
+            $this->state[$status_key] = null;
+            $this->state["files_imported"] = 0;
+            $this->state["server_session_id"] = null; // Clear server session
+            $this->save_state($this->state);
+            $has_cursor = false;
+            $current_status = null;
+        }
+
+        // Check if already completed
+        if ($current_status === "complete" && !$restart) {
+            throw new RuntimeException(
+                "files-sync-delta already completed. Use --restart flag to start a new delta sync."
+            );
+        }
+
+        // Validate prerequisites
+        if (!$has_index) {
+            throw new RuntimeException(
+                "No import index found. You must run files-sync-initial first."
+            );
+        }
+
+        // Starting fresh delta sync
+        if (!$has_cursor) {
+            // Verify initial sync completed
+            if ($initial_status !== "complete") {
+                throw new RuntimeException(
+                    "files-sync-initial has not completed. Run files-sync-initial first."
+                );
+            }
+
+            // Create new session for delta sync
+            $this->state[$session_key] = "import-" . bin2hex(random_bytes(16));
+            $this->state[$status_key] = "in_progress";
+            $this->state["files_imported"] = 0;
+            $this->save_state($this->state);
+
+            $index_size = count($this->load_local_index());
+            $this->audit_log(
+                "START files-sync-delta | session=" . substr($this->state[$session_key], 0, 12) .
+                " | index_files={$index_size}",
+                true
+            );
+
+            if (!$this->verbose_mode) {
+                echo "Starting files-sync-delta\n";
+                echo "  Session: " . substr($this->state[$session_key], 0, 12) . "\n";
+                echo "  Index contains: {$index_size} files\n";
+                echo "  Server will send only changed/new/deleted files\n";
+            }
+        } else {
+            // Resuming delta sync
+            $this->files_imported = $this->state["files_imported"] ?? 0;
+            $index_size = count($this->load_local_index());
+
+            $this->audit_log(
+                sprintf(
+                    "RESUME files-sync-delta | session=%s | cursor=%s | indexed_files=%d",
+                    substr($this->state[$session_key], 0, 12),
+                    substr($this->state[$cursor_key], 0, 20) . "...",
+                    $index_size
+                ),
+                true
+            );
+
+            if (!$this->verbose_mode) {
+                echo "Resuming files-sync-delta\n";
+                echo "  Session: " . substr($this->state[$session_key], 0, 12) . "\n";
+                echo "  Already indexed: {$index_size} files\n";
+            }
+        }
+
+        $this->state["current_command"] = "files-sync-delta";
+        $this->save_state($this->state);
+
+        // Execute delta sync (send client state for delta detection)
+        $this->download_files($cursor_key, true, $session_key);
+
+        // Mark as complete
+        $this->state[$status_key] = "complete";
+        $this->save_state($this->state);
+
+        $this->clear_progress_line();
+        $index_size = count($this->load_local_index());
+        $this->audit_log("files-sync-delta complete: {$index_size} files indexed", true);
+
+        if (!$this->verbose_mode) {
+            echo "files-sync-delta complete: {$index_size} files indexed\n";
+            echo "Audit log: {$this->audit_log}\n";
+        }
+    }
+
+    /**
+     * Command: sql-sync
+     *
+     * Rules:
+     * - Stream next portion of SQL from last saved cursor
+     * - If already completed and db.sql exists: require --restart flag
+     * - If db.sql missing but state says complete: warn and require --restart flag
+     * - Otherwise: error
+     */
+    private function run_sql_sync(bool $restart): void
+    {
+        $cursor_key = "sql_sync_cursor";
+        $session_key = "sql_sync_session_id";
+        $status_key = "sql_sync_status";
+        $sql_file = $this->local_path . "/db.sql";
+
+        $has_cursor = !empty($this->state[$cursor_key] ?? null);
+        $current_status = $this->state[$status_key] ?? null;
+        $sql_exists = file_exists($sql_file);
+
+        // Handle restart flag
+        if ($restart) {
+            $this->audit_log("RESTART | Clearing sql-sync state and starting fresh", true);
+            $this->state[$cursor_key] = null;
+            $this->state[$session_key] = null;
+            $this->state[$status_key] = null;
+            $this->save_state($this->state);
+            $has_cursor = false;
+            $current_status = null;
+
+            // Remove existing SQL file on restart
+            if ($sql_exists) {
+                unlink($sql_file);
+                $sql_exists = false;
+            }
+        }
+
+        // Check if already completed
+        if ($current_status === "complete") {
+            if ($sql_exists && !$restart) {
+                throw new RuntimeException(
+                    "sql-sync already completed and db.sql exists. Use --restart flag to start over."
+                );
+            } elseif (!$sql_exists && !$restart) {
+                throw new RuntimeException(
+                    "sql-sync marked complete but db.sql is missing. Use --restart flag to re-sync."
+                );
+            }
+        }
+
+        // Starting fresh SQL sync
+        if (!$has_cursor) {
+            $this->state[$session_key] = "import-" . bin2hex(random_bytes(16));
+            $this->state[$status_key] = "in_progress";
+            $this->save_state($this->state);
+
+            $this->audit_log(
+                "START sql-sync | session=" . substr($this->state[$session_key], 0, 12),
+                true
+            );
+
+            if (!$this->verbose_mode) {
+                echo "Starting sql-sync\n";
+                echo "  Session: " . substr($this->state[$session_key], 0, 12) . "\n";
+            }
+        } else {
+            // Resuming SQL sync
+            $this->audit_log(
+                sprintf(
+                    "RESUME sql-sync | session=%s | cursor=%s",
+                    substr($this->state[$session_key], 0, 12),
+                    substr($this->state[$cursor_key], 0, 20) . "..."
+                ),
+                true
+            );
+
+            if (!$this->verbose_mode) {
+                echo "Resuming sql-sync\n";
+                echo "  Session: " . substr($this->state[$session_key], 0, 12) . "\n";
+            }
+        }
+
+        $this->state["current_command"] = "sql-sync";
+        $this->save_state($this->state);
+
+        $this->output_progress([
+            "status" => "starting",
+            "phase" => "sql",
+        ]);
+
+        // Execute SQL sync
+        $this->download_sql($cursor_key, $session_key);
+
+        // Mark as complete
+        $this->state[$status_key] = "complete";
+        $this->save_state($this->state);
+
+        $this->audit_log("sql-sync complete", true);
+
+        if (!$this->verbose_mode) {
+            echo "sql-sync complete\n";
+            echo "SQL file: {$sql_file}\n";
+            echo "Audit log: {$this->audit_log}\n";
         }
     }
 
@@ -1756,50 +1990,43 @@ class ImportClient
     {
         if (!file_exists($this->state_file)) {
             return [
-                "current_mode" => null,
-                // Per-mode session IDs
-                "sql_session_id" => null,
-                "files_first_sync_session_id" => null,
-                "files_delta_session_id" => null,
-                // Per-mode cursors
-                "sql_cursor" => null,
-                "files_first_sync_cursor" => null,
-                "files_delta_cursor" => null,
-                // Files imported counter (for file modes)
+                "current_command" => null,
+                // Per-command session IDs
+                "files_sync_initial_session_id" => null,
+                "files_sync_delta_session_id" => null,
+                "sql_sync_session_id" => null,
+                // Per-command cursors
+                "files_sync_initial_cursor" => null,
+                "files_sync_delta_cursor" => null,
+                "sql_sync_cursor" => null,
+                // Per-command status
+                "files_sync_initial_status" => null,
+                "files_sync_delta_status" => null,
+                "sql_sync_status" => null,
+                // Server session ID (for delta detection)
+                "server_session_id" => null,
+                // Files imported counter
                 "files_imported" => 0,
             ];
         }
 
         $state = json_decode(file_get_contents($this->state_file), true);
 
-        // Initialize cursor/session keys if missing
-        $state["current_mode"] = $state["current_mode"] ?? null;
-        $state["sql_session_id"] = $state["sql_session_id"] ?? null;
-        $state["files_first_sync_session_id"] =
-            $state["files_first_sync_session_id"] ?? null;
-        $state["files_delta_session_id"] =
-            $state["files_delta_session_id"] ?? null;
-        $state["sql_cursor"] = $state["sql_cursor"] ?? null;
-        $state["files_first_sync_cursor"] =
-            $state["files_first_sync_cursor"] ?? null;
-        $state["files_delta_cursor"] = $state["files_delta_cursor"] ?? null;
+        // Initialize keys if missing (for backwards compatibility)
+        $state["current_command"] = $state["current_command"] ?? null;
+        $state["files_sync_initial_session_id"] = $state["files_sync_initial_session_id"] ?? null;
+        $state["files_sync_delta_session_id"] = $state["files_sync_delta_session_id"] ?? null;
+        $state["sql_sync_session_id"] = $state["sql_sync_session_id"] ?? null;
+        $state["files_sync_initial_cursor"] = $state["files_sync_initial_cursor"] ?? null;
+        $state["files_sync_delta_cursor"] = $state["files_sync_delta_cursor"] ?? null;
+        $state["sql_sync_cursor"] = $state["sql_sync_cursor"] ?? null;
+        $state["files_sync_initial_status"] = $state["files_sync_initial_status"] ?? null;
+        $state["files_sync_delta_status"] = $state["files_sync_delta_status"] ?? null;
+        $state["sql_sync_status"] = $state["sql_sync_status"] ?? null;
+        $state["server_session_id"] = $state["server_session_id"] ?? null;
         $state["files_imported"] = $state["files_imported"] ?? 0;
 
-        // Ensure files_imported exists (for backwards compatibility)
-        if (!isset($state["files_imported"])) {
-            $state["files_imported"] = 0;
-        }
-
-        return $state ?: [
-                "phase" => "init",
-                "session_id" => "import-" . bin2hex(random_bytes(16)),
-                "server_session_id" => null,
-                "files_cursor" => null,
-                "sql_cursor" => null,
-                "deltas_cursor" => null,
-                "last_sync_time" => null,
-                "files_imported" => 0,
-            ];
+        return $state;
     }
 
     /**
@@ -1925,88 +2152,95 @@ if (
     realpath($argv[0] ?? "") === __FILE__
 ) {
     if ($argc < 3) {
-        echo "Usage: php import.php <remote-url> <local-path> [options]\n";
+        echo "Usage: php import.php <remote-url> <local-path> <command> [options]\n";
         echo "\n";
         echo "Arguments:\n";
         echo "  remote-url   URL to export.php script with required parameters:\n";
         echo "               - directory: Directory to export (use directory[] for multiple)\n";
         echo "               - SECRET_KEY: Authentication key (required)\n";
         echo "               Example: http://example.com/export.php?directory=/var/www/html&SECRET_KEY=xxx\n";
-        echo "               Multiple: http://example.com/export.php?directory[]=/srv&directory[]=/wordpress&SECRET_KEY=xxx\n";
         echo "  local-path   Local directory to store imported data\n";
+        echo "  command      Command to execute (required)\n";
+        echo "\n";
+        echo "Commands:\n";
+        echo "  files-sync-initial   Initial full file sync\n";
+        echo "                       - If target empty: starts new sync\n";
+        echo "                       - If in progress: resumes from cursor\n";
+        echo "                       - If complete: requires --restart flag\n";
+        echo "\n";
+        echo "  files-sync-delta     Delta file sync (only changed/new/deleted files)\n";
+        echo "                       - Requires completed files-sync-initial\n";
+        echo "                       - Sends local index to server for comparison\n";
+        echo "                       - If in progress: resumes from cursor\n";
+        echo "                       - If complete: requires --restart flag\n";
+        echo "\n";
+        echo "  sql-sync             Download database dump\n";
+        echo "                       - Streams SQL to db.sql file\n";
+        echo "                       - If in progress: resumes from cursor\n";
+        echo "                       - If complete: requires --restart flag\n";
         echo "\n";
         echo "Options:\n";
-        echo "  --mode=MODE      Import mode (sql|files-first-sync|files-delta)\n";
-        echo "                   Default: files-first-sync if no index, files-delta if index exists\n";
+        echo "  --restart        Force restart of completed command (clears state)\n";
         echo "  --verbose, -v    Show detailed logs (default: show progress only)\n";
         echo "\n";
-        echo "Modes:\n";
-        echo "  sql              Download database dump only\n";
-        echo "  files-first-sync Download all files (no delta detection)\n";
-        echo "  files-delta      Download only changed files (requires existing index)\n";
-        echo "\n";
-        echo "Notes:\n";
-        echo "  - Each mode tracks its own cursor - interrupted imports auto-resume\n";
-        echo "  - Index (.import-index.tsv) enables delta detection (only changed files)\n";
-        echo "  - Server compares client index with filesystem to detect changes/deletions\n";
+        echo "State Management:\n";
+        echo "  - Each command tracks its own state (cursor, status, session)\n";
+        echo "  - Interrupted commands automatically resume from last cursor\n";
+        echo "  - Completed commands require --restart to run again\n";
+        echo "  - State is stored in .import-state.json\n";
         echo "\n";
         echo "Examples:\n";
-        echo "  # First import (downloads everything)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --mode=files-first-sync\n";
+        echo "  # Initial full sync (downloads everything)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-initial\n";
         echo "\n";
-        echo "  # Resume interrupted import (automatically continues from cursor)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --mode=files-first-sync\n";
+        echo "  # Resume interrupted initial sync (continues from cursor)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-initial\n";
         echo "\n";
-        echo "  # Pull delta (only download changed/new/deleted files)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --mode=files-delta\n";
+        echo "  # Delta sync (only download changes since last sync)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-delta\n";
         echo "\n";
-        echo "  # Download database only\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup --mode=sql\n";
+        echo "  # Restart completed delta sync\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-delta --restart\n";
         echo "\n";
-        echo "  # Auto mode (detects based on index presence)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup\n";
+        echo "  # Download database\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup sql-sync\n";
         echo "\n";
         echo "Output:\n";
-        echo "  - Progress is reported as JSON lines to stdout\n";
-        echo "  - SQL data is written to <local-path>/db.sql\n";
-        echo "  - Files are written to <local-path>/filesystem-root/\n";
-        echo "  - Script can be interrupted and will resume on next run\n";
+        echo "  - Progress reported as JSON lines to stdout (in verbose mode)\n";
+        echo "  - SQL written to <local-path>/db.sql\n";
+        echo "  - Files written to <local-path>/filesystem-root/\n";
+        echo "  - State written to <local-path>/.import-state.json\n";
+        echo "  - Index written to <local-path>/.import-index.tsv\n";
+        echo "  - Audit log written to <local-path>/.import-audit.log\n";
         exit(1);
     }
 
     $remote_url = $argv[1];
     $local_path = $argv[2];
+    $command = $argv[3] ?? null;
+
+    if (!$command) {
+        fwrite(STDERR, "Error: Command is required\n");
+        fwrite(STDERR, "Valid commands: files-sync-initial, files-sync-delta, sql-sync\n");
+        exit(1);
+    }
 
     // Parse options
     $options = [
-        "mode" => null, // sql|files-first-sync|files-delta
+        "command" => $command,
+        "restart" => false,
         "verbose" => false,
     ];
 
-    for ($i = 3; $i < $argc; $i++) {
-        if (preg_match('/^--mode=(.+)$/', $argv[$i], $matches)) {
-            $mode = $matches[1];
-            if (!in_array($mode, ["sql", "files-first-sync", "files-delta"])) {
-                fwrite(
-                    STDERR,
-                    "Invalid mode: {$mode}. Must be: sql, files-first-sync, or files-delta\n",
-                );
-                exit(1);
-            }
-            $options["mode"] = $mode;
+    for ($i = 4; $i < $argc; $i++) {
+        if ($argv[$i] === "--restart") {
+            $options["restart"] = true;
         } elseif ($argv[$i] === "--verbose" || $argv[$i] === "-v") {
             $options["verbose"] = true;
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
         }
-    }
-
-    // Default mode: files-first-sync if no index, files-delta if index exists
-    if ($options["mode"] === null) {
-        $index_file = $local_path . "/.import-index.tsv";
-        $has_index = file_exists($index_file);
-        $options["mode"] = $has_index ? "files-delta" : "files-first-sync";
     }
 
     try {
