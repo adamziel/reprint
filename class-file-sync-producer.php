@@ -960,19 +960,30 @@ class FileSyncProducer
 
         // Find directories with no files (excluding root directories)
         $this->empty_directories = [];
-        foreach (array_keys($this->scanned_directories) as $dir) {
-            // Skip the root scan directories themselves
-            if (in_array($dir, $this->directories)) {
-                continue;
+
+        // During delta sync (when snapshot exists), skip empty directories entirely.
+        // Rationale:
+        // - If directory has files, it will be created automatically
+        // - Empty directories from previous syncs don't need to be re-sent
+        // - New empty directories are rare and not critical
+        // - This eliminates redundant directory chunks during delta sync
+        if ($this->snapshot_storage === null) {
+            // No snapshot = full sync, include all empty directories
+            foreach (array_keys($this->scanned_directories) as $dir) {
+                // Skip the root scan directories themselves
+                if (in_array($dir, $this->directories)) {
+                    continue;
+                }
+
+                if (!isset($dirs_with_files[$dir])) {
+                    $this->empty_directories[] = $dir;
+                }
             }
 
-            if (!isset($dirs_with_files[$dir])) {
-                $this->empty_directories[] = $dir;
-            }
+            // Sort empty directories by path for consistent output
+            sort($this->empty_directories);
         }
-
-        // Sort empty directories by path for consistent output
-        sort($this->empty_directories);
+        // else: delta sync - don't send any empty directory chunks
     }
 
     /**
