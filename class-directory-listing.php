@@ -30,6 +30,12 @@ class DirectoryListing
     private int $count = 0;
 
     /**
+     * Total bytes of entry data stored in the stream (including NUL separators).
+     * @var int
+     */
+    private int $total_bytes = 0;
+
+    /**
      * Whether the entries have been sorted.
      * @var bool
      */
@@ -60,8 +66,11 @@ class DirectoryListing
      */
     private function __construct(int $memory_limit = 2 * 1024 * 1024)
     {
-        $this->memory_limit = $memory_limit;
-        $this->stream = fopen("php://temp/maxmemory:{$memory_limit}", 'w+b');
+        $this->memory_limit = $this->clamp_memory_limit($memory_limit);
+        $this->stream = fopen(
+            "php://temp/maxmemory:{$this->memory_limit}",
+            'w+b',
+        );
         if ($this->stream === false) {
             throw new RuntimeException("Failed to open php://temp stream");
         }
@@ -95,6 +104,7 @@ class DirectoryListing
             // We use \0 as separator since filenames can't contain null bytes
             fwrite($listing->stream, $entry . "\0");
             $listing->count++;
+            $listing->total_bytes += strlen($entry) + 1;
         }
 
         closedir($dh);
@@ -120,6 +130,7 @@ class DirectoryListing
             }
             fwrite($listing->stream, $entry . "\0");
             $listing->count++;
+            $listing->total_bytes += strlen($entry) + 1;
         }
 
         return $listing;
@@ -127,10 +138,6 @@ class DirectoryListing
 
     /**
      * Sorts the entries alphabetically.
-     *
-     * For directories that fit in memory, this loads all entries, sorts them
-     * in memory, and writes them back. For very large directories, this may
-     * use significant memory temporarily during the sort operation.
      *
      * After sorting, builds an offset index for efficient binary search.
      */
@@ -141,23 +148,14 @@ class DirectoryListing
             return;
         }
 
-        // Read all entries into memory for sorting
-        rewind($this->stream);
-        $content = stream_get_contents($this->stream);
-        $entries = explode("\0", rtrim($content, "\0"));
-
-        // Sort using PHP's natural string sort
-        sort($entries, SORT_STRING);
-
-        // Truncate and rewrite the sorted entries, building offset index
-        ftruncate($this->stream, 0);
-        rewind($this->stream);
-        $this->offsets = [];
-
-        foreach ($entries as $entry) {
-            $this->offsets[] = ftell($this->stream);
-            fwrite($this->stream, $entry . "\0");
+        $target_bytes = $this->get_target_bytes();
+        if ($this->estimate_in_memory_sort_bytes() <= $target_bytes) {
+            $this->sort_in_memory();
+        } else {
+            $this->stream = $this->external_sort($target_bytes);
         }
+
+        $this->rebuild_offsets();
 
         $this->sorted = true;
         $this->position = 0;
@@ -341,5 +339,268 @@ class DirectoryListing
     public function __destruct()
     {
         $this->close();
+    }
+
+    /**
+     * Read a single entry from a stream using NUL as a delimiter.
+     */
+    private function read_entry($stream): ?string
+    {
+        $entry = stream_get_line($stream, 65536, "\0");
+        return $entry === false ? null : $entry;
+    }
+
+    /**
+     * External sort using bounded memory and php://temp streams.
+     */
+    private function external_sort(int $target_bytes)
+    {
+        $runs = [];
+        $buffer = [];
+        $buffer_bytes = 0;
+
+        rewind($this->stream);
+        while (true) {
+            $entry = $this->read_entry($this->stream);
+            if ($entry === null) {
+                break;
+            }
+
+            $buffer[] = $entry;
+            $buffer_bytes += strlen($entry) + 1;
+
+            if ($buffer_bytes >= $target_bytes) {
+                $runs[] = $this->write_sorted_run($buffer);
+                $buffer = [];
+                $buffer_bytes = 0;
+            }
+        }
+
+        if (!empty($buffer)) {
+            $runs[] = $this->write_sorted_run($buffer);
+        }
+
+        // Release the original stream - we will replace it with sorted output
+        if ($this->stream !== null) {
+            fclose($this->stream);
+            $this->stream = null;
+        }
+
+        if (count($runs) === 1) {
+            return $runs[0];
+        }
+
+        return $this->merge_sorted_runs($runs);
+    }
+
+    /**
+     * Write a sorted run to a php://temp stream.
+     */
+    private function write_sorted_run(array $entries)
+    {
+        sort($entries, SORT_STRING);
+        $run = fopen("php://temp/maxmemory:{$this->memory_limit}", "w+b");
+        if ($run === false) {
+            throw new RuntimeException("Failed to open php://temp stream for run");
+        }
+        foreach ($entries as $entry) {
+            fwrite($run, $entry . "\0");
+        }
+        rewind($run);
+        return $run;
+    }
+
+    /**
+     * Merge sorted runs into a single sorted stream.
+     *
+     * @param array $runs List of sorted run streams.
+     * @return resource Sorted php://temp stream.
+     */
+    private function merge_sorted_runs(array $runs)
+    {
+        $out = fopen("php://temp/maxmemory:{$this->memory_limit}", "w+b");
+        if ($out === false) {
+            throw new RuntimeException("Failed to open php://temp stream for merge");
+        }
+
+        $heap = new DirectoryListingMinHeap();
+        $heap->setExtractFlags(\SplPriorityQueue::EXTR_DATA);
+
+        foreach ($runs as $i => $run) {
+            rewind($run);
+            $entry = $this->read_entry($run);
+            if ($entry !== null) {
+                $heap->insert(
+                    ["entry" => $entry, "run" => $i],
+                    [$entry, $i],
+                );
+            }
+        }
+
+        while (!$heap->isEmpty()) {
+            $item = $heap->extract();
+            $entry = $item["entry"];
+            $run_index = $item["run"];
+
+            fwrite($out, $entry . "\0");
+
+            $next = $this->read_entry($runs[$run_index]);
+            if ($next !== null) {
+                $heap->insert(
+                    ["entry" => $next, "run" => $run_index],
+                    [$next, $run_index],
+                );
+            }
+        }
+
+        foreach ($runs as $run) {
+            fclose($run);
+        }
+
+        rewind($out);
+        return $out;
+    }
+
+    /**
+     * Rebuild offset index for random access.
+     */
+    private function rebuild_offsets(): void
+    {
+        $this->offsets = [];
+        rewind($this->stream);
+        while (true) {
+            $pos = ftell($this->stream);
+            $entry = $this->read_entry($this->stream);
+            if ($entry === null) {
+                break;
+            }
+            $this->offsets[] = $pos;
+        }
+    }
+
+    /**
+     * In-memory sort for small listings (faster than external sort).
+     */
+    private function sort_in_memory(): void
+    {
+        $entries = [];
+        rewind($this->stream);
+        while (true) {
+            $entry = $this->read_entry($this->stream);
+            if ($entry === null) {
+                break;
+            }
+            $entries[] = $entry;
+        }
+
+        sort($entries, SORT_STRING);
+
+        ftruncate($this->stream, 0);
+        rewind($this->stream);
+        foreach ($entries as $entry) {
+            fwrite($this->stream, $entry . "\0");
+        }
+    }
+
+    /**
+     * Compute the target in-memory buffer size for external sort runs.
+     */
+    private function get_target_bytes(): int
+    {
+        $target = (int) ($this->memory_limit * 0.8);
+        $target = max(64 * 1024, $target);
+        return min($this->memory_limit, $target);
+    }
+
+    /**
+     * Rough estimate of memory needed to load and sort all entries in PHP arrays.
+     */
+    private function estimate_in_memory_sort_bytes(): int
+    {
+        $per_entry_overhead = 64; // heuristic for zval+bucket+string header
+        $estimated = $this->total_bytes + ($this->count * $per_entry_overhead);
+        return (int) ($estimated * 1.5);
+    }
+
+    /**
+     * Clamp requested memory limit to [4KB, min(50MB, 20% of available memory)].
+     */
+    private function clamp_memory_limit(int $requested): int
+    {
+        $min = 4 * 1024;
+        $available = $this->get_available_memory_bytes();
+        $max = (int) ($available * 0.2);
+        $max = min($max, 50 * 1024 * 1024);
+        $max = max($max, $min);
+
+        $clamped = min($requested, $max);
+        return max($clamped, $min);
+    }
+
+    /**
+     * Estimate available memory for this process.
+     */
+    private function get_available_memory_bytes(): int
+    {
+        $limit = ini_get("memory_limit");
+        if ($limit === false || $limit === "") {
+            return 128 * 1024 * 1024;
+        }
+
+        if ($limit === "-1") {
+            return 256 * 1024 * 1024;
+        }
+
+        $limit_bytes = $this->parse_memory_limit($limit);
+        if ($limit_bytes <= 0) {
+            return 128 * 1024 * 1024;
+        }
+
+        $used = memory_get_usage(true);
+        $available = $limit_bytes - $used;
+        return $available > 0 ? $available : $limit_bytes;
+    }
+
+    /**
+     * Parse a PHP memory_limit string into bytes.
+     */
+    private function parse_memory_limit(string $limit): int
+    {
+        $limit = trim($limit);
+        if ($limit === "") {
+            return 0;
+        }
+
+        $unit = strtoupper(substr($limit, -1));
+        $value = (int) $limit;
+
+        switch ($unit) {
+            case "G":
+                return $value * 1024 * 1024 * 1024;
+            case "M":
+                return $value * 1024 * 1024;
+            case "K":
+                return $value * 1024;
+            default:
+                return (int) $limit;
+        }
+    }
+}
+
+/**
+ * Min-heap priority queue for lexicographic string ordering.
+ */
+class DirectoryListingMinHeap extends \SplPriorityQueue
+{
+    public function compare($priority1, $priority2): int
+    {
+        $cmp = strcmp($priority1[0], $priority2[0]);
+        if ($cmp === 0) {
+            if ($priority1[1] === $priority2[1]) {
+                return 0;
+            }
+            return ($priority1[1] < $priority2[1]) ? 1 : -1;
+        }
+        return ($cmp < 0) ? 1 : -1;
     }
 }

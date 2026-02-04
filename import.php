@@ -991,6 +991,31 @@ class ImportClient
         $complete = false;
         $this->chunks_since_save = 0;
 
+        // Crash recovery: if we have a tracked file that's larger than expected,
+        // truncate it. This happens if we crashed after writing but before saving
+        // the new cursor, so we'll re-fetch the same data.
+        $tracked_file = $this->state["current_file"] ?? null;
+        $tracked_bytes = $this->state["current_file_bytes"] ?? null;
+        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+            $actual_size = filesize($tracked_file);
+            if ($actual_size > $tracked_bytes) {
+                $this->audit_log(
+                    sprintf(
+                        "CRASH RECOVERY | Truncating %s from %d to %d bytes",
+                        $tracked_file,
+                        $actual_size,
+                        $tracked_bytes,
+                    ),
+                    true,
+                );
+                $handle = fopen($tracked_file, "r+");
+                if ($handle) {
+                    ftruncate($handle, $tracked_bytes);
+                    fclose($handle);
+                }
+            }
+        }
+
         $url = $this->build_url($endpoint, $cursor, [], null);
         $this->audit_log("Downloading file stream from {$url}");
         $this->audit_log("POST data: " . json_encode($post_data));
@@ -1016,6 +1041,16 @@ class ImportClient
             $this->chunks_since_save++;
             if ($this->chunks_since_save >= 50) {
                 $this->state["cursor"] = $cursor;
+                // Track current file for crash recovery
+                if ($context->file_handle && $context->file_path) {
+                    // Flush to ensure bytes are on disk before saving state
+                    fflush($context->file_handle);
+                    $this->state["current_file"] = $context->file_path;
+                    $this->state["current_file_bytes"] = $context->file_bytes_written;
+                } else {
+                    $this->state["current_file"] = null;
+                    $this->state["current_file_bytes"] = null;
+                }
                 $this->save_state($this->state);
                 $this->chunks_since_save = 0;
             }
@@ -1061,6 +1096,15 @@ class ImportClient
         $this->fetch_streaming($url, $cursor, $context, $post_data);
         $this->finalize_index_updates();
         $this->state["cursor"] = $cursor;
+        // Update file tracking: track in-progress file, or clear if complete/no active file
+        if ($context->file_handle && $context->file_path) {
+            fflush($context->file_handle);
+            $this->state["current_file"] = $context->file_path;
+            $this->state["current_file_bytes"] = $context->file_bytes_written;
+        } else {
+            $this->state["current_file"] = null;
+            $this->state["current_file_bytes"] = null;
+        }
         $this->save_state($this->state);
 
         return $complete;
@@ -1731,6 +1775,28 @@ class ImportClient
         $complete = false;
         $sql_file = $this->local_path . "/db.sql";
 
+        // Crash recovery: if SQL file is larger than expected, truncate it.
+        // This happens if we crashed after writing but before saving the new cursor.
+        $tracked_bytes = $this->state["sql_bytes"] ?? null;
+        if ($tracked_bytes !== null && file_exists($sql_file)) {
+            $actual_size = filesize($sql_file);
+            if ($actual_size > $tracked_bytes) {
+                $this->audit_log(
+                    sprintf(
+                        "CRASH RECOVERY | Truncating db.sql from %d to %d bytes",
+                        $actual_size,
+                        $tracked_bytes,
+                    ),
+                    true,
+                );
+                $handle = fopen($sql_file, "r+");
+                if ($handle) {
+                    ftruncate($handle, $tracked_bytes);
+                    fclose($handle);
+                }
+            }
+        }
+
         // Log current progress at start of request
         $sql_size = file_exists($sql_file)
             ? filesize($sql_file)
@@ -1744,6 +1810,9 @@ class ImportClient
             ),
             false,
         );
+
+        // Track bytes written for crash recovery
+        $sql_bytes_written = $sql_size;
 
         // Open in write mode if no cursor (starting fresh), append mode if resuming
         $sql_handle = fopen($sql_file, $cursor ? "a" : "w");
@@ -1762,6 +1831,7 @@ class ImportClient
                 $context->on_chunk = function ($chunk) use (
                     &$cursor,
                     &$complete,
+                    &$sql_bytes_written,
                     $sql_handle,
                     $context,
                 ) {
@@ -1780,7 +1850,10 @@ class ImportClient
                     // Save cursor periodically (every 50 chunks)
                     $this->chunks_since_save++;
                     if ($this->chunks_since_save >= 50) {
+                        // Flush to ensure bytes are on disk before saving state
+                        fflush($sql_handle);
                         $this->state["cursor"] = $cursor;
+                        $this->state["sql_bytes"] = $sql_bytes_written;
                         $this->save_state($this->state);
                         $this->chunks_since_save = 0;
                     }
@@ -1788,7 +1861,10 @@ class ImportClient
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                     if ($chunk_type === "sql") {
-                        fwrite($sql_handle, $chunk["body"]);
+                        $bytes = fwrite($sql_handle, $chunk["body"]);
+                        if ($bytes !== false) {
+                            $sql_bytes_written += $bytes;
+                        }
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
                     } elseif ($chunk_type === "completion") {
@@ -1813,7 +1889,10 @@ class ImportClient
                 $this->fetch_streaming($url, $cursor, $context, null);
 
                 // Save cursor for resumption (keep it even when complete for reference)
+                fflush($sql_handle);
                 $this->state["cursor"] = $cursor;
+                // Clear sql_bytes when complete, otherwise save current position
+                $this->state["sql_bytes"] = $complete ? null : $sql_bytes_written;
                 $this->save_state($this->state);
             }
         } finally {
@@ -1931,12 +2010,16 @@ class ImportClient
             }
             $context->file_path = $local_path;
             $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
+            $context->file_bytes_written = 0;  // Reset byte counter for new file
         }
 
         // Write body data if present
         if (isset($chunk["body"]) && $chunk["body"] !== "") {
             if ($context->file_handle) {
-                fwrite($context->file_handle, $chunk["body"]);
+                $bytes = fwrite($context->file_handle, $chunk["body"]);
+                if ($bytes !== false) {
+                    $context->file_bytes_written += $bytes;
+                }
             }
         }
 
@@ -1978,6 +2061,10 @@ class ImportClient
             $context->file_handle = null;
             $context->file_path = null;
             $context->file_ctime = null;
+            $context->file_bytes_written = 0;
+            // Clear crash recovery tracking - file is complete
+            $this->state["current_file"] = null;
+            $this->state["current_file_bytes"] = null;
         }
     }
 
@@ -2599,6 +2686,12 @@ class ImportClient
                 "remote_offset" => 0,
                 "local_after" => null,
             ],
+            // Crash recovery: track in-progress file downloads
+            // If we crash mid-write, we can truncate to the expected size on resume
+            "current_file" => null,        // Path to file being written
+            "current_file_bytes" => null,  // Expected bytes written so far
+            // Crash recovery: track SQL file size
+            "sql_bytes" => null,           // Expected SQL file size
         ];
     }
 
@@ -2800,6 +2893,8 @@ class StreamingContext
     public $chunk_fingerprints = [];
     public $need_client_slice = false;
     public $next_client_offset = 0;
+    // Crash recovery: track bytes written for current file
+    public $file_bytes_written = 0;
 }
 
 // ============================================================================
