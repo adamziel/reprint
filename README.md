@@ -119,10 +119,6 @@ This is why we're budgeting our resource usage in a few ways:
 ### Todos
 
 * Auto-constraining resource usage
-* When we're starting the import and we have access to local MySQL, detect our local `current_statement_size` and `max_allowed_packet` and send that
-  over to the remote host to get an appropriately-chunked dump. Alternatively, if we ever need to store the dump now and execute it later, we could
-  bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and
-  turn it into SQL statements locally. Let's not start there, though, as that would add complexity and make the REST endpoints harder to debug.
 * When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
   what it was doing when we've killed it (e.g. appending a partial state to the local file). So, if we wrote some bytes
   to the file but did not update the cursor yet, make sure the next run will know we're only expected to have so many
@@ -139,9 +135,13 @@ This is why we're budgeting our resource usage in a few ways:
 ❌ Directory tree snapshots – store root-relative path. Don't store the entire absolute path, it inflates the snapshot size.
   ^ this is okay, repetitive paths gzip exceptionally well.
 
-### Out of scope for this initial version
 
-* Secure site-to-site tunnel any more advanced than defining a hardcoded ACCESS_KEY constant
+**Out of scope for this initial version**
+
+* When we're starting the import and we have access to local MySQL, detect our local `current_statement_size` and `max_allowed_packet` and send that
+  over to the remote host to get an appropriately-chunked dump. Alternatively, if we ever need to store the dump now and execute it later, we could
+  bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and
+  turn it into SQL statements locally. Let's not start there, though, as that would add complexity and make the REST endpoints harder to debug.
 
 ### Transport
 
