@@ -346,7 +346,29 @@ function endpoint_sql_chunk(
         ob_end_flush();
     }
 
-    // Initialize multipart boundary and gzip stream
+    /**
+     * We're choosing a random boundary without checking for its presence in the content.
+     * This may seem to contradict RFC 2046, where it says:
+     * 
+     * > As stated previously, each body part is preceded by a boundary
+     * > delimiter line that contains the boundary delimiter.  The boundary
+     * > delimiter MUST NOT appear inside any of the encapsulated parts, on a
+     * > line by itself or as the prefix of any line.  This implies that it is
+     * > crucial that the composing agent be able to choose and specify a
+     * > unique boundary parameter value that does not contain the boundary
+     * > parameter value of an enclosing multipart as a prefix.
+     * > 
+     * > https://www.rfc-editor.org/rfc/rfc2046.html
+     *
+     * But in practice, we're okay. We use 128 bits of randomness. The chance of
+     * it appearing in the data is about 1 in 2^128 — effectively zero. Curl does
+     * the same here: 
+     *
+     *    https://github.com/curl/curl/blob/462244447e8ba3a53b1ba9f0ba7baa52d8777daa/lib/mime.c#L1179-L1236
+     * 
+     * Also, most chunks declare their Content-Length, so the client may skip the
+     * boundary matching entirely and just consume that many bytes.
+     */
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
     $gz = new GzipOutputStream();

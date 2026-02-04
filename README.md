@@ -119,7 +119,6 @@ This is why we're budgeting our resource usage in a few ways:
 ### Todos
 
 * Auto-constraining resource usage
-* Tell the user when a volatile file can't be synchronized
 * When we're starting the import and we have access to local MySQL, detect our local `current_statement_size` and `max_allowed_packet` and send that
   over to the remote host to get an appropriately-chunked dump. Alternatively, if we ever need to store the dump now and execute it later, we could
   bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and
@@ -133,10 +132,9 @@ This is why we're budgeting our resource usage in a few ways:
 * Support directories with more files than can be stored in memory at once.
 * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases
-* Multipart handling – do we need to check for boundary presence in our chunk when Content-Length is also present?
-* ?: It is the responsibility of the migration target to keep track of all modified files and re-request them later on.
-* ?: The migration source keeps track of all such modified files and moves them to the end of the synchronization queue.
-     If they're reached again, and they're modified again, ... (?) ...
+* Take note of any files modified while they were streamed, re-request them later on.
+   * Tell the user when a file is too volatile to be synchronized
+✅ Multipart handling – do we need to check for boundary presence in our chunk when Content-Length is also present?
 ✅ Double check we're generating a useful, append-only audit log for every export call
 ❌ Directory tree snapshots – store root-relative path. Don't store the entire absolute path, it inflates the snapshot size.
   ^ this is okay, repetitive paths gzip exceptionally well.

@@ -9,6 +9,8 @@
  * cursors for transport.
  */
 
+require_once __DIR__ . '/class-directory-listing.php';
+
 /**
  * Stream filesystem entries in deterministic, sorted DFS order.
  *
@@ -117,7 +119,7 @@ class FileTreeProducer
             $this->traversal_stack[] = [
                 "dir" => $dir,
                 "last_visited" => null,
-                "entries" => null,
+                "listing" => null,
             ];
         }
     }
@@ -208,7 +210,7 @@ class FileTreeProducer
                     $this->traversal_stack[] = [
                         "dir" => $dir,
                         "last_visited" => null,
-                        "entries" => null,
+                        "listing" => null,
                     ];
                 }
             }
@@ -241,7 +243,7 @@ class FileTreeProducer
                 $this->traversal_stack[] = [
                     "dir" => $dir,
                     "last_visited" => null,
-                    "entries" => null,
+                    "listing" => null,
                 ];
             }
             return;
@@ -259,7 +261,7 @@ class FileTreeProducer
             $frames[] = [
                 "dir" => $current_dir,
                 "last_visited" => $part,
-                "entries" => null,
+                "listing" => null,
             ];
             $current_dir .= "/" . $part;
         }
@@ -268,7 +270,7 @@ class FileTreeProducer
             $frames[] = [
                 "dir" => $matched_root,
                 "last_visited" => basename($last_path),
-                "entries" => null,
+                "listing" => null,
             ];
         }
 
@@ -280,7 +282,7 @@ class FileTreeProducer
                 array_unshift($this->traversal_stack, [
                     "dir" => $roots[$i],
                     "last_visited" => null,
-                    "entries" => null,
+                    "listing" => null,
                 ]);
             }
         }
@@ -384,37 +386,27 @@ class FileTreeProducer
             $idx = count($this->traversal_stack) - 1;
             $frame = &$this->traversal_stack[$idx];
 
-            if ($frame["entries"] === null) {
+            if ($frame["listing"] === null) {
 				/**
-				 * @TODO: use readdir() with file-based sorting whenever we deal with a really large
-				 * directory.
-				 * 
-				 * Sort the scandir() results. Maybe we don't have to, since scandir() second argument
-				 * defaults to ascending sorting of the returned data. However, at the moment I don't
-				 * trust PHP's internal handling of string sorting and am cutting a corner to avoid
-				 * spending time diving into it. Let's just sort.
-				 * 
-				 * scandir() uses readdir() internally:
-				 * 
-				 * > The order in which filenames are read by successive calls to
-				 * > readdir() depends on the filesystem implementation; it is unlikely
-				 * > that the names will be sorted in any fashion.
-				 * 
-				 * https://man7.org/linux/man-pages/man3/readdir.3.html
+				 * Use DirectoryListing which handles large directories efficiently.
+				 *
+				 * DirectoryListing uses php://temp which stores entries in memory up to a threshold
+				 * (default 2MB), then automatically spills to a temporary file. This allows handling
+				 * directories with millions of files without exhausting memory.
+				 *
+				 * We use readdir() internally (not scandir()) to avoid loading all entries into
+				 * memory at once during the scan phase.
 				 */
-                $entries = @scandir($frame["dir"]);
-                if ($entries === false) {
+                $listing = DirectoryListing::scan($frame["dir"]);
+                if ($listing === null) {
                     array_pop($this->traversal_stack);
                     continue;
                 }
-                $entries = array_values(
-                    array_filter($entries, fn($e) => $e !== "." && $e !== ".."),
-                );
-                sort($entries, SORT_STRING);
-                $frame["entries"] = $entries;
+                $listing->sort();
+                $frame["listing"] = $listing;
 
 				// Empty directory? Emit that as a chunk:
-                if (count($entries) === 0) {
+                if ($listing->isEmpty()) {
                     array_pop($this->traversal_stack);
                     $this->last_emitted_path = $frame["dir"];
                     $this->last_emitted_ctime = null;
@@ -426,19 +418,21 @@ class FileTreeProducer
                 }
             }
 
-            // Use binary search to find position after $frame["last_visited"], not a stored index
+            // Use DirectoryListing's binary search to find position after last_visited
+            $listing = $frame["listing"];
             $last = $frame["last_visited"] ?? null;
-            $start = 0;
             if ($last !== null) {
-                $start = $this->binary_search_next($frame["entries"], $last);
+                $listing->seekAfter($last);
+            } else {
+                $listing->rewind();
             }
 
-            if ($start >= count($frame["entries"])) {
+            $entry = $listing->next();
+            if ($entry === null) {
                 array_pop($this->traversal_stack);
                 continue;
             }
 
-            $entry = $frame["entries"][$start];
             $frame["last_visited"] = $entry;
             $path = $frame["dir"] . "/" . $entry;
 
@@ -460,7 +454,7 @@ class FileTreeProducer
                 $this->traversal_stack[] = [
                     "dir" => $path,
                     "last_visited" => null,
-                    "entries" => null,
+                    "listing" => null,
                 ];
                 continue;
             }
