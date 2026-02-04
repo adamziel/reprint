@@ -2362,6 +2362,7 @@ class ImportClient
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_TIMEOUT => 300,
+            CURLOPT_ENCODING => "", // Auto-decompress gzip/deflate/br responses
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
                 &$parser,

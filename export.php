@@ -69,6 +69,59 @@ require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/file-sync.php";
 
 /**
+ * Streaming gzip output wrapper.
+ *
+ * Compresses output incrementally without buffering the entire response.
+ * Uses deflate_add() with ZLIB_SYNC_FLUSH to emit compressed data immediately.
+ */
+class GzipOutputStream
+{
+    private $deflate_ctx;
+    private bool $header_sent = false;
+
+    public function __construct()
+    {
+        $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
+        header("Content-Encoding: gzip");
+    }
+
+    /**
+     * Write data to the gzip stream.
+     */
+    public function write(string $data): void
+    {
+        $compressed = deflate_add(
+            $this->deflate_ctx,
+            $data,
+            ZLIB_SYNC_FLUSH,
+        );
+        if ($compressed !== false && $compressed !== "") {
+            echo $compressed;
+        }
+    }
+
+    /**
+     * Flush the output buffer.
+     */
+    public function flush(): void
+    {
+        flush();
+    }
+
+    /**
+     * Finalize the gzip stream.
+     */
+    public function finish(): void
+    {
+        $final = deflate_add($this->deflate_ctx, "", ZLIB_FINISH);
+        if ($final !== false && $final !== "") {
+            echo $final;
+        }
+        flush();
+    }
+}
+
+/**
  * Extract database credentials from wp-config.php using PHP tokenizer.
  *
  * @param array $directories Array of directory paths to search for wp-config.php
@@ -293,9 +346,10 @@ function endpoint_sql_chunk(
         ob_end_flush();
     }
 
-    // Initialize multipart boundary
+    // Initialize multipart boundary and gzip stream
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    $gz = new GzipOutputStream();
 
     $batches_processed = 0;
 
@@ -336,14 +390,15 @@ function endpoint_sql_chunk(
 
         // Output SQL batch as multipart chunk
         $cursor = $reader->get_reentrancy_cursor();
-        echo "--{$boundary}\r\n";
-        echo "Content-Type: application/sql\r\n";
-        echo "Content-Length: " . strlen($sql) . "\r\n";
-        echo "X-Chunk-Type: sql\r\n";
-        echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-        echo "\r\n";
-        echo $sql;
-        echo "\r\n";
+        $gz->write("--{$boundary}\r\n");
+        $gz->write("Content-Type: application/sql\r\n");
+        $gz->write("Content-Length: " . strlen($sql) . "\r\n");
+        $gz->write("X-Chunk-Type: sql\r\n");
+        $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+        $gz->write("\r\n");
+        $gz->write($sql);
+        $gz->write("\r\n");
+        $gz->flush();
 
         $batches_processed++;
 
@@ -355,19 +410,20 @@ function endpoint_sql_chunk(
     // Output completion chunk with stats in headers
     $status = $reader->is_finished() ? "complete" : "partial";
 
-    echo "--{$boundary}\r\n";
-    echo "Content-Type: application/octet-stream\r\n";
-    echo "Content-Length: 0\r\n";
-    echo "X-Chunk-Type: completion\r\n";
-    echo "X-Status: {$status}\r\n";
-    echo "X-Batches-Processed: {$batches_processed}\r\n";
-    echo "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n";
-    echo "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n";
-    echo "\r\n";
-    echo "\r\n";
+    $gz->write("--{$boundary}\r\n");
+    $gz->write("Content-Type: application/octet-stream\r\n");
+    $gz->write("Content-Length: 0\r\n");
+    $gz->write("X-Chunk-Type: completion\r\n");
+    $gz->write("X-Status: {$status}\r\n");
+    $gz->write("X-Batches-Processed: {$batches_processed}\r\n");
+    $gz->write("X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n");
+    $gz->write("X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n");
+    $gz->write("\r\n");
+    $gz->write("\r\n");
 
     // Close multipart
-    echo "--{$boundary}--\r\n";
+    $gz->write("--{$boundary}--\r\n");
+    $gz->finish();
 
     return [
         "status" => $status,
@@ -434,7 +490,7 @@ function resolve_directories(array $config): array
 }
 
 /**
- * Stream chunks from a file producer as multipart/mixed.
+ * Stream chunks from a file producer as multipart/mixed with gzip compression.
  */
 function stream_file_producer(
     $producer,
@@ -450,18 +506,20 @@ function stream_file_producer(
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
 
+    $gz = new GzipOutputStream();
+
     $initial_progress = $producer->get_progress();
     $initial_progress_json = json_encode($initial_progress);
     $initial_cursor = $producer->get_reentrancy_cursor();
-    echo "--{$boundary}\r\n";
-    echo "Content-Type: application/json\r\n";
-    echo "Content-Length: " . strlen($initial_progress_json) . "\r\n";
-    echo "X-Chunk-Type: progress\r\n";
-    echo "X-Cursor: " . base64_encode($initial_cursor) . "\r\n";
-    echo "\r\n";
-    echo $initial_progress_json;
-    echo "\r\n";
-    flush();
+    $gz->write("--{$boundary}\r\n");
+    $gz->write("Content-Type: application/json\r\n");
+    $gz->write("Content-Length: " . strlen($initial_progress_json) . "\r\n");
+    $gz->write("X-Chunk-Type: progress\r\n");
+    $gz->write("X-Cursor: " . base64_encode($initial_cursor) . "\r\n");
+    $gz->write("\r\n");
+    $gz->write($initial_progress_json);
+    $gz->write("\r\n");
+    $gz->flush();
 
     $chunks_processed = 0;
     $files_completed = 0;
@@ -482,18 +540,19 @@ function stream_file_producer(
             ];
             $metadata_json = json_encode($metadata);
 
-            echo "--{$boundary}\r\n";
-            echo "Content-Type: application/json\r\n";
-            echo "Content-Length: " . strlen($metadata_json) . "\r\n";
-            echo "X-Chunk-Type: metadata\r\n";
-            echo "X-Filesystem-Root: " .
-                base64_encode($filesystem_root ?? "") .
-                "\r\n";
-            echo "X-Debug-Filesystem-Root: " . $filesystem_root . "\r\n";
-            echo "\r\n";
-            echo $metadata_json;
-            echo "\r\n";
-            flush();
+            $gz->write("--{$boundary}\r\n");
+            $gz->write("Content-Type: application/json\r\n");
+            $gz->write("Content-Length: " . strlen($metadata_json) . "\r\n");
+            $gz->write("X-Chunk-Type: metadata\r\n");
+            $gz->write(
+                "X-Filesystem-Root: " .
+                    base64_encode($filesystem_root ?? "") .
+                    "\r\n",
+            );
+            $gz->write("\r\n");
+            $gz->write($metadata_json);
+            $gz->write("\r\n");
+            $gz->flush();
 
             $metadata_sent = true;
         }
@@ -504,15 +563,17 @@ function stream_file_producer(
                 $progress_json = json_encode($progress);
                 $cursor = $producer->get_reentrancy_cursor();
 
-                echo "--{$boundary}\r\n";
-                echo "Content-Type: application/json\r\n";
-                echo "Content-Length: " . strlen($progress_json) . "\r\n";
-                echo "X-Chunk-Type: progress\r\n";
-                echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-                echo "\r\n";
-                echo $progress_json;
-                echo "\r\n";
-                flush();
+                $gz->write("--{$boundary}\r\n");
+                $gz->write("Content-Type: application/json\r\n");
+                $gz->write(
+                    "Content-Length: " . strlen($progress_json) . "\r\n",
+                );
+                $gz->write("X-Chunk-Type: progress\r\n");
+                $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+                $gz->write("\r\n");
+                $gz->write($progress_json);
+                $gz->write("\r\n");
+                $gz->flush();
 
                 $last_progress_output = $now;
             }
@@ -534,51 +595,61 @@ function stream_file_producer(
         $cursor = $producer->get_reentrancy_cursor();
 
         if ($chunk_type === "directory") {
-            echo "--{$boundary}\r\n";
-            echo "Content-Type: application/octet-stream\r\n";
-            echo "Content-Length: 0\r\n";
-            echo "X-Chunk-Type: directory\r\n";
-            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-            echo "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n";
-            echo "\r\n";
-            echo "\r\n";
-            flush();
+            $gz->write("--{$boundary}\r\n");
+            $gz->write("Content-Type: application/octet-stream\r\n");
+            $gz->write("Content-Length: 0\r\n");
+            $gz->write("X-Chunk-Type: directory\r\n");
+            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+            $gz->write(
+                "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n",
+            );
+            $gz->write("\r\n");
+            $gz->write("\r\n");
+            $gz->flush();
         } elseif ($chunk_type === "symlink") {
-            echo "--{$boundary}\r\n";
-            echo "Content-Type: application/octet-stream\r\n";
-            echo "Content-Length: 0\r\n";
-            echo "X-Chunk-Type: symlink\r\n";
-            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-            echo "X-Symlink-Path: " . base64_encode($chunk["path"]) . "\r\n";
-            echo "X-Symlink-Target: " .
-                base64_encode($chunk["target"]) .
-                "\r\n";
-            echo "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n";
-            echo "\r\n";
-            echo "\r\n";
-            flush();
+            $gz->write("--{$boundary}\r\n");
+            $gz->write("Content-Type: application/octet-stream\r\n");
+            $gz->write("Content-Length: 0\r\n");
+            $gz->write("X-Chunk-Type: symlink\r\n");
+            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+            $gz->write(
+                "X-Symlink-Path: " . base64_encode($chunk["path"]) . "\r\n",
+            );
+            $gz->write(
+                "X-Symlink-Target: " .
+                    base64_encode($chunk["target"]) .
+                    "\r\n",
+            );
+            $gz->write("X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n");
+            $gz->write("\r\n");
+            $gz->write("\r\n");
+            $gz->flush();
         } elseif ($chunk_type === "index") {
-            echo "--{$boundary}\r\n";
-            echo "Content-Type: application/octet-stream\r\n";
-            echo "Content-Length: 0\r\n";
-            echo "X-Chunk-Type: index\r\n";
-            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-            echo "X-Index-Path: " . base64_encode($chunk["path"]) . "\r\n";
-            echo "X-File-Ctime: " . $chunk["ctime"] . "\r\n";
-            echo "X-File-Size: " . $chunk["size"] . "\r\n";
-            echo "\r\n";
-            echo "\r\n";
-            flush();
+            $gz->write("--{$boundary}\r\n");
+            $gz->write("Content-Type: application/octet-stream\r\n");
+            $gz->write("Content-Length: 0\r\n");
+            $gz->write("X-Chunk-Type: index\r\n");
+            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+            $gz->write(
+                "X-Index-Path: " . base64_encode($chunk["path"]) . "\r\n",
+            );
+            $gz->write("X-File-Ctime: " . $chunk["ctime"] . "\r\n");
+            $gz->write("X-File-Size: " . $chunk["size"] . "\r\n");
+            $gz->write("\r\n");
+            $gz->write("\r\n");
+            $gz->flush();
         } elseif ($chunk_type === "missing") {
-            echo "--{$boundary}\r\n";
-            echo "Content-Type: application/octet-stream\r\n";
-            echo "Content-Length: 0\r\n";
-            echo "X-Chunk-Type: missing\r\n";
-            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-            echo "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n";
-            echo "\r\n";
-            echo "\r\n";
-            flush();
+            $gz->write("--{$boundary}\r\n");
+            $gz->write("Content-Type: application/octet-stream\r\n");
+            $gz->write("Content-Length: 0\r\n");
+            $gz->write("X-Chunk-Type: missing\r\n");
+            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+            $gz->write(
+                "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n",
+            );
+            $gz->write("\r\n");
+            $gz->write("\r\n");
+            $gz->flush();
         } else {
             $chunks_processed++;
             $bytes_processed += strlen($chunk["data"]);
@@ -588,39 +659,49 @@ function stream_file_producer(
 
             $data = $chunk["data"];
 
-            echo "--{$boundary}\r\n";
-            echo "Content-Type: application/octet-stream\r\n";
-            echo "Content-Length: " . strlen($data) . "\r\n";
-            echo "X-Chunk-Type: file\r\n";
-            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-            echo "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n";
-            echo "X-File-Size: " . $chunk["size"] . "\r\n";
-            echo "X-File-Ctime: " . $chunk["ctime"] . "\r\n";
-            echo "X-Chunk-Offset: " . $chunk["offset"] . "\r\n";
-            echo "X-Chunk-Size: " . strlen($data) . "\r\n";
-            echo "X-First-Chunk: " .
-                ($chunk["is_first_chunk"] ? "1" : "0") .
-                "\r\n";
-            echo "X-Last-Chunk: " .
-                ($chunk["is_last_chunk"] ? "1" : "0") .
-                "\r\n";
+            $gz->write("--{$boundary}\r\n");
+            $gz->write("Content-Type: application/octet-stream\r\n");
+            $gz->write("Content-Length: " . strlen($data) . "\r\n");
+            $gz->write("X-Chunk-Type: file\r\n");
+            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+            $gz->write(
+                "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n",
+            );
+            $gz->write("X-File-Size: " . $chunk["size"] . "\r\n");
+            $gz->write("X-File-Ctime: " . $chunk["ctime"] . "\r\n");
+            $gz->write("X-Chunk-Offset: " . $chunk["offset"] . "\r\n");
+            $gz->write("X-Chunk-Size: " . strlen($data) . "\r\n");
+            $gz->write(
+                "X-First-Chunk: " .
+                    ($chunk["is_first_chunk"] ? "1" : "0") .
+                    "\r\n",
+            );
+            $gz->write(
+                "X-Last-Chunk: " .
+                    ($chunk["is_last_chunk"] ? "1" : "0") .
+                    "\r\n",
+            );
             if (!empty($chunk["file_changed"])) {
-                echo "X-File-Changed: 1\r\n";
+                $gz->write("X-File-Changed: 1\r\n");
                 if ($chunk["change_ctime"] !== null) {
-                    echo "X-File-Change-Ctime: " .
-                        $chunk["change_ctime"] .
-                        "\r\n";
+                    $gz->write(
+                        "X-File-Change-Ctime: " .
+                            $chunk["change_ctime"] .
+                            "\r\n",
+                    );
                 }
                 if ($chunk["change_size"] !== null) {
-                    echo "X-File-Change-Size: " .
-                        $chunk["change_size"] .
-                        "\r\n";
+                    $gz->write(
+                        "X-File-Change-Size: " .
+                            $chunk["change_size"] .
+                            "\r\n",
+                    );
                 }
             }
-            echo "\r\n";
-            echo $data;
-            echo "\r\n";
-            flush();
+            $gz->write("\r\n");
+            $gz->write($data);
+            $gz->write("\r\n");
+            $gz->flush();
         }
 
         if (
@@ -644,19 +725,20 @@ function stream_file_producer(
             "chunks={$chunks_processed}, files={$files_completed}, bytes={$bytes_processed}",
     );
 
-    echo "--{$boundary}\r\n";
-    echo "Content-Type: application/octet-stream\r\n";
-    echo "Content-Length: 0\r\n";
-    echo "X-Chunk-Type: completion\r\n";
-    echo "X-Status: {$status}\r\n";
-    echo "X-Chunks-Processed: {$chunks_processed}\r\n";
-    echo "X-Files-Completed: {$files_completed}\r\n";
-    echo "X-Bytes-Processed: {$bytes_processed}\r\n";
-    echo "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n";
-    echo "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n";
-    echo "\r\n";
-    echo "\r\n";
-    echo "--{$boundary}--\r\n";
+    $gz->write("--{$boundary}\r\n");
+    $gz->write("Content-Type: application/octet-stream\r\n");
+    $gz->write("Content-Length: 0\r\n");
+    $gz->write("X-Chunk-Type: completion\r\n");
+    $gz->write("X-Status: {$status}\r\n");
+    $gz->write("X-Chunks-Processed: {$chunks_processed}\r\n");
+    $gz->write("X-Files-Completed: {$files_completed}\r\n");
+    $gz->write("X-Bytes-Processed: {$bytes_processed}\r\n");
+    $gz->write("X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n");
+    $gz->write("X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n");
+    $gz->write("\r\n");
+    $gz->write("\r\n");
+    $gz->write("--{$boundary}--\r\n");
+    $gz->finish();
 
     return [
         "status" => $status,
@@ -710,17 +792,16 @@ function endpoint_file_stream(
 }
 
 /**
- * Endpoint: Stream index in batches.
+ * Endpoint: Stream index in batches with gzip compression.
  *
  * Instead of emitting one multipart chunk per file, collects up to
  * `batch_size` (default 5000) index entries and emits them as a single
- * gzipped TSV chunk. The cursor points to where to continue on the next request.
+ * TSV chunk. The entire response is gzip-compressed.
  *
  * Output format per batch:
  *   X-Chunk-Type: index_batch
  *   X-Cursor: <base64 cursor>
- *   Content-Encoding: gzip
- *   Body: gzipped TSV (path\tctime\tsize per line)
+ *   Body: TSV (path\tctime\tsize per line)
  */
 function endpoint_file_index(
     array $config,
@@ -751,20 +832,24 @@ function endpoint_file_index(
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
 
+    $gz = new GzipOutputStream();
+
     // Emit initial metadata
     $filesystem_root = $producer->get_filesystem_root();
     $metadata = ["filesystem_root" => $filesystem_root];
     $metadata_json = json_encode($metadata);
 
-    echo "--{$boundary}\r\n";
-    echo "Content-Type: application/json\r\n";
-    echo "Content-Length: " . strlen($metadata_json) . "\r\n";
-    echo "X-Chunk-Type: metadata\r\n";
-    echo "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n";
-    echo "\r\n";
-    echo $metadata_json;
-    echo "\r\n";
-    flush();
+    $gz->write("--{$boundary}\r\n");
+    $gz->write("Content-Type: application/json\r\n");
+    $gz->write("Content-Length: " . strlen($metadata_json) . "\r\n");
+    $gz->write("X-Chunk-Type: metadata\r\n");
+    $gz->write(
+        "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n",
+    );
+    $gz->write("\r\n");
+    $gz->write($metadata_json);
+    $gz->write("\r\n");
+    $gz->flush();
 
     $batches_emitted = 0;
     $total_entries = 0;
@@ -806,22 +891,19 @@ function endpoint_file_index(
             )
         ) {
             $cursor = $producer->get_reentrancy_cursor();
-            $tsv = implode("\n", $batch_lines);
-            $gzipped = gzencode($tsv, 6);
+            $tsv = implode("\n", $batch_lines) . "\n";
 
-            echo "--{$boundary}\r\n";
-            echo "Content-Type: text/tab-separated-values\r\n";
-            echo "Content-Encoding: gzip\r\n";
-            echo "Content-Length: " . strlen($gzipped) . "\r\n";
-            echo "X-Chunk-Type: index_batch\r\n";
-            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-            echo "X-Batch-Size: " . count($batch_lines) . "\r\n";
-            echo "\r\n";
-            echo $gzipped;
-            echo "\r\n";
-            flush();
+            $gz->write("--{$boundary}\r\n");
+            $gz->write("Content-Type: text/tab-separated-values\r\n");
+            $gz->write("Content-Length: " . strlen($tsv) . "\r\n");
+            $gz->write("X-Chunk-Type: index_batch\r\n");
+            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+            $gz->write("X-Batch-Size: " . count($batch_lines) . "\r\n");
+            $gz->write("\r\n");
+            $gz->write($tsv);
+            $gz->write("\r\n");
+            $gz->flush();
 
-            $batches_emitted++;
             $batches_emitted++;
             $total_entries += count($batch_lines);
             $batch_lines = [];
@@ -842,20 +924,18 @@ function endpoint_file_index(
     // Emit any remaining entries
     if (!empty($batch_lines)) {
         $cursor = $producer->get_reentrancy_cursor();
-        $tsv = implode("\n", $batch_lines);
-        $gzipped = gzencode($tsv, 6);
+        $tsv = implode("\n", $batch_lines) . "\n";
 
-        echo "--{$boundary}\r\n";
-        echo "Content-Type: text/tab-separated-values\r\n";
-        echo "Content-Encoding: gzip\r\n";
-        echo "Content-Length: " . strlen($gzipped) . "\r\n";
-        echo "X-Chunk-Type: index_batch\r\n";
-        echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
-        echo "X-Batch-Size: " . count($batch_lines) . "\r\n";
-        echo "\r\n";
-        echo $gzipped;
-        echo "\r\n";
-        flush();
+        $gz->write("--{$boundary}\r\n");
+        $gz->write("Content-Type: text/tab-separated-values\r\n");
+        $gz->write("Content-Length: " . strlen($tsv) . "\r\n");
+        $gz->write("X-Chunk-Type: index_batch\r\n");
+        $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+        $gz->write("X-Batch-Size: " . count($batch_lines) . "\r\n");
+        $gz->write("\r\n");
+        $gz->write($tsv);
+        $gz->write("\r\n");
+        $gz->flush();
 
         $batches_emitted++;
         $total_entries += count($batch_lines);
@@ -865,18 +945,19 @@ function endpoint_file_index(
     $is_complete = $progress["phase"] === "finished";
     $status = $is_complete ? "complete" : "partial";
 
-    echo "--{$boundary}\r\n";
-    echo "Content-Type: application/octet-stream\r\n";
-    echo "Content-Length: 0\r\n";
-    echo "X-Chunk-Type: completion\r\n";
-    echo "X-Status: {$status}\r\n";
-    echo "X-Batches-Emitted: {$batches_emitted}\r\n";
-    echo "X-Total-Entries: {$total_entries}\r\n";
-    echo "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n";
-    echo "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n";
-    echo "\r\n";
-    echo "\r\n";
-    echo "--{$boundary}--\r\n";
+    $gz->write("--{$boundary}\r\n");
+    $gz->write("Content-Type: application/octet-stream\r\n");
+    $gz->write("Content-Length: 0\r\n");
+    $gz->write("X-Chunk-Type: completion\r\n");
+    $gz->write("X-Status: {$status}\r\n");
+    $gz->write("X-Batches-Emitted: {$batches_emitted}\r\n");
+    $gz->write("X-Total-Entries: {$total_entries}\r\n");
+    $gz->write("X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n");
+    $gz->write("X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n");
+    $gz->write("\r\n");
+    $gz->write("\r\n");
+    $gz->write("--{$boundary}--\r\n");
+    $gz->finish();
 
     return [
         "status" => $status,
