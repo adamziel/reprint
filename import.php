@@ -662,11 +662,13 @@ class ImportClient
         $this->save_state($this->state);
 
         // Execute sync (no client state for initial sync)
-        $completed = $this->download_file_stream("file_stream", null);
+        do {
+            $completed = $this->download_file_stream("file_stream", null);
 
-        // Mark status based on completion
-        $this->state["status"] = $completed ? "complete" : "partial";
-        $this->save_state($this->state);
+            // Mark status based on completion
+            $this->state["status"] = $completed ? "complete" : "partial";
+            $this->save_state($this->state);
+        } while (!$completed);
 
         $this->clear_progress_line();
         $index_size = $this->index_count();
@@ -819,6 +821,14 @@ class ImportClient
             $this->state["stage"] = $has_downloads ? "fetch" : null;
             $this->save_state($this->state);
             $stage = $has_downloads ? "fetch" : null;
+
+            // Clean up empty download list when no files need fetching
+            if (!$has_downloads && file_exists($this->download_list_file)) {
+                @unlink($this->download_list_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->download_list_file} | no files to fetch",
+                );
+            }
         }
 
         if ($stage === "fetch") {
@@ -831,6 +841,14 @@ class ImportClient
             $this->state["stage"] = null;
             $this->state["cursor"] = null;
             $this->save_state($this->state);
+
+            // Clean up download list after successful fetch
+            if (file_exists($this->download_list_file)) {
+                @unlink($this->download_list_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->download_list_file} | fetch complete",
+                );
+            }
         }
 
         $this->state["status"] = "complete";
@@ -2252,24 +2270,8 @@ class ImportClient
         ?array $post_data = null,
     ): void {
         // Log HTTP request details
-        $parsed_url = parse_url($url);
-        $query_params = [];
-        if (isset($parsed_url["query"])) {
-            parse_str($parsed_url["query"], $query_params);
-        }
+        $log_parts = ["HTTP_REQUEST", $post_data ? "POST" : "GET", $url];
 
-        $log_parts = [
-            "HTTP_REQUEST",
-            $post_data ? "POST" : "GET",
-            $parsed_url["path"] ?? "/",
-        ];
-
-        if (isset($query_params["phase"])) {
-            $log_parts[] = "phase=" . $query_params["phase"];
-        }
-        if ($cursor) {
-            $log_parts[] = "cursor=" . substr($cursor, 0, 20) . "...";
-        }
         if ($post_data && isset($post_data["file_list"])) {
             $file_list_part = $post_data["file_list"];
             if ($file_list_part instanceof CURLFile) {
@@ -2597,40 +2599,6 @@ class ImportClient
     }
 
     /**
-     * Migrate legacy state keys into the compact schema.
-     */
-    private function migrate_legacy_state(array $legacy): array
-    {
-        $state = $this->default_state();
-        $command = $legacy["current_command"] ?? null;
-        $state["command"] = $command;
-
-        if ($command === "files-sync-initial") {
-            $state["status"] = $legacy["files_sync_initial_status"] ?? null;
-            $state["cursor"] = $legacy["files_sync_initial_cursor"] ?? null;
-        } elseif ($command === "files-sync-delta") {
-            $state["status"] = $legacy["files_sync_delta_status"] ?? null;
-            $state["stage"] = $legacy["files_sync_delta_stage"] ?? null;
-            $state["diff"]["remote_offset"] =
-                (int) ($legacy["files_sync_delta_diff_offset"] ?? 0);
-            $state["diff"]["local_after"] =
-                $legacy["files_sync_delta_diff_local_after"] ?? null;
-            if ($state["stage"] === "index") {
-                $state["cursor"] =
-                    $legacy["files_sync_delta_index_cursor"] ?? null;
-            } elseif ($state["stage"] === "fetch") {
-                $state["cursor"] =
-                    $legacy["files_sync_delta_fetch_cursor"] ?? null;
-            }
-        } elseif ($command === "sql-sync") {
-            $state["status"] = $legacy["sql_sync_status"] ?? null;
-            $state["cursor"] = $legacy["sql_sync_cursor"] ?? null;
-        }
-
-        return $state;
-    }
-
-    /**
      * Load import state from disk.
      */
     private function load_state(): array
@@ -2642,13 +2610,6 @@ class ImportClient
         $state = json_decode(file_get_contents($this->state_file), true);
         if (!is_array($state)) {
             return $this->default_state();
-        }
-
-        if (
-            isset($state["current_command"]) ||
-            isset($state["files_sync_initial_cursor"])
-        ) {
-            $state = $this->migrate_legacy_state($state);
         }
 
         return $this->normalize_state($state);

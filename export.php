@@ -489,6 +489,7 @@ function stream_file_producer(
             echo "X-Filesystem-Root: " .
                 base64_encode($filesystem_root ?? "") .
                 "\r\n";
+            echo "X-Debug-Filesystem-Root: " . $filesystem_root . "\r\n";
             echo "\r\n";
             echo $metadata_json;
             echo "\r\n";
@@ -670,7 +671,12 @@ function stream_file_producer(
 }
 
 /**
- * Endpoint: Stream all files (initial sync).
+ * Endpoint: Stream files.
+ *
+ * If `paths` is provided (array of specific file paths), streams only those files.
+ * Otherwise, streams all files via directory traversal (initial sync).
+ *
+ * The paths array is passed in memory - no filesystem writes required.
  */
 function endpoint_file_stream(
     array $config,
@@ -687,6 +693,12 @@ function endpoint_file_stream(
         $sync_options["cursor"] = $config["cursor"];
     }
 
+    // Optional paths filter: when provided, only stream these specific paths
+    // instead of doing full directory traversal
+    if (isset($config["paths"]) && is_array($config["paths"])) {
+        $sync_options["paths"] = $config["paths"];
+    }
+
     $producer = new FileTreeProducer($directories, $sync_options);
     return stream_file_producer(
         $producer,
@@ -699,6 +711,9 @@ function endpoint_file_stream(
 
 /**
  * Endpoint: Stream index-only entries (path, ctime, size).
+ *
+ * If `paths` is provided, only indexes those specific files.
+ * Otherwise, indexes all files via directory traversal.
  */
 function endpoint_file_index(
     array $config,
@@ -716,6 +731,11 @@ function endpoint_file_index(
         $sync_options["cursor"] = $config["cursor"];
     } elseif (isset($config["index_after"])) {
         $sync_options["start_after"] = $config["index_after"];
+    }
+
+    // Optional paths filter: when provided, only index these specific paths
+    if (isset($config["paths"]) && is_array($config["paths"])) {
+        $sync_options["paths"] = $config["paths"];
     }
 
     $producer = new FileTreeProducer($directories, $sync_options);
@@ -817,11 +837,8 @@ function should_continue(
 }
 
 // ============================================================================
-// CLI/HTTP Runtime
+// HTTP Runtime
 // ============================================================================
-
-// Detect runtime environment
-$is_cli = PHP_SAPI === "cli" || PHP_SAPI === "phpdbg";
 
 // Only execute if called directly (not included as a library)
 if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
@@ -829,19 +846,16 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
     ini_set("display_errors", 1);
 
     try {
-        // Parse configuration from CLI or HTTP
-        $config = $is_cli ? parse_cli_config() : parse_http_config();
+        $config = parse_http_config();
 
         // Decode cursor from base64 to JSON
-        // Cursor is ALWAYS base64-encoded in transit (GET param, header, or env var)
+        // Cursor is ALWAYS base64-encoded in transit (GET param or header)
         // Cursor is ALWAYS JSON when decoded
 
         // First, check if cursor was already set from GET/POST params
         if (!isset($config["cursor"])) {
-            // Try header or environment variable
-            $config["cursor"] = $is_cli
-                ? getenv("EXPORT_CURSOR")
-                : $_SERVER["HTTP_X_EXPORT_CURSOR"] ?? null;
+            // Try X-Export-Cursor header
+            $config["cursor"] = $_SERVER["HTTP_X_EXPORT_CURSOR"] ?? null;
         }
 
         // If cursor exists (from any source), decode it
@@ -952,70 +966,39 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
                 );
         }
     } catch (Exception $e) {
-        if ($is_cli) {
-            fwrite(STDERR, "Error: " . $e->getMessage() . "\n");
-            exit(1);
-        } else {
-            http_response_code(400);
-            header("Content-Type: application/json");
-            echo json_encode([
-                "error" => $e->getMessage(),
-                "trace" => $e->getTraceAsString(),
-            ]);
-        }
+        http_response_code(400);
+        header("Content-Type: application/json");
+        echo json_encode([
+            "error" => $e->getMessage(),
+            "trace" => $e->getTraceAsString(),
+        ]);
     }
-}
-
-/**
- * Parse configuration from CLI arguments.
- */
-function parse_cli_config(): array
-{
-    global $argv;
-    $config = [];
-
-    // Parse --key=value style arguments
-    for ($i = 1; $i < count($argv); $i++) {
-        $arg = $argv[$i];
-
-        if (strpos($arg, "--") === 0) {
-            $parts = explode("=", substr($arg, 2), 2);
-            $key = $parts[0];
-            $value = $parts[1] ?? "";
-
-            // Convert kebab-case to snake_case
-            $key = str_replace("-", "_", $key);
-
-            // Type casting for known numeric/boolean fields
-            if (
-                in_array($key, [
-                    "max_execution_time",
-                    "min_ctime",
-                    "chunk_size",
-                    "fragments_per_batch",
-                ])
-            ) {
-                $value = (int) $value;
-            } elseif (in_array($key, ["memory_threshold"])) {
-                $value = (float) $value;
-            } elseif (in_array($key, ["create_table_query"])) {
-                $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
-            }
-
-            $config[$key] = $value;
-        }
-    }
-
-    return $config;
 }
 
 /**
  * Parse configuration from HTTP GET/POST parameters.
+ *
+ * Paths can be passed as:
+ * - JSON array in 'paths' parameter (GET or POST)
+ * - JSON body with Content-Type: application/json containing {"paths": [...]}
  */
 function parse_http_config(): array
 {
     $config = [];
     $params = array_merge($_GET, $_POST);
+
+    // Check for JSON body (application/json) - useful for passing large paths arrays
+    $content_type = $_SERVER["CONTENT_TYPE"] ?? "";
+    if (strpos($content_type, "application/json") !== false) {
+        $json_body = file_get_contents("php://input");
+        if ($json_body !== false && $json_body !== "") {
+            $json_data = json_decode($json_body, true);
+            if (is_array($json_data)) {
+                // Merge JSON body params, with GET params taking precedence
+                $params = array_merge($json_data, $params);
+            }
+        }
+    }
 
     foreach ($params as $key => $value) {
         // Convert kebab-case to snake_case
@@ -1035,6 +1018,12 @@ function parse_http_config(): array
             $value = (float) $value;
         } elseif (in_array($key, ["create_table_query"])) {
             $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
+        } elseif ($key === "paths" && is_string($value)) {
+            // Paths passed as JSON-encoded string in parameter
+            $decoded = json_decode($value, true);
+            if (is_array($decoded)) {
+                $value = $decoded;
+            }
         }
 
         $config[$key] = $value;
