@@ -174,6 +174,13 @@ class MySQLDumpProducer
     private $max_statement_size;
 
     /**
+     * Optional query time limit (milliseconds) for SELECT statements.
+     *
+     * @var int|null
+     */
+    private $query_time_limit_ms = null;
+
+    /**
      * Queue of oversized column chunks to emit as UPDATE statements.
      * Structure: [['column' => name, 'chunks' => [...], 'chunk_index' => int], ...]
      *
@@ -224,6 +231,11 @@ class MySQLDumpProducer
             $this->max_statement_size = $options["max_statement_size"];
         } else {
             $this->max_statement_size = $this->detect_max_statement_size();
+        }
+
+        if (isset($options["query_time_limit_ms"])) {
+            $limit = (int) $options["query_time_limit_ms"];
+            $this->query_time_limit_ms = $limit > 0 ? $limit : null;
         }
 
         // Validate string_encoding value
@@ -610,6 +622,12 @@ class MySQLDumpProducer
     private function build_select_query()
     {
         $table = $this->current_table;
+        $select = "SELECT";
+        if ($this->query_time_limit_ms !== null) {
+            $select .= " /*+ MAX_EXECUTION_TIME(" .
+                $this->query_time_limit_ms .
+                ") */";
+        }
 
         // For binary encodings, fetch all non-numeric columns as binary to avoid charset conversion
         if ($this->string_encoding !== "raw" && $this->current_column_types) {
@@ -629,9 +647,12 @@ class MySQLDumpProducer
                 }
             }
             $query =
-                "SELECT " . implode(", ", $select_parts) . " FROM `{$table}`";
+                $select .
+                " " .
+                implode(", ", $select_parts) .
+                " FROM `{$table}`";
         } else {
-            $query = "SELECT * FROM `{$table}`";
+            $query = $select . " * FROM `{$table}`";
         }
 
         if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {

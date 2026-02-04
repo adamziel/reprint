@@ -319,18 +319,27 @@ function endpoint_sql_chunk(
     $fragments_per_batch = $config["fragments_per_batch"] ?? 1000;
 
     // Initialize MySQL connection
+    $pdo_options = [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    ];
+    if (!empty($config["db_unbuffered"])) {
+        $pdo_options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = false;
+    }
     $mysql = new PDO(
         "mysql:host={$db_host};dbname={$db_name};charset=utf8mb4",
         $db_user,
         $db_password,
+        $pdo_options,
     );
-    $mysql->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
     // Producer options
     $producer_options = [
         "create_table_query" => $config["create_table_query"] ?? true,
         "string_encoding" => $config["string_encoding"] ?? "base64",
     ];
+    if (!empty($config["db_query_time_limit"])) {
+        $producer_options["query_time_limit_ms"] = (int) $config["db_query_time_limit"];
+    }
 
     if (isset($config["cursor"])) {
         $producer_options["cursor"] = $config["cursor"];
@@ -1275,12 +1284,13 @@ function parse_http_config(): array
                 "min_ctime",
                 "chunk_size",
                 "fragments_per_batch",
+                "db_query_time_limit",
             ])
         ) {
             $value = (int) $value;
         } elseif (in_array($key, ["memory_threshold"])) {
             $value = (float) $value;
-        } elseif (in_array($key, ["create_table_query"])) {
+        } elseif (in_array($key, ["create_table_query", "db_unbuffered"])) {
             $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
         } elseif ($key === "paths" && is_string($value)) {
             // Paths passed as JSON-encoded string in parameter
