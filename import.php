@@ -2638,14 +2638,18 @@ class ImportClient
 
     /**
      * Save import state to disk.
+     *
+     * Uses atomic write (temp file + rename) to prevent corruption if
+     * the process is killed mid-write.
      */
     private function save_state(array $state): void
     {
         $state = $this->normalize_state($state);
-        file_put_contents(
-            $this->state_file,
-            json_encode($state, JSON_PRETTY_PRINT),
-        );
+
+        // Write to temp file first, then atomic rename
+        $tmp_file = $this->state_file . '.tmp';
+        file_put_contents($tmp_file, json_encode($state, JSON_PRETTY_PRINT));
+        rename($tmp_file, $this->state_file);
 
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run
