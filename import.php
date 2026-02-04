@@ -1729,21 +1729,21 @@ class ImportClient
     {
         $cursor = $this->state["cursor"] ?? null;
         $complete = false;
+        $sql_file = $this->local_path . "/db.sql";
 
         // Log current progress at start of request
-        $sql_size = file_exists($this->sql_file)
-            ? filesize($this->sql_file)
+        $sql_size = file_exists($sql_file)
+            ? filesize($sql_file)
             : 0;
         $has_cursor = $cursor !== null;
         $this->audit_log(
             sprintf(
                 "START SQL REQUEST | cursor=%s | sql_size=%s",
                 $has_cursor ? "YES" : "NO",
-                $this->format_bytes($sql_size),
+                number_format($sql_size) . " bytes",
             ),
             false,
         );
-        $sql_file = $this->local_path . "/db.sql";
 
         // Open in write mode if no cursor (starting fresh), append mode if resuming
         $sql_handle = fopen($sql_file, $cursor ? "a" : "w");
