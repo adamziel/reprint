@@ -436,21 +436,25 @@ class FileTreeProducer
             $frame["last_visited"] = $entry;
             $path = $frame["dir"] . "/" . $entry;
 
-            if (is_link($path)) {
+            $info = $this->lstat_path($path);
+            if ($info === null) {
+                continue;
+            }
+
+            if ($info["type"] === "link") {
                 $target = readlink($path);
-                $ctime = @filectime($path);
                 $this->last_emitted_path = $path;
-                $this->last_emitted_ctime = $ctime !== false ? $ctime : null;
+                $this->last_emitted_ctime = $info["ctime"];
                 $this->current_chunk = [
                     "type" => "symlink",
                     "path" => $path,
                     "target" => $target !== false ? $target : "",
-                    "ctime" => $ctime !== false ? $ctime : 0,
+                    "ctime" => $info["ctime"] ?? 0,
                 ];
                 return null;
             }
 
-            if (is_dir($path)) {
+            if ($info["type"] === "dir") {
                 $this->traversal_stack[] = [
                     "dir" => $path,
                     "last_visited" => null,
@@ -459,10 +463,10 @@ class FileTreeProducer
                 continue;
             }
 
-            if (is_file($path)) {
-                $ctime = @filectime($path);
-                $size = @filesize($path);
-                if ($ctime === false || $size === false) {
+            if ($info["type"] === "file") {
+                $ctime = $info["ctime"];
+                $size = $info["size"];
+                if ($ctime === null || $size === null) {
                     continue;
                 }
                 $this->current_file_meta = [
@@ -523,21 +527,25 @@ class FileTreeProducer
                 return null;
             }
 
-            if (is_link($resolved_path)) {
+            $info = $this->lstat_path($resolved_path);
+            if ($info === null) {
+                continue;
+            }
+
+            if ($info["type"] === "link") {
                 $target = readlink($resolved_path);
-                $ctime = @filectime($resolved_path);
                 $this->last_emitted_path = $resolved_path;
-                $this->last_emitted_ctime = $ctime !== false ? $ctime : null;
+                $this->last_emitted_ctime = $info["ctime"];
                 $this->current_chunk = [
                     "type" => "symlink",
                     "path" => $resolved_path,
                     "target" => $target !== false ? $target : "",
-                    "ctime" => $ctime !== false ? $ctime : 0,
+                    "ctime" => $info["ctime"] ?? 0,
                 ];
                 return null;
             }
 
-            if (is_dir($resolved_path)) {
+            if ($info["type"] === "dir") {
                 $this->last_emitted_path = $resolved_path;
                 $this->last_emitted_ctime = null;
                 $this->current_chunk = [
@@ -547,10 +555,10 @@ class FileTreeProducer
                 return null;
             }
 
-            if (is_file($resolved_path)) {
-                $ctime = @filectime($resolved_path);
-                $size = @filesize($resolved_path);
-                if ($ctime === false || $size === false) {
+            if ($info["type"] === "file") {
+                $ctime = $info["ctime"];
+                $size = $info["size"];
+                if ($ctime === null || $size === null) {
                     continue;
                 }
                 $this->current_file_meta = [
@@ -637,9 +645,10 @@ class FileTreeProducer
         $change_size = null;
         if ($is_last) {
             clearstatcache(true, $file["path"]);
-            $now_ctime = @filectime($file["path"]);
-            $now_size = @filesize($file["path"]);
-            if ($now_ctime !== false && $now_size !== false) {
+            $stat = @stat($file["path"]);
+            if ($stat !== false) {
+                $now_ctime = $stat["ctime"];
+                $now_size = $stat["size"];
                 if (
                     $now_ctime !== $file["ctime"] ||
                     $now_size !== $file["size"]
@@ -775,6 +784,35 @@ class FileTreeProducer
             }
         }
         return $low;
+    }
+
+    /**
+     * Single lstat() call to classify a path.
+     *
+     * @return array|null ['type' => 'file'|'dir'|'link'|'other', 'ctime' => int|null, 'size' => int|null]
+     */
+    private function lstat_path(string $path): ?array
+    {
+        $stat = @lstat($path);
+        if ($stat === false) {
+            return null;
+        }
+
+        $mode = $stat["mode"] & 0170000;
+        $type = "other";
+        if ($mode === 0120000) {
+            $type = "link";
+        } elseif ($mode === 0040000) {
+            $type = "dir";
+        } elseif ($mode === 0100000) {
+            $type = "file";
+        }
+
+        return [
+            "type" => $type,
+            "ctime" => isset($stat["ctime"]) ? (int) $stat["ctime"] : null,
+            "size" => isset($stat["size"]) ? (int) $stat["size"] : null,
+        ];
     }
 }
 

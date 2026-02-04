@@ -123,9 +123,11 @@ This is why we're budgeting our resource usage in a few ways:
   what it was doing when we've killed it (e.g. appending a partial state to the local file). So, if we wrote some bytes
   to the file but did not update the cursor yet, make sure the next run will know we're only expected to have so many
   bytes and will truncate the excess bytes beyond that expected size.
+* Account for the disk space limits for files and for MySQL data on the migration target.
 * Turn it into a WordPress plugin 
   * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases
+* Handle 4xx and 5xx errors, support backoff strategies.
 * Take note of any files modified while they were streamed, re-request them later on.
    * Tell the user when a file is too volatile to be synchronized
 ✅ Display nice progress information in the terminal (since that will also allow us to display it on the web)

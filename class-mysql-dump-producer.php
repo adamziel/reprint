@@ -1092,6 +1092,95 @@ class MySQLDumpProducer
     }
 
     /**
+     * Estimate the formatted SQL size of a value without building the full string.
+     *
+     * @param mixed  $value     The raw value.
+     * @param string $data_type The MySQL data type (uppercase or not).
+     * @return int Estimated size in bytes of the formatted SQL literal.
+     */
+    private function estimate_formatted_size($value, $data_type)
+    {
+        if ($value === null) {
+            return 4; // NULL
+        }
+
+        $data_type = strtoupper($data_type);
+
+        if ($this->is_numeric_type($data_type)) {
+            return strlen((string) $value);
+        }
+
+        // Binary types are always hex-encoded regardless of string_encoding
+        if ($this->is_binary_type($data_type)) {
+            $len = strlen((string) $value);
+            return $len === 0 ? 2 : (2 + ($len * 2)); // '' or 0x...
+        }
+
+        $len = strlen((string) $value);
+        if ($len === 0) {
+            return 2; // ''
+        }
+
+        switch ($this->string_encoding) {
+            case "0xbinary":
+                return 2 + ($len * 2); // 0x + hex
+
+            case "base64":
+                $b64_len = $this->estimate_base64_length($len);
+                // FROM_BASE64('<data>') => 15 bytes overhead + base64 length
+                return 15 + $b64_len;
+
+            case "raw":
+            default:
+                $escaped_len = $this->estimate_escaped_length((string) $value);
+                return $escaped_len + 2; // quotes
+        }
+    }
+
+    /**
+     * Estimate length of a base64-encoded string without encoding.
+     */
+    private function estimate_base64_length(int $raw_len): int
+    {
+        if ($raw_len === 0) {
+            return 0;
+        }
+        return 4 * intdiv($raw_len + 2, 3);
+    }
+
+    /**
+     * Estimate escaped length for MySQL string literals without allocation.
+     *
+     * Accounts for characters escaped by the MySQL driver:
+     * NUL, LF, CR, Ctrl+Z, backslash, single quote, double quote.
+     */
+    private function estimate_escaped_length(string $value): int
+    {
+        $len = strlen($value);
+        if ($len === 0) {
+            return 0;
+        }
+
+        $extra = 0;
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $value[$i];
+            if (
+                $ch === "\0" ||
+                $ch === "\n" ||
+                $ch === "\r" ||
+                $ch === "\x1a" ||
+                $ch === "\\" ||
+                $ch === "'" ||
+                $ch === "\""
+            ) {
+                $extra++;
+            }
+        }
+
+        return $len + $extra;
+    }
+
+    /**
      * Determines if a MySQL data type is numeric.
      *
      * @param string $data_type The MySQL data type (uppercase).
@@ -1218,27 +1307,31 @@ class MySQLDumpProducer
      */
     private function format_row_for_insert($row)
     {
-        // First, format all values and track their sizes
-        $formatted_values = [];
-        $value_sizes = [];
+        // First, estimate sizes without formatting (avoids large allocations)
+        $estimated_sizes = [];
+        $raw_values = [];
 
         foreach ($this->current_column_names as $col) {
             $value = $row[$col] ?? null;
+            $raw_values[$col] = $value;
             $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
-            $formatted = $this->format_value($value, $data_type);
-            $formatted_values[$col] = $formatted;
-            $value_sizes[$col] = strlen($formatted);
+            $estimated_sizes[$col] = $this->estimate_formatted_size($value, $data_type);
         }
 
-        // Calculate this row's size (values + commas + parens + newline)
-        $row_size = array_sum($value_sizes) + count($value_sizes) + 3;
+        // Calculate this row's estimated size (values + commas + parens + newline)
+        $row_size_est = array_sum($estimated_sizes) + count($estimated_sizes) + 3;
 
         // Check if adding this row would exceed max_statement_size
         // current_statement_size already includes the INSERT header (or accumulated rows)
-        $projected_size = $this->current_statement_size + $row_size;
+        $projected_size = $this->current_statement_size + $row_size_est;
 
-        // If within limits, return formatted row directly
+        // If within limits, format all values and return
         if ($projected_size <= $this->max_statement_size) {
+            $formatted_values = [];
+            foreach ($this->current_column_names as $col) {
+                $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
+                $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
+            }
             return "(" . implode(",", array_values($formatted_values)) . ")";
         }
 
@@ -1247,6 +1340,11 @@ class MySQLDumpProducer
         if (!$this->current_pk_columns || count($this->current_pk_columns) === 0) {
             // Cannot split rows in tables without primary key - emit as-is and hope for the best
             // The import might fail, but that's better than silently dropping data
+            $formatted_values = [];
+            foreach ($this->current_column_names as $col) {
+                $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
+                $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
+            }
             return "(" . implode(",", array_values($formatted_values)) . ")";
         }
 
@@ -1257,14 +1355,16 @@ class MySQLDumpProducer
         }
 
         // Find columns to split - sort by size descending
-        arsort($value_sizes);
+        $sorted_sizes = $estimated_sizes;
+        arsort($sorted_sizes);
 
         $this->oversized_queue = [];
+        $chunked_columns = [];
 
         // Calculate how much we need to trim to fit within max_statement_size
         $excess = $projected_size - $this->max_statement_size;
 
-        foreach ($value_sizes as $col => $size) {
+        foreach ($sorted_sizes as $col => $size) {
             // Don't split primary key columns - we need them for the WHERE clause
             if (in_array($col, $this->current_pk_columns)) {
                 continue;
@@ -1281,7 +1381,7 @@ class MySQLDumpProducer
             }
 
             // Get raw value for chunking
-            $raw_value = $row[$col] ?? null;
+            $raw_value = $raw_values[$col] ?? null;
             if ($raw_value === null || $raw_value === '') {
                 continue;
             }
@@ -1291,8 +1391,7 @@ class MySQLDumpProducer
             $chunks = $this->create_value_chunks($raw_value, $data_type, $col);
 
             if (count($chunks) > 1) {
-                // Replace with empty string in INSERT
-                $formatted_values[$col] = "''";
+                $chunked_columns[$col] = true;
                 $excess -= ($size - 2); // Saved bytes (size minus the '' replacement)
 
                 // Queue chunks for UPDATE statements
@@ -1303,6 +1402,21 @@ class MySQLDumpProducer
                     'chunk_index' => 0,
                 ];
             }
+        }
+
+        if (empty($chunked_columns)) {
+            // Nothing to split - fall back to emitting full row
+            $this->oversized_pk_values = null;
+        }
+
+        $formatted_values = [];
+        foreach ($this->current_column_names as $col) {
+            if (isset($chunked_columns[$col])) {
+                $formatted_values[$col] = "''";
+                continue;
+            }
+            $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
+            $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
         }
 
         return "(" . implode(",", array_values($formatted_values)) . ")";
