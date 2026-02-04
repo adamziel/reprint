@@ -1119,7 +1119,26 @@ class ImportClient
 
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
-            if ($chunk_type === "index") {
+            if ($chunk_type === "index_batch") {
+                // Batched format: gzipped TSV (path\tctime\tsize per line)
+                $body = $chunk["body"] ?? "";
+                $encoding = $chunk["headers"]["content-encoding"] ?? "";
+
+                // Decompress if gzipped
+                if ($encoding === "gzip") {
+                    $body = gzdecode($body);
+                }
+
+                // Write TSV lines directly to the index file
+                if ($body !== false && $body !== "") {
+                    fwrite($handle, $body);
+                    // Ensure newline at end if not present
+                    if (substr($body, -1) !== "\n") {
+                        fwrite($handle, "\n");
+                    }
+                }
+            } elseif ($chunk_type === "index") {
+                // Legacy single-entry format (backwards compatibility)
                 $path = base64_decode($chunk["headers"]["x-index-path"] ?? "");
                 $ctime = (int) ($chunk["headers"]["x-file-ctime"] ?? 0);
                 $size = (int) ($chunk["headers"]["x-file-size"] ?? 0);
@@ -1127,6 +1146,7 @@ class ImportClient
                     fwrite($handle, "{$path}\t{$ctime}\t{$size}\n");
                 }
             } elseif ($chunk_type === "symlink") {
+                // Legacy symlink format (backwards compatibility)
                 $path = base64_decode(
                     $chunk["headers"]["x-symlink-path"] ?? "",
                 );

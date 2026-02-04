@@ -10,7 +10,7 @@
  * - Internal: Cursors are JSON strings (e.g., {"p":"streaming","n":123})
  * - HTTP transmission: Cursors are base64-encoded in X-Cursor header (outgoing) and X-Export-Cursor header (incoming)
  * - This file is responsible for encoding when sending and decoding when receiving
- * - Producers (FileTreeProducer, FileListProducer, MySQLDumpProducer) work with JSON strings only, never base64
+ * - Producers (FileTreeProducer, MySQLDumpProducer) work with JSON strings only, never base64
  */
 
 // Global error handler to send errors back to client
@@ -710,10 +710,17 @@ function endpoint_file_stream(
 }
 
 /**
- * Endpoint: Stream index-only entries (path, ctime, size).
+ * Endpoint: Stream index in batches.
  *
- * If `paths` is provided, only indexes those specific files.
- * Otherwise, indexes all files via directory traversal.
+ * Instead of emitting one multipart chunk per file, collects up to
+ * `batch_size` (default 5000) index entries and emits them as a single
+ * gzipped TSV chunk. The cursor points to where to continue on the next request.
+ *
+ * Output format per batch:
+ *   X-Chunk-Type: index_batch
+ *   X-Cursor: <base64 cursor>
+ *   Content-Encoding: gzip
+ *   Body: gzipped TSV (path\tctime\tsize per line)
  */
 function endpoint_file_index(
     array $config,
@@ -723,6 +730,8 @@ function endpoint_file_index(
     float $memory_threshold,
 ): array {
     $directories = resolve_directories($config);
+    $batch_size = $config["batch_size"] ?? 5000;
+
     $sync_options = [
         "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024,
         "index_only" => true,
@@ -733,23 +742,158 @@ function endpoint_file_index(
         $sync_options["start_after"] = $config["index_after"];
     }
 
-    // Optional paths filter: when provided, only index these specific paths
-    if (isset($config["paths"]) && is_array($config["paths"])) {
-        $sync_options["paths"] = $config["paths"];
+    $producer = new FileTreeProducer($directories, $sync_options);
+
+    if (ob_get_level()) {
+        ob_end_flush();
     }
 
-    $producer = new FileTreeProducer($directories, $sync_options);
-    return stream_file_producer(
-        $producer,
-        $script_start,
-        $max_execution_time,
-        $max_memory,
-        $memory_threshold,
-    );
+    $boundary = "boundary-" . bin2hex(random_bytes(16));
+    header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+
+    // Emit initial metadata
+    $filesystem_root = $producer->get_filesystem_root();
+    $metadata = ["filesystem_root" => $filesystem_root];
+    $metadata_json = json_encode($metadata);
+
+    echo "--{$boundary}\r\n";
+    echo "Content-Type: application/json\r\n";
+    echo "Content-Length: " . strlen($metadata_json) . "\r\n";
+    echo "X-Chunk-Type: metadata\r\n";
+    echo "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n";
+    echo "\r\n";
+    echo $metadata_json;
+    echo "\r\n";
+    flush();
+
+    $batches_emitted = 0;
+    $total_entries = 0;
+    $batch_lines = [];
+
+    while ($producer->next_chunk()) {
+        $chunk = $producer->get_current_chunk();
+
+        if ($chunk === null) {
+            continue;
+        }
+
+        $chunk_type = $chunk["type"] ?? "file";
+
+        // Collect index entries as TSV lines
+        if ($chunk_type === "index") {
+            $batch_lines[] =
+                $chunk["path"] .
+                "\t" .
+                $chunk["ctime"] .
+                "\t" .
+                $chunk["size"];
+        } elseif ($chunk_type === "symlink") {
+            $batch_lines[] =
+                $chunk["path"] . "\t" . ($chunk["ctime"] ?? 0) . "\t0";
+        } elseif ($chunk_type === "directory") {
+            // Skip directories in index - they're implicit from file paths
+            continue;
+        }
+
+        // Emit batch when full or when we need to stop
+        if (
+            count($batch_lines) >= $batch_size ||
+            !should_continue(
+                $script_start,
+                $max_execution_time,
+                $max_memory,
+                $memory_threshold,
+            )
+        ) {
+            $cursor = $producer->get_reentrancy_cursor();
+            $tsv = implode("\n", $batch_lines);
+            $gzipped = gzencode($tsv, 6);
+
+            echo "--{$boundary}\r\n";
+            echo "Content-Type: text/tab-separated-values\r\n";
+            echo "Content-Encoding: gzip\r\n";
+            echo "Content-Length: " . strlen($gzipped) . "\r\n";
+            echo "X-Chunk-Type: index_batch\r\n";
+            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
+            echo "X-Batch-Size: " . count($batch_lines) . "\r\n";
+            echo "\r\n";
+            echo $gzipped;
+            echo "\r\n";
+            flush();
+
+            $batches_emitted++;
+            $batches_emitted++;
+            $total_entries += count($batch_lines);
+            $batch_lines = [];
+
+            if (
+                !should_continue(
+                    $script_start,
+                    $max_execution_time,
+                    $max_memory,
+                    $memory_threshold,
+                )
+            ) {
+                break;
+            }
+        }
+    }
+
+    // Emit any remaining entries
+    if (!empty($batch_lines)) {
+        $cursor = $producer->get_reentrancy_cursor();
+        $tsv = implode("\n", $batch_lines);
+        $gzipped = gzencode($tsv, 6);
+
+        echo "--{$boundary}\r\n";
+        echo "Content-Type: text/tab-separated-values\r\n";
+        echo "Content-Encoding: gzip\r\n";
+        echo "Content-Length: " . strlen($gzipped) . "\r\n";
+        echo "X-Chunk-Type: index_batch\r\n";
+        echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
+        echo "X-Batch-Size: " . count($batch_lines) . "\r\n";
+        echo "\r\n";
+        echo $gzipped;
+        echo "\r\n";
+        flush();
+
+        $batches_emitted++;
+        $total_entries += count($batch_lines);
+    }
+
+    $progress = $producer->get_progress();
+    $is_complete = $progress["phase"] === "finished";
+    $status = $is_complete ? "complete" : "partial";
+
+    echo "--{$boundary}\r\n";
+    echo "Content-Type: application/octet-stream\r\n";
+    echo "Content-Length: 0\r\n";
+    echo "X-Chunk-Type: completion\r\n";
+    echo "X-Status: {$status}\r\n";
+    echo "X-Batches-Emitted: {$batches_emitted}\r\n";
+    echo "X-Total-Entries: {$total_entries}\r\n";
+    echo "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n";
+    echo "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n";
+    echo "\r\n";
+    echo "\r\n";
+    echo "--{$boundary}--\r\n";
+
+    return [
+        "status" => $status,
+        "stats" => [
+            "batches_emitted" => $batches_emitted,
+            "total_entries" => $total_entries,
+            "memory_used" => memory_get_peak_usage(true),
+            "time_elapsed" => microtime(true) - $script_start,
+        ],
+    ];
 }
 
 /**
- * Endpoint: Stream a provided list of files (path per line).
+ * Endpoint: Stream files from a provided list.
+ *
+ * Reads paths from an uploaded file (one path per line) and streams
+ * those files using FileTreeProducer with paths mode.
  */
 function endpoint_file_fetch(
     array $config,
@@ -758,6 +902,9 @@ function endpoint_file_fetch(
     int $max_memory,
     float $memory_threshold,
 ): array {
+    $directories = resolve_directories($config);
+
+    // Get paths from uploaded file
     $list_path = $config["file_list_path"] ?? null;
     if ($list_path === null && isset($_FILES["file_list"])) {
         $tmp_name = $_FILES["file_list"]["tmp_name"] ?? "";
@@ -775,14 +922,28 @@ function endpoint_file_fetch(
         );
     }
 
+    // Read paths from the file
+    $paths = [];
+    $handle = fopen($list_path, "r");
+    if ($handle) {
+        while (($line = fgets($handle)) !== false) {
+            $path = trim($line);
+            if ($path !== "") {
+                $paths[] = $path;
+            }
+        }
+        fclose($handle);
+    }
+
     $sync_options = [
         "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024,
+        "paths" => $paths,
     ];
     if (isset($config["cursor"])) {
         $sync_options["cursor"] = $config["cursor"];
     }
 
-    $producer = new FileListProducer($list_path, $sync_options);
+    $producer = new FileTreeProducer($directories, $sync_options);
     return stream_file_producer(
         $producer,
         $script_start,
