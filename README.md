@@ -123,17 +123,17 @@ This is why we're budgeting our resource usage in a few ways:
   over to the remote host to get an appropriately-chunked dump. Alternatively, if we ever need to store the dump now and execute it later, we could
   bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and
   turn it into SQL statements locally. Let's not start there, though, as that would add complexity and make the REST endpoints harder to debug.
-* Display nice progress information in the terminal (since that will also allow us to display it on the web)
 * When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
   what it was doing when we've killed it (e.g. appending a partial state to the local file). So, if we wrote some bytes
   to the file but did not update the cursor yet, make sure the next run will know we're only expected to have so many
   bytes and will truncate the excess bytes beyond that expected size.
 * Turn it into a WordPress plugin 
-* Support directories with more files than can be stored in memory at once.
-* HMAC signatures per request with a shared secret + random number + microtime
+  * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases
 * Take note of any files modified while they were streamed, re-request them later on.
    * Tell the user when a file is too volatile to be synchronized
+✅ Display nice progress information in the terminal (since that will also allow us to display it on the web)
+✅ Support directories with more files than can be stored in memory at once.
 ✅ Multipart handling – do we need to check for boundary presence in our chunk when Content-Length is also present?
 ✅ Double check we're generating a useful, append-only audit log for every export call
 ❌ Directory tree snapshots – store root-relative path. Don't store the entire absolute path, it inflates the snapshot size.
