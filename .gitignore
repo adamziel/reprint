@@ -9,3 +9,5 @@ adamadam-blog-export
 secrets.php
 exports.sh
 bluehost-export
+tests/.phpunit.result.cache
+

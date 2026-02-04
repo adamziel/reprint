@@ -120,6 +120,10 @@ This is why we're budgeting our resource usage in a few ways:
 
 * Auto-constraining resource usage
 * Tell the user when a volatile file can't be synchronized
+* When we're starting the import and we have access to local MySQL, detect our local `current_statement_size` and `max_allowed_packet` and send that
+  over to the remote host to get an appropriately-chunked dump. Alternatively, if we ever need to store the dump now and execute it later, we could
+  bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and
+  turn it into SQL statements locally. Let's not start there, though, as that would add complexity and make the REST endpoints harder to debug.
 * Display nice progress information in the terminal (since that will also allow us to display it on the web)
 * When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
   what it was doing when we've killed it (e.g. appending a partial state to the local file). So, if we wrote some bytes

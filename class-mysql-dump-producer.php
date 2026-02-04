@@ -196,6 +196,14 @@ class MySQLDumpProducer
     private $state_after_oversized = null;
 
     /**
+     * Tracks the actual byte size of the current INSERT statement being built.
+     * Reset when starting a new INSERT, incremented as rows are added.
+     *
+     * @var int
+     */
+    private $current_statement_size = 0;
+
+    /**
      * Constructor.
      *
      * @param PDO   $db      The database connection to use.
@@ -416,8 +424,17 @@ class MySQLDumpProducer
             }, $this->current_column_names),
         );
 
-        // Format the first row (handles oversized columns)
+        // Build the INSERT header
+        $header = "INSERT INTO `{$this->current_table}` ({$column_list}) VALUES\n";
+
+        // Reset statement size tracking for this new INSERT
+        $this->current_statement_size = strlen($header);
+
+        // Format the first row (handles oversized columns based on current_statement_size)
         $first_row_sql = $this->format_row_for_insert($this->current_row);
+
+        // Track the row size (including comma/semicolon terminator)
+        $this->current_statement_size += strlen($first_row_sql) + 1;
 
         // Clear current row (we've processed it)
         $this->current_row = null;
@@ -426,17 +443,15 @@ class MySQLDumpProducer
         // Fetch next row to determine terminator
         $has_next_row = $this->fetch_and_store_row();
 
-        // Generate INSERT header with first row included
-        $sql = "INSERT INTO `{$this->current_table}` ({$column_list}) VALUES\n";
-
         // If we have oversized updates, we MUST end this INSERT statement with a semicolon
         // because we'll emit UPDATE statements next. We can't leave a dangling comma.
         $has_oversized = $this->has_pending_oversized_updates();
 
         if (!$has_next_row) {
             // First row is the only row - end INSERT statement
-            $sql .= $first_row_sql . ";";
+            $sql = $header . $first_row_sql . ";";
             $this->current_sql_fragment = $sql;
+            $this->current_statement_size = 0; // Statement complete
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_NEXT_TABLE;
                 $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -445,8 +460,9 @@ class MySQLDumpProducer
             }
         } elseif ($this->rows_in_batch >= $this->batch_size || $has_oversized) {
             // Batch is full after first row OR we have oversized updates - end this INSERT
-            $sql .= $first_row_sql . ";";
+            $sql = $header . $first_row_sql . ";";
             $this->current_sql_fragment = $sql;
+            $this->current_statement_size = 0; // Statement complete, will reset on next INSERT
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_START_INSERT;
                 $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -455,7 +471,7 @@ class MySQLDumpProducer
             }
         } else {
             // Continue this INSERT with more rows (no oversized updates pending)
-            $sql .= $first_row_sql . ",";
+            $sql = $header . $first_row_sql . ",";
             $this->current_sql_fragment = $sql;
             $this->state = self::STATE_EMIT_ROW;
         }
@@ -480,8 +496,11 @@ class MySQLDumpProducer
             return false;
         }
 
-        // Format the current row (handles oversized columns)
+        // Format the current row (handles oversized columns based on current_statement_size)
         $row_sql = $this->format_row_for_insert($this->current_row);
+
+        // Track the row size (including newline and comma/semicolon)
+        $this->current_statement_size += strlen($row_sql) + 2;
 
         // Clear current row (we've processed it)
         $this->current_row = null;
@@ -497,6 +516,7 @@ class MySQLDumpProducer
         if (!$has_next_row) {
             // No more rows - end INSERT and move to next table
             $this->current_sql_fragment = $row_sql . ";";
+            $this->current_statement_size = 0; // Statement complete
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_NEXT_TABLE;
                 $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -506,6 +526,7 @@ class MySQLDumpProducer
         } elseif ($this->rows_in_batch >= $this->batch_size || $has_oversized) {
             // Batch is full OR we have oversized updates - end this INSERT
             $this->current_sql_fragment = $row_sql . ";";
+            $this->current_statement_size = 0; // Statement complete, will reset on next INSERT
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_START_INSERT;
                 $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -766,6 +787,9 @@ class MySQLDumpProducer
             $this->oversized_queue = [];
             $this->oversized_pk_values = null;
             $this->state_after_oversized = null;
+
+            // Reset statement size tracking
+            $this->current_statement_size = 0;
         }
 
         return (bool) $this->current_table;
@@ -819,6 +843,8 @@ class MySQLDumpProducer
             "oversized_queue" => $encoded_oversized_queue,
             "oversized_pk_values" => $this->oversized_pk_values,
             "state_after_oversized" => $this->state_after_oversized,
+            // Statement size tracking
+            "current_statement_size" => $this->current_statement_size,
         ]);
     }
 
@@ -954,6 +980,9 @@ class MySQLDumpProducer
             $this->oversized_queue = $this->decode_oversized_queue_from_cursor($encoded_queue);
             $this->oversized_pk_values = $cursor_data["oversized_pk_values"] ?? null;
             $this->state_after_oversized = $cursor_data["state_after_oversized"] ?? null;
+
+            // Restore statement size tracking
+            $this->current_statement_size = $cursor_data["current_statement_size"] ?? 0;
 
             // Initialize tables_to_process if not already set
             if ($this->tables_to_process === null) {
@@ -1180,8 +1209,9 @@ class MySQLDumpProducer
     /**
      * Formats a row for SQL INSERT, handling oversized columns.
      *
-     * If the formatted row would exceed max_statement_size, large columns are
-     * replaced with empty strings and queued for subsequent UPDATE statements.
+     * Uses the actual tracked current_statement_size to determine if adding this row
+     * would exceed max_statement_size. If so, large columns are replaced with empty
+     * strings and queued for subsequent UPDATE statements.
      *
      * @param array $row The row data.
      * @return string The formatted VALUES clause (e.g., "(1,'hello','')")
@@ -1200,17 +1230,15 @@ class MySQLDumpProducer
             $value_sizes[$col] = strlen($formatted);
         }
 
-        // Calculate total row size
-        $total_size = array_sum($value_sizes) + count($value_sizes) * 2; // Account for commas and parens
+        // Calculate this row's size (values + commas + parens + newline)
+        $row_size = array_sum($value_sizes) + count($value_sizes) + 3;
 
-        // Add overhead for INSERT statement structure
-        $column_list_size = array_sum(array_map('strlen', $this->current_column_names)) + count($this->current_column_names) * 3;
-        $insert_overhead = strlen("INSERT INTO `{$this->current_table}` () VALUES\n") + $column_list_size;
-
-        $estimated_statement_size = $insert_overhead + $total_size;
+        // Check if adding this row would exceed max_statement_size
+        // current_statement_size already includes the INSERT header (or accumulated rows)
+        $projected_size = $this->current_statement_size + $row_size;
 
         // If within limits, return formatted row directly
-        if ($estimated_statement_size <= $this->max_statement_size) {
+        if ($projected_size <= $this->max_statement_size) {
             return "(" . implode(",", array_values($formatted_values)) . ")";
         }
 
@@ -1232,10 +1260,9 @@ class MySQLDumpProducer
         arsort($value_sizes);
 
         $this->oversized_queue = [];
-        $current_size = $estimated_statement_size;
 
-        // Calculate how much we need to trim to fit
-        $target_size = $this->max_statement_size * 0.8; // Leave 20% margin
+        // Calculate how much we need to trim to fit within max_statement_size
+        $excess = $projected_size - $this->max_statement_size;
 
         foreach ($value_sizes as $col => $size) {
             // Don't split primary key columns - we need them for the WHERE clause
@@ -1243,13 +1270,13 @@ class MySQLDumpProducer
                 continue;
             }
 
-            // Skip small columns
+            // Skip small columns (not worth splitting)
             if ($size < 1000) {
                 continue;
             }
 
-            // Check if this column would benefit from splitting
-            if ($current_size <= $target_size) {
+            // Check if we've trimmed enough
+            if ($excess <= 0) {
                 break;
             }
 
@@ -1266,8 +1293,7 @@ class MySQLDumpProducer
             if (count($chunks) > 1) {
                 // Replace with empty string in INSERT
                 $formatted_values[$col] = "''";
-                $current_size -= $size;
-                $current_size += 2; // For ''
+                $excess -= ($size - 2); // Saved bytes (size minus the '' replacement)
 
                 // Queue chunks for UPDATE statements
                 $this->oversized_queue[] = [
