@@ -7,6 +7,8 @@ sql-exports
 adamadam.blog-export
 adamadam-blog-export
 secrets.php
+secrets.sh
+tester.sh
 exports.sh
 bluehost-export
 tests/.phpunit.result.cache
