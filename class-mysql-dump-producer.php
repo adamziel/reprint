@@ -211,9 +211,12 @@ class MySQLDumpProducer
         // Handle string encoding option
         $this->string_encoding = $options["string_encoding"] ?? "raw";
 
-        // Maximum statement size - default to 1MB, well below typical 4MB max_allowed_packet
-        // This gives headroom for MySQL protocol overhead and prevents import failures
-        $this->max_statement_size = $options["max_statement_size"] ?? (1024 * 1024);
+        // Maximum statement size - auto-detect from MySQL's max_allowed_packet if not specified
+        if (isset($options["max_statement_size"])) {
+            $this->max_statement_size = $options["max_statement_size"];
+        } else {
+            $this->max_statement_size = $this->detect_max_statement_size();
+        }
 
         // Validate string_encoding value
         $valid_encodings = ["raw", "0xbinary", "base64"];
@@ -1150,6 +1153,31 @@ class MySQLDumpProducer
     }
 
     /**
+     * Detects the maximum safe statement size based on MySQL's max_allowed_packet.
+     *
+     * Uses 80% of max_allowed_packet to leave headroom for protocol overhead.
+     * Falls back to 1MB if detection fails.
+     *
+     * @return int Maximum statement size in bytes.
+     */
+    private function detect_max_statement_size()
+    {
+        try {
+            $result = $this->db->query("SELECT @@max_allowed_packet as max_allowed_packet");
+            $row = $result->fetch(PDO::FETCH_ASSOC);
+            if ($row && isset($row['max_allowed_packet'])) {
+                // Use 80% of max_allowed_packet to leave headroom for protocol overhead
+                return (int)($row['max_allowed_packet'] * 0.8);
+            }
+        } catch (\PDOException $e) {
+            // Fall through to default
+        }
+
+        // Default to 1MB if detection fails
+        return 1024 * 1024;
+    }
+
+    /**
      * Formats a row for SQL INSERT, handling oversized columns.
      *
      * If the formatted row would exceed max_statement_size, large columns are
@@ -1400,22 +1428,5 @@ class MySQLDumpProducer
     private function has_pending_oversized_updates()
     {
         return !empty($this->oversized_queue);
-    }
-
-    /**
-     * Transitions to oversized update state if there are pending updates.
-     * Returns true if transitioning, false otherwise.
-     *
-     * @param string $return_state The state to return to after oversized updates.
-     * @return bool True if transitioning to oversized state.
-     */
-    private function maybe_emit_oversized_updates($return_state)
-    {
-        if ($this->has_pending_oversized_updates()) {
-            $this->state_after_oversized = $return_state;
-            $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
-            return true;
-        }
-        return false;
     }
 }
