@@ -126,6 +126,7 @@ This is why we're budgeting our resource usage in a few ways:
   to the file but did not update the cursor yet, make sure the next run will know we're only expected to have so many
   bytes and will truncate the excess bytes beyond that expected size.
 * Turn it into a WordPress plugin 
+* Support directories with more files than can be stored in memory at once.
 * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases
 * Multipart handling – do we need to check for boundary presence in our chunk when Content-Length is also present?
