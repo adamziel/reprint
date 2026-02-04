@@ -180,6 +180,9 @@ class FileTreeProducer
                     "size" => $size,
                 ];
                 $this->streaming_file_offset = $byte_offset;
+                // Set last_emitted_path so we build the traversal stack
+                // to continue from AFTER this file finishes streaming
+                $this->last_emitted_path = $path;
             }
         } else {
             // Starting fresh or resuming after a completed item
@@ -189,13 +192,15 @@ class FileTreeProducer
         }
 
         // Build traversal state from path (not from stored indices)
+        // This must happen even when resuming mid-file, so we know where
+        // to continue after the current file finishes streaming
         if ($this->paths === null) {
             // Tree mode: rebuild traversal stack from last emitted path
             if ($this->last_emitted_path !== null) {
                 $this->build_traversal_stack_from_last_path(
                     $this->last_emitted_path,
                 );
-            } else if ($this->current_file_meta === null) {
+            } else {
                 // Starting fresh - initialize root directories
                 $dirs = $this->directories;
                 sort($dirs, SORT_STRING);
