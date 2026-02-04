@@ -16,7 +16,10 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
 
         $chunks = $this->processAllChunks($sync);
 
-        $this->assertEmpty($chunks, 'Empty directory should produce no chunks');
+        // Empty directories emit a directory chunk so import can create them
+        $this->assertCount(1, $chunks, 'Empty directory should produce one directory chunk');
+        $this->assertEquals('directory', $chunks[0]['type']);
+        $this->assertEquals($dir, $chunks[0]['path']);
     }
 
     public function testSyncSingleSmallFile()

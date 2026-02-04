@@ -13,7 +13,7 @@ The codebase follows a producer-consumer pattern with two main components:
 ### Export Side (Server)
 - **export.php**: HTTP endpoint that serves as the export API, handling authentication and routing requests to the appropriate producer
 - **MySQLDumpProducer**: Generates SQL dump fragments with cursor-based resumption, supporting batched INSERT statements and all MySQL data types
-- **FileSyncProducer**: Streams filesystem contents in chunks with support for symlinks, deletion detection, and snapshot storage (file-based or SQLite)
+- **FileTreeProducer / FileListProducer**: Streams filesystem contents (full tree or explicit list) in chunks with support for symlinks and cursor-based resumption
 
 ### Import Side (Client)
 - **import.php**: CLI script that downloads from export.php using streaming multipart parsing, no buffering of entire response

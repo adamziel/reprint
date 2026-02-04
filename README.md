@@ -25,9 +25,9 @@ import.php <export.php URL>?SECRET_KEY=<key> <local directory to export to> --re
 The system is designed to perform an initial directory tree synchronization followed by incremental updates.
 
 **Initial synchronization** is when the **migration target** requests a stream of files from the **migration source**
-without having any prior state. The migration target sends a HTTP request to the migration source and asks to start
-a new synchronization of one or more root directory paths. In response, the migration target provides a synchronization
-ID. From now on, the migration target uses that identifier for all following requests related to this synchronization.
+without having any prior state. The migration target sends an HTTP request to the migration source and asks to start
+a new synchronization of one or more root directory paths. The migration source responds immediately with a multipart
+stream and a cursor for resumption. All subsequent requests are stateless and use the cursor only.
 
 The migration target then sends a HTTP request asking for the next batch of files. The migration source immediately starts
 streaming the requested directory trees using pre-order traversal. The HTTP response is a multipart/mixed data stream listing
@@ -39,7 +39,7 @@ either of them, it ends the response and the migration target needs to send anot
 synchronization request will most likely be concluded before all the files are transferred.
 
 Once the first HTTP request is completed, the migration target sends another HTTP request to the migration source asking for the next
-batch of files. It provides the synchronization ID and the cursor from the previous response. The migration source then responds
+batch of files. It provides the cursor from the previous response. The migration source then responds
 with the next batch of files. This repeats until the initial synchronization is complete.
 
 ### Synchronization Cursor
@@ -55,20 +55,17 @@ the next file.
 ### Migration index
 
 As the migration target receives files from the migration source, it builds a local index of all the paths, ctimes, and filesizes
-it has seen. Later on, we'll use this index for incremental synchronization to get files changed since the last sync. Here's how
-that works:
+it has seen (stored as a sorted TSV). Later on, we use this index for incremental synchronization to get files changed since the last sync.
+Here's how that works now:
 
-1. The migration target requests the stream of files from the migration source. The request carries a cursor and the next relevant
-   chunk of the index.
-2. The migration source uses two lists: 1. its own filesystem, starting at the path stored in the cursor 2. the received index chunk.
-   It advances through both lists, finds discrepancies, and responds with the relevant upsertion and deletion chunks.
+1. The migration target requests an **index-only** stream from the migration source and stores it locally.
+2. The migration target advances through both lists (local TSV index and remote index file) using a two-pointer diff:
+   - Deletes local files that no longer exist remotely.
+   - Builds a download list for new/changed files.
+3. The migration target uploads the download list to the migration source and streams just those files.
 
-The alternative approach that is not implemented here:
-
-The migration source computes a new index and sends it back to the migration target. The migration target then advances through both
-lists, computes a delta, and requests any changed files from the migration source. In this approach, we always have to wait for the index
-before we can start streaming data, and we also need more round trips (index down, diffs up). The upside is that the logic seems
-simpler.
+This keeps the server stateless, keeps all large lists streamed (no full buffering), and guarantees ordering using `strcmp`-equivalent
+binary collation on both sides.
 
 ### Volatile files
 
@@ -118,8 +115,6 @@ This is why we're budgeting our resource usage in a few ways:
     [7:54 PM]not simple. but if you get someone deactivated and banned .25 though a migration you’re gonna have a bad time
 * Can we, somehow, budget CPU usage?
 * How to negotiate symlinks pointing outside of the requested root directories?
-* Should we include a sequence ID with each file chunk for consistency checks?
-* Should we include crc32 checksums for each transmitted chunk? Seems excessive since TCP+TLS both already give us strong consistency guarantees?
 
 ### Todos
 
@@ -131,6 +126,7 @@ This is why we're budgeting our resource usage in a few ways:
   to the file but did not update the cursor yet, make sure the next run will know we're only expected to have so many
   bytes and will truncate the excess bytes beyond that expected size.
 * Turn it into a WordPress plugin 
+* HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases
 * Multipart handling – do we need to check for boundary presence in our chunk when Content-Length is also present?
 * ?: It is the responsibility of the migration target to keep track of all modified files and re-request them later on.

@@ -10,7 +10,7 @@
  * - Internal: Cursors are JSON strings (e.g., {"p":"streaming","n":123})
  * - HTTP transmission: Cursors are base64-encoded in X-Cursor header (outgoing) and X-Export-Cursor header (incoming)
  * - This file is responsible for encoding when sending and decoding when receiving
- * - Producers (FileSyncProducer, MySQLDumpProducer) work with JSON strings only, never base64
+ * - Producers (FileTreeProducer, FileListProducer, MySQLDumpProducer) work with JSON strings only, never base64
  */
 
 // Global error handler to send errors back to client
@@ -23,7 +23,7 @@ set_error_handler(function ($errno, $errstr, $errfile, $errline) {
     ];
     error_log("Export error: " . json_encode($error));
     http_response_code(500);
-    header("Content-Type: application/json");
+    @header("Content-Type: application/json");
     echo json_encode($error);
     exit(1);
 });
@@ -380,28 +380,10 @@ function endpoint_sql_chunk(
 }
 
 /**
- * Endpoint: Create a new file transfer session.
- *
- * @param array $config Configuration with optional session_id
- * @return array Result with session_id and snapshot_storage
+ * Resolve and validate directories from config.
  */
-/**
- * Endpoint: Get next chunk of file data in a given file transfer session.
- *
- * @param array $config Configuration with optional cursor and session info
- * @param float $script_start Script execution start time
- * @param int $max_execution_time Maximum execution time in seconds
- * @param int $max_memory Maximum memory in bytes
- * @param float $memory_threshold Memory usage threshold (0.0-1.0)
- * @return array Result with status and stats
- */
-function endpoint_file_chunk(
-    array $config,
-    float $script_start,
-    int $max_execution_time,
-    int $max_memory,
-    float $memory_threshold,
-): array {
+function resolve_directories(array $config): array
+{
     $directories_input = $config["directory"] ?? null;
     if (!$directories_input) {
         throw new InvalidArgumentException(
@@ -409,26 +391,21 @@ function endpoint_file_chunk(
         );
     }
 
-    // Handle multiple directories (array or single string)
     $directories = [];
     $dir_list = is_array($directories_input)
         ? $directories_input
         : [$directories_input];
 
     foreach ($dir_list as $directory) {
-        // Expand ~ to home directory
-        // @TODO: Expand this as a path segment as well
         if ($directory[0] === "~") {
             $home = getenv("HOME") ?: (getenv("USERPROFILE") ?: "/");
             $directory = $home . substr($directory, 1);
         }
 
-        // Convert to absolute path if relative
         if ($directory[0] !== "/") {
             $directory = __DIR__ . "/" . $directory;
         }
 
-        // Resolve realpath
         $real_directory = realpath($directory);
         if ($real_directory === false) {
             throw new InvalidArgumentException(
@@ -453,59 +430,29 @@ function endpoint_file_chunk(
         throw new InvalidArgumentException("No valid directories specified");
     }
 
-    // Stateless client index slice (per-request)
-    $client_index_file = null;
-    $client_slice_start = isset($_POST["client_index_slice_start"])
-        ? (int) $_POST["client_index_slice_start"]
-        : null;
-    $client_slice_len = isset($_POST["client_index_slice_len"])
-        ? (int) $_POST["client_index_slice_len"]
-        : null;
-    $client_slice_total = isset($_POST["client_index_total"])
-        ? (int) $_POST["client_index_total"]
-        : null;
+    return $directories;
+}
 
-    if (isset($_FILES["client_index_slice_gz"])) {
-        $client_index_file = $_FILES["client_index_slice_gz"]["tmp_name"] ?? null;
-        if ($client_index_file === null || !is_uploaded_file($client_index_file)) {
-            throw new InvalidArgumentException("client_index_slice_gz upload missing or invalid");
-        }
-        if ($client_slice_start === null || $client_slice_len === null) {
-            throw new InvalidArgumentException(
-                "client_index_slice_start and client_index_slice_len are required when uploading a slice",
-            );
-        }
-    }
-
-    // File sync options
-    $sync_options = [
-        "min_ctime" => $config["min_ctime"] ?? 0,
-        "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024, // 5MB
-        "client_index_file" => $client_index_file, // Path to gzipped slice
-        "client_slice_start" => $client_slice_start,
-        "client_slice_len" => $client_slice_len,
-        "client_slice_total" => $client_slice_total,
-    ];
-
-    if (isset($config["cursor"])) {
-        $sync_options["cursor"] = $config["cursor"];
-    }
-
-    $sync = new FileSyncProducer($directories, $sync_options);
-
-    // Disable output buffering for immediate response
+/**
+ * Stream chunks from a file producer as multipart/mixed.
+ */
+function stream_file_producer(
+    $producer,
+    float $script_start,
+    int $max_execution_time,
+    int $max_memory,
+    float $memory_threshold,
+): array {
     if (ob_get_level()) {
         ob_end_flush();
     }
 
-    // Initialize multipart boundary
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
 
-    // Output initial progress chunk immediately
-    $initial_progress = $sync->get_progress();
+    $initial_progress = $producer->get_progress();
     $initial_progress_json = json_encode($initial_progress);
-    $initial_cursor = $sync->get_reentrancy_cursor();
+    $initial_cursor = $producer->get_reentrancy_cursor();
     echo "--{$boundary}\r\n";
     echo "Content-Type: application/json\r\n";
     echo "Content-Length: " . strlen($initial_progress_json) . "\r\n";
@@ -523,15 +470,13 @@ function endpoint_file_chunk(
     $metadata_sent = false;
     $iterations = 0;
 
-    // Process chunks
-    while ($sync->next_chunk()) {
+    while ($producer->next_chunk()) {
         $iterations++;
-        $chunk = $sync->get_current_chunk();
-        $progress = $sync->get_progress();
+        $chunk = $producer->get_current_chunk();
+        $progress = $producer->get_progress();
 
-        // Output metadata once when we first enter streaming phase
         if (!$metadata_sent && $progress["phase"] === "streaming") {
-            $filesystem_root = $sync->get_filesystem_root();
+            $filesystem_root = $producer->get_filesystem_root();
             $metadata = [
                 "filesystem_root" => $filesystem_root,
             ];
@@ -542,23 +487,21 @@ function endpoint_file_chunk(
             echo "Content-Length: " . strlen($metadata_json) . "\r\n";
             echo "X-Chunk-Type: metadata\r\n";
             echo "X-Filesystem-Root: " .
-                base64_encode($filesystem_root) .
+                base64_encode($filesystem_root ?? "") .
                 "\r\n";
             echo "\r\n";
             echo $metadata_json;
             echo "\r\n";
-            flush(); // Force output immediately
+            flush();
 
             $metadata_sent = true;
         }
 
-        // During scanning/sorting phases, chunk will be null - output progress
         if ($chunk === null) {
-            // Output progress chunk (throttled to once every 3 seconds, except first one)
             $now = microtime(true);
             if ($iterations === 1 || $now - $last_progress_output >= 3.0) {
                 $progress_json = json_encode($progress);
-                $cursor = $sync->get_reentrancy_cursor();
+                $cursor = $producer->get_reentrancy_cursor();
 
                 echo "--{$boundary}\r\n";
                 echo "Content-Type: application/json\r\n";
@@ -568,12 +511,11 @@ function endpoint_file_chunk(
                 echo "\r\n";
                 echo $progress_json;
                 echo "\r\n";
-                flush(); // Force output immediately
+                flush();
 
                 $last_progress_output = $now;
             }
 
-            // Check limits
             if (
                 !should_continue(
                     $script_start,
@@ -587,12 +529,10 @@ function endpoint_file_chunk(
             continue;
         }
 
-        // Handle different chunk types
         $chunk_type = $chunk["type"] ?? "file";
-        $cursor = $sync->get_reentrancy_cursor();
+        $cursor = $producer->get_reentrancy_cursor();
 
         if ($chunk_type === "directory") {
-            // Output directory chunk
             echo "--{$boundary}\r\n";
             echo "Content-Type: application/octet-stream\r\n";
             echo "Content-Length: 0\r\n";
@@ -601,9 +541,8 @@ function endpoint_file_chunk(
             echo "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n";
             echo "\r\n";
             echo "\r\n";
-            flush(); // Force output immediately
+            flush();
         } elseif ($chunk_type === "symlink") {
-            // Output symlink chunk
             echo "--{$boundary}\r\n";
             echo "Content-Type: application/octet-stream\r\n";
             echo "Content-Length: 0\r\n";
@@ -616,31 +555,36 @@ function endpoint_file_chunk(
             echo "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n";
             echo "\r\n";
             echo "\r\n";
-            flush(); // Force output immediately
-        } elseif ($chunk_type === "deletion") {
-            // Output deletion chunk
-            $deletion = $chunk;
-            unset($deletion["type"]);
-            $deletion_json = json_encode($deletion);
-
+            flush();
+        } elseif ($chunk_type === "index") {
             echo "--{$boundary}\r\n";
-            echo "Content-Type: application/json\r\n";
-            echo "Content-Length: " . strlen($deletion_json) . "\r\n";
-            echo "X-Chunk-Type: deletion\r\n";
+            echo "Content-Type: application/octet-stream\r\n";
+            echo "Content-Length: 0\r\n";
+            echo "X-Chunk-Type: index\r\n";
             echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
+            echo "X-Index-Path: " . base64_encode($chunk["path"]) . "\r\n";
+            echo "X-File-Ctime: " . $chunk["ctime"] . "\r\n";
+            echo "X-File-Size: " . $chunk["size"] . "\r\n";
             echo "\r\n";
-            echo $deletion_json;
             echo "\r\n";
-            flush(); // Force output immediately
+            flush();
+        } elseif ($chunk_type === "missing") {
+            echo "--{$boundary}\r\n";
+            echo "Content-Type: application/octet-stream\r\n";
+            echo "Content-Length: 0\r\n";
+            echo "X-Chunk-Type: missing\r\n";
+            echo "X-Cursor: " . base64_encode($cursor) . "\r\n";
+            echo "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n";
+            echo "\r\n";
+            echo "\r\n";
+            flush();
         } else {
-            // Track stats
             $chunks_processed++;
             $bytes_processed += strlen($chunk["data"]);
             if ($chunk["is_first_chunk"]) {
                 $files_completed++;
             }
 
-            // Output file chunk as multipart
             $data = $chunk["data"];
 
             echo "--{$boundary}\r\n";
@@ -659,15 +603,26 @@ function endpoint_file_chunk(
             echo "X-Last-Chunk: " .
                 ($chunk["is_last_chunk"] ? "1" : "0") .
                 "\r\n";
+            if (!empty($chunk["file_changed"])) {
+                echo "X-File-Changed: 1\r\n";
+                if ($chunk["change_ctime"] !== null) {
+                    echo "X-File-Change-Ctime: " .
+                        $chunk["change_ctime"] .
+                        "\r\n";
+                }
+                if ($chunk["change_size"] !== null) {
+                    echo "X-File-Change-Size: " .
+                        $chunk["change_size"] .
+                        "\r\n";
+                }
+            }
             echo "\r\n";
             echo $data;
             echo "\r\n";
-            flush(); // Force output immediately
+            flush();
         }
 
-        // Check limits or wait for client slice
         if (
-            $sync->is_waiting_for_client_slice() ||
             !should_continue(
                 $script_start,
                 $max_execution_time,
@@ -679,14 +634,10 @@ function endpoint_file_chunk(
         }
     }
 
-    // Output completion chunk with stats in headers
-    $progress = $sync->get_progress();
+    $progress = $producer->get_progress();
     $is_complete = $progress["phase"] === "finished";
-    $status = $is_complete
-        ? "complete"
-        : ($sync->is_waiting_for_client_slice() ? "need_client_slice" : "partial");
+    $status = $is_complete ? "complete" : "partial";
 
-    // Log completion
     error_log(
         "Export completion: status={$status}, phase={$progress["phase"]}, " .
             "chunks={$chunks_processed}, files={$files_completed}, bytes={$bytes_processed}",
@@ -704,8 +655,6 @@ function endpoint_file_chunk(
     echo "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n";
     echo "\r\n";
     echo "\r\n";
-
-    // Close multipart
     echo "--{$boundary}--\r\n";
 
     return [
@@ -718,6 +667,109 @@ function endpoint_file_chunk(
             "time_elapsed" => microtime(true) - $script_start,
         ],
     ];
+}
+
+/**
+ * Endpoint: Stream all files (initial sync).
+ */
+function endpoint_file_stream(
+    array $config,
+    float $script_start,
+    int $max_execution_time,
+    int $max_memory,
+    float $memory_threshold,
+): array {
+    $directories = resolve_directories($config);
+    $sync_options = [
+        "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024,
+    ];
+    if (isset($config["cursor"])) {
+        $sync_options["cursor"] = $config["cursor"];
+    }
+
+    $producer = new FileTreeProducer($directories, $sync_options);
+    return stream_file_producer(
+        $producer,
+        $script_start,
+        $max_execution_time,
+        $max_memory,
+        $memory_threshold,
+    );
+}
+
+/**
+ * Endpoint: Stream index-only entries (path, ctime, size).
+ */
+function endpoint_file_index(
+    array $config,
+    float $script_start,
+    int $max_execution_time,
+    int $max_memory,
+    float $memory_threshold,
+): array {
+    $directories = resolve_directories($config);
+    $sync_options = [
+        "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024,
+        "index_only" => true,
+    ];
+    if (isset($config["cursor"])) {
+        $sync_options["cursor"] = $config["cursor"];
+    } elseif (isset($config["index_after"])) {
+        $sync_options["start_after"] = $config["index_after"];
+    }
+
+    $producer = new FileTreeProducer($directories, $sync_options);
+    return stream_file_producer(
+        $producer,
+        $script_start,
+        $max_execution_time,
+        $max_memory,
+        $memory_threshold,
+    );
+}
+
+/**
+ * Endpoint: Stream a provided list of files (path per line).
+ */
+function endpoint_file_fetch(
+    array $config,
+    float $script_start,
+    int $max_execution_time,
+    int $max_memory,
+    float $memory_threshold,
+): array {
+    $list_path = $config["file_list_path"] ?? null;
+    if ($list_path === null && isset($_FILES["file_list"])) {
+        $tmp_name = $_FILES["file_list"]["tmp_name"] ?? "";
+        if ($tmp_name === "" || !is_uploaded_file($tmp_name)) {
+            throw new InvalidArgumentException(
+                "file_list upload missing or invalid",
+            );
+        }
+        $list_path = $tmp_name;
+    }
+
+    if ($list_path === null) {
+        throw new InvalidArgumentException(
+            "file_list is required for file_fetch endpoint",
+        );
+    }
+
+    $sync_options = [
+        "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024,
+    ];
+    if (isset($config["cursor"])) {
+        $sync_options["cursor"] = $config["cursor"];
+    }
+
+    $producer = new FileListProducer($list_path, $sync_options);
+    return stream_file_producer(
+        $producer,
+        $script_start,
+        $max_execution_time,
+        $max_memory,
+        $memory_threshold,
+    );
 }
 
 /**
@@ -834,7 +886,7 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
         if (!$endpoint) {
             throw new InvalidArgumentException(
                 "endpoint parameter is required. " .
-                    "Valid endpoints: 'create_file_session', 'file_chunk', 'sql_chunk'",
+                    "Valid endpoints: 'file_stream', 'file_index', 'file_fetch', 'sql_chunk'",
             );
         }
 
@@ -853,24 +905,28 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
 
         // Dispatch to appropriate endpoint
         switch ($endpoint) {
-            case "create_file_session":
-                $result = endpoint_create_file_session($config);
-                // Return session info as JSON for this endpoint
-                if (!$is_cli) {
-                    header("Content-Type: application/json");
-                    echo json_encode([
-                        "session_id" => $result["session_id"],
-                    ]);
-                } else {
-                    echo json_encode(
-                        ["session_id" => $result["session_id"]],
-                        JSON_PRETTY_PRINT,
-                    ) . "\n";
-                }
+            case "file_stream":
+                $result = endpoint_file_stream(
+                    $config,
+                    $script_start,
+                    $max_execution_time,
+                    $max_memory,
+                    $memory_threshold,
+                );
                 break;
 
-            case "file_chunk":
-                $result = endpoint_file_chunk(
+            case "file_index":
+                $result = endpoint_file_index(
+                    $config,
+                    $script_start,
+                    $max_execution_time,
+                    $max_memory,
+                    $memory_threshold,
+                );
+                break;
+
+            case "file_fetch":
+                $result = endpoint_file_fetch(
                     $config,
                     $script_start,
                     $max_execution_time,
@@ -892,7 +948,7 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
             default:
                 throw new InvalidArgumentException(
                     "Invalid endpoint: '{$endpoint}'. " .
-                        "Valid endpoints: 'create_file_session', 'file_chunk', 'sql_chunk'",
+                        "Valid endpoints: 'file_stream', 'file_index', 'file_fetch', 'sql_chunk'",
                 );
         }
     } catch (Exception $e) {

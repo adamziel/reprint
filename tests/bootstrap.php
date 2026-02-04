@@ -4,7 +4,7 @@
 require_once __DIR__ . '/../vendor/autoload.php';
 
 // Load the FileSyncProducer class
-require_once __DIR__ . '/../class-file-sync-producer.php';
+require_once __DIR__ . '/../file-sync.php';
 
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';
