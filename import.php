@@ -581,12 +581,14 @@ class ImportClient
 
             if (file_exists($this->index_file)) {
                 @unlink($this->index_file);
+                $this->audit_log("FILE DELETE | {$this->index_file}");
             }
             if (
                 $this->index_updates_file &&
                 file_exists($this->index_updates_file)
             ) {
                 @unlink($this->index_updates_file);
+                $this->audit_log("FILE DELETE | {$this->index_updates_file}");
             }
             $this->index_updates_file = null;
             $this->index_updates_handle = null;
@@ -594,9 +596,11 @@ class ImportClient
 
             if (file_exists($this->remote_index_file)) {
                 @unlink($this->remote_index_file);
+                $this->audit_log("FILE DELETE | {$this->remote_index_file}");
             }
             if (file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
+                $this->audit_log("FILE DELETE | {$this->download_list_file}");
             }
             $this->save_state($this->state);
             $has_cursor = false;
@@ -713,9 +717,11 @@ class ImportClient
             $this->state = $this->default_state();
             if (file_exists($this->remote_index_file)) {
                 @unlink($this->remote_index_file);
+                $this->audit_log("FILE DELETE | {$this->remote_index_file}");
             }
             if (file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
+                $this->audit_log("FILE DELETE | {$this->download_list_file}");
             }
             $this->save_state($this->state);
             $current_status = null;
@@ -754,9 +760,13 @@ class ImportClient
         $this->state["command"] = "files-sync-delta";
         $this->state["stage"] = $stage;
         if ($starting_index_fresh) {
+            $this->audit_log(
+                "DELTA INDEX FRESH | clearing cursor and remote index for new delta sync",
+            );
             $this->state["cursor"] = null;
             if (file_exists($this->remote_index_file)) {
                 @unlink($this->remote_index_file);
+                $this->audit_log("FILE DELETE | {$this->remote_index_file}");
             }
         }
         $this->save_state($this->state);
@@ -787,6 +797,9 @@ class ImportClient
             $this->state["diff"] = $this->default_state()["diff"];
             if (file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
+                );
             }
             $this->save_state($this->state);
             $stage = "diff";
@@ -873,6 +886,9 @@ class ImportClient
             // Remove existing SQL file on restart
             if ($sql_exists) {
                 unlink($sql_file);
+                $this->audit_log(
+                    "FILE DELETE | {$sql_file} | restart sql-sync",
+                );
                 $sql_exists = false;
             }
         }
@@ -1039,6 +1055,15 @@ class ImportClient
     {
         $cursor = $this->state["cursor"] ?? null;
         $mode = $cursor ? "a" : "w";
+        if ($mode === "w") {
+            $this->audit_log(
+                "FILE CREATE | {$this->remote_index_file} | downloading fresh remote index",
+            );
+        } else {
+            $this->audit_log(
+                "FILE APPEND | {$this->remote_index_file} | resuming remote index download",
+            );
+        }
         $handle = fopen($this->remote_index_file, $mode);
         if (!$handle) {
             throw new RuntimeException("Failed to open remote index file");
@@ -1122,10 +1147,17 @@ class ImportClient
         $diff = $this->state["diff"] ?? [];
         $remote_offset = (int) ($diff["remote_offset"] ?? 0);
         $local_after = $diff["local_after"] ?? null;
-        $download_handle = fopen(
-            $this->download_list_file,
-            $remote_offset > 0 ? "a" : "w",
-        );
+        $download_mode = $remote_offset > 0 ? "a" : "w";
+        if ($download_mode === "w") {
+            $this->audit_log(
+                "FILE CREATE | {$this->download_list_file} | building download list",
+            );
+        } else {
+            $this->audit_log(
+                "FILE APPEND | {$this->download_list_file} | resuming download list build",
+            );
+        }
+        $download_handle = fopen($this->download_list_file, $download_mode);
         if (!$download_handle) {
             throw new RuntimeException("Failed to open download list file");
         }
@@ -1311,6 +1343,7 @@ class ImportClient
         if ($this->index_updates_handle) {
             return;
         }
+        $is_new = false;
         if ($this->index_updates_file === null) {
             $tmp = tempnam(sys_get_temp_dir(), "index-updates-");
             if ($tmp === false) {
@@ -1319,16 +1352,23 @@ class ImportClient
                 );
             }
             $this->index_updates_file = $tmp;
+            $is_new = true;
         } elseif (!file_exists($this->index_updates_file)) {
             $dir = dirname($this->index_updates_file);
             if (!is_dir($dir)) {
                 mkdir($dir, 0755, true);
             }
+            $is_new = true;
         }
         $this->index_updates_handle = fopen($this->index_updates_file, "a");
         if (!$this->index_updates_handle) {
             throw new RuntimeException(
                 "Failed to open temp index updates file",
+            );
+        }
+        if ($is_new) {
+            $this->audit_log(
+                "FILE CREATE | {$this->index_updates_file} | index updates buffer",
             );
         }
         $this->index_updates_count = 0;
@@ -1410,14 +1450,24 @@ class ImportClient
                 filesize($this->index_updates_file) > 0);
 
         if (!$has_updates) {
-            if ($this->index_updates_file) {
+            if (
+                $this->index_updates_file &&
+                file_exists($this->index_updates_file)
+            ) {
                 @unlink($this->index_updates_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->index_updates_file} | no updates to merge",
+                );
             }
             return;
         }
 
         $updates_path = $this->index_updates_file;
         $new_index = $this->index_file . ".new";
+
+        $this->audit_log(
+            "INDEX MERGE START | merging updates into {$this->index_file}",
+        );
 
         $old_handle = file_exists($this->index_file)
             ? fopen($this->index_file, "r")
@@ -1525,8 +1575,10 @@ class ImportClient
         if (!rename($new_index, $this->index_file)) {
             throw new RuntimeException("Failed to replace index file");
         }
+        $this->audit_log("INDEX MERGE COMPLETE | {$this->index_file} updated");
 
         @unlink($updates_path);
+        $this->audit_log("FILE DELETE | {$updates_path} | updates merged");
     }
 
     /**
