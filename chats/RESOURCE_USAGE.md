@@ -54,14 +54,14 @@ What I may have missed in my design? Could I introduce some other knobs or ways 
 
   Design tweaks that reduce spikes
 
-  -  Directory sort: external sort or chunked merge sort, or store a temporary on‑disk sorted listing and reuse across requests (cursor includes a temp filename + offset). The
+  ✅ Directory sort: external sort or chunked merge sort, or store a temporary on‑disk sorted listing and reuse across requests (cursor includes a temp filename + offset). The
      current sort() in class-directory-listing.php is the biggest memory spike.
   ✅ File stat: replace is_link/is_dir/is_file + filectime/filesize with a single lstat() and inspect mode, size, ctime. This can reduce syscall count by 2–4x in file-sync.php.
   ✅ Oversized SQL rows: estimate size without fully encoding. For big values, use raw length + encoding formula to decide chunking, then only encode chunks. This avoids
      allocating gigantic quoted strings. That change would be in class-mysql-dump-producer.php.
-  -  SQL batching: emit each fragment as its own multipart part (no batching), or compute and emit without Content-Length to avoid holding the whole batch in memory. That’s in
+  ✅ SQL batching: emit each fragment as its own multipart part (no batching), or compute and emit without Content-Length to avoid holding the whole batch in memory. That’s in
      export.php.
-  -  Large path lists: avoid reading all paths into memory in endpoint_file_fetch(). Instead, keep a file pointer offset in the cursor and read lines incrementally (requires a
+  ✅ Large path lists: avoid reading all paths into memory in endpoint_file_fetch(). Instead, keep a file pointer offset in the cursor and read lines incrementally (requires a
      stable path list file).
 
   Backoff strategy I’d use
