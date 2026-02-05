@@ -102,6 +102,57 @@ This is why we're budgeting our resource usage in a few ways:
 * Execution time limit on the remote host – it gracefully ends the request once we exceed the budget.
 * Memory usage limit on the remote host – it gracefully ends the request once we exceed the budget.
 * Request backoff to make space for other requests (TODO)
+* Per-endpoint target times – file streaming, indexing, and SQL dumps have different cost profiles and host limits,
+  so we tune each to its own target runtime instead of a single global value.
+
+We also detect likely response buffering (TTFB ≈ server runtime) and switch to smaller per-request budgets
+to keep buffered responses small and avoid memory spikes in proxies, PHP-FPM, or web servers.
+
+Adaptive tuning knobs (client-side, in `import.php`):
+
+* `target_time`: Baseline target runtime per request (seconds). The tuner sizes work to fit this window.
+* `target_time_file`: Override target time for file streaming.
+* `target_time_index`: Override target time for index streaming.
+* `target_time_sql`: Override target time for SQL dump.
+* `throughput_ema_alpha`: Smoothing factor for throughput EMA. Lower = steadier, slower to adapt.
+* `throughput_headroom`: Safety margin below measured throughput (e.g. 0.9 leaves 10% headroom).
+* `scale_min`: Minimum scaling factor per request (prevents huge drops).
+* `scale_max`: Maximum scaling factor per request (prevents huge jumps).
+* `tune_only_partial`: Only tune on partial requests to avoid tiny final batches skewing the signal.
+* `duty`: Desired client-side duty cycle (work time vs sleep time).
+* `duty_min`: Minimum duty cycle allowed.
+* `duty_max`: Maximum duty cycle allowed.
+* `min_sleep`: Lower bound on client-side sleep between requests.
+* `max_sleep`: Upper bound on client-side sleep between requests.
+* `max_execution_time`: Passed to export.php to enforce server-side time budget.
+* `memory_threshold`: Passed to export.php to enforce server-side memory budget.
+* `file_chunk_start` / `file_chunk_min` / `file_chunk_max`: Initial/min/max file chunk size (bytes).
+* `index_batch_start` / `index_batch_min` / `index_batch_max`: Initial/min/max index batch size (entries).
+* `sql_fragments_start` / `sql_fragments_min` / `sql_fragments_max`: Initial/min/max SQL fragments per request.
+* `db_unbuffered`: Ask export.php to use unbuffered MySQL queries (lower memory).
+* `db_query_time_limit`: MySQL MAX_EXECUTION_TIME for SELECT (ms), when supported.
+* `buffered_ratio_threshold`: TTFB/server_time ratio to flag likely buffering.
+* `buffered_min_server_time`: Minimum server runtime before buffering heuristic applies.
+* `buffered_target_time_factor`: Multiplier applied to target time while in buffered mode.
+* `buffered_cooldown`: Number of requests to keep buffered mode after detection.
+
+Sometimes the host will produce files faster than we can consume them. That creates a natural backoff
+mechanism. Other times, however, we'll be able to consume the files faster than the host can produce them
+and in those scenarios we need to be careful about not overwhelming the host.
+
+We **don't**:
+
+* Use usleep on the exporting side. We could spread the CPU usage over time with something
+  like `while(!$done) { small_unit_of_work(); usleep($some_time); }`, but that would hold a PHP worker busy for longer.
+  Some hosts only run **two** PHP workers. Introducing a `usleep()` would keep one of them busy for longer,
+  making the site availability strangled for longer. Instead, we try to use shorter requests that do less work,
+  and use a client-side waiting strategy between those requests.
+* Tune based on client download time or wall-clock time. The client might be slower than the server, or a fast
+  connection could hide server pressure. We only tune based on server-reported runtime and the amount of work
+  done (bytes streamed, index entries emitted, SQL bytes dumped).
+* Use a simple "fast/slow" threshold against the target time. We instead track throughput (EMA) per endpoint
+  and size the next request based on a target amount of work, and we only tune on partial requests to avoid
+  tiny final batches skewing the signal.
 
 ### Open questions
 
@@ -124,6 +175,7 @@ This is why we're budgeting our resource usage in a few ways:
   * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases
 * Handle 4xx and 5xx errors, support backoff strategies.
+* If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
 * Take note of any files modified while they were streamed, re-request them later on.
    * Tell the user when a file is too volatile to be synchronized
 ✅ When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of

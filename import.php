@@ -315,6 +315,546 @@ class MultipartStreamParser
     }
 }
 
+/**
+ * Adaptive controller for pacing and chunk sizing.
+ *
+ * Uses observed request time and memory to adjust sizes (fast up, hard down)
+ * and compute client-side sleep to respect a target duty cycle.
+ */
+class AdaptiveTuner
+{
+    private array $config;
+    private array $state;
+
+    public function __construct(array $config, array $state = [])
+    {
+        $defaults = [
+            "enabled" => true,
+            "use_server_time" => true,
+            "target_time" => null, // seconds, if null computed from max_execution_time
+            "target_time_file" => null,
+            "target_time_index" => null,
+            "target_time_sql" => null,
+            "max_execution_time" => 5,
+            "memory_threshold" => 0.8,
+            "duty" => 0.5,
+            "duty_min" => 0.35,
+            "duty_max" => 1.0,
+            "min_sleep" => 0.2,
+            "max_sleep" => 10.0,
+            "throughput_ema_alpha" => 0.2,
+            "throughput_headroom" => 0.9,
+            "scale_min" => 0.5,
+            "scale_max" => 1.5,
+            "tune_only_partial" => true,
+            "buffered_ratio_threshold" => 0.85,
+            "buffered_min_server_time" => 0.5,
+            "buffered_target_time_factor" => 0.5,
+            "buffered_cooldown" => 3,
+            // File chunks
+            "file_chunk_start" => 5 * 1024 * 1024,
+            "file_chunk_min" => 256 * 1024,
+            "file_chunk_max" => 16 * 1024 * 1024,
+            // Index batch
+            "index_batch_start" => 5000,
+            "index_batch_min" => 500,
+            "index_batch_max" => 50000,
+            // SQL fragments per request
+            "sql_fragments_start" => 1000,
+            "sql_fragments_min" => 100,
+            "sql_fragments_max" => 5000,
+            // DB options (export side)
+            "db_unbuffered" => false,
+            "db_query_time_limit" => 0,
+        ];
+
+        $config = array_merge($defaults, $config);
+        $config["enabled"] = (bool) $config["enabled"];
+        $config["use_server_time"] = (bool) $config["use_server_time"];
+        $config["max_execution_time"] = max(
+            1,
+            (int) $config["max_execution_time"],
+        );
+        $config["memory_threshold"] = $this->clamp_float(
+            (float) $config["memory_threshold"],
+            0.1,
+            0.95,
+        );
+        $config["duty"] = $this->clamp_float(
+            (float) $config["duty"],
+            0.1,
+            1.0,
+        );
+        $config["duty_min"] = $this->clamp_float(
+            (float) $config["duty_min"],
+            0.1,
+            1.0,
+        );
+        $config["duty_max"] = $this->clamp_float(
+            (float) $config["duty_max"],
+            0.1,
+            1.0,
+        );
+        $config["min_sleep"] = max(0.0, (float) $config["min_sleep"]);
+        $config["max_sleep"] = max($config["min_sleep"], (float) $config["max_sleep"]);
+        $config["throughput_ema_alpha"] = $this->clamp_float(
+            (float) $config["throughput_ema_alpha"],
+            0.05,
+            0.5,
+        );
+        $config["throughput_headroom"] = $this->clamp_float(
+            (float) $config["throughput_headroom"],
+            0.5,
+            1.0,
+        );
+        $config["scale_min"] = $this->clamp_float(
+            (float) $config["scale_min"],
+            0.1,
+            1.0,
+        );
+        $config["scale_max"] = $this->clamp_float(
+            (float) $config["scale_max"],
+            1.0,
+            4.0,
+        );
+        $config["tune_only_partial"] = (bool) $config["tune_only_partial"];
+        $config["buffered_ratio_threshold"] = $this->clamp_float(
+            (float) $config["buffered_ratio_threshold"],
+            0.5,
+            1.0,
+        );
+        $config["buffered_min_server_time"] = max(
+            0.0,
+            (float) $config["buffered_min_server_time"],
+        );
+        $config["buffered_target_time_factor"] = $this->clamp_float(
+            (float) $config["buffered_target_time_factor"],
+            0.1,
+            1.0,
+        );
+        $config["buffered_cooldown"] = $this->clamp_int(
+            (int) $config["buffered_cooldown"],
+            1,
+            20,
+        );
+        $config["db_unbuffered"] = (bool) $config["db_unbuffered"];
+        $config["db_query_time_limit"] = max(
+            0,
+            (int) $config["db_query_time_limit"],
+        );
+
+        if ($config["target_time"] === null) {
+            $config["target_time"] = min(2.0, $config["max_execution_time"] * 0.6);
+        } else {
+            $config["target_time"] = max(0.2, (float) $config["target_time"]);
+        }
+
+        $config["target_time_file"] =
+            $config["target_time_file"] !== null
+                ? max(0.2, (float) $config["target_time_file"])
+                : $config["target_time"];
+        $config["target_time_index"] =
+            $config["target_time_index"] !== null
+                ? max(0.2, (float) $config["target_time_index"])
+                : $config["target_time"];
+        $config["target_time_sql"] =
+            $config["target_time_sql"] !== null
+                ? max(0.2, (float) $config["target_time_sql"])
+                : $config["target_time"];
+
+        $this->config = $config;
+
+        $state_defaults = [
+            "file_chunk_size" => $config["file_chunk_start"],
+            "index_batch_size" => $config["index_batch_start"],
+            "sql_fragments_per_batch" => $config["sql_fragments_start"],
+            "duty" => $config["duty"],
+            "file_throughput_ema" => null,
+            "index_throughput_ema" => null,
+            "sql_throughput_ema" => null,
+            "buffered_mode" => false,
+            "buffered_cooldown" => 0,
+        ];
+        $this->state = array_merge($state_defaults, $state);
+        $this->state["file_chunk_size"] = $this->clamp_int(
+            (int) $this->state["file_chunk_size"],
+            (int) $config["file_chunk_min"],
+            (int) $config["file_chunk_max"],
+        );
+        $this->state["index_batch_size"] = $this->clamp_int(
+            (int) $this->state["index_batch_size"],
+            (int) $config["index_batch_min"],
+            (int) $config["index_batch_max"],
+        );
+        $this->state["sql_fragments_per_batch"] = $this->clamp_int(
+            (int) $this->state["sql_fragments_per_batch"],
+            (int) $config["sql_fragments_min"],
+            (int) $config["sql_fragments_max"],
+        );
+        $this->state["duty"] = $this->clamp_float(
+            (float) $this->state["duty"],
+            $config["duty_min"],
+            $config["duty_max"],
+        );
+        foreach ([
+            "file_throughput_ema",
+            "index_throughput_ema",
+            "sql_throughput_ema",
+        ] as $ema_key) {
+            $ema_value = $this->state[$ema_key] ?? null;
+            if ($ema_value === null) {
+                $this->state[$ema_key] = null;
+                continue;
+            }
+            $ema_value = (float) $ema_value;
+            $this->state[$ema_key] = $ema_value > 0 ? $ema_value : null;
+        }
+
+        $this->state["buffered_mode"] = (bool) ($this->state["buffered_mode"] ?? false);
+        $this->state["buffered_cooldown"] = max(
+            0,
+            (int) ($this->state["buffered_cooldown"] ?? 0),
+        );
+    }
+
+    public function get_config(): array
+    {
+        return $this->config;
+    }
+
+    public function get_state(): array
+    {
+        return $this->state;
+    }
+
+    public function get_request_params(string $endpoint): array
+    {
+        $params = [
+            "max_execution_time" => $this->config["max_execution_time"],
+            "memory_threshold" => $this->config["memory_threshold"],
+        ];
+
+        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
+            $params["chunk_size"] = (int) $this->state["file_chunk_size"];
+        } elseif ($endpoint === "file_index") {
+            $params["batch_size"] = (int) $this->state["index_batch_size"];
+        } elseif ($endpoint === "sql_chunk") {
+            $params["fragments_per_batch"] = (int) $this->state["sql_fragments_per_batch"];
+            if ($this->config["db_unbuffered"]) {
+                $params["db_unbuffered"] = 1;
+            }
+            if ($this->config["db_query_time_limit"] > 0) {
+                $params["db_query_time_limit"] = (int) $this->config["db_query_time_limit"];
+            }
+        }
+
+        return $params;
+    }
+
+    /**
+     * Record the outcome of a request and update tuning state.
+     *
+     * @param array $metrics ['wall_time','server_time','memory_used','memory_limit','status',
+     *                        'bytes_processed','entries_processed','sql_bytes']
+     * @return array Decision summary (sleep_seconds, decision, duty, size)
+     */
+    public function record_result(string $endpoint, array $metrics): array
+    {
+        if (!$this->config["enabled"]) {
+            return [
+                "decision" => "disabled",
+                "sleep_seconds" => 0.0,
+                "duty" => $this->state["duty"],
+            ];
+        }
+
+        $wall_time = (float) ($metrics["wall_time"] ?? 0);
+        $server_time = (float) ($metrics["server_time"] ?? 0);
+        if ($this->config["use_server_time"]) {
+            if ($server_time <= 0) {
+                return [
+                    "decision" => "no_server_time",
+                    "sleep_seconds" => 0.0,
+                    "duty" => $this->state["duty"],
+                    "elapsed" => 0.0,
+                    "wall_time" => $wall_time,
+                    "server_time" => $server_time,
+                ];
+            }
+            $elapsed = $server_time;
+        } else {
+            $elapsed = $wall_time > 0 ? $wall_time : 0.001;
+        }
+
+        $mem_ratio = null;
+        $memory_used = (int) ($metrics["memory_used"] ?? 0);
+        $memory_limit = (int) ($metrics["memory_limit"] ?? 0);
+        if ($memory_used > 0 && $memory_limit > 0) {
+            $mem_ratio = $memory_used / $memory_limit;
+        }
+
+        /**
+         * Buffering heuristic:
+         * - TTFB includes network/proxy latency, while X-Time-Elapsed is server runtime.
+         * - We treat buffering as "likely" when TTFB is close to server runtime
+         *   (ratio threshold) and runtime is above a minimum to avoid RTT-only
+         *   false positives on tiny requests.
+         */
+        $ttfb = (float) ($metrics["ttfb"] ?? 0);
+        $total_time = (float) ($metrics["total_time"] ?? 0);
+        $buffered_likely = false;
+        $buffered_ratio = null;
+        if ($server_time > 0 && $ttfb > 0) {
+            $buffered_ratio = $ttfb / $server_time;
+            if ($server_time >= $this->config["buffered_min_server_time"]) {
+                $buffered_likely =
+                    $ttfb >=
+                    ($server_time * $this->config["buffered_ratio_threshold"]);
+            }
+        }
+        if ($buffered_likely) {
+            $this->state["buffered_mode"] = true;
+            $this->state["buffered_cooldown"] = $this->config["buffered_cooldown"];
+        } elseif ($this->state["buffered_cooldown"] > 0) {
+            $this->state["buffered_cooldown"]--;
+            if ($this->state["buffered_cooldown"] <= 0) {
+                $this->state["buffered_mode"] = false;
+            }
+        }
+
+        $status = $metrics["status"] ?? null;
+        $target_time = $this->target_time_for_endpoint($endpoint);
+        $work_done = $this->work_done_for_endpoint($endpoint, $metrics);
+        if ($work_done !== null) {
+            $work_done = (int) $work_done;
+        }
+
+        $decision = "steady";
+        $size_key = $this->size_key_for_endpoint($endpoint);
+        $scale = null;
+        $throughput = null;
+        $throughput_ema = null;
+        $target_work = null;
+
+        $should_tune = $work_done !== null && $work_done > 0;
+        if (
+            $should_tune &&
+            $this->config["tune_only_partial"] &&
+            $status !== "partial"
+        ) {
+            $should_tune = false;
+            $decision = "skip_complete";
+        }
+
+        if ($should_tune) {
+            $throughput = $work_done / max(0.0001, $elapsed);
+            $ema_key = $this->throughput_key_for_endpoint($endpoint);
+            if ($ema_key !== null) {
+                $prev_ema = $this->state[$ema_key] ?? null;
+                $alpha = (float) $this->config["throughput_ema_alpha"];
+                if ($prev_ema === null || $prev_ema <= 0) {
+                    $throughput_ema = $throughput;
+                } else {
+                    $throughput_ema =
+                        $prev_ema * (1.0 - $alpha) +
+                        $throughput * $alpha;
+                }
+                $this->state[$ema_key] = $throughput_ema;
+            } else {
+                $throughput_ema = $throughput;
+            }
+
+            if ($size_key !== null && $throughput_ema !== null) {
+                $target_work =
+                    $throughput_ema *
+                    $target_time *
+                    (float) $this->config["throughput_headroom"];
+                if ($target_work > 0) {
+                    $scale = $target_work / $work_done;
+                    $scale = $this->clamp_float(
+                        $scale,
+                        (float) $this->config["scale_min"],
+                        (float) $this->config["scale_max"],
+                    );
+                    $size = (int) round($this->state[$size_key] * $scale);
+                    $size = $this->clamp_int(
+                        $size,
+                        (int) $this->config[$this->min_key_for_size($size_key)],
+                        (int) $this->config[$this->max_key_for_size($size_key)],
+                    );
+                    $this->state[$size_key] = $size;
+                    if ($scale > 1.05) {
+                        $decision = "increase";
+                    } elseif ($scale < 0.95) {
+                        $decision = "decrease";
+                    }
+                }
+            }
+        } elseif ($work_done === null || $work_done <= 0) {
+            $decision = "no_work";
+        }
+
+        $this->state["duty"] = $this->clamp_float(
+            (float) $this->state["duty"],
+            $this->config["duty_min"],
+            $this->config["duty_max"],
+        );
+
+        $sleep = 0.0;
+        $duty = (float) $this->state["duty"];
+        if ($duty < 1.0 && $elapsed > 0) {
+            $sleep = $elapsed * (1.0 / max(0.01, $duty) - 1.0);
+            $sleep = $this->clamp_float(
+                $sleep,
+                $this->config["min_sleep"],
+                $this->config["max_sleep"],
+            );
+        }
+
+        if ($status === "complete") {
+            $sleep = 0.0;
+        }
+
+        return [
+            "decision" => $decision,
+            "sleep_seconds" => $sleep,
+            "duty" => $duty,
+            "elapsed" => $elapsed,
+            "mem_ratio" => $mem_ratio,
+            "size_key" => $size_key,
+            "size_value" => $size_key ? $this->state[$size_key] : null,
+            "work_done" => $work_done,
+            "throughput" => $throughput,
+            "throughput_ema" => $throughput_ema,
+            "target_work" => $target_work,
+            "target_time" => $target_time,
+            "scale" => $scale,
+            "status" => $status,
+            "ttfb" => $ttfb,
+            "total_time" => $total_time,
+            "buffered_ratio" => $buffered_ratio,
+            "buffered_likely" => $buffered_likely,
+            "buffered_mode" => $this->state["buffered_mode"],
+            "wall_time" => $wall_time,
+            "server_time" => $server_time,
+        ];
+    }
+
+    private function throughput_key_for_endpoint(string $endpoint): ?string
+    {
+        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
+            return "file_throughput_ema";
+        }
+        if ($endpoint === "file_index") {
+            return "index_throughput_ema";
+        }
+        if ($endpoint === "sql_chunk") {
+            return "sql_throughput_ema";
+        }
+        return null;
+    }
+
+    private function target_time_for_endpoint(string $endpoint): float
+    {
+        $target = (float) $this->config["target_time"];
+        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
+            $target = (float) $this->config["target_time_file"];
+        } elseif ($endpoint === "file_index") {
+            $target = (float) $this->config["target_time_index"];
+        } elseif ($endpoint === "sql_chunk") {
+            $target = (float) $this->config["target_time_sql"];
+        }
+
+        if ($this->state["buffered_mode"]) {
+            $target *= (float) $this->config["buffered_target_time_factor"];
+        }
+
+        return max(0.2, $target);
+    }
+
+    private function work_done_for_endpoint(string $endpoint, array $metrics): ?int
+    {
+        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
+            return isset($metrics["bytes_processed"])
+                ? (int) $metrics["bytes_processed"]
+                : null;
+        }
+        if ($endpoint === "file_index") {
+            if (isset($metrics["entries_processed"])) {
+                return (int) $metrics["entries_processed"];
+            }
+            if (isset($metrics["total_entries"])) {
+                return (int) $metrics["total_entries"];
+            }
+            return null;
+        }
+        if ($endpoint === "sql_chunk") {
+            return isset($metrics["sql_bytes"])
+                ? (int) $metrics["sql_bytes"]
+                : null;
+        }
+        return null;
+    }
+
+    private function size_key_for_endpoint(string $endpoint): ?string
+    {
+        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
+            return "file_chunk_size";
+        }
+        if ($endpoint === "file_index") {
+            return "index_batch_size";
+        }
+        if ($endpoint === "sql_chunk") {
+            return "sql_fragments_per_batch";
+        }
+        return null;
+    }
+
+    private function min_key_for_size(string $size_key): string
+    {
+        if ($size_key === "file_chunk_size") {
+            return "file_chunk_min";
+        }
+        if ($size_key === "index_batch_size") {
+            return "index_batch_min";
+        }
+        return "sql_fragments_min";
+    }
+
+    private function max_key_for_size(string $size_key): string
+    {
+        if ($size_key === "file_chunk_size") {
+            return "file_chunk_max";
+        }
+        if ($size_key === "index_batch_size") {
+            return "index_batch_max";
+        }
+        return "sql_fragments_max";
+    }
+
+    private function clamp_int(int $value, int $min, int $max): int
+    {
+        if ($value < $min) {
+            return $min;
+        }
+        if ($value > $max) {
+            return $max;
+        }
+        return $value;
+    }
+
+    private function clamp_float(float $value, float $min, float $max): float
+    {
+        if ($value < $min) {
+            return $min;
+        }
+        if ($value > $max) {
+            return $max;
+        }
+        return $value;
+    }
+}
+
 class ImportClient
 {
     private $remote_url;
@@ -340,6 +880,7 @@ class ImportClient
     private $chunks_since_save = 0; // Track chunks for periodic saves
     private $shutdown_requested = false; // Flag for graceful shutdown
     private $current_curl_handle = null; // Active curl handle for abort
+    private $tuner = null; // AdaptiveTuner instance or null
 
     public function __construct(string $remote_url, string $local_path)
     {
@@ -521,6 +1062,7 @@ class ImportClient
         }
 
         $this->state = $this->load_state();
+        $this->initialize_tuner($options);
 
         // Dispatch to appropriate command handler
         try {
@@ -545,6 +1087,156 @@ class ImportClient
                 "error" => $e->getMessage(),
             ]);
             throw $e;
+        }
+    }
+
+    /**
+     * Initialize adaptive tuning from CLI options and persisted state.
+     */
+    private function initialize_tuner(array $options): void
+    {
+        $config = $this->state["tuning"]["config"] ?? [];
+        $state = $this->state["tuning"]["state"] ?? [];
+        $cli_config = $options["tuning_config"] ?? [];
+
+        $config = array_merge($config, $cli_config);
+
+        $this->tuner = new AdaptiveTuner($config, $state);
+        $this->state["tuning"] = [
+            "config" => $this->tuner->get_config(),
+            "state" => $this->tuner->get_state(),
+        ];
+
+        $this->audit_log(
+            "TUNER CONFIG | " . json_encode($this->state["tuning"]["config"]),
+            false,
+        );
+    }
+
+    /**
+     * Build request params for an endpoint using the adaptive tuner.
+     */
+    private function get_tuned_params(string $endpoint): array
+    {
+        if (!$this->tuner instanceof AdaptiveTuner) {
+            return [];
+        }
+        $params = $this->tuner->get_request_params($endpoint);
+        if (!empty($params)) {
+            $this->audit_log(
+                "TUNER REQUEST | endpoint={$endpoint} | params=" .
+                    json_encode($params),
+                false,
+            );
+        }
+        return $params;
+    }
+
+    /**
+     * Record request metrics, apply tuning decisions, and sleep if needed.
+     */
+    private function finalize_tuned_request(
+        string $endpoint,
+        float $wall_time,
+        array $response_stats,
+    ): void {
+        if (!$this->tuner instanceof AdaptiveTuner) {
+            return;
+        }
+
+        $decision = $this->tuner->record_result($endpoint, [
+            "wall_time" => $wall_time,
+            "server_time" => $response_stats["server_time"] ?? null,
+            "status" => $response_stats["status"] ?? null,
+            "bytes_processed" => $response_stats["bytes_processed"] ?? null,
+            "entries_processed" => $response_stats["entries_processed"] ?? null,
+            "sql_bytes" => $response_stats["sql_bytes"] ?? null,
+            "ttfb" => $response_stats["ttfb"] ?? null,
+            "total_time" => $response_stats["total_time"] ?? null,
+            "memory_used" => $response_stats["memory_used"] ?? null,
+            "memory_limit" => $response_stats["memory_limit"] ?? null,
+        ]);
+
+        $log = [
+            "TUNER RESULT",
+            "endpoint={$endpoint}",
+            "decision={$decision["decision"]}",
+            "status=" . ($decision["status"] ?? "unknown"),
+            "elapsed=" . sprintf("%.3f", $decision["elapsed"] ?? 0) . "s",
+            "server_time=" .
+                sprintf("%.3f", (float) ($decision["server_time"] ?? 0)) .
+                "s",
+            "wall_time=" .
+                sprintf("%.3f", (float) ($decision["wall_time"] ?? 0)) .
+                "s",
+        ];
+
+        if (isset($decision["mem_ratio"]) && $decision["mem_ratio"] !== null) {
+            $log[] = "mem_ratio=" . sprintf("%.2f", $decision["mem_ratio"]);
+        }
+        if (isset($decision["work_done"]) && $decision["work_done"] !== null) {
+            $log[] = "work=" . (int) $decision["work_done"];
+        }
+        if (isset($decision["throughput"]) && $decision["throughput"] !== null) {
+            $log[] =
+                "throughput=" . sprintf("%.2f", $decision["throughput"]);
+        }
+        if (isset($decision["throughput_ema"]) && $decision["throughput_ema"] !== null) {
+            $log[] = "ema=" . sprintf("%.2f", $decision["throughput_ema"]);
+        }
+        if (isset($decision["target_work"]) && $decision["target_work"] !== null) {
+            $log[] =
+                "target=" . sprintf("%.2f", $decision["target_work"]);
+        }
+        if (isset($decision["target_time"]) && $decision["target_time"] !== null) {
+            $log[] =
+                "target_time=" . sprintf("%.2f", $decision["target_time"]) . "s";
+        }
+        if (isset($decision["scale"]) && $decision["scale"] !== null) {
+            $log[] = "scale=" . sprintf("%.2f", $decision["scale"]);
+        }
+        if (isset($decision["ttfb"]) && $decision["ttfb"] !== null) {
+            $log[] = "ttfb=" . sprintf("%.3f", (float) $decision["ttfb"]) . "s";
+        }
+        if (isset($decision["total_time"]) && $decision["total_time"] !== null) {
+            $log[] =
+                "total_time=" .
+                sprintf("%.3f", (float) $decision["total_time"]) .
+                "s";
+        }
+        if (isset($decision["buffered_ratio"]) && $decision["buffered_ratio"] !== null) {
+            $log[] =
+                "buffered_ratio=" . sprintf("%.2f", $decision["buffered_ratio"]);
+        }
+        $log[] =
+            "buffered_threshold=" .
+            sprintf("%.2f", (float) $this->tuner->get_config()["buffered_ratio_threshold"]);
+        $log[] =
+            "buffered_factor=" .
+            sprintf("%.2f", (float) $this->tuner->get_config()["buffered_target_time_factor"]);
+        $log[] =
+            "buffered_cooldown=" .
+            (int) ($this->tuner->get_state()["buffered_cooldown"] ?? 0);
+        if (!empty($decision["buffered_likely"])) {
+            $log[] = "buffered=likely";
+        }
+        if (isset($decision["buffered_mode"])) {
+            $log[] = "buffered_mode=" . ($decision["buffered_mode"] ? "on" : "off");
+        }
+        if (!empty($decision["size_key"])) {
+            $log[] =
+                $decision["size_key"] . "=" . (int) ($decision["size_value"] ?? 0);
+        }
+        $log[] = "duty=" . sprintf("%.2f", $decision["duty"] ?? 0);
+        $log[] =
+            "sleep=" .
+            sprintf("%.2f", $decision["sleep_seconds"] ?? 0) .
+            "s";
+        $this->audit_log(implode(" | ", $log), false);
+
+        $sleep = (float) ($decision["sleep_seconds"] ?? 0);
+        if ($sleep > 0) {
+            usleep((int) round($sleep * 1_000_000));
         }
     }
 
@@ -1016,7 +1708,8 @@ class ImportClient
             }
         }
 
-        $url = $this->build_url($endpoint, $cursor, [], null);
+        $params = $this->get_tuned_params($endpoint);
+        $url = $this->build_url($endpoint, $cursor, $params, null);
         $this->audit_log("Downloading file stream from {$url}");
         $this->audit_log("POST data: " . json_encode($post_data));
 
@@ -1079,6 +1772,25 @@ class ImportClient
             } elseif ($chunk_type === "completion") {
                 $complete =
                     ($chunk["headers"]["x-status"] ?? "") === "complete";
+                $context->response_stats = [
+                    "status" => $chunk["headers"]["x-status"] ?? null,
+                    "bytes_processed" =>
+                        isset($chunk["headers"]["x-bytes-processed"])
+                            ? (int) $chunk["headers"]["x-bytes-processed"]
+                            : null,
+                    "server_time" =>
+                        isset($chunk["headers"]["x-time-elapsed"])
+                            ? (float) $chunk["headers"]["x-time-elapsed"]
+                            : null,
+                    "memory_used" =>
+                        isset($chunk["headers"]["x-memory-used"])
+                            ? (int) $chunk["headers"]["x-memory-used"]
+                            : null,
+                    "memory_limit" =>
+                        isset($chunk["headers"]["x-memory-limit"])
+                            ? (int) $chunk["headers"]["x-memory-limit"]
+                            : null,
+                ];
                 $this->output_progress(
                     [
                         "phase" => "files",
@@ -1093,7 +1805,14 @@ class ImportClient
             }
         };
 
+        $request_start = microtime(true);
         $this->fetch_streaming($url, $cursor, $context, $post_data);
+        $wall_time = microtime(true) - $request_start;
+        $this->finalize_tuned_request(
+            $endpoint,
+            $wall_time,
+            $context->response_stats ?? [],
+        );
         $this->finalize_index_updates();
         $this->state["cursor"] = $cursor;
         // Update file tracking: track in-progress file, or clear if complete/no active file
@@ -1133,7 +1852,8 @@ class ImportClient
 
         $complete = false;
         $this->chunks_since_save = 0;
-        $url = $this->build_url("file_index", $cursor, [], null);
+        $params = $this->get_tuned_params("file_index");
+        $url = $this->build_url("file_index", $cursor, $params, null);
         $context = new StreamingContext();
 
         $context->on_chunk = function ($chunk) use (
@@ -1205,10 +1925,36 @@ class ImportClient
             } elseif ($chunk_type === "completion") {
                 $complete =
                     ($chunk["headers"]["x-status"] ?? "") === "complete";
+                $context->response_stats = [
+                    "status" => $chunk["headers"]["x-status"] ?? null,
+                    "entries_processed" =>
+                        isset($chunk["headers"]["x-total-entries"])
+                            ? (int) $chunk["headers"]["x-total-entries"]
+                            : null,
+                    "server_time" =>
+                        isset($chunk["headers"]["x-time-elapsed"])
+                            ? (float) $chunk["headers"]["x-time-elapsed"]
+                            : null,
+                    "memory_used" =>
+                        isset($chunk["headers"]["x-memory-used"])
+                            ? (int) $chunk["headers"]["x-memory-used"]
+                            : null,
+                    "memory_limit" =>
+                        isset($chunk["headers"]["x-memory-limit"])
+                            ? (int) $chunk["headers"]["x-memory-limit"]
+                            : null,
+                ];
             }
         };
 
+        $request_start = microtime(true);
         $this->fetch_streaming($url, $cursor, $context, null);
+        $wall_time = microtime(true) - $request_start;
+        $this->finalize_tuned_request(
+            "file_index",
+            $wall_time,
+            $context->response_stats ?? [],
+        );
         fclose($handle);
 
         $this->state["cursor"] = $cursor;
@@ -1823,7 +2569,8 @@ class ImportClient
 
         try {
             while (!$complete) {
-                $url = $this->build_url("sql_chunk", $cursor, [], null);
+                $params = $this->get_tuned_params("sql_chunk");
+                $url = $this->build_url("sql_chunk", $cursor, $params, null);
 
                 $context = new StreamingContext();
                 $context->sql_handle = $sql_handle;
@@ -1871,6 +2618,25 @@ class ImportClient
                         $complete =
                             ($chunk["headers"]["x-status"] ?? "") ===
                             "complete";
+                        $context->response_stats = [
+                            "status" => $chunk["headers"]["x-status"] ?? null,
+                            "sql_bytes" =>
+                                isset($chunk["headers"]["x-sql-bytes"])
+                                    ? (int) $chunk["headers"]["x-sql-bytes"]
+                                    : null,
+                            "server_time" =>
+                                isset($chunk["headers"]["x-time-elapsed"])
+                                    ? (float) $chunk["headers"]["x-time-elapsed"]
+                                    : null,
+                            "memory_used" =>
+                                isset($chunk["headers"]["x-memory-used"])
+                                    ? (int) $chunk["headers"]["x-memory-used"]
+                                    : null,
+                            "memory_limit" =>
+                                isset($chunk["headers"]["x-memory-limit"])
+                                    ? (int) $chunk["headers"]["x-memory-limit"]
+                                    : null,
+                        ];
                         $this->output_progress(
                             [
                                 "phase" => "sql",
@@ -1886,7 +2652,14 @@ class ImportClient
                     }
                 };
 
+                $request_start = microtime(true);
                 $this->fetch_streaming($url, $cursor, $context, null);
+                $wall_time = microtime(true) - $request_start;
+                $this->finalize_tuned_request(
+                    "sql_chunk",
+                    $wall_time,
+                    $context->response_stats ?? [],
+                );
 
                 // Save cursor for resumption (keep it even when complete for reference)
                 fflush($sql_handle);
@@ -2627,10 +3400,18 @@ class ImportClient
         }
 
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
+        $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
         curl_close($ch);
 
         // Clear curl handle reference
         $this->current_curl_handle = null;
+
+        if (!isset($context->response_stats) || !is_array($context->response_stats)) {
+            $context->response_stats = [];
+        }
+        $context->response_stats["ttfb"] = $ttfb;
+        $context->response_stats["total_time"] = $total_time;
 
         if ($http_code !== 200) {
             $error_msg = "HTTP error {$http_code}";
@@ -2692,6 +3473,11 @@ class ImportClient
             "current_file_bytes" => null,  // Expected bytes written so far
             // Crash recovery: track SQL file size
             "sql_bytes" => null,           // Expected SQL file size
+            // Adaptive tuning state/config
+            "tuning" => [
+                "config" => [],
+                "state" => [],
+            ],
         ];
     }
 
@@ -2709,6 +3495,13 @@ class ImportClient
         }
         $diff = array_intersect_key($diff, $defaults["diff"]);
         $state["diff"] = array_merge($defaults["diff"], $diff);
+        $tuning = $state["tuning"] ?? [];
+        if (!is_array($tuning)) {
+            $tuning = [];
+        }
+        $tuning = array_intersect_key($tuning, $defaults["tuning"]);
+        $tuning = array_merge($defaults["tuning"], $tuning);
+        $state["tuning"] = $tuning;
         return $state;
     }
 
@@ -2737,6 +3530,12 @@ class ImportClient
      */
     private function save_state(array $state): void
     {
+        if ($this->tuner instanceof AdaptiveTuner) {
+            $state["tuning"] = [
+                "config" => $this->tuner->get_config(),
+                "state" => $this->tuner->get_state(),
+            ];
+        }
         $state = $this->normalize_state($state);
 
         // Write to temp file first, then atomic rename
@@ -2895,6 +3694,8 @@ class StreamingContext
     public $next_client_offset = 0;
     // Crash recovery: track bytes written for current file
     public $file_bytes_written = 0;
+    // Last response stats from completion chunk
+    public $response_stats = [];
 }
 
 // ============================================================================
@@ -2938,6 +3739,37 @@ if (
         echo "Options:\n";
         echo "  --restart        Force restart of completed command (clears state)\n";
         echo "  --verbose, -v    Show detailed logs (default: show progress only)\n";
+        echo "  --adaptive       Enable adaptive tuning (default)\n";
+        echo "  --no-adaptive    Disable adaptive tuning\n";
+        echo "  --target-time=F  Target server time per request (seconds)\n";
+        echo "  --target-time-file=F   Target time for file stream requests\n";
+        echo "  --target-time-index=F  Target time for index requests\n";
+        echo "  --target-time-sql=F    Target time for SQL requests\n";
+        echo "  --duty=F         Target duty cycle (0-1)\n";
+        echo "  --duty-min=F     Minimum duty cycle (0-1)\n";
+        echo "  --duty-max=F     Maximum duty cycle (0-1)\n";
+        echo "  --throughput-alpha=F    EMA alpha for throughput (0-1)\n";
+        echo "  --throughput-headroom=F Headroom factor for target work (0-1)\n";
+        echo "  --scale-min=F    Minimum scaling per request (0-1)\n";
+        echo "  --scale-max=F    Maximum scaling per request (>1)\n";
+        echo "  --tune-all       Tune on complete requests too (default: partial only)\n";
+        echo "  --buffered-ratio=F      TTFB/server_time ratio to detect buffering\n";
+        echo "  --buffered-min-time=F   Minimum server_time to consider buffering\n";
+        echo "  --buffered-factor=F     Target time multiplier in buffered mode\n";
+        echo "  --buffered-cooldown=N   Requests to keep buffered mode after detection\n";
+        echo "  --max-exec=N     max_execution_time sent to export.php (seconds)\n";
+        echo "  --memory-threshold=F  memory_threshold sent to export.php (0-1)\n";
+        echo "  --file-chunk-start=N  Initial file chunk size (bytes)\n";
+        echo "  --file-chunk-min=N    Minimum file chunk size (bytes)\n";
+        echo "  --file-chunk-max=N    Maximum file chunk size (bytes)\n";
+        echo "  --index-batch-start=N Initial index batch size (entries)\n";
+        echo "  --index-batch-min=N   Minimum index batch size (entries)\n";
+        echo "  --index-batch-max=N   Maximum index batch size (entries)\n";
+        echo "  --sql-fragments-start=N Initial SQL fragments per request\n";
+        echo "  --sql-fragments-min=N   Minimum SQL fragments per request\n";
+        echo "  --sql-fragments-max=N   Maximum SQL fragments per request\n";
+        echo "  --db-unbuffered         Use unbuffered MySQL queries on export\n";
+        echo "  --db-query-time-limit=N MySQL MAX_EXECUTION_TIME (ms) for SELECT\n";
         echo "\n";
         echo "State Management:\n";
         echo "  - Each command tracks its own state (cursor, status, session)\n";
@@ -2989,6 +3821,7 @@ if (
         "command" => $command,
         "restart" => false,
         "verbose" => false,
+        "tuning_config" => [],
     ];
 
     for ($i = 4; $i < $argc; $i++) {
@@ -2996,6 +3829,149 @@ if (
             $options["restart"] = true;
         } elseif ($argv[$i] === "--verbose" || $argv[$i] === "-v") {
             $options["verbose"] = true;
+        } elseif (strpos($argv[$i], "--target-time=") === 0) {
+            $options["tuning_config"]["target_time"] = (float) substr(
+                $argv[$i],
+                strlen("--target-time="),
+            );
+        } elseif (strpos($argv[$i], "--target-time-file=") === 0) {
+            $options["tuning_config"]["target_time_file"] = (float) substr(
+                $argv[$i],
+                strlen("--target-time-file="),
+            );
+        } elseif (strpos($argv[$i], "--target-time-index=") === 0) {
+            $options["tuning_config"]["target_time_index"] = (float) substr(
+                $argv[$i],
+                strlen("--target-time-index="),
+            );
+        } elseif (strpos($argv[$i], "--target-time-sql=") === 0) {
+            $options["tuning_config"]["target_time_sql"] = (float) substr(
+                $argv[$i],
+                strlen("--target-time-sql="),
+            );
+        } elseif (strpos($argv[$i], "--duty=") === 0) {
+            $options["tuning_config"]["duty"] = (float) substr(
+                $argv[$i],
+                strlen("--duty="),
+            );
+        } elseif (strpos($argv[$i], "--duty-min=") === 0) {
+            $options["tuning_config"]["duty_min"] = (float) substr(
+                $argv[$i],
+                strlen("--duty-min="),
+            );
+        } elseif (strpos($argv[$i], "--duty-max=") === 0) {
+            $options["tuning_config"]["duty_max"] = (float) substr(
+                $argv[$i],
+                strlen("--duty-max="),
+            );
+        } elseif (strpos($argv[$i], "--throughput-alpha=") === 0) {
+            $options["tuning_config"]["throughput_ema_alpha"] = (float) substr(
+                $argv[$i],
+                strlen("--throughput-alpha="),
+            );
+        } elseif (strpos($argv[$i], "--throughput-headroom=") === 0) {
+            $options["tuning_config"]["throughput_headroom"] = (float) substr(
+                $argv[$i],
+                strlen("--throughput-headroom="),
+            );
+        } elseif (strpos($argv[$i], "--scale-min=") === 0) {
+            $options["tuning_config"]["scale_min"] = (float) substr(
+                $argv[$i],
+                strlen("--scale-min="),
+            );
+        } elseif (strpos($argv[$i], "--scale-max=") === 0) {
+            $options["tuning_config"]["scale_max"] = (float) substr(
+                $argv[$i],
+                strlen("--scale-max="),
+            );
+        } elseif ($argv[$i] === "--tune-all") {
+            $options["tuning_config"]["tune_only_partial"] = false;
+        } elseif (strpos($argv[$i], "--buffered-ratio=") === 0) {
+            $options["tuning_config"]["buffered_ratio_threshold"] = (float) substr(
+                $argv[$i],
+                strlen("--buffered-ratio="),
+            );
+        } elseif (strpos($argv[$i], "--buffered-min-time=") === 0) {
+            $options["tuning_config"]["buffered_min_server_time"] = (float) substr(
+                $argv[$i],
+                strlen("--buffered-min-time="),
+            );
+        } elseif (strpos($argv[$i], "--buffered-factor=") === 0) {
+            $options["tuning_config"]["buffered_target_time_factor"] = (float) substr(
+                $argv[$i],
+                strlen("--buffered-factor="),
+            );
+        } elseif (strpos($argv[$i], "--buffered-cooldown=") === 0) {
+            $options["tuning_config"]["buffered_cooldown"] = (int) substr(
+                $argv[$i],
+                strlen("--buffered-cooldown="),
+            );
+        } elseif (strpos($argv[$i], "--max-exec=") === 0) {
+            $options["tuning_config"]["max_execution_time"] = (int) substr(
+                $argv[$i],
+                strlen("--max-exec="),
+            );
+        } elseif (strpos($argv[$i], "--memory-threshold=") === 0) {
+            $options["tuning_config"]["memory_threshold"] = (float) substr(
+                $argv[$i],
+                strlen("--memory-threshold="),
+            );
+        } elseif ($argv[$i] === "--no-adaptive") {
+            $options["tuning_config"]["enabled"] = false;
+        } elseif ($argv[$i] === "--adaptive") {
+            $options["tuning_config"]["enabled"] = true;
+        } elseif (strpos($argv[$i], "--file-chunk-start=") === 0) {
+            $options["tuning_config"]["file_chunk_start"] = (int) substr(
+                $argv[$i],
+                strlen("--file-chunk-start="),
+            );
+        } elseif (strpos($argv[$i], "--file-chunk-min=") === 0) {
+            $options["tuning_config"]["file_chunk_min"] = (int) substr(
+                $argv[$i],
+                strlen("--file-chunk-min="),
+            );
+        } elseif (strpos($argv[$i], "--file-chunk-max=") === 0) {
+            $options["tuning_config"]["file_chunk_max"] = (int) substr(
+                $argv[$i],
+                strlen("--file-chunk-max="),
+            );
+        } elseif (strpos($argv[$i], "--index-batch-start=") === 0) {
+            $options["tuning_config"]["index_batch_start"] = (int) substr(
+                $argv[$i],
+                strlen("--index-batch-start="),
+            );
+        } elseif (strpos($argv[$i], "--index-batch-min=") === 0) {
+            $options["tuning_config"]["index_batch_min"] = (int) substr(
+                $argv[$i],
+                strlen("--index-batch-min="),
+            );
+        } elseif (strpos($argv[$i], "--index-batch-max=") === 0) {
+            $options["tuning_config"]["index_batch_max"] = (int) substr(
+                $argv[$i],
+                strlen("--index-batch-max="),
+            );
+        } elseif (strpos($argv[$i], "--sql-fragments-start=") === 0) {
+            $options["tuning_config"]["sql_fragments_start"] = (int) substr(
+                $argv[$i],
+                strlen("--sql-fragments-start="),
+            );
+        } elseif (strpos($argv[$i], "--sql-fragments-min=") === 0) {
+            $options["tuning_config"]["sql_fragments_min"] = (int) substr(
+                $argv[$i],
+                strlen("--sql-fragments-min="),
+            );
+        } elseif (strpos($argv[$i], "--sql-fragments-max=") === 0) {
+            $options["tuning_config"]["sql_fragments_max"] = (int) substr(
+                $argv[$i],
+                strlen("--sql-fragments-max="),
+            );
+        } elseif ($argv[$i] === "--db-unbuffered") {
+            $options["tuning_config"]["db_unbuffered"] = true;
+        } elseif (strpos($argv[$i], "--db-query-time-limit=") === 0) {
+            $options["tuning_config"]["db_query_time_limit"] = (int) substr(
+                $argv[$i],
+                strlen("--db-query-time-limit="),
+            );
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
@@ -3012,4 +3988,3 @@ if (
         exit(1);
     }
 }
-

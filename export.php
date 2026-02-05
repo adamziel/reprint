@@ -65,8 +65,71 @@ if (false) {
     define("DB_NAME", "your-db-name");
 }
 
+// Export bounds (adjust here if needed)
+if (!defined("EXPORT_MIN_EXECUTION_TIME")) {
+    define("EXPORT_MIN_EXECUTION_TIME", 1);
+}
+if (!defined("EXPORT_MAX_EXECUTION_TIME")) {
+    define("EXPORT_MAX_EXECUTION_TIME", 60);
+}
+if (!defined("EXPORT_MIN_MEMORY_THRESHOLD")) {
+    define("EXPORT_MIN_MEMORY_THRESHOLD", 0.1);
+}
+if (!defined("EXPORT_MAX_MEMORY_THRESHOLD")) {
+    define("EXPORT_MAX_MEMORY_THRESHOLD", 0.95);
+}
+if (!defined("EXPORT_MIN_CHUNK_SIZE")) {
+    define("EXPORT_MIN_CHUNK_SIZE", 16 * 1024);
+}
+if (!defined("EXPORT_MAX_CHUNK_SIZE")) {
+    define("EXPORT_MAX_CHUNK_SIZE", 32 * 1024 * 1024);
+}
+if (!defined("EXPORT_MIN_INDEX_BATCH")) {
+    define("EXPORT_MIN_INDEX_BATCH", 100);
+}
+if (!defined("EXPORT_MAX_INDEX_BATCH")) {
+    define("EXPORT_MAX_INDEX_BATCH", 100000);
+}
+if (!defined("EXPORT_MIN_SQL_FRAGMENTS")) {
+    define("EXPORT_MIN_SQL_FRAGMENTS", 1);
+}
+if (!defined("EXPORT_MAX_SQL_FRAGMENTS")) {
+    define("EXPORT_MAX_SQL_FRAGMENTS", 10000);
+}
+if (!defined("EXPORT_MIN_DB_QUERY_TIME_MS")) {
+    define("EXPORT_MIN_DB_QUERY_TIME_MS", 0);
+}
+if (!defined("EXPORT_MAX_DB_QUERY_TIME_MS")) {
+    define("EXPORT_MAX_DB_QUERY_TIME_MS", 300000);
+}
+
 require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/file-sync.php";
+
+/**
+ * Best-effort streaming response setup.
+ *
+ * Disables output buffering, compression layers, and proxy buffering where possible.
+ */
+function prepare_streaming_response(): void
+{
+    if (!headers_sent()) {
+        header("X-Accel-Buffering: no");
+        header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+        header("Pragma: no-cache");
+        header("Expires: 0");
+    }
+
+    @ini_set("zlib.output_compression", "0");
+    @ini_set("output_buffering", "0");
+    @ini_set("implicit_flush", "1");
+
+    while (ob_get_level() > 0) {
+        @ob_end_flush();
+    }
+    @ob_implicit_flush(true);
+    flush();
+}
 
 /**
  * Streaming gzip output wrapper.
@@ -263,6 +326,7 @@ function endpoint_sql_chunk(
     int $max_memory,
     float $memory_threshold,
 ): array {
+    prepare_streaming_response();
     // Try to get credentials from config, constants, env vars, or wp-config.php
     $db_host =
         $config["db_host"] ??
@@ -317,6 +381,12 @@ function endpoint_sql_chunk(
     }
 
     $fragments_per_batch = $config["fragments_per_batch"] ?? 1000;
+    $fragments_per_batch = require_int_range(
+        "fragments_per_batch",
+        (int) $fragments_per_batch,
+        EXPORT_MIN_SQL_FRAGMENTS,
+        EXPORT_MAX_SQL_FRAGMENTS,
+    );
 
     // Initialize MySQL connection
     $pdo_options = [
@@ -338,7 +408,15 @@ function endpoint_sql_chunk(
         "string_encoding" => $config["string_encoding"] ?? "base64",
     ];
     if (!empty($config["db_query_time_limit"])) {
-        $producer_options["query_time_limit_ms"] = (int) $config["db_query_time_limit"];
+        $query_time_limit = require_int_range(
+            "db_query_time_limit",
+            (int) $config["db_query_time_limit"],
+            EXPORT_MIN_DB_QUERY_TIME_MS,
+            EXPORT_MAX_DB_QUERY_TIME_MS,
+        );
+        if ($query_time_limit > 0) {
+            $producer_options["query_time_limit_ms"] = $query_time_limit;
+        }
     }
 
     if (isset($config["cursor"])) {
@@ -383,6 +461,7 @@ function endpoint_sql_chunk(
     $gz = new GzipOutputStream();
 
     $batches_processed = 0;
+    $sql_bytes_processed = 0;
 
     // Process batches
     while (
@@ -418,6 +497,7 @@ function endpoint_sql_chunk(
             }
         }
         $sql = implode("", $sql);
+        $sql_bytes_processed += strlen($sql);
 
         // Output SQL batch as multipart chunk
         $cursor = $reader->get_reentrancy_cursor();
@@ -447,7 +527,9 @@ function endpoint_sql_chunk(
     $gz->write("X-Chunk-Type: completion\r\n");
     $gz->write("X-Status: {$status}\r\n");
     $gz->write("X-Batches-Processed: {$batches_processed}\r\n");
+    $gz->write("X-SQL-Bytes: {$sql_bytes_processed}\r\n");
     $gz->write("X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n");
+    $gz->write("X-Memory-Limit: " . $max_memory . "\r\n");
     $gz->write("X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n");
     $gz->write("\r\n");
     $gz->write("\r\n");
@@ -460,6 +542,7 @@ function endpoint_sql_chunk(
         "status" => $status,
         "stats" => [
             "batches_processed" => $batches_processed,
+            "sql_bytes" => $sql_bytes_processed,
             "memory_used" => memory_get_peak_usage(true),
             "time_elapsed" => microtime(true) - $script_start,
         ],
@@ -530,9 +613,7 @@ function stream_file_producer(
     int $max_memory,
     float $memory_threshold,
 ): array {
-    if (ob_get_level()) {
-        ob_end_flush();
-    }
+    prepare_streaming_response();
 
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
@@ -559,7 +640,22 @@ function stream_file_producer(
     $metadata_sent = false;
     $iterations = 0;
 
-    while ($producer->next_chunk()) {
+    while (true) {
+        if (
+            !should_continue(
+                $script_start,
+                $max_execution_time,
+                $max_memory,
+                $memory_threshold,
+            )
+        ) {
+            break;
+        }
+
+        if (!$producer->next_chunk()) {
+            break;
+        }
+
         $iterations++;
         $chunk = $producer->get_current_chunk();
         $progress = $producer->get_progress();
@@ -609,16 +705,6 @@ function stream_file_producer(
                 $last_progress_output = $now;
             }
 
-            if (
-                !should_continue(
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                )
-            ) {
-                break;
-            }
             continue;
         }
 
@@ -735,16 +821,6 @@ function stream_file_producer(
             $gz->flush();
         }
 
-        if (
-            !should_continue(
-                $script_start,
-                $max_execution_time,
-                $max_memory,
-                $memory_threshold,
-            )
-        ) {
-            break;
-        }
     }
 
     $progress = $producer->get_progress();
@@ -765,6 +841,7 @@ function stream_file_producer(
     $gz->write("X-Files-Completed: {$files_completed}\r\n");
     $gz->write("X-Bytes-Processed: {$bytes_processed}\r\n");
     $gz->write("X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n");
+    $gz->write("X-Memory-Limit: " . $max_memory . "\r\n");
     $gz->write("X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n");
     $gz->write("\r\n");
     $gz->write("\r\n");
@@ -799,8 +876,16 @@ function endpoint_file_stream(
     float $memory_threshold,
 ): array {
     $directories = resolve_directories($config);
+    $chunk_size = $config["chunk_size"] ?? 5 * 1024 * 1024;
+    $chunk_size = require_int_range(
+        "chunk_size",
+        (int) $chunk_size,
+        EXPORT_MIN_CHUNK_SIZE,
+        EXPORT_MAX_CHUNK_SIZE,
+    );
+
     $sync_options = [
-        "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024,
+        "chunk_size" => $chunk_size,
     ];
     if (isset($config["cursor"])) {
         $sync_options["cursor"] = $config["cursor"];
@@ -843,9 +928,23 @@ function endpoint_file_index(
 ): array {
     $directories = resolve_directories($config);
     $batch_size = $config["batch_size"] ?? 5000;
+    $batch_size = require_int_range(
+        "batch_size",
+        (int) $batch_size,
+        EXPORT_MIN_INDEX_BATCH,
+        EXPORT_MAX_INDEX_BATCH,
+    );
+
+    $chunk_size = $config["chunk_size"] ?? 5 * 1024 * 1024;
+    $chunk_size = require_int_range(
+        "chunk_size",
+        (int) $chunk_size,
+        EXPORT_MIN_CHUNK_SIZE,
+        EXPORT_MAX_CHUNK_SIZE,
+    );
 
     $sync_options = [
-        "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024,
+        "chunk_size" => $chunk_size,
         "index_only" => true,
     ];
     if (isset($config["cursor"])) {
@@ -856,9 +955,7 @@ function endpoint_file_index(
 
     $producer = new FileTreeProducer($directories, $sync_options);
 
-    if (ob_get_level()) {
-        ob_end_flush();
-    }
+    prepare_streaming_response();
 
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
@@ -886,7 +983,22 @@ function endpoint_file_index(
     $total_entries = 0;
     $batch_lines = [];
 
-    while ($producer->next_chunk()) {
+    while (true) {
+        if (
+            !should_continue(
+                $script_start,
+                $max_execution_time,
+                $max_memory,
+                $memory_threshold,
+            )
+        ) {
+            break;
+        }
+
+        if (!$producer->next_chunk()) {
+            break;
+        }
+
         $chunk = $producer->get_current_chunk();
 
         if ($chunk === null) {
@@ -912,15 +1024,7 @@ function endpoint_file_index(
         }
 
         // Emit batch when full or when we need to stop
-        if (
-            count($batch_lines) >= $batch_size ||
-            !should_continue(
-                $script_start,
-                $max_execution_time,
-                $max_memory,
-                $memory_threshold,
-            )
-        ) {
+        if (count($batch_lines) >= $batch_size) {
             $cursor = $producer->get_reentrancy_cursor();
             $tsv = implode("\n", $batch_lines) . "\n";
 
@@ -939,16 +1043,6 @@ function endpoint_file_index(
             $total_entries += count($batch_lines);
             $batch_lines = [];
 
-            if (
-                !should_continue(
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                )
-            ) {
-                break;
-            }
         }
     }
 
@@ -984,6 +1078,7 @@ function endpoint_file_index(
     $gz->write("X-Batches-Emitted: {$batches_emitted}\r\n");
     $gz->write("X-Total-Entries: {$total_entries}\r\n");
     $gz->write("X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n");
+    $gz->write("X-Memory-Limit: " . $max_memory . "\r\n");
     $gz->write("X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n");
     $gz->write("\r\n");
     $gz->write("\r\n");
@@ -1047,8 +1142,16 @@ function endpoint_file_fetch(
         fclose($handle);
     }
 
+    $chunk_size = $config["chunk_size"] ?? 5 * 1024 * 1024;
+    $chunk_size = require_int_range(
+        "chunk_size",
+        (int) $chunk_size,
+        EXPORT_MIN_CHUNK_SIZE,
+        EXPORT_MAX_CHUNK_SIZE,
+    );
+
     $sync_options = [
-        "chunk_size" => $config["chunk_size"] ?? 5 * 1024 * 1024,
+        "chunk_size" => $chunk_size,
         "paths" => $paths,
     ];
     if (isset($config["cursor"])) {
@@ -1084,6 +1187,40 @@ function parse_memory_limit(string $limit): int
         default:
             return (int) $limit;
     }
+}
+
+/**
+ * Require an integer within range, else throw.
+ */
+function require_int_range(
+    string $name,
+    int $value,
+    int $min,
+    int $max,
+): int {
+    if ($value < $min || $value > $max) {
+        throw new InvalidArgumentException(
+            "{$name} out of range. Expected {$min}-{$max}, got {$value}",
+        );
+    }
+    return $value;
+}
+
+/**
+ * Require a float within range, else throw.
+ */
+function require_float_range(
+    string $name,
+    float $value,
+    float $min,
+    float $max,
+): float {
+    if ($value < $min || $value > $max) {
+        throw new InvalidArgumentException(
+            "{$name} out of range. Expected {$min}-{$max}, got {$value}",
+        );
+    }
+    return $value;
 }
 
 /**
@@ -1179,6 +1316,20 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
 
         $max_execution_time = $config["max_execution_time"] ?? 5;
         $memory_threshold = $config["memory_threshold"] ?? 0.8;
+
+        $max_execution_time = require_int_range(
+            "max_execution_time",
+            (int) $max_execution_time,
+            EXPORT_MIN_EXECUTION_TIME,
+            EXPORT_MAX_EXECUTION_TIME,
+        );
+
+        $memory_threshold = require_float_range(
+            "memory_threshold",
+            (float) $memory_threshold,
+            EXPORT_MIN_MEMORY_THRESHOLD,
+            EXPORT_MAX_MEMORY_THRESHOLD,
+        );
 
         // Parse memory limit
         $memory_limit = ini_get("memory_limit");
@@ -1284,6 +1435,7 @@ function parse_http_config(): array
                 "min_ctime",
                 "chunk_size",
                 "fragments_per_batch",
+                "batch_size",
                 "db_query_time_limit",
             ])
         ) {

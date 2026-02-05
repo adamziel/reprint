@@ -418,8 +418,9 @@ class FileTreeProducer
                 }
             }
 
-            // Use DirectoryListing's binary search to find position after last_visited
             $listing = $frame["listing"];
+
+            // Use DirectoryListing's binary search to find position after last_visited
             $last = $frame["last_visited"] ?? null;
             if ($last !== null) {
                 $listing->seekAfter($last);
