@@ -485,10 +485,13 @@ function endpoint_sql_chunk(
      */
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     $can_send_headers = !headers_sent();
-    if ($can_send_headers) {
-        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    if (!$can_send_headers) {
+        throw new RuntimeException(
+            "Cannot stream sql_preflight: headers already sent",
+        );
     }
-    $gz = new GzipOutputStream($can_send_headers);
+    @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    $gz = new GzipOutputStream(true);
 
     $batches_processed = 0;
     $sql_bytes_processed = 0;
