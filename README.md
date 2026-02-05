@@ -101,46 +101,30 @@ This is why we're budgeting our resource usage in a few ways:
 
 * Execution time limit on the remote host – it gracefully ends the request once we exceed the budget.
 * Memory usage limit on the remote host – it gracefully ends the request once we exceed the budget.
-* Request backoff to make space for other requests (TODO)
+* Request backoff to make space for other requests
 * Per-endpoint target times – file streaming, indexing, and SQL dumps have different cost profiles and host limits,
   so we tune each to its own target runtime instead of a single global value.
-
-We also detect likely response buffering (TTFB ≈ server runtime) and switch to smaller per-request budgets
-to keep buffered responses small and avoid memory spikes in proxies, PHP-FPM, or web servers.
-
-Adaptive tuning knobs (client-side, in `import.php`):
-
-* `target_time`: Baseline target runtime per request (seconds). The tuner sizes work to fit this window.
-* `target_time_file`: Override target time for file streaming.
-* `target_time_index`: Override target time for index streaming.
-* `target_time_sql`: Override target time for SQL dump.
-* `throughput_ema_alpha`: Smoothing factor for throughput EMA. Lower = steadier, slower to adapt.
-* `throughput_headroom`: Safety margin below measured throughput (e.g. 0.9 leaves 10% headroom).
-* `scale_min`: Minimum scaling factor per request (prevents huge drops).
-* `scale_max`: Maximum scaling factor per request (prevents huge jumps).
-* `tune_only_partial`: Only tune on partial requests to avoid tiny final batches skewing the signal.
-* `duty`: Desired client-side duty cycle (work time vs sleep time).
-* `duty_min`: Minimum duty cycle allowed.
-* `duty_max`: Maximum duty cycle allowed.
-* `min_sleep`: Lower bound on client-side sleep between requests.
-* `max_sleep`: Upper bound on client-side sleep between requests.
-* `max_execution_time`: Passed to export.php to enforce server-side time budget.
-* `memory_threshold`: Passed to export.php to enforce server-side memory budget.
-* `file_chunk_start` / `file_chunk_min` / `file_chunk_max`: Initial/min/max file chunk size (bytes).
-* `index_batch_start` / `index_batch_min` / `index_batch_max`: Initial/min/max index batch size (entries).
-* `sql_fragments_start` / `sql_fragments_min` / `sql_fragments_max`: Initial/min/max SQL fragments per request.
-* `db_unbuffered`: Ask export.php to use unbuffered MySQL queries (lower memory).
-* `db_query_time_limit`: MySQL MAX_EXECUTION_TIME for SELECT (ms), when supported.
-* `buffered_ratio_threshold`: TTFB/server_time ratio to flag likely buffering.
-* `buffered_min_server_time`: Minimum server runtime before buffering heuristic applies.
-* `buffered_target_time_factor`: Multiplier applied to target time while in buffered mode.
-* `buffered_cooldown`: Number of requests to keep buffered mode after detection.
 
 Sometimes the host will produce files faster than we can consume them. That creates a natural backoff
 mechanism. Other times, however, we'll be able to consume the files faster than the host can produce them
 and in those scenarios we need to be careful about not overwhelming the host.
 
-We **don't**:
+We detect likely response buffering (TTFB ≈ server runtime) and switch to smaller per-request budgets
+to keep buffered responses small and avoid memory spikes in proxies, PHP-FPM, or web servers. When the
+server looks fast, we gradually increase the amount of work per request; when it looks slow or buffered,
+we cut the work size down and let the client sleep a bit longer between requests.
+
+The tuner runs on the client and uses only server-reported runtime plus the amount of work done (bytes
+streamed, index entries emitted, SQL bytes dumped). It keeps separate targets for file streaming, indexing,
+and SQL, because those workloads behave very differently on shared hosts. If we hit timeouts or any
+error response, we enter an error backoff mode that shrinks targets for a few requests.
+
+If buffering persists over several requests, we switch into a slow-host mode that clamps the maximum
+chunk sizes and adds a small random jitter to sleep times so multiple migrations don’t synchronize their
+load. All of these thresholds are configurable in `import.php` and via CLI flags, but the core idea is
+simple: stay under the host’s limits while still making steady progress.
+
+What we **don't** do:
 
 * Use usleep on the exporting side. We could spread the CPU usage over time with something
   like `while(!$done) { small_unit_of_work(); usleep($some_time); }`, but that would hold a PHP worker busy for longer.
@@ -150,13 +134,28 @@ We **don't**:
 * Tune based on client download time or wall-clock time. The client might be slower than the server, or a fast
   connection could hide server pressure. We only tune based on server-reported runtime and the amount of work
   done (bytes streamed, index entries emitted, SQL bytes dumped).
-* Use a simple "fast/slow" threshold against the target time. We instead track throughput (EMA) per endpoint
-  and size the next request based on a target amount of work, and we only tune on partial requests to avoid
-  tiny final batches skewing the signal.
+* Use a simple "fast/slow" threshold against the target time. We have no idea how fast is "fast" or "slow" for each 
+  site. We instead track throughput (Exponential Moving Average) per endpoint and size the next request based on a
+  target amount of work, and we only tune on partial requests to avoid tiny final batches skewing the signal.
 
 ### Open questions
 
-* How do we choose resource budgets for each host / runtime?
+* How to negotiate symlinks pointing outside of the requested root directories?
+
+### Todos
+
+* Account for the disk space limits for files and for MySQL data on the migration target.
+* Account for 3xx errors
+* Handle every single possible error case, e.g. fread() returning false prematurely etc.
+* Turn it into a WordPress plugin 
+  * HMAC signatures per request with a shared secret + random number + microtime
+* Automated test suite to cover all the usual corner cases
+* If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
+* Take note of any files modified while they were streamed, re-request them later on.
+   * Tell the user when a file is too volatile to be synchronized
+✅ Auto-constraining resource usage
+✅ Handle 4xx and 5xx errors, support backoff strategies.
+    How do we choose resource budgets for each host / runtime?
     start = microtime(); do_thing(); took = microtime() - start; usleep( max( 0.5, (2 * took ) ) );
     you can also if bite_size = default; ……. while ….. if ( took > threshold ) { bite_size = bite_size / 2 } else if ( took < other threshold ) { bite_size++ }
     for things like number of rows and or files or bytes or whatever transferred at a time
@@ -164,20 +163,6 @@ We **don't**:
     [7:53 PM]you can also threshold… like if took > a then sleep 2x; if took > b then sleep 4x; if took > c then sleep 8x
     [7:53 PM]you should be able to make some combination of things that backs off as necessary (edited) 
     [7:54 PM]not simple. but if you get someone deactivated and banned .25 though a migration you’re gonna have a bad time
-* Can we, somehow, budget CPU usage?
-* How to negotiate symlinks pointing outside of the requested root directories?
-
-### Todos
-
-* Auto-constraining resource usage
-* Account for the disk space limits for files and for MySQL data on the migration target.
-* Turn it into a WordPress plugin 
-  * HMAC signatures per request with a shared secret + random number + microtime
-* Automated test suite to cover all the usual corner cases
-* Handle 4xx and 5xx errors, support backoff strategies.
-* If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
-* Take note of any files modified while they were streamed, re-request them later on.
-   * Tell the user when a file is too volatile to be synchronized
 ✅ When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
    what it was doing when we've killed it (e.g. appending a partial state to the local file). So, if we wrote some bytes
    to the file but did not update the cursor yet, make sure the next run will know we're only expected to have so many

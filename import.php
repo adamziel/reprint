@@ -316,10 +316,65 @@ class MultipartStreamParser
 }
 
 /**
- * Adaptive controller for pacing and chunk sizing.
+ * AdaptiveTuner
  *
- * Uses observed request time and memory to adjust sizes (fast up, hard down)
- * and compute client-side sleep to respect a target duty cycle.
+ * Purpose:
+ * - Keep each request within a target server-runtime budget while avoiding
+ *   resource spikes on low-end hosts and still scaling up on fast hosts.
+ * - Tune per-endpoint (files, index, SQL) using measured throughput on the
+ *   exporting server, not client download time.
+ *
+ * Core behavior:
+ * - Measures work_done per request (bytes for file stream, entries for index,
+ *   SQL bytes for SQL dump) and uses X-Time-Elapsed from the server to compute
+ *   throughput.
+ * - Maintains an EMA of throughput per endpoint to smooth noise.
+ * - Computes target_work = throughput_ema * target_time * headroom, then scales
+ *   next request size by target_work / work_done, clamped by scale_min/scale_max.
+ * - By default, only tunes on partial responses to avoid tiny final batches
+ *   skewing the signal (tune_only_partial).
+ * - Optional duty-cycle sleep keeps overall request rate controlled without
+ *   holding PHP workers on the server (sleep happens client-side).
+ * - Detects likely response buffering by comparing client TTFB to server runtime.
+ *   If buffering is likely, it temporarily reduces target time to keep responses
+ *   small (buffered_mode with cooldown).
+ *
+ * Parameters (config keys):
+ * - enabled: Master toggle for tuning.
+ * - use_server_time: Use server-reported elapsed time (recommended).
+ * - target_time: Baseline target runtime (seconds) for all endpoints.
+ * - target_time_file: Target runtime for file streaming (seconds).
+ * - target_time_index: Target runtime for index streaming (seconds).
+ * - target_time_sql: Target runtime for SQL dumping (seconds).
+ * - max_execution_time: Sent to export.php for server-side time budgeting.
+ * - memory_threshold: Sent to export.php for server-side memory budgeting.
+ * - duty: Desired client duty cycle (work vs sleep), 0-1.
+ * - duty_min: Minimum duty cycle allowed.
+ * - duty_max: Maximum duty cycle allowed.
+ * - min_sleep: Minimum client sleep between requests (seconds).
+ * - max_sleep: Maximum client sleep between requests (seconds).
+ * - throughput_ema_alpha: EMA smoothing factor for throughput (0-1).
+ * - throughput_headroom: Safety margin below measured throughput (0-1).
+ * - scale_min: Min scale per request (prevents huge drops).
+ * - scale_max: Max scale per request (prevents huge jumps).
+ * - tune_only_partial: Only tune on partial responses (default true).
+ * - file_chunk_start/min/max: File chunk size bounds (bytes).
+ * - index_batch_start/min/max: Index batch size bounds (entries).
+ * - sql_fragments_start/min/max: SQL fragments per request bounds (count).
+ * - db_unbuffered: Ask export.php to use unbuffered MySQL queries.
+ * - db_query_time_limit: MySQL MAX_EXECUTION_TIME for SELECT (ms), if supported.
+ * - buffered_ratio_threshold: TTFB/server_time ratio to flag buffering.
+ * - buffered_min_server_time: Minimum server_time before buffering heuristic applies.
+ * - buffered_target_time_factor: Multiplier applied to target_time in buffered mode.
+ * - buffered_cooldown: Requests to keep buffered mode after detection.
+ * - error_backoff_requests: Requests to stay in error-backoff mode after 429/503/timeout.
+ * - error_target_time_factor: Multiplier applied to target_time during error backoff.
+ * - error_force_scale_min: Force scale_min while error backoff is active.
+ * - slow_host_threshold: Buffered detections before enabling slow-host caps.
+ * - slow_host_file_chunk_max: Max file chunk size in slow-host mode.
+ * - slow_host_index_batch_max: Max index batch size in slow-host mode.
+ * - slow_host_sql_fragments_max: Max SQL fragments per request in slow-host mode.
+ * - sleep_jitter: Fractional jitter applied to client sleep.
  */
 class AdaptiveTuner
 {
@@ -351,6 +406,14 @@ class AdaptiveTuner
             "buffered_min_server_time" => 0.5,
             "buffered_target_time_factor" => 0.5,
             "buffered_cooldown" => 3,
+            "error_backoff_requests" => 3,
+            "error_target_time_factor" => 0.5,
+            "error_force_scale_min" => true,
+            "slow_host_threshold" => 3,
+            "slow_host_file_chunk_max" => 2 * 1024 * 1024,
+            "slow_host_index_batch_max" => 5000,
+            "slow_host_sql_fragments_max" => 1000,
+            "sleep_jitter" => 0.1,
             // File chunks
             "file_chunk_start" => 5 * 1024 * 1024,
             "file_chunk_min" => 256 * 1024,
@@ -437,6 +500,42 @@ class AdaptiveTuner
             1,
             20,
         );
+        $config["error_backoff_requests"] = $this->clamp_int(
+            (int) $config["error_backoff_requests"],
+            1,
+            20,
+        );
+        $config["error_target_time_factor"] = $this->clamp_float(
+            (float) $config["error_target_time_factor"],
+            0.1,
+            1.0,
+        );
+        $config["error_force_scale_min"] = (bool) $config["error_force_scale_min"];
+        $config["slow_host_threshold"] = $this->clamp_int(
+            (int) $config["slow_host_threshold"],
+            1,
+            20,
+        );
+        $config["slow_host_file_chunk_max"] = $this->clamp_int(
+            (int) $config["slow_host_file_chunk_max"],
+            (int) $config["file_chunk_min"],
+            (int) $config["file_chunk_max"],
+        );
+        $config["slow_host_index_batch_max"] = $this->clamp_int(
+            (int) $config["slow_host_index_batch_max"],
+            (int) $config["index_batch_min"],
+            (int) $config["index_batch_max"],
+        );
+        $config["slow_host_sql_fragments_max"] = $this->clamp_int(
+            (int) $config["slow_host_sql_fragments_max"],
+            (int) $config["sql_fragments_min"],
+            (int) $config["sql_fragments_max"],
+        );
+        $config["sleep_jitter"] = $this->clamp_float(
+            (float) $config["sleep_jitter"],
+            0.0,
+            0.5,
+        );
         $config["db_unbuffered"] = (bool) $config["db_unbuffered"];
         $config["db_query_time_limit"] = max(
             0,
@@ -474,6 +573,9 @@ class AdaptiveTuner
             "sql_throughput_ema" => null,
             "buffered_mode" => false,
             "buffered_cooldown" => 0,
+            "buffered_streak" => 0,
+            "slow_host_mode" => false,
+            "error_backoff_remaining" => 0,
         ];
         $this->state = array_merge($state_defaults, $state);
         $this->state["file_chunk_size"] = $this->clamp_int(
@@ -515,6 +617,15 @@ class AdaptiveTuner
             0,
             (int) ($this->state["buffered_cooldown"] ?? 0),
         );
+        $this->state["buffered_streak"] = max(
+            0,
+            (int) ($this->state["buffered_streak"] ?? 0),
+        );
+        $this->state["slow_host_mode"] = (bool) ($this->state["slow_host_mode"] ?? false);
+        $this->state["error_backoff_remaining"] = max(
+            0,
+            (int) ($this->state["error_backoff_remaining"] ?? 0),
+        );
     }
 
     public function get_config(): array
@@ -535,11 +646,35 @@ class AdaptiveTuner
         ];
 
         if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
-            $params["chunk_size"] = (int) $this->state["file_chunk_size"];
+            $size_key = "file_chunk_size";
+            $size = (int) $this->state[$size_key];
+            $size = $this->clamp_int(
+                $size,
+                (int) $this->config[$this->min_key_for_size($size_key)],
+                $this->effective_max_for_size($size_key),
+            );
+            $this->state[$size_key] = $size;
+            $params["chunk_size"] = $size;
         } elseif ($endpoint === "file_index") {
-            $params["batch_size"] = (int) $this->state["index_batch_size"];
+            $size_key = "index_batch_size";
+            $size = (int) $this->state[$size_key];
+            $size = $this->clamp_int(
+                $size,
+                (int) $this->config[$this->min_key_for_size($size_key)],
+                $this->effective_max_for_size($size_key),
+            );
+            $this->state[$size_key] = $size;
+            $params["batch_size"] = $size;
         } elseif ($endpoint === "sql_chunk") {
-            $params["fragments_per_batch"] = (int) $this->state["sql_fragments_per_batch"];
+            $size_key = "sql_fragments_per_batch";
+            $size = (int) $this->state[$size_key];
+            $size = $this->clamp_int(
+                $size,
+                (int) $this->config[$this->min_key_for_size($size_key)],
+                $this->effective_max_for_size($size_key),
+            );
+            $this->state[$size_key] = $size;
+            $params["fragments_per_batch"] = $size;
             if ($this->config["db_unbuffered"]) {
                 $params["db_unbuffered"] = 1;
             }
@@ -615,11 +750,22 @@ class AdaptiveTuner
         if ($buffered_likely) {
             $this->state["buffered_mode"] = true;
             $this->state["buffered_cooldown"] = $this->config["buffered_cooldown"];
+            $this->state["buffered_streak"]++;
         } elseif ($this->state["buffered_cooldown"] > 0) {
             $this->state["buffered_cooldown"]--;
             if ($this->state["buffered_cooldown"] <= 0) {
                 $this->state["buffered_mode"] = false;
             }
+            $this->state["buffered_streak"] = 0;
+        } else {
+            $this->state["buffered_streak"] = 0;
+        }
+
+        if (
+            !$this->state["slow_host_mode"] &&
+            $this->state["buffered_streak"] >= $this->config["slow_host_threshold"]
+        ) {
+            $this->state["slow_host_mode"] = true;
         }
 
         $status = $metrics["status"] ?? null;
@@ -671,6 +817,12 @@ class AdaptiveTuner
                     (float) $this->config["throughput_headroom"];
                 if ($target_work > 0) {
                     $scale = $target_work / $work_done;
+                    if (
+                        $this->state["error_backoff_remaining"] > 0 &&
+                        $this->config["error_force_scale_min"]
+                    ) {
+                        $scale = min($scale, (float) $this->config["scale_min"]);
+                    }
                     $scale = $this->clamp_float(
                         $scale,
                         (float) $this->config["scale_min"],
@@ -680,7 +832,7 @@ class AdaptiveTuner
                     $size = $this->clamp_int(
                         $size,
                         (int) $this->config[$this->min_key_for_size($size_key)],
-                        (int) $this->config[$this->max_key_for_size($size_key)],
+                        $this->effective_max_for_size($size_key),
                     );
                     $this->state[$size_key] = $size;
                     if ($scale > 1.05) {
@@ -692,6 +844,10 @@ class AdaptiveTuner
             }
         } elseif ($work_done === null || $work_done <= 0) {
             $decision = "no_work";
+        }
+
+        if ($this->state["error_backoff_remaining"] > 0) {
+            $this->state["error_backoff_remaining"]--;
         }
 
         $this->state["duty"] = $this->clamp_float(
@@ -709,6 +865,18 @@ class AdaptiveTuner
                 $this->config["min_sleep"],
                 $this->config["max_sleep"],
             );
+            if ($sleep > 0 && $this->config["sleep_jitter"] > 0) {
+                $jitter = $sleep * (float) $this->config["sleep_jitter"];
+                $sleep += $this->random_float(-$jitter, $jitter);
+                if ($sleep < 0) {
+                    $sleep = 0.0;
+                }
+                $sleep = $this->clamp_float(
+                    $sleep,
+                    $this->config["min_sleep"],
+                    $this->config["max_sleep"],
+                );
+            }
         }
 
         if ($status === "complete") {
@@ -735,8 +903,77 @@ class AdaptiveTuner
             "buffered_ratio" => $buffered_ratio,
             "buffered_likely" => $buffered_likely,
             "buffered_mode" => $this->state["buffered_mode"],
+            "buffered_streak" => $this->state["buffered_streak"],
+            "slow_host_mode" => $this->state["slow_host_mode"],
+            "error_backoff_remaining" => $this->state["error_backoff_remaining"],
             "wall_time" => $wall_time,
             "server_time" => $server_time,
+        ];
+    }
+
+    /**
+     * Record a request-level error and trigger temporary backoff.
+     *
+     * @param array $error ['http_code'=>int|null,'timeout'=>bool,'curl_errno'=>int|null]
+     * @return array Decision summary for logging.
+     */
+    public function record_error(string $endpoint, array $error): array
+    {
+        $http_code = (int) ($error["http_code"] ?? 0);
+        $timeout = (bool) ($error["timeout"] ?? false);
+        $curl_errno = (int) ($error["curl_errno"] ?? 0);
+
+        $should_backoff =
+            $timeout ||
+            ($http_code >= 400 && $http_code < 600) ||
+            $http_code >= 600;
+        if (!$should_backoff) {
+            return [
+                "decision" => "ignore",
+                "http_code" => $http_code,
+                "timeout" => $timeout,
+                "curl_errno" => $curl_errno,
+                "buffered_mode" => $this->state["buffered_mode"],
+                "slow_host_mode" => $this->state["slow_host_mode"],
+                "error_backoff_remaining" => $this->state["error_backoff_remaining"],
+            ];
+        }
+
+        $this->state["buffered_mode"] = true;
+        $this->state["buffered_cooldown"] = max(
+            $this->state["buffered_cooldown"],
+            (int) $this->config["buffered_cooldown"],
+        );
+        $this->state["error_backoff_remaining"] = max(
+            $this->state["error_backoff_remaining"],
+            (int) $this->config["error_backoff_requests"],
+        );
+
+        $size_key = $this->size_key_for_endpoint($endpoint);
+        if (
+            $size_key !== null &&
+            $this->config["error_force_scale_min"]
+        ) {
+            $size = (int) $this->state[$size_key];
+            $size = (int) round($size * (float) $this->config["scale_min"]);
+            $size = $this->clamp_int(
+                $size,
+                (int) $this->config[$this->min_key_for_size($size_key)],
+                $this->effective_max_for_size($size_key),
+            );
+            $this->state[$size_key] = $size;
+        }
+
+        return [
+            "decision" => "backoff",
+            "http_code" => $http_code,
+            "timeout" => $timeout,
+            "curl_errno" => $curl_errno,
+            "buffered_mode" => $this->state["buffered_mode"],
+            "slow_host_mode" => $this->state["slow_host_mode"],
+            "error_backoff_remaining" => $this->state["error_backoff_remaining"],
+            "size_key" => $size_key,
+            "size_value" => $size_key ? $this->state[$size_key] : null,
         ];
     }
 
@@ -754,6 +991,29 @@ class AdaptiveTuner
         return null;
     }
 
+    private function effective_max_for_size(string $size_key): int
+    {
+        $max = (int) $this->config[$this->max_key_for_size($size_key)];
+        if (!empty($this->state["slow_host_mode"])) {
+            if ($size_key === "file_chunk_size") {
+                $max = min($max, (int) $this->config["slow_host_file_chunk_max"]);
+            } elseif ($size_key === "index_batch_size") {
+                $max = min(
+                    $max,
+                    (int) $this->config["slow_host_index_batch_max"],
+                );
+            } elseif ($size_key === "sql_fragments_per_batch") {
+                $max = min(
+                    $max,
+                    (int) $this->config["slow_host_sql_fragments_max"],
+                );
+            }
+        }
+
+        $min = (int) $this->config[$this->min_key_for_size($size_key)];
+        return $max < $min ? $min : $max;
+    }
+
     private function target_time_for_endpoint(string $endpoint): float
     {
         $target = (float) $this->config["target_time"];
@@ -767,6 +1027,9 @@ class AdaptiveTuner
 
         if ($this->state["buffered_mode"]) {
             $target *= (float) $this->config["buffered_target_time_factor"];
+        }
+        if ($this->state["error_backoff_remaining"] > 0) {
+            $target *= (float) $this->config["error_target_time_factor"];
         }
 
         return max(0.2, $target);
@@ -853,6 +1116,12 @@ class AdaptiveTuner
         }
         return $value;
     }
+
+    private function random_float(float $min, float $max): float
+    {
+        $rand = mt_rand() / mt_getrandmax();
+        return $min + ($max - $min) * $rand;
+    }
 }
 
 class ImportClient
@@ -881,6 +1150,9 @@ class ImportClient
     private $shutdown_requested = false; // Flag for graceful shutdown
     private $current_curl_handle = null; // Active curl handle for abort
     private $tuner = null; // AdaptiveTuner instance or null
+    private $last_http_code = null;
+    private $last_curl_errno = null;
+    private $last_curl_timeout = false;
 
     public function __construct(string $remote_url, string $local_path)
     {
@@ -1132,6 +1404,34 @@ class ImportClient
         return $params;
     }
 
+    private function handle_tuner_error(string $endpoint, array $error): void
+    {
+        if (!$this->tuner instanceof AdaptiveTuner) {
+            return;
+        }
+
+        $decision = $this->tuner->record_error($endpoint, $error);
+        $log = [
+            "TUNER ERROR",
+            "endpoint={$endpoint}",
+            "decision={$decision["decision"]}",
+            "http_code=" . (int) ($decision["http_code"] ?? 0),
+            "timeout=" . (!empty($decision["timeout"]) ? "yes" : "no"),
+            "curl_errno=" . (int) ($decision["curl_errno"] ?? 0),
+            "buffered_mode=" .
+                (!empty($decision["buffered_mode"]) ? "on" : "off"),
+            "slow_host=" .
+                (!empty($decision["slow_host_mode"]) ? "on" : "off"),
+            "error_backoff_remaining=" .
+                (int) ($decision["error_backoff_remaining"] ?? 0),
+        ];
+        if (!empty($decision["size_key"])) {
+            $log[] =
+                $decision["size_key"] . "=" . (int) ($decision["size_value"] ?? 0);
+        }
+        $this->audit_log(implode(" | ", $log), false);
+    }
+
     /**
      * Record request metrics, apply tuning decisions, and sleep if needed.
      */
@@ -1222,6 +1522,16 @@ class ImportClient
         }
         if (isset($decision["buffered_mode"])) {
             $log[] = "buffered_mode=" . ($decision["buffered_mode"] ? "on" : "off");
+        }
+        if (isset($decision["buffered_streak"])) {
+            $log[] = "buffered_streak=" . (int) $decision["buffered_streak"];
+        }
+        if (isset($decision["slow_host_mode"])) {
+            $log[] = "slow_host=" . ($decision["slow_host_mode"] ? "on" : "off");
+        }
+        if (isset($decision["error_backoff_remaining"])) {
+            $log[] =
+                "error_backoff=" . (int) $decision["error_backoff_remaining"];
         }
         if (!empty($decision["size_key"])) {
             $log[] =
@@ -1806,7 +2116,7 @@ class ImportClient
         };
 
         $request_start = microtime(true);
-        $this->fetch_streaming($url, $cursor, $context, $post_data);
+        $this->fetch_streaming($url, $cursor, $context, $post_data, $endpoint);
         $wall_time = microtime(true) - $request_start;
         $this->finalize_tuned_request(
             $endpoint,
@@ -1948,7 +2258,7 @@ class ImportClient
         };
 
         $request_start = microtime(true);
-        $this->fetch_streaming($url, $cursor, $context, null);
+        $this->fetch_streaming($url, $cursor, $context, null, "file_index");
         $wall_time = microtime(true) - $request_start;
         $this->finalize_tuned_request(
             "file_index",
@@ -2653,7 +2963,7 @@ class ImportClient
                 };
 
                 $request_start = microtime(true);
-                $this->fetch_streaming($url, $cursor, $context, null);
+                $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
                     "sql_chunk",
@@ -3148,7 +3458,12 @@ class ImportClient
         ?string $cursor,
         StreamingContext $context,
         ?array $post_data = null,
+        ?string $endpoint = null,
     ): void {
+        $this->last_http_code = null;
+        $this->last_curl_errno = null;
+        $this->last_curl_timeout = false;
+
         // Log HTTP request details
         $log_parts = ["HTTP_REQUEST", $post_data ? "POST" : "GET", $url];
 
@@ -3394,12 +3709,26 @@ class ImportClient
         );
 
         if (curl_errno($ch)) {
+            $errno = curl_errno($ch);
             $error = curl_error($ch);
+            $timeout_errno = defined("CURLE_OPERATION_TIMEDOUT")
+                ? CURLE_OPERATION_TIMEDOUT
+                : 28;
+            $this->last_curl_errno = $errno;
+            $this->last_curl_timeout = $errno === $timeout_errno;
+            if ($endpoint !== null) {
+                $this->handle_tuner_error($endpoint, [
+                    "http_code" => 0,
+                    "timeout" => $this->last_curl_timeout,
+                    "curl_errno" => $errno,
+                ]);
+            }
             curl_close($ch);
             throw new RuntimeException("cURL error: {$error}");
         }
 
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $this->last_http_code = $http_code;
         $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
         $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
         curl_close($ch);
@@ -3414,6 +3743,13 @@ class ImportClient
         $context->response_stats["total_time"] = $total_time;
 
         if ($http_code !== 200) {
+            if ($endpoint !== null) {
+                $this->handle_tuner_error($endpoint, [
+                    "http_code" => $http_code,
+                    "timeout" => false,
+                    "curl_errno" => 0,
+                ]);
+            }
             $error_msg = "HTTP error {$http_code}";
 
             // Log what we received
@@ -3757,6 +4093,14 @@ if (
         echo "  --buffered-min-time=F   Minimum server_time to consider buffering\n";
         echo "  --buffered-factor=F     Target time multiplier in buffered mode\n";
         echo "  --buffered-cooldown=N   Requests to keep buffered mode after detection\n";
+        echo "  --error-backoff=N       Requests to stay in error-backoff after 429/503/timeout\n";
+        echo "  --error-factor=F        Target time multiplier during error backoff\n";
+        echo "  --error-force-scale-min Enable scale_min while error backoff active\n";
+        echo "  --slow-host-threshold=N Buffered detections before slow-host caps\n";
+        echo "  --slow-file-chunk-max=N Max file chunk size in slow-host mode\n";
+        echo "  --slow-index-batch-max=N Max index batch size in slow-host mode\n";
+        echo "  --slow-sql-fragments-max=N Max SQL fragments in slow-host mode\n";
+        echo "  --sleep-jitter=F        Fractional jitter applied to sleep (0-0.5)\n";
         echo "  --max-exec=N     max_execution_time sent to export.php (seconds)\n";
         echo "  --memory-threshold=F  memory_threshold sent to export.php (0-1)\n";
         echo "  --file-chunk-start=N  Initial file chunk size (bytes)\n";
@@ -3905,6 +4249,43 @@ if (
             $options["tuning_config"]["buffered_cooldown"] = (int) substr(
                 $argv[$i],
                 strlen("--buffered-cooldown="),
+            );
+        } elseif (strpos($argv[$i], "--error-backoff=") === 0) {
+            $options["tuning_config"]["error_backoff_requests"] = (int) substr(
+                $argv[$i],
+                strlen("--error-backoff="),
+            );
+        } elseif (strpos($argv[$i], "--error-factor=") === 0) {
+            $options["tuning_config"]["error_target_time_factor"] = (float) substr(
+                $argv[$i],
+                strlen("--error-factor="),
+            );
+        } elseif ($argv[$i] === "--error-force-scale-min") {
+            $options["tuning_config"]["error_force_scale_min"] = true;
+        } elseif (strpos($argv[$i], "--slow-host-threshold=") === 0) {
+            $options["tuning_config"]["slow_host_threshold"] = (int) substr(
+                $argv[$i],
+                strlen("--slow-host-threshold="),
+            );
+        } elseif (strpos($argv[$i], "--slow-file-chunk-max=") === 0) {
+            $options["tuning_config"]["slow_host_file_chunk_max"] = (int) substr(
+                $argv[$i],
+                strlen("--slow-file-chunk-max="),
+            );
+        } elseif (strpos($argv[$i], "--slow-index-batch-max=") === 0) {
+            $options["tuning_config"]["slow_host_index_batch_max"] = (int) substr(
+                $argv[$i],
+                strlen("--slow-index-batch-max="),
+            );
+        } elseif (strpos($argv[$i], "--slow-sql-fragments-max=") === 0) {
+            $options["tuning_config"]["slow_host_sql_fragments_max"] = (int) substr(
+                $argv[$i],
+                strlen("--slow-sql-fragments-max="),
+            );
+        } elseif (strpos($argv[$i], "--sleep-jitter=") === 0) {
+            $options["tuning_config"]["sleep_jitter"] = (float) substr(
+                $argv[$i],
+                strlen("--sleep-jitter="),
             );
         } elseif (strpos($argv[$i], "--max-exec=") === 0) {
             $options["tuning_config"]["max_execution_time"] = (int) substr(
