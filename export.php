@@ -215,7 +215,7 @@ class GzipOutputStream
  * Extract database credentials from wp-config.php using PHP tokenizer.
  *
  * @param array $directories Array of directory paths to search for wp-config.php
- * @return array|null Array with db_host, db_name, db_user, db_password or null if not found
+ * @return array|null Array with db_host, db_name, db_user, db_password, table_prefix, wp_config_path or null
  */
 function extract_db_credentials_from_wp_config(array $directories): ?array
 {
@@ -321,11 +321,58 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
             }
         }
 
+        $table_prefix = null;
+        $prefix_state = "search";
+        for ($i = 0; $i < count($tokens); $i++) {
+            $token = $tokens[$i];
+            if (
+                is_array($token) &&
+                ($token[0] === T_WHITESPACE ||
+                    $token[0] === T_COMMENT ||
+                    $token[0] === T_DOC_COMMENT)
+            ) {
+                continue;
+            }
+
+            if ($prefix_state === "search") {
+                if (
+                    is_array($token) &&
+                    $token[0] === T_VARIABLE &&
+                    $token[1] === "\$table_prefix"
+                ) {
+                    $prefix_state = "found_var";
+                }
+                continue;
+            }
+
+            if ($prefix_state === "found_var") {
+                if ($token === "=") {
+                    $prefix_state = "found_equals";
+                } else {
+                    $prefix_state = "search";
+                }
+                continue;
+            }
+
+            if ($prefix_state === "found_equals") {
+                if (
+                    is_array($token) &&
+                    $token[0] === T_CONSTANT_ENCAPSED_STRING
+                ) {
+                    $table_prefix = trim($token[1], '\'"');
+                    break;
+                }
+                $prefix_state = "search";
+            }
+        }
+
         return [
             "db_host" => $credentials["DB_HOST"],
             "db_name" => $credentials["DB_NAME"],
             "db_user" => $credentials["DB_USER"],
             "db_password" => $credentials["DB_PASSWORD"],
+            "table_prefix" => $table_prefix,
+            "wp_config_path" => $wp_config_path,
         ];
     } catch (Exception $e) {
         error_log(
@@ -334,6 +381,74 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
         );
         return null;
     }
+}
+
+/**
+ * Normalize a list of paths into unique, non-empty, absolute-ish entries.
+ */
+function normalize_path_list(array $paths): array
+{
+    $normalized = [];
+    foreach ($paths as $path) {
+        if (!is_string($path)) {
+            continue;
+        }
+        $path = trim($path);
+        if ($path === "") {
+            continue;
+        }
+        $real = realpath($path);
+        $final = $real !== false ? $real : $path;
+        $final = rtrim($final, "/");
+        if ($final === "") {
+            continue;
+        }
+        $normalized[$final] = true;
+    }
+    return array_keys($normalized);
+}
+
+/**
+ * Walk parent directories to detect WordPress roots.
+ */
+function detect_wp_roots(array $start_paths): array
+{
+    $start_paths = normalize_path_list($start_paths);
+    $seen = [];
+    $roots = [];
+
+    foreach ($start_paths as $start) {
+        $current = $start;
+        while ($current !== "" && !isset($seen[$current])) {
+            $seen[$current] = true;
+            $wp_load_path = $current . "/wp-load.php";
+            $wp_config_path = $current . "/wp-config.php";
+            $has_wp_load = file_exists($wp_load_path);
+            $has_wp_config = file_exists($wp_config_path);
+            $has_wp_content = is_dir($current . "/wp-content");
+            if ($has_wp_load || $has_wp_config) {
+                $roots[$current] = [
+                    "path" => $current,
+                    "wp_load" => $has_wp_load,
+                    "wp_load_path" => $has_wp_load ? $wp_load_path : null,
+                    "wp_config" => $has_wp_config,
+                    "wp_config_path" => $has_wp_config ? $wp_config_path : null,
+                    "wp_content" => $has_wp_content,
+                ];
+            }
+
+            $parent = dirname($current);
+            if ($parent === $current || $parent === "") {
+                break;
+            }
+            $current = $parent;
+        }
+    }
+
+    return [
+        "searched" => array_keys($seen),
+        "roots" => array_values($roots),
+    ];
 }
 
 /**
@@ -853,18 +968,73 @@ function endpoint_preflight(array $config): array
 {
     $directories = [];
     $dir_error = null;
-    try {
-        $directories = resolve_directories($config);
-    } catch (Exception $e) {
-        $dir_error = $e->getMessage();
+    $has_root_input = array_key_exists("directory", $config) && $config["directory"] !== null;
+    if ($has_root_input) {
+        try {
+            $directories = resolve_directories($config);
+        } catch (Exception $e) {
+            $dir_error = $e->getMessage();
+        }
     }
 
-    $dir_checks = [];
+    $search_roots = [];
     if (!empty($directories)) {
-        foreach ($directories as $dir) {
+        $search_roots = $directories;
+    } else {
+        $search_roots = normalize_path_list(
+            array_filter(
+                [
+                    getcwd() ?: null,
+                    __DIR__,
+                    $_SERVER["DOCUMENT_ROOT"] ?? null,
+                ],
+                fn($value) => $value !== null && $value !== "",
+            ),
+        );
+    }
+
+    $wp_detect = detect_wp_roots($search_roots);
+    $detected_root_paths = [];
+    foreach ($wp_detect["roots"] as $root) {
+        if (!empty($root["path"])) {
+            $detected_root_paths[] = $root["path"];
+        }
+    }
+    $detected_root_paths = normalize_path_list($detected_root_paths);
+
+    $wp_load_path = null;
+    foreach ($wp_detect["roots"] as $root) {
+        if (!empty($root["wp_load_path"]) && is_readable($root["wp_load_path"])) {
+            $wp_load_path = $root["wp_load_path"];
+            break;
+        }
+    }
+    $preflight_error = null;
+    if (!$has_root_input && $wp_load_path === null) {
+        $preflight_error =
+            "wp-load.php not found and no root directories were provided";
+    }
+
+    $scan_roots = !empty($directories) ? $directories : $detected_root_paths;
+    if (empty($scan_roots)) {
+        $scan_roots = $search_roots;
+    }
+    $scan_roots = normalize_path_list($scan_roots);
+
+    $wp_scan_roots = normalize_path_list(
+        array_merge($scan_roots, $detected_root_paths),
+    );
+
+    $dir_checks = [];
+    $htaccess_files = [];
+    $wp_paths = [];
+    if (!empty($scan_roots)) {
+        foreach ($scan_roots as $dir) {
             $exists = is_dir($dir);
             $readable = $exists && is_readable($dir);
             $openable = false;
+            $disk_free = null;
+            $disk_total = null;
             if ($readable) {
                 $dh = @opendir($dir);
                 if ($dh !== false) {
@@ -874,25 +1044,105 @@ function endpoint_preflight(array $config): array
                     closedir($dh);
                 }
             }
+            if ($openable) {
+                $disk_free = @disk_free_space($dir);
+                $disk_total = @disk_total_space($dir);
+            }
             $dir_checks[] = [
                 "path" => $dir,
                 "exists" => $exists,
                 "readable" => $readable,
                 "openable" => $openable,
+                "disk_free_bytes" => $disk_free !== false ? $disk_free : null,
+                "disk_total_bytes" => $disk_total !== false ? $disk_total : null,
+            ];
+
+            $htaccess_path = rtrim($dir, "/") . "/.htaccess";
+            if (file_exists($htaccess_path)) {
+                $htaccess_readable = is_readable($htaccess_path);
+                $htaccess_size = @filesize($htaccess_path);
+                $htaccess_mtime = @filemtime($htaccess_path);
+                $htaccess_content = null;
+                $htaccess_truncated = false;
+                if ($htaccess_readable) {
+                    $limit = 8192;
+                    $fh = @fopen($htaccess_path, "r");
+                    if ($fh) {
+                        $data = @fread($fh, $limit + 1);
+                        fclose($fh);
+                        if ($data !== false) {
+                            if (strlen($data) > $limit) {
+                                $htaccess_truncated = true;
+                                $data = substr($data, 0, $limit);
+                            }
+                            $htaccess_content = $data;
+                        }
+                    }
+                }
+                $htaccess_files[] = [
+                    "path" => $htaccess_path,
+                    "readable" => $htaccess_readable,
+                    "size_bytes" => $htaccess_size !== false ? $htaccess_size : null,
+                    "mtime" => $htaccess_mtime !== false ? $htaccess_mtime : null,
+                    "content" => $htaccess_content,
+                    "truncated" => $htaccess_truncated,
+                ];
+            }
+
+            $plugins_dir = rtrim($dir, "/") . "/wp-content/plugins";
+            $mu_plugins_dir = rtrim($dir, "/") . "/wp-content/mu-plugins";
+            $themes_dir = rtrim($dir, "/") . "/wp-content/themes";
+            $wp_paths[] = [
+                "root" => $dir,
+                "plugins_dir" => $plugins_dir,
+                "mu_plugins_dir" => $mu_plugins_dir,
+                "themes_dir" => $themes_dir,
             ];
         }
     }
 
+    if (!empty($wp_scan_roots)) {
+        foreach ($wp_scan_roots as $dir) {
+            $plugins_dir = rtrim($dir, "/") . "/wp-content/plugins";
+            $mu_plugins_dir = rtrim($dir, "/") . "/wp-content/mu-plugins";
+            $themes_dir = rtrim($dir, "/") . "/wp-content/themes";
+            $wp_paths[] = [
+                "root" => $dir,
+                "plugins_dir" => $plugins_dir,
+                "mu_plugins_dir" => $mu_plugins_dir,
+                "themes_dir" => $themes_dir,
+            ];
+        }
+    }
+
+    $wp_paths = normalize_path_list(
+        array_map(
+            fn($entry) => $entry["root"] ?? null,
+            $wp_paths,
+        ),
+    );
+    $wp_paths = array_map(function ($root) {
+        $root = rtrim($root, "/");
+        return [
+            "root" => $root,
+            "plugins_dir" => $root . "/wp-content/plugins",
+            "mu_plugins_dir" => $root . "/wp-content/mu-plugins",
+            "themes_dir" => $root . "/wp-content/themes",
+        ];
+    }, $wp_paths);
+
     $filesystem_ok = true;
-    if ($dir_error !== null || empty($dir_checks)) {
+    if ($dir_error !== null) {
         $filesystem_ok = false;
-    } else {
+    } elseif (!empty($dir_checks)) {
         foreach ($dir_checks as $check) {
             if (empty($check["openable"])) {
                 $filesystem_ok = false;
                 break;
             }
         }
+    } elseif ($wp_load_path === null) {
+        $filesystem_ok = false;
     }
 
     $memory_limit_raw = ini_get("memory_limit");
@@ -909,6 +1159,66 @@ function endpoint_preflight(array $config): array
         $memory_limit_bytes !== null && $memory_limit_bytes !== PHP_INT_MAX
             ? max(0, $memory_limit_bytes - $memory_used)
             : null;
+    $post_max_size_raw = ini_get("post_max_size");
+    $upload_max_filesize_raw = ini_get("upload_max_filesize");
+    $post_max_bytes =
+        $post_max_size_raw !== false && $post_max_size_raw !== ""
+            ? parse_memory_limit($post_max_size_raw)
+            : null;
+    $upload_max_bytes =
+        $upload_max_filesize_raw !== false && $upload_max_filesize_raw !== ""
+            ? parse_memory_limit($upload_max_filesize_raw)
+            : null;
+    $max_request_bytes = null;
+    if ($post_max_bytes !== null && $upload_max_bytes !== null) {
+        $max_request_bytes = min($post_max_bytes, $upload_max_bytes);
+    } elseif ($post_max_bytes !== null) {
+        $max_request_bytes = $post_max_bytes;
+    } elseif ($upload_max_bytes !== null) {
+        $max_request_bytes = $upload_max_bytes;
+    }
+
+    $extensions = get_loaded_extensions();
+    sort($extensions, SORT_STRING);
+    $extension_versions = [];
+    foreach ([
+        "curl",
+        "gd",
+        "imagick",
+        "pdo_mysql",
+        "mysqli",
+        "mbstring",
+        "zlib",
+        "openssl",
+        "fileinfo",
+        "exif",
+    ] as $ext) {
+        if (extension_loaded($ext)) {
+            $ver = phpversion($ext);
+            $extension_versions[$ext] = $ver !== false ? $ver : true;
+        }
+    }
+
+    $gd_info = function_exists("gd_info") ? gd_info() : null;
+    $gd_formats = null;
+    $gd_version = null;
+    if (is_array($gd_info)) {
+        $gd_version = $gd_info["GD Version"] ?? null;
+        $gd_formats = [
+            "gif_create" => (bool) ($gd_info["GIF Create Support"] ?? false),
+            "gif_read" => (bool) ($gd_info["GIF Read Support"] ?? false),
+            "jpeg" => (bool) ($gd_info["JPEG Support"] ?? false),
+            "png" => (bool) ($gd_info["PNG Support"] ?? false),
+            "webp" => (bool) ($gd_info["WebP Support"] ?? false),
+            "avif" => (bool) ($gd_info["AVIF Support"] ?? false),
+            "bmp" => (bool) ($gd_info["BMP Support"] ?? false),
+            "wbmp" => (bool) ($gd_info["WBMP Support"] ?? false),
+            "xpm" => (bool) ($gd_info["XPM Support"] ?? false),
+        ];
+    }
+    $imagick_version = extension_loaded("imagick")
+        ? (phpversion("imagick") ?: null)
+        : null;
 
     $db = [
         "credentials_found" => false,
@@ -921,6 +1231,22 @@ function endpoint_preflight(array $config): array
         "server_collation" => null,
         "table_listable" => null,
         "table_list_error" => null,
+        "wp" => [
+            "wp_config_path" => null,
+            "wp_load_path" => null,
+            "wp_load_attempted" => false,
+            "wp_load_loaded" => false,
+            "wp_load_error" => null,
+            "table_prefix" => null,
+            "options_table" => null,
+            "active_plugins" => null,
+            "active_sitewide_plugins" => null,
+            "theme_template" => null,
+            "theme_stylesheet" => null,
+            "siteurl" => null,
+            "home" => null,
+            "error" => null,
+        ],
         "error" => null,
     ];
 
@@ -951,8 +1277,28 @@ function endpoint_preflight(array $config): array
         $missing[] = "db_password";
     }
 
-    if (!empty($missing) && !empty($directories)) {
-        $wp_credentials = extract_db_credentials_from_wp_config($directories);
+    $wp_credentials = null;
+    $credential_roots = [];
+    if (!empty($directories)) {
+        $credential_roots = $directories;
+    } elseif (!empty($detected_root_paths)) {
+        $credential_roots = $detected_root_paths;
+    } elseif (!empty($search_roots)) {
+        $credential_roots = $search_roots;
+    }
+    $credential_roots = normalize_path_list($credential_roots);
+
+    if (!empty($missing) && !empty($credential_roots)) {
+        if(defined("DB_HOST") && defined("DB_NAME") && defined("DB_USER") && defined("DB_PASSWORD")) {
+            $wp_credentials = [
+                "db_host" => DB_HOST,
+                "db_name" => DB_NAME,
+                "db_user" => DB_USER,
+                "db_password" => DB_PASSWORD,
+            ];
+        } else {
+            $wp_credentials = extract_db_credentials_from_wp_config($credential_roots);
+        }
         if ($wp_credentials !== null) {
             $db_host = $db_host ?: $wp_credentials["db_host"];
             $db_name = $db_name ?: $wp_credentials["db_name"];
@@ -974,8 +1320,13 @@ function endpoint_preflight(array $config): array
             if ($db_password === false || $db_password === null || $db_password === "") {
                 $missing[] = "db_password";
             }
+            $db["wp"]["wp_config_path"] = $wp_credentials["wp_config_path"] ?? null;
+            $db["wp"]["table_prefix"] = $wp_credentials["table_prefix"] ?? null;
         }
     }
+
+    $db["wp"]["wp_load_path"] = $wp_load_path;
+    $db["wp"]["wp_load_loaded"] = function_exists("get_option");
 
     if (empty($missing)) {
         $db["credentials_found"] = true;
@@ -995,12 +1346,122 @@ function endpoint_preflight(array $config): array
                 $db["version"] = $version !== false ? (string) $version : null;
                 $db["can_query"] = true;
 
+                $table_prefix = $db["wp"]["table_prefix"];
+                if ($table_prefix === null || $table_prefix === "") {
+                    try {
+                        $stmt = $mysql->query(
+                            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES " .
+                                "WHERE TABLE_SCHEMA = DATABASE() " .
+                                "AND TABLE_NAME LIKE '%\\_options' ESCAPE '\\\\' " .
+                                "LIMIT 5",
+                        );
+                        if ($stmt !== false) {
+                            $names = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                            foreach ($names as $name) {
+                                if (!is_string($name)) {
+                                    continue;
+                                }
+                                $suffix = "options";
+                                if (
+                                    strlen($name) > strlen($suffix) &&
+                                    substr($name, -strlen($suffix)) === $suffix
+                                ) {
+                                    $table_prefix = substr(
+                                        $name,
+                                        0,
+                                        -strlen($suffix),
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (Exception $e) {
+                        if ($db["wp"]["error"] === null) {
+                            $db["wp"]["error"] = $e->getMessage();
+                        }
+                    }
+                }
+
+                if ($table_prefix !== null && $table_prefix !== "") {
+                    $db["wp"]["table_prefix"] = $table_prefix;
+                    $db["wp"]["options_table"] = $table_prefix . "options";
+                }
+
+                $wp_load_attempted = false;
+                $wp_load_error = null;
+                $wp_loaded = $db["wp"]["wp_load_loaded"];
+                if (!$wp_loaded && $wp_load_path !== null) {
+                    $wp_load_attempted = true;
+                    $errors = [];
+                    $handler = function ($errno, $errstr) use (&$errors) {
+                        $errors[] = $errstr;
+                        return true;
+                    };
+                    set_error_handler($handler);
+                    $include_result = @include_once $wp_load_path;
+                    restore_error_handler();
+                    if ($include_result === false) {
+                        $wp_load_error = !empty($errors)
+                            ? implode("; ", $errors)
+                            : "Failed to include wp-load.php";
+                    }
+                    if (function_exists("get_option")) {
+                        $wp_loaded = true;
+                    } elseif ($wp_load_error === null) {
+                        $wp_load_error = "wp-load.php did not load WordPress functions";
+                    }
+                }
+
+                $db["wp"]["wp_load_attempted"] = $wp_load_attempted;
+                $db["wp"]["wp_load_loaded"] = $wp_loaded;
+                if ($wp_load_error !== null) {
+                    $db["wp"]["wp_load_error"] = $wp_load_error;
+                }
+
+                if ($wp_loaded) {
+                    try {
+                        $db["wp"]["active_plugins"] = get_option("active_plugins");
+                        $db["wp"]["theme_stylesheet"] = get_option("stylesheet");
+                        $db["wp"]["theme_template"] = get_option("template");
+                        $db["wp"]["siteurl"] = get_option("siteurl");
+                        $db["wp"]["home"] = get_option("home");
+                        if (
+                            function_exists("is_multisite") &&
+                            is_multisite() &&
+                            function_exists("get_site_option")
+                        ) {
+                            $db["wp"]["active_sitewide_plugins"] = get_site_option(
+                                "active_sitewide_plugins",
+                            );
+                        }
+                    } catch (Throwable $e) {
+                        if ($db["wp"]["error"] === null) {
+                            $db["wp"]["error"] = $e->getMessage();
+                        }
+                    }
+                } else {
+                    if ($db["wp"]["error"] === null) {
+                        if ($wp_load_error !== null) {
+                            $db["wp"]["error"] = $wp_load_error;
+                        } elseif ($wp_load_path === null) {
+                            $db["wp"]["error"] = "wp-load.php not found";
+                        } else {
+                            $db["wp"]["error"] = "wp-load.php not loaded";
+                        }
+                    }
+                }
+
                 $vars = $mysql
                     ->query(
                         "SELECT @@character_set_database AS db_charset, " .
                             "@@collation_database AS db_collation, " .
                             "@@character_set_server AS server_charset, " .
-                            "@@collation_server AS server_collation",
+                            "@@collation_server AS server_collation, " .
+                            "@@character_set_connection AS connection_charset, " .
+                            "@@collation_connection AS connection_collation, " .
+                            "@@max_allowed_packet AS max_allowed_packet, " .
+                            "@@sql_mode AS sql_mode, " .
+                            "@@lower_case_table_names AS lower_case_table_names",
                     )
                     ->fetch(PDO::FETCH_ASSOC);
                 if (is_array($vars)) {
@@ -1008,12 +1469,26 @@ function endpoint_preflight(array $config): array
                     $db["db_collation"] = $vars["db_collation"] ?? null;
                     $db["server_charset"] = $vars["server_charset"] ?? null;
                     $db["server_collation"] = $vars["server_collation"] ?? null;
+                    $db["connection_charset"] = $vars["connection_charset"] ?? null;
+                    $db["connection_collation"] = $vars["connection_collation"] ?? null;
+                    $db["max_allowed_packet"] = isset($vars["max_allowed_packet"])
+                        ? (int) $vars["max_allowed_packet"]
+                        : null;
+                    $db["sql_mode"] = $vars["sql_mode"] ?? null;
+                    $db["lower_case_table_names"] = isset(
+                        $vars["lower_case_table_names"],
+                    )
+                        ? (int) $vars["lower_case_table_names"]
+                        : null;
                 }
 
                 try {
-                    $stmt = $mysql->query("SHOW TABLES");
+                    $stmt = $mysql->query(
+                        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES " .
+                            "WHERE TABLE_SCHEMA = DATABASE() LIMIT 1",
+                    );
                     if ($stmt !== false) {
-                        $first = $stmt->fetchColumn();
+                        $stmt->fetchColumn();
                         $db["table_listable"] = true;
                         $db["table_list_error"] = null;
                     } else {
@@ -1033,17 +1508,158 @@ function endpoint_preflight(array $config): array
         $db["missing"] = $missing;
     }
 
+    $wp_runtime_paths = null;
+    if ($db["wp"]["wp_load_loaded"]) {
+        $runtime_root = defined("ABSPATH") ? rtrim(ABSPATH, "/") : null;
+        $content_dir = defined("WP_CONTENT_DIR")
+            ? rtrim(WP_CONTENT_DIR, "/")
+            : null;
+        $plugins_dir = defined("WP_PLUGIN_DIR")
+            ? rtrim(WP_PLUGIN_DIR, "/")
+            : null;
+        $mu_plugins_dir = defined("WPMU_PLUGIN_DIR")
+            ? rtrim(WPMU_PLUGIN_DIR, "/")
+            : null;
+        $themes_dir = null;
+        if (function_exists("get_theme_root")) {
+            $themes_dir = get_theme_root();
+            if (is_string($themes_dir)) {
+                $themes_dir = rtrim($themes_dir, "/");
+            } else {
+                $themes_dir = null;
+            }
+        }
+
+        if ($content_dir !== null) {
+            if ($plugins_dir === null) {
+                $plugins_dir = $content_dir . "/plugins";
+            }
+            if ($mu_plugins_dir === null) {
+                $mu_plugins_dir = $content_dir . "/mu-plugins";
+            }
+            if ($themes_dir === null) {
+                $themes_dir = $content_dir . "/themes";
+            }
+        }
+
+        $wp_runtime_paths = [
+            "root" => $runtime_root ?? $content_dir,
+            "content_dir" => $content_dir,
+            "plugins_dir" => $plugins_dir,
+            "mu_plugins_dir" => $mu_plugins_dir,
+            "themes_dir" => $themes_dir,
+        ];
+    }
+
+    $wp_content = [
+        "roots" => [],
+    ];
+    $wp_paths_to_scan = $wp_runtime_paths !== null ? [$wp_runtime_paths] : $wp_paths;
+    foreach ($wp_paths_to_scan as $paths) {
+        $root_entry = [
+            "root" => $paths["root"],
+            "content_dir" => $paths["content_dir"] ?? null,
+            "plugins" => [],
+            "mu_plugins" => [],
+            "themes" => [],
+        ];
+        $plugins_dir = $paths["plugins_dir"] ?? null;
+        if ($plugins_dir !== null && is_dir($plugins_dir) && is_readable($plugins_dir)) {
+            $entries = @scandir($plugins_dir) ?: [];
+            foreach ($entries as $entry) {
+                if ($entry === "." || $entry === "..") {
+                    continue;
+                }
+                $path = $plugins_dir . "/" . $entry;
+                $root_entry["plugins"][] = [
+                    "name" => $entry,
+                    "type" => is_dir($path) ? "dir" : "file",
+                ];
+            }
+            usort(
+                $root_entry["plugins"],
+                fn($a, $b) => strcmp($a["name"], $b["name"]),
+            );
+        }
+
+        $mu_plugins_dir = $paths["mu_plugins_dir"] ?? null;
+        if ($mu_plugins_dir !== null && is_dir($mu_plugins_dir) && is_readable($mu_plugins_dir)) {
+            $entries = @scandir($mu_plugins_dir) ?: [];
+            foreach ($entries as $entry) {
+                if ($entry === "." || $entry === "..") {
+                    continue;
+                }
+                $path = $mu_plugins_dir . "/" . $entry;
+                $root_entry["mu_plugins"][] = [
+                    "name" => $entry,
+                    "type" => is_dir($path) ? "dir" : "file",
+                ];
+            }
+            usort(
+                $root_entry["mu_plugins"],
+                fn($a, $b) => strcmp($a["name"], $b["name"]),
+            );
+        }
+
+        $themes_dir = $paths["themes_dir"] ?? null;
+        if ($themes_dir !== null && is_dir($themes_dir) && is_readable($themes_dir)) {
+            $entries = @scandir($themes_dir) ?: [];
+            foreach ($entries as $entry) {
+                if ($entry === "." || $entry === "..") {
+                    continue;
+                }
+                $path = $themes_dir . "/" . $entry;
+                if (is_dir($path)) {
+                    $root_entry["themes"][] = $entry;
+                }
+            }
+            sort($root_entry["themes"]);
+        }
+
+        $wp_content["roots"][] = $root_entry;
+    }
+
+    $ok =
+        $preflight_error === null &&
+        $filesystem_ok &&
+        (!empty($db["credentials_found"]) ? !empty($db["connected"]) : false);
     $response = [
-        "ok" => $filesystem_ok && (!empty($db["credentials_found"]) ? !empty($db["connected"]) : false),
+        "ok" => $ok,
+        "error" => $preflight_error,
         "timestamp" => time(),
+        "wp_detect" => [
+            "found" => !empty($wp_detect["roots"]),
+            "searched" => $wp_detect["searched"],
+            "roots" => $wp_detect["roots"],
+            "error" =>
+                !empty($wp_detect["roots"])
+                    ? null
+                    : "wp-load.php or wp-config.php not found in parent directories",
+        ],
         "php" => [
             "version" => PHP_VERSION,
             "sapi" => php_sapi_name(),
+            "timezone" => date_default_timezone_get(),
+            "extensions" => $extensions,
+            "extension_versions" => $extension_versions,
         ],
         "limits" => [
             "ini_max_execution_time" => (int) ini_get("max_execution_time"),
             "ini_max_input_time" => (int) ini_get("max_input_time"),
             "ini_default_socket_timeout" => (int) ini_get("default_socket_timeout"),
+            "max_input_vars" => (int) ini_get("max_input_vars"),
+            "max_file_uploads" => (int) ini_get("max_file_uploads"),
+            "post_max_size" => $post_max_size_raw !== false ? $post_max_size_raw : null,
+            "post_max_bytes" => $post_max_bytes,
+            "upload_max_filesize" =>
+                $upload_max_filesize_raw !== false ? $upload_max_filesize_raw : null,
+            "upload_max_bytes" => $upload_max_bytes,
+            "max_request_bytes" => $max_request_bytes,
+            "output_buffering" => ini_get("output_buffering") ?: null,
+            "zlib_output_compression" =>
+                ini_get("zlib.output_compression") ?: null,
+            "disable_functions" => ini_get("disable_functions") ?: null,
+            "allow_url_fopen" => ini_get("allow_url_fopen") ?: null,
             "open_basedir" => ini_get("open_basedir") ?: null,
         ],
         "memory" => [
@@ -1052,11 +1668,33 @@ function endpoint_preflight(array $config): array
             "used_bytes" => $memory_used,
             "available_bytes" => $memory_available,
         ],
+        "images" => [
+            "gd" => [
+                "available" => is_array($gd_info),
+                "version" => $gd_version,
+                "formats" => $gd_formats,
+            ],
+            "imagick" => [
+                "available" => $imagick_version !== null,
+                "version" => $imagick_version,
+            ],
+        ],
+        "runtime" => [
+            "server_software" => $_SERVER["SERVER_SOFTWARE"] ?? null,
+            "php_ini" => function_exists("php_ini_loaded_file")
+                ? (php_ini_loaded_file() ?: null)
+                : null,
+            "temp_dir" => sys_get_temp_dir(),
+        ],
         "filesystem" => [
             "directories" => $dir_checks,
             "error" => $dir_error,
             "ok" => $filesystem_ok,
         ],
+        "htaccess" => [
+            "files" => $htaccess_files,
+        ],
+        "wp_content" => $wp_content,
         "database" => $db,
     ];
 
