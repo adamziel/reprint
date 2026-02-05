@@ -1,4 +1,9 @@
 <?php
+// Capture any accidental output before headers are set so we can discard it
+// when switching to streaming mode later.
+if (!ob_get_level()) {
+    ob_start();
+}
 /**
  * Unified export API for SQL and file operations.
  *
@@ -113,20 +118,22 @@ require_once __DIR__ . "/file-sync.php";
  */
 function prepare_streaming_response(): void
 {
+    // Discard any buffered output before we emit headers or stream data.
+    while (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+
     if (!headers_sent()) {
-        header("X-Accel-Buffering: no");
-        header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
-        header("Pragma: no-cache");
-        header("Expires: 0");
+        @header("X-Accel-Buffering: no");
+        @header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+        @header("Pragma: no-cache");
+        @header("Expires: 0");
     }
 
     @ini_set("zlib.output_compression", "0");
     @ini_set("output_buffering", "0");
     @ini_set("implicit_flush", "1");
 
-    while (ob_get_level() > 0) {
-        @ob_end_flush();
-    }
     @ob_implicit_flush(true);
     flush();
 }
@@ -141,11 +148,17 @@ class GzipOutputStream
 {
     private $deflate_ctx;
     private bool $header_sent = false;
+    private bool $enabled = true;
 
-    public function __construct()
+    public function __construct(bool $enabled = true)
     {
-        $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
-        header("Content-Encoding: gzip");
+        $this->enabled = $enabled;
+        if ($this->enabled) {
+            $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
+            if (!headers_sent()) {
+                @header("Content-Encoding: gzip");
+            }
+        }
     }
 
     /**
@@ -153,6 +166,10 @@ class GzipOutputStream
      */
     public function write(string $data): void
     {
+        if (!$this->enabled) {
+            echo $data;
+            return;
+        }
         $compressed = deflate_add(
             $this->deflate_ctx,
             $data,
@@ -176,6 +193,10 @@ class GzipOutputStream
      */
     public function finish(): void
     {
+        if (!$this->enabled) {
+            flush();
+            return;
+        }
         $final = deflate_add($this->deflate_ctx, "", ZLIB_FINISH);
         if ($final !== false && $final !== "") {
             echo $final;
@@ -457,8 +478,11 @@ function endpoint_sql_chunk(
      * boundary matching entirely and just consume that many bytes.
      */
     $boundary = "boundary-" . bin2hex(random_bytes(16));
-    header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
-    $gz = new GzipOutputStream();
+    $can_send_headers = !headers_sent();
+    if ($can_send_headers) {
+        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    }
+    $gz = new GzipOutputStream($can_send_headers);
 
     $batches_processed = 0;
     $sql_bytes_processed = 0;
@@ -616,9 +640,12 @@ function stream_file_producer(
     prepare_streaming_response();
 
     $boundary = "boundary-" . bin2hex(random_bytes(16));
-    header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    $can_send_headers = !headers_sent();
+    if ($can_send_headers) {
+        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    }
 
-    $gz = new GzipOutputStream();
+    $gz = new GzipOutputStream($can_send_headers);
 
     $initial_progress = $producer->get_progress();
     $initial_progress_json = json_encode($initial_progress);
@@ -765,6 +792,28 @@ function stream_file_producer(
                 "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n",
             );
             $gz->write("\r\n");
+            $gz->write("\r\n");
+            $gz->flush();
+        } elseif ($chunk_type === "error") {
+            $payload = [
+                "error_type" => $chunk["error_type"] ?? "unknown",
+                "path" => $chunk["path"] ?? "",
+                "message" => $chunk["message"] ?? "Error",
+            ];
+            if (isset($chunk["expected_ctime"])) {
+                $payload["expected_ctime"] = $chunk["expected_ctime"];
+            }
+            if (isset($chunk["actual_ctime"])) {
+                $payload["actual_ctime"] = $chunk["actual_ctime"];
+            }
+            $json = json_encode($payload);
+            $gz->write("--{$boundary}\r\n");
+            $gz->write("Content-Type: application/json\r\n");
+            $gz->write("Content-Length: " . strlen($json) . "\r\n");
+            $gz->write("X-Chunk-Type: error\r\n");
+            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+            $gz->write("\r\n");
+            $gz->write($json);
             $gz->write("\r\n");
             $gz->flush();
         } else {
@@ -958,9 +1007,12 @@ function endpoint_file_index(
     prepare_streaming_response();
 
     $boundary = "boundary-" . bin2hex(random_bytes(16));
-    header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    $can_send_headers = !headers_sent();
+    if ($can_send_headers) {
+        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    }
 
-    $gz = new GzipOutputStream();
+    $gz = new GzipOutputStream($can_send_headers);
 
     // Emit initial metadata
     $filesystem_root = $producer->get_filesystem_root();
@@ -1020,6 +1072,30 @@ function endpoint_file_index(
                 $chunk["path"] . "\t" . ($chunk["ctime"] ?? 0) . "\t0";
         } elseif ($chunk_type === "directory") {
             // Skip directories in index - they're implicit from file paths
+            continue;
+        } elseif ($chunk_type === "error") {
+            $payload = [
+                "error_type" => $chunk["error_type"] ?? "unknown",
+                "path" => $chunk["path"] ?? "",
+                "message" => $chunk["message"] ?? "Error",
+            ];
+            if (isset($chunk["expected_ctime"])) {
+                $payload["expected_ctime"] = $chunk["expected_ctime"];
+            }
+            if (isset($chunk["actual_ctime"])) {
+                $payload["actual_ctime"] = $chunk["actual_ctime"];
+            }
+            $json = json_encode($payload);
+            $cursor = $producer->get_reentrancy_cursor();
+            $gz->write("--{$boundary}\r\n");
+            $gz->write("Content-Type: application/json\r\n");
+            $gz->write("Content-Length: " . strlen($json) . "\r\n");
+            $gz->write("X-Chunk-Type: error\r\n");
+            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+            $gz->write("\r\n");
+            $gz->write($json);
+            $gz->write("\r\n");
+            $gz->flush();
             continue;
         }
 

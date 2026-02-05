@@ -274,11 +274,13 @@ class FileTreeProducer
             ];
         }
 
-        $this->traversal_stack = array_reverse($frames);
+        // Keep frames in root -> leaf order so the stack top is the deepest dir.
+        $this->traversal_stack = $frames;
 
         $root_index = array_search($matched_root, $roots, true);
         if ($root_index !== false) {
-            for ($i = count($roots) - 1; $i > $root_index; $i--) {
+            // Prepend roots that come after the matched root so they are processed later.
+            for ($i = $root_index + 1; $i < count($roots); $i++) {
                 array_unshift($this->traversal_stack, [
                     "dir" => $roots[$i],
                     "last_visited" => null,
@@ -399,8 +401,17 @@ class FileTreeProducer
 				 */
                 $listing = DirectoryListing::scan($frame["dir"]);
                 if ($listing === null) {
+                    $path = $frame["dir"];
                     array_pop($this->traversal_stack);
-                    continue;
+                    $this->last_emitted_path = $path;
+                    $this->last_emitted_ctime = null;
+                    $this->current_chunk = [
+                        "type" => "error",
+                        "error_type" => "dir_open",
+                        "path" => $path,
+                        "message" => "Failed to open directory",
+                    ];
+                    return null;
                 }
                 $listing->sort();
                 $frame["listing"] = $listing;
@@ -611,7 +622,14 @@ class FileTreeProducer
             $this->streaming_file_handle = @fopen($file["path"], "r");
             if (!$this->streaming_file_handle) {
                 $this->current_file_meta = null;
-                $this->current_chunk = null;
+                $this->current_chunk = [
+                    "type" => "error",
+                    "error_type" => "file_open",
+                    "path" => $file["path"],
+                    "message" => "Failed to open file",
+                ];
+                $this->last_emitted_path = $file["path"];
+                $this->last_emitted_ctime = $file["ctime"];
                 return;
             }
             if ($this->streaming_file_offset > 0) {
@@ -623,17 +641,21 @@ class FileTreeProducer
         }
 
         $data = fread($this->streaming_file_handle, $this->chunk_size);
-        if (false === $data || ("" === $data && $file['size'] !== 0 )) {
-			// fread() failed
-			// @TODO: Communicate the error to the client.
-			fclose($this->streaming_file_handle);
-			$this->streaming_file_handle = null;
-			$this->streaming_file_offset = 0;
-			$this->last_emitted_path = $file["path"];
-			$this->last_emitted_ctime = $file["ctime"];
-			$this->current_file_meta = null;
-			return;
-		}
+        if (false === $data || ("" === $data && $file["size"] !== 0)) {
+            fclose($this->streaming_file_handle);
+            $this->streaming_file_handle = null;
+            $this->streaming_file_offset = 0;
+            $this->last_emitted_path = $file["path"];
+            $this->last_emitted_ctime = $file["ctime"];
+            $this->current_file_meta = null;
+            $this->current_chunk = [
+                "type" => "error",
+                "error_type" => "file_read",
+                "path" => $file["path"],
+                "message" => "Failed to read file",
+            ];
+            return;
+        }
 
         $offset = $this->streaming_file_offset;
         $this->streaming_file_offset += strlen($data);
@@ -644,21 +666,41 @@ class FileTreeProducer
         $changed = false;
         $change_ctime = null;
         $change_size = null;
-        if ($is_last) {
-            clearstatcache(true, $file["path"]);
-            $stat = @stat($file["path"]);
-            if ($stat !== false) {
-                $now_ctime = $stat["ctime"];
-                $now_size = $stat["size"];
-                if (
-                    $now_ctime !== $file["ctime"] ||
-                    $now_size !== $file["size"]
-                ) {
-                    $changed = true;
-                    $change_ctime = $now_ctime;
-                    $change_size = $now_size;
-                }
+        $error_type = "file_changed";
+
+        // Post-read change detection: only compare ctime.
+        clearstatcache(true, $file["path"]);
+        $stat = @stat($file["path"]);
+        if ($stat === false) {
+            $changed = true;
+            $error_type = "file_missing";
+        } else {
+            $now_ctime = $stat["ctime"];
+            if ($now_ctime !== $file["ctime"]) {
+                $changed = true;
+                $change_ctime = $now_ctime;
             }
+        }
+
+        if ($changed) {
+            fclose($this->streaming_file_handle);
+            $this->streaming_file_handle = null;
+            $this->streaming_file_offset = 0;
+            $this->last_emitted_path = $file["path"];
+            $this->last_emitted_ctime = $file["ctime"];
+            $this->current_file_meta = null;
+            $this->current_chunk = [
+                "type" => "error",
+                "error_type" => $error_type,
+                "path" => $file["path"],
+                "message" =>
+                    $error_type === "file_missing"
+                        ? "File disappeared during stream"
+                        : "File changed during stream",
+                "expected_ctime" => $file["ctime"],
+                "actual_ctime" => $change_ctime,
+            ];
+            return;
         }
 
         $this->current_chunk = [

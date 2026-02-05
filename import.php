@@ -1516,6 +1516,23 @@ class ImportClient
         $this->audit_log(implode(" | ", $log), false);
     }
 
+    private function detect_boundary_from_body(string $buffer): ?string
+    {
+        if (strncmp($buffer, "--boundary-", 11) !== 0) {
+            return null;
+        }
+        $line_end = strpos($buffer, "\n");
+        if ($line_end === false) {
+            return null;
+        }
+        $line = rtrim(substr($buffer, 0, $line_end), "\r\n");
+        if (strncmp($line, "--boundary-", 11) !== 0) {
+            return null;
+        }
+        return substr($line, 2);
+    }
+
+
     /**
      * Record request metrics, apply tuning decisions, and sleep if needed.
      */
@@ -2161,11 +2178,14 @@ class ImportClient
                 if ($path) {
                     $this->audit_log("Missing on server: {$path}", true);
                 }
+            } elseif ($chunk_type === "error") {
+                $this->handle_error_chunk($chunk, "files", $context);
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "files");
             } elseif ($chunk_type === "completion") {
                 $complete =
                     ($chunk["headers"]["x-status"] ?? "") === "complete";
+                $context->saw_completion = true;
                 $context->response_stats = [
                     "status" => $chunk["headers"]["x-status"] ?? null,
                     "bytes_processed" =>
@@ -2202,6 +2222,7 @@ class ImportClient
         $request_start = microtime(true);
         $this->fetch_streaming($url, $cursor, $context, $post_data, $endpoint);
         $wall_time = microtime(true) - $request_start;
+
         $this->finalize_tuned_request(
             $endpoint,
             $wall_time,
@@ -2319,6 +2340,7 @@ class ImportClient
             } elseif ($chunk_type === "completion") {
                 $complete =
                     ($chunk["headers"]["x-status"] ?? "") === "complete";
+                $context->saw_completion = true;
                 $context->response_stats = [
                     "status" => $chunk["headers"]["x-status"] ?? null,
                     "entries_processed" =>
@@ -2338,6 +2360,8 @@ class ImportClient
                             ? (int) $chunk["headers"]["x-memory-limit"]
                             : null,
                 ];
+            } elseif ($chunk_type === "error") {
+                $this->handle_error_chunk($chunk, "index", $context);
             }
         };
 
@@ -3012,6 +3036,7 @@ class ImportClient
                         $complete =
                             ($chunk["headers"]["x-status"] ?? "") ===
                             "complete";
+                        $context->saw_completion = true;
                         $context->response_stats = [
                             "status" => $chunk["headers"]["x-status"] ?? null,
                             "sql_bytes" =>
@@ -3043,6 +3068,8 @@ class ImportClient
                             ],
                             true,
                         );
+                    } elseif ($chunk_type === "error") {
+                        $this->handle_error_chunk($chunk, "sql", $context);
                     }
                 };
 
@@ -3447,49 +3474,62 @@ class ImportClient
     }
 
     /**
-     * Handle a deletion notification.
+     * Handle an error chunk from the server.
      */
-    private function handle_deletion(array $chunk): void
-    {
+    private function handle_error_chunk(
+        array $chunk,
+        string $phase,
+        StreamingContext $context,
+    ): void {
         $body = $chunk["body"] ?? "";
         $data = json_decode($body, true);
-        if (!$data || !isset($data["path"])) {
+        if (!$data) {
             return;
         }
 
-        // Security: path must be absolute (start with /)
-        if (!isset($data["path"][0]) || $data["path"][0] !== "/") {
-            throw new RuntimeException(
-                "Security: Deletion path must be absolute: " .
-                    ($data["path"] ?? "empty"),
-            );
-        }
+        $error_type = $data["error_type"] ?? "unknown";
+        $path = $data["path"] ?? "";
+        $message = $data["message"] ?? "Error";
 
-        $local_path = $this->local_path . "/filesystem-root" . $data["path"];
-        if (file_exists($local_path)) {
-            if (true !== @unlink($local_path)) {
-                $this->audit_log("Failed to delete: {$data["path"]}", true);
-            } else {
-                $this->audit_log("Deleted: {$data["path"]}", false);
+        $this->audit_log(
+            "REMOTE ERROR | phase={$phase} | type={$error_type} | path={$path} | message={$message}",
+            true,
+        );
 
-                // Show relative path for deletion
-                $relative_path = ltrim($data["path"], "/");
-                $max_path_len = 60;
-                if (strlen($relative_path) > $max_path_len) {
-                    $relative_path =
-                        "..." . substr($relative_path, -($max_path_len - 3));
-                }
-                $this->show_progress_line("Deleted: " . $relative_path);
-
-                // Remove from index after successful deletion
-                $this->delete_index_entry($data["path"]);
+        $is_file_error = in_array(
+            $error_type,
+            ["file_changed", "file_missing", "file_open", "file_read"],
+            true,
+        );
+        if ($path !== "" && $is_file_error) {
+            $local_path = $this->local_path . "/filesystem-root" . $path;
+            if ($context->file_handle && $context->file_path === $local_path) {
+                fclose($context->file_handle);
+                $context->file_handle = null;
+                $context->file_path = null;
+                $context->file_ctime = null;
+                $context->file_bytes_written = 0;
             }
+
+            if (file_exists($local_path)) {
+                @unlink($local_path);
+            }
+            $this->delete_index_entry($path);
         }
 
-        $this->output_progress([
-            "type" => "deletion",
-            "path" => $data["path"],
-        ]);
+        $this->show_progress_line(
+            "Remote error: {$error_type} " . ($path !== "" ? $path : ""),
+        );
+        $this->output_progress(
+            [
+                "type" => "error",
+                "phase" => $phase,
+                "error_type" => $error_type,
+                "path" => $path,
+                "message" => $message,
+            ],
+            true,
+        );
     }
 
     /**
@@ -3712,6 +3752,8 @@ class ImportClient
             },
             CURLOPT_WRITEFUNCTION => function ($ch, $data) use (
                 &$parser,
+                &$current_chunk,
+                $context,
                 &$bytes_received,
                 &$last_heartbeat,
                 &$last_progress_check,
@@ -3721,6 +3763,48 @@ class ImportClient
                 // If no parser yet, we might be receiving an error response
                 if (!$parser) {
                     $error_body .= $data;
+                    $boundary = $this->detect_boundary_from_body($error_body);
+                    if ($boundary !== null) {
+                        $this->audit_log(
+                            "Detected boundary in body (no Content-Type): {$boundary}",
+                            false,
+                        );
+                        $parser = new MultipartStreamParser(
+                            $boundary,
+                            function ($event) use (&$current_chunk, $context) {
+                                if ($event["type"] === "body") {
+                                    if (!$current_chunk) {
+                                        $current_chunk = [
+                                            "headers" => $event["headers"],
+                                            "body" => $event["data"],
+                                        ];
+                                    } else {
+                                        $current_chunk["body"] =
+                                            ($current_chunk["body"] ?? "") .
+                                            $event["data"];
+                                    }
+                                } elseif ($event["type"] === "complete") {
+                                    if ($current_chunk) {
+                                        if ($context->on_chunk) {
+                                            ($context->on_chunk)($current_chunk);
+                                        }
+                                    } elseif ($event["headers"]) {
+                                        if ($context->on_chunk) {
+                                            ($context->on_chunk)([
+                                                "headers" => $event["headers"],
+                                                "body" => "",
+                                            ]);
+                                        }
+                                    }
+                                    $current_chunk = null;
+                                }
+                            },
+                        );
+                        $parser->feed($error_body);
+                        $error_body = "";
+                    } elseif (strlen($error_body) > 65536) {
+                        $error_body = substr($error_body, -65536);
+                    }
                     static $logged_no_parser = false;
                     if (!$logged_no_parser && strlen($error_body) > 0) {
                         $this->audit_log(
@@ -3870,6 +3954,20 @@ class ImportClient
             }
 
             throw new RuntimeException($error_msg);
+        }
+
+        if (!$parser) {
+            $snippet = $error_body ? substr($error_body, 0, 500) : "";
+            throw new RuntimeException(
+                "Invalid response: missing multipart boundary. " .
+                    ($snippet !== "" ? "Body: {$snippet}" : ""),
+            );
+        }
+
+        if (!$context->saw_completion) {
+            throw new RuntimeException(
+                "Invalid response: missing completion chunk from server.",
+            );
         }
     }
 
@@ -4116,6 +4214,8 @@ class StreamingContext
     public $file_bytes_written = 0;
     // Last response stats from completion chunk
     public $response_stats = [];
+    // Stream integrity
+    public $saw_completion = false;
 }
 
 // ============================================================================
