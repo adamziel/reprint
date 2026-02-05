@@ -12,4 +12,6 @@ tester.sh
 exports.sh
 bluehost-export
 tests/.phpunit.result.cache
+exports
+siteground-export-*
 

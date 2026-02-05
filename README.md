@@ -102,27 +102,18 @@ This is why we're budgeting our resource usage in a few ways:
 * Execution time limit on the remote host – it gracefully ends the request once we exceed the budget.
 * Memory usage limit on the remote host – it gracefully ends the request once we exceed the budget.
 * Request backoff to make space for other requests
-* Per-endpoint target times – file streaming, indexing, and SQL dumps have different cost profiles and host limits,
-  so we tune each to its own target runtime instead of a single global value.
+* Per-endpoint size caps and adaptive sizing, since files, indexing, and SQL have different cost profiles.
 
-Sometimes the host will produce files faster than we can consume them. That creates a natural backoff
-mechanism. Other times, however, we'll be able to consume the files faster than the host can produce them
-and in those scenarios we need to be careful about not overwhelming the host.
+The exporter almost always uses the full server time budget, so the tuner does not try to make responses
+shorter. Instead it measures server-reported runtime plus the amount of work done (bytes streamed, index
+entries emitted, SQL bytes dumped), keeps a throughput EMA per endpoint, and applies an AIMD loop: small
+additive increases when throughput is stable, and multiplicative decreases when throughput drops. This
+lets fast hosts grow steadily while slow hosts back off quickly.
 
-We detect likely response buffering (TTFB ≈ server runtime) and switch to smaller per-request budgets
-to keep buffered responses small and avoid memory spikes in proxies, PHP-FPM, or web servers. When the
-server looks fast, we gradually increase the amount of work per request; when it looks slow or buffered,
-we cut the work size down and let the client sleep a bit longer between requests.
-
-The tuner runs on the client and uses only server-reported runtime plus the amount of work done (bytes
-streamed, index entries emitted, SQL bytes dumped). It keeps separate targets for file streaming, indexing,
-and SQL, because those workloads behave very differently on shared hosts. If we hit timeouts or any
-error response, we enter an error backoff mode that shrinks targets for a few requests.
-
-If buffering persists over several requests, we switch into a slow-host mode that clamps the maximum
-chunk sizes and adds a small random jitter to sleep times so multiple migrations don’t synchronize their
-load. All of these thresholds are configurable in `import.php` and via CLI flags, but the core idea is
-simple: stay under the host’s limits while still making steady progress.
+We also detect likely buffering (TTFB ≈ server runtime) and enter a conservative mode that clamps maximum
+sizes. Any non-2xx/3xx response or timeout triggers error backoff and an immediate size cut. Separately, a
+duty-cycle sleep (with jitter) spaces requests so we don’t monopolize PHP workers or synchronize multiple
+migrations on the same host.
 
 What we **don't** do:
 
@@ -134,9 +125,8 @@ What we **don't** do:
 * Tune based on client download time or wall-clock time. The client might be slower than the server, or a fast
   connection could hide server pressure. We only tune based on server-reported runtime and the amount of work
   done (bytes streamed, index entries emitted, SQL bytes dumped).
-* Use a simple "fast/slow" threshold against the target time. We have no idea how fast is "fast" or "slow" for each 
-  site. We instead track throughput (Exponential Moving Average) per endpoint and size the next request based on a
-  target amount of work, and we only tune on partial requests to avoid tiny final batches skewing the signal.
+* Aim for a fixed target runtime. The exporter almost always runs until its time budget expires, so the meaningful
+  signal is throughput under that budget, not how close we got to an arbitrary time goal.
 
 ### Open questions
 
@@ -144,6 +134,9 @@ What we **don't** do:
 
 ### Todos
 
+* Pre-flight request to
+  * Confirm the host is able to export the site
+  * Get runtime details so the importing side may decide if it's capable of importing the site.
 * Account for the disk space limits for files and for MySQL data on the migration target.
 * Account for 3xx errors
 * Handle every single possible error case, e.g. fread() returning false prematurely etc.

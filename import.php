@@ -318,22 +318,19 @@ class MultipartStreamParser
 /**
  * AdaptiveTuner
  *
- * The tuner makes each request do a safe amount of work for the host it is
- * running on. It uses the server's own reported runtime together with how
- * much work was actually completed in that request. This keeps the logic
- * grounded in what the exporter experienced, not what the client observed.
+ * The exporter always runs until its server-side budgets expire, so the goal
+ * is not to end early but to maximize useful work per request without pushing
+ * the host into timeouts or buffering. We measure server-reported runtime and
+ * work done, maintain a per-endpoint throughput EMA, then apply additive
+ * increase and multiplicative decrease to the next request size. This lets
+ * fast hosts grow steadily while slow hosts back off quickly when throughput
+ * drops or errors appear.
  *
- * Each endpoint is treated separately because files, index scans, and SQL
- * dumps stress the system in different ways. The tuner learns a stable
- * throughput for each type of request and sizes the next request to fit a
- * target runtime window. It intentionally avoids using the last, tiny batch
- * as a signal, and it backs off more aggressively when the host looks slow or
- * when responses appear to be buffered instead of streamed.
- *
- * When errors happen or buffering persists, the tuner shifts into more
- * conservative modes that clamp maximum sizes and introduce extra spacing
- * between requests. All of this happens on the client side so PHP workers on
- * the host are not held open longer than necessary.
+ * We only tune on partial responses to avoid tiny final batches skewing the
+ * signal. Buffering detection and error backoff temporarily clamp sizes, and
+ * a duty-cycle sleep with jitter spaces requests so multiple migrations do not
+ * synchronize their load. Everything is decided on the client so PHP workers
+ * stay free between requests.
  */
 class AdaptiveTuner
 {
@@ -344,49 +341,43 @@ class AdaptiveTuner
      * @param array $config {
      *     Optional. An array of arguments.
      *
-     *     @type bool       $enabled                  Enable adaptive tuning. Default true.
-     *     @type bool       $use_server_time           Prefer server-reported runtime. Default true.
-     *     @type float|null $target_time               Baseline target time (seconds). Default null (computed).
-     *     @type float|null $target_time_file          Target time for file streaming. Default null.
-     *     @type float|null $target_time_index         Target time for index streaming. Default null.
-     *     @type float|null $target_time_sql           Target time for SQL dumping. Default null.
-     *     @type int        $max_execution_time        Sent to export.php (seconds). Default 5.
-     *     @type float      $memory_threshold          Sent to export.php (0-1). Default 0.8.
-     *     @type float      $duty                      Desired duty cycle (0-1). Default 0.5.
-     *     @type float      $duty_min                  Minimum duty cycle. Default 0.35.
-     *     @type float      $duty_max                  Maximum duty cycle. Default 1.0.
-     *     @type float      $min_sleep                 Minimum sleep (seconds). Default 0.2.
-     *     @type float      $max_sleep                 Maximum sleep (seconds). Default 10.0.
-     *     @type float      $throughput_ema_alpha      EMA smoothing factor. Default 0.2.
-     *     @type float      $throughput_headroom       Safety headroom (0-1). Default 0.9.
-     *     @type float      $scale_min                 Min scale per request. Default 0.5.
-     *     @type float      $scale_max                 Max scale per request. Default 1.5.
-     *     @type bool       $tune_only_partial         Tune only on partial responses. Default true.
-     *     @type float      $buffered_ratio_threshold  TTFB/server_time ratio for buffering. Default 0.85.
-     *     @type float      $buffered_min_server_time  Minimum server_time to apply heuristic. Default 0.5.
-     *     @type float      $buffered_target_time_factor
-     *         Target-time multiplier in buffered mode. Default 0.5.
-     *     @type int        $buffered_cooldown         Requests to keep buffered mode. Default 3.
-     *     @type int        $error_backoff_requests    Requests to stay in error backoff. Default 3.
-     *     @type float      $error_target_time_factor  Target-time multiplier during error backoff. Default 0.5.
-     *     @type bool       $error_force_scale_min     Force scale_min in error backoff. Default true.
-     *     @type int        $slow_host_threshold       Buffered detections before slow-host mode. Default 3.
-     *     @type int        $slow_host_file_chunk_max  Max file chunk in slow-host mode. Default 2097152.
-     *     @type int        $slow_host_index_batch_max Max index batch in slow-host mode. Default 5000.
-     *     @type int        $slow_host_sql_fragments_max
-     *         Max SQL fragments in slow-host mode. Default 1000.
-     *     @type float      $sleep_jitter              Sleep jitter fraction (0-0.5). Default 0.1.
-     *     @type int        $file_chunk_start          Initial file chunk size. Default 5242880.
-     *     @type int        $file_chunk_min            Min file chunk size. Default 262144.
-     *     @type int        $file_chunk_max            Max file chunk size. Default 16777216.
-     *     @type int        $index_batch_start         Initial index batch size. Default 5000.
-     *     @type int        $index_batch_min           Min index batch size. Default 500.
-     *     @type int        $index_batch_max           Max index batch size. Default 50000.
-     *     @type int        $sql_fragments_start       Initial SQL fragments per request. Default 1000.
-     *     @type int        $sql_fragments_min         Min SQL fragments per request. Default 100.
-     *     @type int        $sql_fragments_max         Max SQL fragments per request. Default 5000.
-     *     @type bool       $db_unbuffered             Use unbuffered MySQL queries. Default false.
-     *     @type int        $db_query_time_limit       MySQL MAX_EXECUTION_TIME (ms). Default 0.
+     *     @type bool  $enabled                     Enable adaptive tuning. Default true.
+     *     @type bool  $use_server_time              Prefer server-reported runtime. Default true.
+     *     @type int   $max_execution_time           Sent to export.php (seconds). Default 5.
+     *     @type float $memory_threshold             Sent to export.php (0-1). Default 0.8.
+     *     @type float $duty                         Desired duty cycle (0-1). Default 0.5.
+     *     @type float $duty_min                     Minimum duty cycle. Default 0.35.
+     *     @type float $duty_max                     Maximum duty cycle. Default 1.0.
+     *     @type float $min_sleep                    Minimum sleep (seconds). Default 0.2.
+     *     @type float $max_sleep                    Maximum sleep (seconds). Default 10.0.
+     *     @type float $sleep_jitter                 Sleep jitter fraction (0-0.5). Default 0.1.
+     *     @type float $throughput_ema_alpha         EMA smoothing factor. Default 0.2.
+     *     @type float $aimd_drop_ratio              Throughput ratio to trigger decrease. Default 0.9.
+     *     @type float $aimd_decrease_factor         Multiplicative decrease factor. Default 0.7.
+     *     @type float $error_decrease_factor        Error backoff decrease factor. Default 0.5.
+     *     @type int   $aimd_increase_file_bytes     Additive increase for file chunks. Default 262144.
+     *     @type int   $aimd_increase_index_entries  Additive increase for index batches. Default 500.
+     *     @type int   $aimd_increase_sql_fragments  Additive increase for SQL fragments. Default 100.
+     *     @type bool  $tune_only_partial            Tune only on partial responses. Default true.
+     *     @type float $buffered_ratio_threshold     TTFB/server_time ratio for buffering. Default 0.85.
+     *     @type float $buffered_min_server_time     Minimum server_time to apply heuristic. Default 0.5.
+     *     @type int   $buffered_cooldown            Requests to keep buffered mode. Default 3.
+     *     @type int   $error_backoff_requests       Requests to stay in error backoff. Default 3.
+     *     @type int   $slow_host_threshold          Buffered detections before slow-host mode. Default 3.
+     *     @type int   $slow_host_file_chunk_max     Max file chunk in slow-host mode. Default 2097152.
+     *     @type int   $slow_host_index_batch_max    Max index batch in slow-host mode. Default 5000.
+     *     @type int   $slow_host_sql_fragments_max  Max SQL fragments in slow-host mode. Default 1000.
+     *     @type int   $file_chunk_start             Initial file chunk size. Default 5242880.
+     *     @type int   $file_chunk_min               Min file chunk size. Default 262144.
+     *     @type int   $file_chunk_max               Max file chunk size. Default 16777216.
+     *     @type int   $index_batch_start            Initial index batch size. Default 5000.
+     *     @type int   $index_batch_min              Min index batch size. Default 500.
+     *     @type int   $index_batch_max              Max index batch size. Default 50000.
+     *     @type int   $sql_fragments_start          Initial SQL fragments per request. Default 1000.
+     *     @type int   $sql_fragments_min            Min SQL fragments per request. Default 100.
+     *     @type int   $sql_fragments_max            Max SQL fragments per request. Default 5000.
+     *     @type bool  $db_unbuffered                Use unbuffered MySQL queries. Default false.
+     *     @type int   $db_query_time_limit          MySQL MAX_EXECUTION_TIME (ms). Default 0.
      * }
      * @param array $state Persisted tuner state (sizes, EMA values, modes).
      */
@@ -395,10 +386,6 @@ class AdaptiveTuner
         $defaults = [
             "enabled" => true,
             "use_server_time" => true,
-            "target_time" => null, // seconds, if null computed from max_execution_time
-            "target_time_file" => null,
-            "target_time_index" => null,
-            "target_time_sql" => null,
             "max_execution_time" => 5,
             "memory_threshold" => 0.8,
             "duty" => 0.5,
@@ -407,17 +394,17 @@ class AdaptiveTuner
             "min_sleep" => 0.2,
             "max_sleep" => 10.0,
             "throughput_ema_alpha" => 0.2,
-            "throughput_headroom" => 0.9,
-            "scale_min" => 0.5,
-            "scale_max" => 1.5,
+            "aimd_drop_ratio" => 0.9,
+            "aimd_decrease_factor" => 0.7,
+            "error_decrease_factor" => 0.5,
+            "aimd_increase_file_bytes" => 256 * 1024,
+            "aimd_increase_index_entries" => 500,
+            "aimd_increase_sql_fragments" => 100,
             "tune_only_partial" => true,
             "buffered_ratio_threshold" => 0.85,
             "buffered_min_server_time" => 0.5,
-            "buffered_target_time_factor" => 0.5,
             "buffered_cooldown" => 3,
             "error_backoff_requests" => 3,
-            "error_target_time_factor" => 0.5,
-            "error_force_scale_min" => true,
             "slow_host_threshold" => 3,
             "slow_host_file_chunk_max" => 2 * 1024 * 1024,
             "slow_host_index_batch_max" => 5000,
@@ -474,20 +461,35 @@ class AdaptiveTuner
             0.05,
             0.5,
         );
-        $config["throughput_headroom"] = $this->clamp_float(
-            (float) $config["throughput_headroom"],
+        $config["aimd_drop_ratio"] = $this->clamp_float(
+            (float) $config["aimd_drop_ratio"],
             0.5,
-            1.0,
+            0.99,
         );
-        $config["scale_min"] = $this->clamp_float(
-            (float) $config["scale_min"],
+        $config["aimd_decrease_factor"] = $this->clamp_float(
+            (float) $config["aimd_decrease_factor"],
             0.1,
-            1.0,
+            0.95,
         );
-        $config["scale_max"] = $this->clamp_float(
-            (float) $config["scale_max"],
-            1.0,
-            4.0,
+        $config["error_decrease_factor"] = $this->clamp_float(
+            (float) $config["error_decrease_factor"],
+            0.1,
+            0.95,
+        );
+        $config["aimd_increase_file_bytes"] = $this->clamp_int(
+            (int) $config["aimd_increase_file_bytes"],
+            4 * 1024,
+            (int) $config["file_chunk_max"],
+        );
+        $config["aimd_increase_index_entries"] = $this->clamp_int(
+            (int) $config["aimd_increase_index_entries"],
+            1,
+            (int) $config["index_batch_max"],
+        );
+        $config["aimd_increase_sql_fragments"] = $this->clamp_int(
+            (int) $config["aimd_increase_sql_fragments"],
+            1,
+            (int) $config["sql_fragments_max"],
         );
         $config["tune_only_partial"] = (bool) $config["tune_only_partial"];
         $config["buffered_ratio_threshold"] = $this->clamp_float(
@@ -499,11 +501,6 @@ class AdaptiveTuner
             0.0,
             (float) $config["buffered_min_server_time"],
         );
-        $config["buffered_target_time_factor"] = $this->clamp_float(
-            (float) $config["buffered_target_time_factor"],
-            0.1,
-            1.0,
-        );
         $config["buffered_cooldown"] = $this->clamp_int(
             (int) $config["buffered_cooldown"],
             1,
@@ -514,12 +511,6 @@ class AdaptiveTuner
             1,
             20,
         );
-        $config["error_target_time_factor"] = $this->clamp_float(
-            (float) $config["error_target_time_factor"],
-            0.1,
-            1.0,
-        );
-        $config["error_force_scale_min"] = (bool) $config["error_force_scale_min"];
         $config["slow_host_threshold"] = $this->clamp_int(
             (int) $config["slow_host_threshold"],
             1,
@@ -550,25 +541,6 @@ class AdaptiveTuner
             0,
             (int) $config["db_query_time_limit"],
         );
-
-        if ($config["target_time"] === null) {
-            $config["target_time"] = min(2.0, $config["max_execution_time"] * 0.6);
-        } else {
-            $config["target_time"] = max(0.2, (float) $config["target_time"]);
-        }
-
-        $config["target_time_file"] =
-            $config["target_time_file"] !== null
-                ? max(0.2, (float) $config["target_time_file"])
-                : $config["target_time"];
-        $config["target_time_index"] =
-            $config["target_time_index"] !== null
-                ? max(0.2, (float) $config["target_time_index"])
-                : $config["target_time"];
-        $config["target_time_sql"] =
-            $config["target_time_sql"] !== null
-                ? max(0.2, (float) $config["target_time_sql"])
-                : $config["target_time"];
 
         $this->config = $config;
 
@@ -724,7 +696,7 @@ class AdaptiveTuner
     }
 
     /**
-     * Record the outcome of a request and update tuning state.
+     * Record the outcome of a request and update tuning state using AIMD.
      *
      * @param string $endpoint Endpoint name: file_stream, file_fetch, file_index, sql_chunk.
      * @param array  $metrics {
@@ -827,7 +799,6 @@ class AdaptiveTuner
 
         // Section: compute work done and decide whether to tune this response.
         $status = $metrics["status"] ?? null;
-        $target_time = $this->target_time_for_endpoint($endpoint);
         $work_done = $this->work_done_for_endpoint($endpoint, $metrics);
         if ($work_done !== null) {
             $work_done = (int) $work_done;
@@ -835,10 +806,11 @@ class AdaptiveTuner
 
         $decision = "steady";
         $size_key = $this->size_key_for_endpoint($endpoint);
-        $scale = null;
         $throughput = null;
         $throughput_ema = null;
-        $target_work = null;
+        $throughput_ratio = null;
+        $prev_ema = null;
+        $aimd_step = $size_key ? $this->aimd_increase_step($size_key) : null;
 
         $should_tune = $work_done !== null && $work_done > 0;
         if (
@@ -851,17 +823,18 @@ class AdaptiveTuner
             $decision = "skip_complete";
         }
 
-        // Section: throughput estimation and size adjustment.
+        // Section: throughput estimation and AIMD adjustment.
         if ($should_tune) {
             $throughput = $work_done / max(0.0001, $elapsed);
             $ema_key = $this->throughput_key_for_endpoint($endpoint);
             if ($ema_key !== null) {
+                $prev_ema = $this->state[$ema_key] ?? null;
+                if ($prev_ema !== null && $prev_ema > 0) {
+                    $throughput_ratio = $throughput / $prev_ema;
+                }
                 // EMA (Exponential Moving Average) smooths noisy throughput.
                 // It gives more weight to recent measurements without discarding
                 // older history, using: ema = (1 - alpha) * prev + alpha * current.
-                // This avoids overreacting to single slow/fast requests while
-                // still adapting when the host's performance changes.
-                $prev_ema = $this->state[$ema_key] ?? null;
                 $alpha = (float) $this->config["throughput_ema_alpha"];
                 if ($prev_ema === null || $prev_ema <= 0) {
                     $throughput_ema = $throughput;
@@ -875,38 +848,62 @@ class AdaptiveTuner
                 $throughput_ema = $throughput;
             }
 
-            if ($size_key !== null && $throughput_ema !== null) {
-                $target_work =
-                    $throughput_ema *
-                    $target_time *
-                    (float) $this->config["throughput_headroom"];
-                if ($target_work > 0) {
-                    $scale = $target_work / $work_done;
-                    if (
-                        $this->state["error_backoff_remaining"] > 0 &&
-                        $this->config["error_force_scale_min"]
-                    ) {
-                        // During error backoff, force conservative scaling.
-                        $scale = min($scale, (float) $this->config["scale_min"]);
-                    }
-                    $scale = $this->clamp_float(
-                        $scale,
-                        (float) $this->config["scale_min"],
-                        (float) $this->config["scale_max"],
+            if ($this->state["error_backoff_remaining"] > 0) {
+                // Hold sizes steady while error backoff is active.
+                $decision = "error_backoff";
+            } elseif ($size_key === null) {
+                $decision = "no_size_key";
+            } elseif ($prev_ema === null || $prev_ema <= 0) {
+                // First measurement seeds the EMA; only shrink if buffering is obvious.
+                if ($buffered_likely) {
+                    $size = (int) $this->state[$size_key];
+                    $size = (int) round(
+                        $size * (float) $this->config["aimd_decrease_factor"],
                     );
-                    $size = (int) round($this->state[$size_key] * $scale);
                     $size = $this->clamp_int(
                         $size,
                         (int) $this->config[$this->min_key_for_size($size_key)],
                         $this->effective_max_for_size($size_key),
                     );
                     $this->state[$size_key] = $size;
-                    if ($scale > 1.05) {
+                    $decision = "buffered_decrease";
+                } else {
+                    $decision = "warmup";
+                }
+            } else {
+                $size = (int) $this->state[$size_key];
+                $decrease = false;
+
+                if ($buffered_likely) {
+                    $decrease = true;
+                    $decision = "buffered_decrease";
+                } elseif (
+                    $throughput_ratio !== null &&
+                    $throughput_ratio < (float) $this->config["aimd_drop_ratio"]
+                ) {
+                    $decrease = true;
+                    $decision = "decrease";
+                }
+
+                if ($decrease) {
+                    $size = (int) round(
+                        $size * (float) $this->config["aimd_decrease_factor"],
+                    );
+                } else {
+                    if (!$this->state["buffered_mode"]) {
+                        $size += (int) ($aimd_step ?? 0);
                         $decision = "increase";
-                    } elseif ($scale < 0.95) {
-                        $decision = "decrease";
+                    } else {
+                        $decision = "buffered_hold";
                     }
                 }
+
+                $size = $this->clamp_int(
+                    $size,
+                    (int) $this->config[$this->min_key_for_size($size_key)],
+                    $this->effective_max_for_size($size_key),
+                );
+                $this->state[$size_key] = $size;
             }
         } elseif ($work_done === null || $work_done <= 0) {
             // We can't compute throughput without any recorded work.
@@ -964,9 +961,10 @@ class AdaptiveTuner
             "work_done" => $work_done,
             "throughput" => $throughput,
             "throughput_ema" => $throughput_ema,
-            "target_work" => $target_work,
-            "target_time" => $target_time,
-            "scale" => $scale,
+            "throughput_ratio" => $throughput_ratio,
+            "aimd_drop_ratio" => $this->config["aimd_drop_ratio"],
+            "aimd_decrease_factor" => $this->config["aimd_decrease_factor"],
+            "aimd_increase_step" => $aimd_step,
             "status" => $status,
             "ttfb" => $ttfb,
             "total_time" => $total_time,
@@ -1029,14 +1027,13 @@ class AdaptiveTuner
             (int) $this->config["error_backoff_requests"],
         );
 
-        // Section: immediately shrink the next size if configured to do so.
+        // Section: immediately shrink the next size to ease pressure.
         $size_key = $this->size_key_for_endpoint($endpoint);
-        if (
-            $size_key !== null &&
-            $this->config["error_force_scale_min"]
-        ) {
+        if ($size_key !== null) {
             $size = (int) $this->state[$size_key];
-            $size = (int) round($size * (float) $this->config["scale_min"]);
+            $size = (int) round(
+                $size * (float) $this->config["error_decrease_factor"],
+            );
             $size = $this->clamp_int(
                 $size,
                 (int) $this->config[$this->min_key_for_size($size_key)],
@@ -1096,29 +1093,6 @@ class AdaptiveTuner
         return $max < $min ? $min : $max;
     }
 
-    private function target_time_for_endpoint(string $endpoint): float
-    {
-        // Section: choose base target time per endpoint.
-        $target = (float) $this->config["target_time"];
-        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
-            $target = (float) $this->config["target_time_file"];
-        } elseif ($endpoint === "file_index") {
-            $target = (float) $this->config["target_time_index"];
-        } elseif ($endpoint === "sql_chunk") {
-            $target = (float) $this->config["target_time_sql"];
-        }
-
-        // Section: apply temporary conservative factors.
-        if ($this->state["buffered_mode"]) {
-            $target *= (float) $this->config["buffered_target_time_factor"];
-        }
-        if ($this->state["error_backoff_remaining"] > 0) {
-            $target *= (float) $this->config["error_target_time_factor"];
-        }
-
-        return max(0.2, $target);
-    }
-
     private function work_done_for_endpoint(string $endpoint, array $metrics): ?int
     {
         if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
@@ -1155,6 +1129,17 @@ class AdaptiveTuner
             return "sql_fragments_per_batch";
         }
         return null;
+    }
+
+    private function aimd_increase_step(string $size_key): int
+    {
+        if ($size_key === "file_chunk_size") {
+            return (int) $this->config["aimd_increase_file_bytes"];
+        }
+        if ($size_key === "index_batch_size") {
+            return (int) $this->config["aimd_increase_index_entries"];
+        }
+        return (int) $this->config["aimd_increase_sql_fragments"];
     }
 
     private function min_key_for_size(string $size_key): string
@@ -1585,16 +1570,21 @@ class ImportClient
         if (isset($decision["throughput_ema"]) && $decision["throughput_ema"] !== null) {
             $log[] = "ema=" . sprintf("%.2f", $decision["throughput_ema"]);
         }
-        if (isset($decision["target_work"]) && $decision["target_work"] !== null) {
+        if (isset($decision["throughput_ratio"]) && $decision["throughput_ratio"] !== null) {
             $log[] =
-                "target=" . sprintf("%.2f", $decision["target_work"]);
+                "ratio=" . sprintf("%.2f", (float) $decision["throughput_ratio"]);
         }
-        if (isset($decision["target_time"]) && $decision["target_time"] !== null) {
+        if (isset($decision["aimd_drop_ratio"]) && $decision["aimd_drop_ratio"] !== null) {
             $log[] =
-                "target_time=" . sprintf("%.2f", $decision["target_time"]) . "s";
+                "aimd_drop=" . sprintf("%.2f", (float) $decision["aimd_drop_ratio"]);
         }
-        if (isset($decision["scale"]) && $decision["scale"] !== null) {
-            $log[] = "scale=" . sprintf("%.2f", $decision["scale"]);
+        if (isset($decision["aimd_decrease_factor"]) && $decision["aimd_decrease_factor"] !== null) {
+            $log[] =
+                "aimd_dec=" . sprintf("%.2f", (float) $decision["aimd_decrease_factor"]);
+        }
+        if (isset($decision["aimd_increase_step"]) && $decision["aimd_increase_step"] !== null) {
+            $log[] =
+                "aimd_step=" . (int) $decision["aimd_increase_step"];
         }
         if (isset($decision["ttfb"]) && $decision["ttfb"] !== null) {
             $log[] = "ttfb=" . sprintf("%.3f", (float) $decision["ttfb"]) . "s";
@@ -1612,9 +1602,6 @@ class ImportClient
         $log[] =
             "buffered_threshold=" .
             sprintf("%.2f", (float) $this->tuner->get_config()["buffered_ratio_threshold"]);
-        $log[] =
-            "buffered_factor=" .
-            sprintf("%.2f", (float) $this->tuner->get_config()["buffered_target_time_factor"]);
         $log[] =
             "buffered_cooldown=" .
             (int) ($this->tuner->get_state()["buffered_cooldown"] ?? 0);
@@ -4261,25 +4248,21 @@ if (
         echo "  --verbose, -v    Show detailed logs (default: show progress only)\n";
         echo "  --adaptive       Enable adaptive tuning (default)\n";
         echo "  --no-adaptive    Disable adaptive tuning\n";
-        echo "  --target-time=F  Target server time per request (seconds)\n";
-        echo "  --target-time-file=F   Target time for file stream requests\n";
-        echo "  --target-time-index=F  Target time for index requests\n";
-        echo "  --target-time-sql=F    Target time for SQL requests\n";
         echo "  --duty=F         Target duty cycle (0-1)\n";
         echo "  --duty-min=F     Minimum duty cycle (0-1)\n";
         echo "  --duty-max=F     Maximum duty cycle (0-1)\n";
         echo "  --throughput-alpha=F    EMA alpha for throughput (0-1)\n";
-        echo "  --throughput-headroom=F Headroom factor for target work (0-1)\n";
-        echo "  --scale-min=F    Minimum scaling per request (0-1)\n";
-        echo "  --scale-max=F    Maximum scaling per request (>1)\n";
+        echo "  --aimd-drop-ratio=F     Throughput ratio to trigger decrease\n";
+        echo "  --aimd-decrease-factor=F Multiplicative decrease factor\n";
+        echo "  --error-decrease-factor=F Error backoff decrease factor\n";
+        echo "  --aimd-increase-file=N  Additive increase for file chunks (bytes)\n";
+        echo "  --aimd-increase-index=N Additive increase for index batches (entries)\n";
+        echo "  --aimd-increase-sql=N   Additive increase for SQL fragments\n";
         echo "  --tune-all       Tune on complete requests too (default: partial only)\n";
         echo "  --buffered-ratio=F      TTFB/server_time ratio to detect buffering\n";
         echo "  --buffered-min-time=F   Minimum server_time to consider buffering\n";
-        echo "  --buffered-factor=F     Target time multiplier in buffered mode\n";
         echo "  --buffered-cooldown=N   Requests to keep buffered mode after detection\n";
-        echo "  --error-backoff=N       Requests to stay in error-backoff after 429/503/timeout\n";
-        echo "  --error-factor=F        Target time multiplier during error backoff\n";
-        echo "  --error-force-scale-min Enable scale_min while error backoff active\n";
+        echo "  --error-backoff=N       Requests to stay in error-backoff after error/timeout\n";
         echo "  --slow-host-threshold=N Buffered detections before slow-host caps\n";
         echo "  --slow-file-chunk-max=N Max file chunk size in slow-host mode\n";
         echo "  --slow-index-batch-max=N Max index batch size in slow-host mode\n";
@@ -4357,26 +4340,6 @@ if (
             $options["restart"] = true;
         } elseif ($argv[$i] === "--verbose" || $argv[$i] === "-v") {
             $options["verbose"] = true;
-        } elseif (strpos($argv[$i], "--target-time=") === 0) {
-            $options["tuning_config"]["target_time"] = (float) substr(
-                $argv[$i],
-                strlen("--target-time="),
-            );
-        } elseif (strpos($argv[$i], "--target-time-file=") === 0) {
-            $options["tuning_config"]["target_time_file"] = (float) substr(
-                $argv[$i],
-                strlen("--target-time-file="),
-            );
-        } elseif (strpos($argv[$i], "--target-time-index=") === 0) {
-            $options["tuning_config"]["target_time_index"] = (float) substr(
-                $argv[$i],
-                strlen("--target-time-index="),
-            );
-        } elseif (strpos($argv[$i], "--target-time-sql=") === 0) {
-            $options["tuning_config"]["target_time_sql"] = (float) substr(
-                $argv[$i],
-                strlen("--target-time-sql="),
-            );
         } elseif (strpos($argv[$i], "--duty=") === 0) {
             $options["tuning_config"]["duty"] = (float) substr(
                 $argv[$i],
@@ -4397,20 +4360,35 @@ if (
                 $argv[$i],
                 strlen("--throughput-alpha="),
             );
-        } elseif (strpos($argv[$i], "--throughput-headroom=") === 0) {
-            $options["tuning_config"]["throughput_headroom"] = (float) substr(
+        } elseif (strpos($argv[$i], "--aimd-drop-ratio=") === 0) {
+            $options["tuning_config"]["aimd_drop_ratio"] = (float) substr(
                 $argv[$i],
-                strlen("--throughput-headroom="),
+                strlen("--aimd-drop-ratio="),
             );
-        } elseif (strpos($argv[$i], "--scale-min=") === 0) {
-            $options["tuning_config"]["scale_min"] = (float) substr(
+        } elseif (strpos($argv[$i], "--aimd-decrease-factor=") === 0) {
+            $options["tuning_config"]["aimd_decrease_factor"] = (float) substr(
                 $argv[$i],
-                strlen("--scale-min="),
+                strlen("--aimd-decrease-factor="),
             );
-        } elseif (strpos($argv[$i], "--scale-max=") === 0) {
-            $options["tuning_config"]["scale_max"] = (float) substr(
+        } elseif (strpos($argv[$i], "--error-decrease-factor=") === 0) {
+            $options["tuning_config"]["error_decrease_factor"] = (float) substr(
                 $argv[$i],
-                strlen("--scale-max="),
+                strlen("--error-decrease-factor="),
+            );
+        } elseif (strpos($argv[$i], "--aimd-increase-file=") === 0) {
+            $options["tuning_config"]["aimd_increase_file_bytes"] = (int) substr(
+                $argv[$i],
+                strlen("--aimd-increase-file="),
+            );
+        } elseif (strpos($argv[$i], "--aimd-increase-index=") === 0) {
+            $options["tuning_config"]["aimd_increase_index_entries"] = (int) substr(
+                $argv[$i],
+                strlen("--aimd-increase-index="),
+            );
+        } elseif (strpos($argv[$i], "--aimd-increase-sql=") === 0) {
+            $options["tuning_config"]["aimd_increase_sql_fragments"] = (int) substr(
+                $argv[$i],
+                strlen("--aimd-increase-sql="),
             );
         } elseif ($argv[$i] === "--tune-all") {
             $options["tuning_config"]["tune_only_partial"] = false;
@@ -4424,11 +4402,6 @@ if (
                 $argv[$i],
                 strlen("--buffered-min-time="),
             );
-        } elseif (strpos($argv[$i], "--buffered-factor=") === 0) {
-            $options["tuning_config"]["buffered_target_time_factor"] = (float) substr(
-                $argv[$i],
-                strlen("--buffered-factor="),
-            );
         } elseif (strpos($argv[$i], "--buffered-cooldown=") === 0) {
             $options["tuning_config"]["buffered_cooldown"] = (int) substr(
                 $argv[$i],
@@ -4439,13 +4412,6 @@ if (
                 $argv[$i],
                 strlen("--error-backoff="),
             );
-        } elseif (strpos($argv[$i], "--error-factor=") === 0) {
-            $options["tuning_config"]["error_target_time_factor"] = (float) substr(
-                $argv[$i],
-                strlen("--error-factor="),
-            );
-        } elseif ($argv[$i] === "--error-force-scale-min") {
-            $options["tuning_config"]["error_force_scale_min"] = true;
         } elseif (strpos($argv[$i], "--slow-host-threshold=") === 0) {
             $options["tuning_config"]["slow_host_threshold"] = (int) substr(
                 $argv[$i],
