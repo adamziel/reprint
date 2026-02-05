@@ -101,6 +101,12 @@ if (!defined("EXPORT_MIN_SQL_FRAGMENTS")) {
 if (!defined("EXPORT_MAX_SQL_FRAGMENTS")) {
     define("EXPORT_MAX_SQL_FRAGMENTS", 10000);
 }
+if (!defined("EXPORT_MIN_TABLES_BATCH")) {
+    define("EXPORT_MIN_TABLES_BATCH", 10);
+}
+if (!defined("EXPORT_MAX_TABLES_BATCH")) {
+    define("EXPORT_MAX_TABLES_BATCH", 10000);
+}
 if (!defined("EXPORT_MIN_DB_QUERY_TIME_MS")) {
     define("EXPORT_MIN_DB_QUERY_TIME_MS", 0);
 }
@@ -574,6 +580,210 @@ function endpoint_sql_chunk(
 }
 
 /**
+ * Endpoint: Stream table stats from INFORMATION_SCHEMA.
+ *
+ * Returns table name, estimated rows, and size information in chunks.
+ *
+ * @param array $config Configuration with optional cursor for resumption
+ * @param float $script_start Script execution start time
+ * @param int $max_execution_time Maximum execution time in seconds
+ * @param int $max_memory Maximum memory in bytes
+ * @param float $memory_threshold Memory usage threshold (0.0-1.0)
+ * @return array Result with status and stats
+ */
+function endpoint_sql_preflight(
+    array $config,
+    float $script_start,
+    int $max_execution_time,
+    int $max_memory,
+    float $memory_threshold,
+): array {
+    prepare_streaming_response();
+
+    $db_host =
+        $config["db_host"] ??
+        (defined("DB_HOST") ? DB_HOST : getenv("DB_HOST"));
+    $db_name =
+        $config["db_name"] ??
+        (defined("DB_NAME") ? DB_NAME : getenv("DB_NAME"));
+    $db_user =
+        $config["db_user"] ??
+        (defined("DB_USER") ? DB_USER : getenv("DB_USER"));
+    $db_password =
+        $config["db_password"] ??
+        (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
+
+    if (!$db_host || !$db_name || !$db_user || $db_password === false) {
+        $directories = [];
+        if (isset($config["directory"])) {
+            $directories = is_array($config["directory"])
+                ? $config["directory"]
+                : [$config["directory"]];
+        }
+
+        if (!empty($directories)) {
+            $wp_credentials = extract_db_credentials_from_wp_config(
+                $directories,
+            );
+            if ($wp_credentials !== null) {
+                $db_host = $db_host ?: $wp_credentials["db_host"];
+                $db_name = $db_name ?: $wp_credentials["db_name"];
+                $db_user = $db_user ?: $wp_credentials["db_user"];
+                $db_password =
+                    $db_password !== false
+                        ? $db_password
+                        : $wp_credentials["db_password"];
+            }
+        }
+    }
+
+    if (!$db_host || !$db_name || !$db_user || $db_password === false) {
+        throw new InvalidArgumentException(
+            "Database credentials not found for sql_preflight.",
+        );
+    }
+
+    $tables_per_batch = $config["tables_per_batch"] ?? 1000;
+    $tables_per_batch = require_int_range(
+        "tables_per_batch",
+        (int) $tables_per_batch,
+        EXPORT_MIN_TABLES_BATCH,
+        EXPORT_MAX_TABLES_BATCH,
+    );
+
+    $cursor = null;
+    if (isset($config["cursor"])) {
+        $cursor = json_decode($config["cursor"], true);
+        if ($cursor === null && json_last_error() !== JSON_ERROR_NONE) {
+            throw new InvalidArgumentException(
+                "Invalid cursor format: " . json_last_error_msg(),
+            );
+        }
+    }
+    $last_table = $cursor["last_table"] ?? "";
+
+    $mysql = new PDO(
+        "mysql:host={$db_host};dbname={$db_name};charset=utf8mb4",
+        $db_user,
+        $db_password,
+        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
+    );
+
+    $boundary = "boundary-" . bin2hex(random_bytes(16));
+    $can_send_headers = !headers_sent();
+    if ($can_send_headers) {
+        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    }
+    $gz = new GzipOutputStream($can_send_headers);
+
+    $tables_processed = 0;
+    $rows_estimated = 0;
+    $status = "partial";
+
+    while (
+        should_continue(
+            $script_start,
+            $max_execution_time,
+            $max_memory,
+            $memory_threshold,
+        )
+    ) {
+        $sql =
+            "SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, ENGINE, " .
+            "TABLE_COLLATION FROM INFORMATION_SCHEMA.TABLES " .
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME > :last " .
+            "ORDER BY TABLE_NAME ASC LIMIT {$tables_per_batch}";
+        $stmt = $mysql->prepare($sql);
+        $stmt->bindValue(":last", $last_table, PDO::PARAM_STR);
+        $stmt->execute();
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        if (!$rows) {
+            $status = "complete";
+            break;
+        }
+
+        $tables = [];
+        foreach ($rows as $row) {
+            $name = (string) ($row["TABLE_NAME"] ?? "");
+            $tables[] = [
+                "name" => $name,
+                "rows" =>
+                    isset($row["TABLE_ROWS"]) && is_numeric($row["TABLE_ROWS"])
+                        ? (int) $row["TABLE_ROWS"]
+                        : null,
+                "data_bytes" =>
+                    isset($row["DATA_LENGTH"]) && is_numeric($row["DATA_LENGTH"])
+                        ? (int) $row["DATA_LENGTH"]
+                        : null,
+                "index_bytes" =>
+                    isset($row["INDEX_LENGTH"]) && is_numeric($row["INDEX_LENGTH"])
+                        ? (int) $row["INDEX_LENGTH"]
+                        : null,
+                "engine" => $row["ENGINE"] ?? null,
+                "collation" => $row["TABLE_COLLATION"] ?? null,
+            ];
+            $last_table = $name;
+            $tables_processed++;
+            if (
+                isset($row["TABLE_ROWS"]) &&
+                is_numeric($row["TABLE_ROWS"])
+            ) {
+                $rows_estimated += (int) $row["TABLE_ROWS"];
+            }
+        }
+
+        $payload = json_encode($tables);
+        $cursor_json = json_encode([
+            "phase" => "tables",
+            "last_table" => $last_table,
+        ]);
+
+        $gz->write("--{$boundary}\r\n");
+        $gz->write("Content-Type: application/json\r\n");
+        $gz->write("Content-Length: " . strlen($payload) . "\r\n");
+        $gz->write("X-Chunk-Type: table_stats\r\n");
+        $gz->write("X-Tables: " . count($tables) . "\r\n");
+        $gz->write("X-Cursor: " . base64_encode($cursor_json) . "\r\n");
+        $gz->write("\r\n");
+        $gz->write($payload);
+        $gz->write("\r\n");
+        $gz->flush();
+
+        if (count($rows) < $tables_per_batch) {
+            $status = "complete";
+            break;
+        }
+    }
+
+    $gz->write("--{$boundary}\r\n");
+    $gz->write("Content-Type: application/octet-stream\r\n");
+    $gz->write("Content-Length: 0\r\n");
+    $gz->write("X-Chunk-Type: completion\r\n");
+    $gz->write("X-Status: {$status}\r\n");
+    $gz->write("X-Tables-Processed: {$tables_processed}\r\n");
+    $gz->write("X-Rows-Estimated: {$rows_estimated}\r\n");
+    $gz->write("X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n");
+    $gz->write("X-Memory-Limit: " . $max_memory . "\r\n");
+    $gz->write("X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n");
+    $gz->write("\r\n");
+    $gz->write("\r\n");
+
+    $gz->write("--{$boundary}--\r\n");
+    $gz->finish();
+
+    return [
+        "status" => $status,
+        "stats" => [
+            "tables_processed" => $tables_processed,
+            "rows_estimated" => $rows_estimated,
+            "memory_used" => memory_get_peak_usage(true),
+            "time_elapsed" => microtime(true) - $script_start,
+        ],
+    ];
+}
+
+/**
  * Resolve and validate directories from config.
  */
 function resolve_directories(array $config): array
@@ -625,6 +835,235 @@ function resolve_directories(array $config): array
     }
 
     return $directories;
+}
+
+/**
+ * Endpoint: Lightweight preflight checks and runtime info.
+ *
+ * Confirms filesystem accessibility and basic DB connectivity, and reports
+ * environment details useful for diagnostics. This endpoint avoids heavy work.
+ *
+ * @param array $config Configuration with directory and optional DB overrides.
+ * @return array Result with status and stats.
+ */
+function endpoint_preflight(array $config): array
+{
+    $directories = [];
+    $dir_error = null;
+    try {
+        $directories = resolve_directories($config);
+    } catch (Exception $e) {
+        $dir_error = $e->getMessage();
+    }
+
+    $dir_checks = [];
+    if (!empty($directories)) {
+        foreach ($directories as $dir) {
+            $exists = is_dir($dir);
+            $readable = $exists && is_readable($dir);
+            $openable = false;
+            if ($readable) {
+                $dh = @opendir($dir);
+                if ($dh !== false) {
+                    $openable = true;
+                    // Touch one entry to confirm traversal without scanning.
+                    @readdir($dh);
+                    closedir($dh);
+                }
+            }
+            $dir_checks[] = [
+                "path" => $dir,
+                "exists" => $exists,
+                "readable" => $readable,
+                "openable" => $openable,
+            ];
+        }
+    }
+
+    $filesystem_ok = true;
+    if ($dir_error !== null || empty($dir_checks)) {
+        $filesystem_ok = false;
+    } else {
+        foreach ($dir_checks as $check) {
+            if (empty($check["openable"])) {
+                $filesystem_ok = false;
+                break;
+            }
+        }
+    }
+
+    $memory_limit_raw = ini_get("memory_limit");
+    $memory_limit_bytes = null;
+    if ($memory_limit_raw !== false && $memory_limit_raw !== "") {
+        if ($memory_limit_raw === "-1") {
+            $memory_limit_bytes = PHP_INT_MAX;
+        } else {
+            $memory_limit_bytes = parse_memory_limit($memory_limit_raw);
+        }
+    }
+    $memory_used = memory_get_usage(true);
+    $memory_available =
+        $memory_limit_bytes !== null && $memory_limit_bytes !== PHP_INT_MAX
+            ? max(0, $memory_limit_bytes - $memory_used)
+            : null;
+
+    $db = [
+        "credentials_found" => false,
+        "connected" => false,
+        "can_query" => false,
+        "version" => null,
+        "db_charset" => null,
+        "db_collation" => null,
+        "server_charset" => null,
+        "server_collation" => null,
+        "table_listable" => null,
+        "table_list_error" => null,
+        "error" => null,
+    ];
+
+    $db_host =
+        $config["db_host"] ??
+        (defined("DB_HOST") ? DB_HOST : getenv("DB_HOST"));
+    $db_name =
+        $config["db_name"] ??
+        (defined("DB_NAME") ? DB_NAME : getenv("DB_NAME"));
+    $db_user =
+        $config["db_user"] ??
+        (defined("DB_USER") ? DB_USER : getenv("DB_USER"));
+    $db_password =
+        $config["db_password"] ??
+        (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
+
+    $missing = [];
+    if (!$db_host) {
+        $missing[] = "db_host";
+    }
+    if (!$db_name) {
+        $missing[] = "db_name";
+    }
+    if (!$db_user) {
+        $missing[] = "db_user";
+    }
+    if ($db_password === false || $db_password === null || $db_password === "") {
+        $missing[] = "db_password";
+    }
+
+    if (!empty($missing) && !empty($directories)) {
+        $wp_credentials = extract_db_credentials_from_wp_config($directories);
+        if ($wp_credentials !== null) {
+            $db_host = $db_host ?: $wp_credentials["db_host"];
+            $db_name = $db_name ?: $wp_credentials["db_name"];
+            $db_user = $db_user ?: $wp_credentials["db_user"];
+            $db_password =
+                ($db_password !== false && $db_password !== null && $db_password !== "")
+                    ? $db_password
+                    : $wp_credentials["db_password"];
+            $missing = [];
+            if (!$db_host) {
+                $missing[] = "db_host";
+            }
+            if (!$db_name) {
+                $missing[] = "db_name";
+            }
+            if (!$db_user) {
+                $missing[] = "db_user";
+            }
+            if ($db_password === false || $db_password === null || $db_password === "") {
+                $missing[] = "db_password";
+            }
+        }
+    }
+
+    if (empty($missing)) {
+        $db["credentials_found"] = true;
+        if (!extension_loaded("pdo_mysql")) {
+            $db["error"] = "pdo_mysql extension not loaded";
+        } else {
+            try {
+                $mysql = new PDO(
+                    "mysql:host={$db_host};dbname={$db_name};charset=utf8mb4",
+                    $db_user,
+                    $db_password,
+                    [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
+                );
+                $db["connected"] = true;
+
+                $version = $mysql->query("SELECT VERSION()")->fetchColumn();
+                $db["version"] = $version !== false ? (string) $version : null;
+                $db["can_query"] = true;
+
+                $vars = $mysql
+                    ->query(
+                        "SELECT @@character_set_database AS db_charset, " .
+                            "@@collation_database AS db_collation, " .
+                            "@@character_set_server AS server_charset, " .
+                            "@@collation_server AS server_collation",
+                    )
+                    ->fetch(PDO::FETCH_ASSOC);
+                if (is_array($vars)) {
+                    $db["db_charset"] = $vars["db_charset"] ?? null;
+                    $db["db_collation"] = $vars["db_collation"] ?? null;
+                    $db["server_charset"] = $vars["server_charset"] ?? null;
+                    $db["server_collation"] = $vars["server_collation"] ?? null;
+                }
+
+                try {
+                    $stmt = $mysql->query("SHOW TABLES");
+                    if ($stmt !== false) {
+                        $first = $stmt->fetchColumn();
+                        $db["table_listable"] = true;
+                        $db["table_list_error"] = null;
+                    } else {
+                        $db["table_listable"] = false;
+                        $db["table_list_error"] = "SHOW TABLES failed";
+                    }
+                } catch (Exception $e) {
+                    $db["table_listable"] = false;
+                    $db["table_list_error"] = $e->getMessage();
+                }
+            } catch (Exception $e) {
+                $db["error"] = $e->getMessage();
+            }
+        }
+    } else {
+        $db["error"] = "Database credentials not found";
+        $db["missing"] = $missing;
+    }
+
+    $response = [
+        "ok" => $filesystem_ok && (!empty($db["credentials_found"]) ? !empty($db["connected"]) : false),
+        "timestamp" => time(),
+        "php" => [
+            "version" => PHP_VERSION,
+            "sapi" => php_sapi_name(),
+        ],
+        "limits" => [
+            "ini_max_execution_time" => (int) ini_get("max_execution_time"),
+            "ini_max_input_time" => (int) ini_get("max_input_time"),
+            "ini_default_socket_timeout" => (int) ini_get("default_socket_timeout"),
+            "open_basedir" => ini_get("open_basedir") ?: null,
+        ],
+        "memory" => [
+            "limit_raw" => $memory_limit_raw !== false ? $memory_limit_raw : null,
+            "limit_bytes" => $memory_limit_bytes,
+            "used_bytes" => $memory_used,
+            "available_bytes" => $memory_available,
+        ],
+        "filesystem" => [
+            "directories" => $dir_checks,
+            "error" => $dir_error,
+            "ok" => $filesystem_ok,
+        ],
+        "database" => $db,
+    ];
+
+    header("Content-Type: application/json");
+    echo json_encode($response);
+
+    return [
+        "status" => $response["ok"] ? "ok" : "error",
+        "stats" => $response,
+    ];
 }
 
 /**
@@ -1386,7 +1825,7 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
         if (!$endpoint) {
             throw new InvalidArgumentException(
                 "endpoint parameter is required. " .
-                    "Valid endpoints: 'file_stream', 'file_index', 'file_fetch', 'sql_chunk'",
+                    "Valid endpoints: 'file_stream', 'file_index', 'file_fetch', 'sql_chunk', 'sql_preflight', 'preflight'",
             );
         }
 
@@ -1458,11 +1897,23 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
                     $memory_threshold,
                 );
                 break;
+            case "sql_preflight":
+                $result = endpoint_sql_preflight(
+                    $config,
+                    $script_start,
+                    $max_execution_time,
+                    $max_memory,
+                    $memory_threshold,
+                );
+                break;
+            case "preflight":
+                $result = endpoint_preflight($config);
+                break;
 
             default:
                 throw new InvalidArgumentException(
                     "Invalid endpoint: '{$endpoint}'. " .
-                        "Valid endpoints: 'file_stream', 'file_index', 'file_fetch', 'sql_chunk'",
+                        "Valid endpoints: 'file_stream', 'file_index', 'file_fetch', 'sql_chunk', 'sql_preflight', 'preflight'",
                 );
         }
     } catch (Exception $e) {
@@ -1513,6 +1964,7 @@ function parse_http_config(): array
                 "fragments_per_batch",
                 "batch_size",
                 "db_query_time_limit",
+                "tables_per_batch",
             ])
         ) {
             $value = (int) $value;

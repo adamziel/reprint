@@ -427,7 +427,7 @@ class AdaptiveTuner
             "db_query_time_limit" => 0,
         ];
 
-        $config = array_merge($defaults, $config);
+        $config = array_merge($defaults, array_intersect_key($config, $defaults));
         $config["enabled"] = (bool) $config["enabled"];
         $config["use_server_time"] = (bool) $config["use_server_time"];
         $config["max_execution_time"] = max(
@@ -1386,7 +1386,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync-initial, files-sync-delta, sql-sync",
+                "Command is required. Valid commands: files-sync-initial, files-sync-delta, sql-sync, sql-preflight",
             );
         }
 
@@ -1395,15 +1395,17 @@ class ImportClient
                 "files-sync-initial",
                 "files-sync-delta",
                 "sql-sync",
+                "sql-preflight",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, sql-sync",
+                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, sql-sync, sql-preflight",
             );
         }
 
         $this->state = $this->load_state();
         $this->initialize_tuner($options);
+        $this->run_preflight();
 
         // Dispatch to appropriate command handler
         try {
@@ -1418,6 +1420,9 @@ class ImportClient
 
                 case "sql-sync":
                     $this->run_sql_sync($restart);
+                    break;
+                case "sql-preflight":
+                    $this->run_sql_preflight($restart);
                     break;
             }
 
@@ -1450,6 +1455,35 @@ class ImportClient
 
         $this->audit_log(
             "TUNER CONFIG | " . json_encode($this->state["tuning"]["config"]),
+            false,
+        );
+    }
+
+    /**
+     * Run a cheap preflight check to record exporter environment details.
+     */
+    private function run_preflight(): void
+    {
+        $url = $this->build_url("preflight", null, [], null);
+        $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
+
+        $result = $this->fetch_json($url);
+        $payload = $result["json"] ?? null;
+
+        $entry = [
+            "timestamp" => time(),
+            "http_code" => (int) ($result["http_code"] ?? 0),
+            "elapsed" => (float) ($result["elapsed"] ?? 0),
+            "ok" => is_array($payload) ? ($payload["ok"] ?? null) : null,
+            "data" => $payload,
+            "error" => $result["error"] ?? null,
+        ];
+
+        $this->state["preflight"] = $entry;
+        $this->save_state($this->state);
+
+        $this->audit_log(
+            "PREFLIGHT RESULT | " . json_encode($entry),
             false,
         );
     }
@@ -2063,6 +2097,108 @@ class ImportClient
         if (!$this->verbose_mode) {
             echo "sql-sync complete\n";
             echo "SQL file: {$sql_file}\n";
+            echo "Audit log: {$this->audit_log}\n";
+        }
+    }
+
+    /**
+     * Command: sql-preflight
+     *
+     * Streams table metadata (name/rows/size) for planning and diagnostics.
+     */
+    private function run_sql_preflight(bool $restart): void
+    {
+        $state_command = $this->state["command"] ?? null;
+        $tables_file = $this->local_path . "/db-tables.jsonl";
+
+        $has_cursor =
+            $state_command === "sql-preflight" &&
+            !empty($this->state["cursor"] ?? null);
+        $current_status =
+            $state_command === "sql-preflight"
+                ? $this->state["status"] ?? null
+                : null;
+        $tables_exists = file_exists($tables_file);
+
+        if ($restart) {
+            $this->audit_log(
+                "RESTART | Clearing sql-preflight state and starting fresh",
+                true,
+            );
+            $this->state = $this->default_state();
+            $this->save_state($this->state);
+            $has_cursor = false;
+            $current_status = null;
+
+            if ($tables_exists) {
+                unlink($tables_file);
+                $this->audit_log(
+                    "FILE DELETE | {$tables_file} | restart sql-preflight",
+                );
+                $tables_exists = false;
+            }
+        }
+
+        if ($current_status === "complete") {
+            if ($tables_exists && !$restart) {
+                throw new RuntimeException(
+                    "sql-preflight already completed and db-tables.jsonl exists. Use --restart flag to start over.",
+                );
+            } elseif (!$tables_exists && !$restart) {
+                throw new RuntimeException(
+                    "sql-preflight marked complete but db-tables.jsonl is missing. Use --restart flag to re-run.",
+                );
+            }
+        }
+
+        if (!$has_cursor) {
+            $this->state["command"] = "sql-preflight";
+            $this->state["status"] = "in_progress";
+            $this->state["cursor"] = null;
+            $this->state["stage"] = null;
+            $this->state["diff"] = $this->default_state()["diff"];
+            $this->state["sql_preflight"] = $this->default_state()["sql_preflight"];
+            $this->save_state($this->state);
+
+            $this->audit_log("START sql-preflight", true);
+            if (!$this->verbose_mode) {
+                echo "Starting sql-preflight\n";
+            }
+        } else {
+            $this->audit_log(
+                sprintf(
+                    "RESUME sql-preflight | cursor=%s",
+                    substr($this->state["cursor"], 0, 20) . "...",
+                ),
+                true,
+            );
+            if (!$this->verbose_mode) {
+                echo "Resuming sql-preflight\n";
+            }
+        }
+
+        $this->state["command"] = "sql-preflight";
+        $this->save_state($this->state);
+
+        $this->output_progress([
+            "status" => "starting",
+            "phase" => "sql-preflight",
+        ]);
+
+        $this->download_sql_preflight();
+
+        $this->state["status"] = "complete";
+        $this->save_state($this->state);
+
+        $tables = (int) ($this->state["sql_preflight"]["tables"] ?? 0);
+        $this->audit_log(
+            sprintf("sql-preflight complete: %d tables", $tables),
+            true,
+        );
+
+        if (!$this->verbose_mode) {
+            echo "sql-preflight complete: {$tables} tables\n";
+            echo "Table stats: {$tables_file}\n";
             echo "Audit log: {$this->audit_log}\n";
         }
     }
@@ -3056,7 +3192,7 @@ class ImportClient
                             true,
                         );
                     } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "sql", $context);
+                        $this->handle_error_chunk($chunk, "sql-preflight", $context);
                     }
                 };
 
@@ -3078,6 +3214,167 @@ class ImportClient
             }
         } finally {
             fclose($sql_handle);
+        }
+    }
+
+    /**
+     * Download table stats from the sql_preflight endpoint.
+     */
+    private function download_sql_preflight(): void
+    {
+        $cursor = $this->state["cursor"] ?? null;
+        $complete = false;
+        $tables_file = $this->local_path . "/db-tables.jsonl";
+
+        $stats = $this->state["sql_preflight"] ?? [];
+        $tables_written = (int) ($stats["tables"] ?? 0);
+        $rows_estimated = (int) ($stats["rows_estimated"] ?? 0);
+        $bytes_written = (int) ($stats["bytes"] ?? 0);
+
+        if ($bytes_written > 0 && file_exists($tables_file)) {
+            $actual_size = filesize($tables_file);
+            if ($actual_size > $bytes_written) {
+                $this->audit_log(
+                    sprintf(
+                        "CRASH RECOVERY | Truncating db-tables.jsonl from %d to %d bytes",
+                        $actual_size,
+                        $bytes_written,
+                    ),
+                    true,
+                );
+                $handle = fopen($tables_file, "r+");
+                if ($handle) {
+                    ftruncate($handle, $bytes_written);
+                    fclose($handle);
+                }
+            }
+        }
+
+        $handle = fopen($tables_file, $cursor ? "a" : "w");
+        if (!$handle) {
+            throw new RuntimeException("Cannot open table stats file: {$tables_file}");
+        }
+
+        try {
+            while (!$complete) {
+                $params = [
+                    "tables_per_batch" => 1000,
+                ];
+                $url = $this->build_url("sql_preflight", $cursor, $params, null);
+
+                $context = new StreamingContext();
+                $context->on_chunk = function ($chunk) use (
+                    &$cursor,
+                    &$complete,
+                    &$tables_written,
+                    &$rows_estimated,
+                    &$bytes_written,
+                    $handle,
+                    $context,
+                ) {
+                    if ($this->shutdown_requested) {
+                        throw new RuntimeException("Shutdown requested");
+                    }
+                    if (function_exists("pcntl_signal_dispatch")) {
+                        pcntl_signal_dispatch();
+                    }
+
+                    $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
+
+                    $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+                    if ($chunk_type === "table_stats") {
+                        $data = json_decode($chunk["body"], true);
+                        if (is_array($data)) {
+                            foreach ($data as $row) {
+                                $line = json_encode($row) . "\n";
+                                $bytes = fwrite($handle, $line);
+                                if ($bytes !== false) {
+                                    $bytes_written += $bytes;
+                                }
+                                $tables_written++;
+                                if (
+                                    isset($row["rows"]) &&
+                                    is_numeric($row["rows"])
+                                ) {
+                                    $rows_estimated += (int) $row["rows"];
+                                }
+                            }
+                        }
+                    } elseif ($chunk_type === "progress") {
+                        $this->handle_progress($chunk, "sql-preflight");
+                    } elseif ($chunk_type === "completion") {
+                        $complete =
+                            ($chunk["headers"]["x-status"] ?? "") ===
+                            "complete";
+                        $context->saw_completion = true;
+                        $context->response_stats = [
+                            "status" => $chunk["headers"]["x-status"] ?? null,
+                            "tables_processed" =>
+                                isset($chunk["headers"]["x-tables-processed"])
+                                    ? (int) $chunk["headers"]["x-tables-processed"]
+                                    : null,
+                            "rows_estimated" =>
+                                isset($chunk["headers"]["x-rows-estimated"])
+                                    ? (int) $chunk["headers"]["x-rows-estimated"]
+                                    : null,
+                            "server_time" =>
+                                isset($chunk["headers"]["x-time-elapsed"])
+                                    ? (float) $chunk["headers"]["x-time-elapsed"]
+                                    : null,
+                            "memory_used" =>
+                                isset($chunk["headers"]["x-memory-used"])
+                                    ? (int) $chunk["headers"]["x-memory-used"]
+                                    : null,
+                            "memory_limit" =>
+                                isset($chunk["headers"]["x-memory-limit"])
+                                    ? (int) $chunk["headers"]["x-memory-limit"]
+                                    : null,
+                        ];
+                        $this->output_progress(
+                            [
+                                "phase" => "sql-preflight",
+                                "status" =>
+                                    $chunk["headers"]["x-status"] ?? "unknown",
+                                "tables_processed" =>
+                                    (int) ($chunk["headers"][
+                                        "x-tables-processed"
+                                    ] ?? 0),
+                            ],
+                            true,
+                        );
+                    } elseif ($chunk_type === "error") {
+                        $this->handle_error_chunk($chunk, "sql", $context);
+                    }
+                };
+
+                $request_start = microtime(true);
+                $this->fetch_streaming(
+                    $url,
+                    $cursor,
+                    $context,
+                    null,
+                    "sql_preflight",
+                );
+                $wall_time = microtime(true) - $request_start;
+                $this->finalize_tuned_request(
+                    "sql_preflight",
+                    $wall_time,
+                    $context->response_stats ?? [],
+                );
+
+                fflush($handle);
+                $this->state["cursor"] = $cursor;
+                $this->state["sql_preflight"] = [
+                    "file" => $tables_file,
+                    "tables" => $tables_written,
+                    "rows_estimated" => $rows_estimated,
+                    "bytes" => $bytes_written,
+                    "updated_at" => time(),
+                ];
+                $this->save_state($this->state);
+            }
+        } finally {
+            fclose($handle);
         }
     }
 
@@ -3562,6 +3859,88 @@ class ImportClient
     }
 
     /**
+     * Fetch a JSON response for a lightweight request (non-streaming).
+     */
+    private function fetch_json(string $url): array
+    {
+        $this->last_http_code = null;
+        $this->last_curl_errno = null;
+        $this->last_curl_timeout = false;
+
+        $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
+
+        $ch = curl_init($url);
+        $this->current_curl_handle = $ch;
+
+        $headers = [
+            "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept: application/json",
+            "Accept-Language: en-US,en;q=0.9",
+            "Accept-Encoding: gzip, deflate, br",
+            "Cache-Control: no-cache",
+            "Pragma: no-cache",
+            "Connection: keep-alive",
+        ];
+
+        curl_setopt_array($ch, [
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_ENCODING => "",
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_RETURNTRANSFER => true,
+        ]);
+
+        $start = microtime(true);
+        $body = curl_exec($ch);
+        $elapsed = microtime(true) - $start;
+
+        if (curl_errno($ch)) {
+            $errno = curl_errno($ch);
+            $error = curl_error($ch);
+            $timeout_errno = defined("CURLE_OPERATION_TIMEDOUT")
+                ? CURLE_OPERATION_TIMEDOUT
+                : 28;
+            $this->last_curl_errno = $errno;
+            $this->last_curl_timeout = $errno === $timeout_errno;
+            curl_close($ch);
+            $this->current_curl_handle = null;
+            return [
+                "ok" => false,
+                "http_code" => 0,
+                "elapsed" => $elapsed,
+                "body" => null,
+                "json" => null,
+                "error" => "cURL error: {$error}",
+                "curl_errno" => $errno,
+                "timeout" => $this->last_curl_timeout,
+            ];
+        }
+
+        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $this->last_http_code = $http_code;
+        curl_close($ch);
+        $this->current_curl_handle = null;
+
+        $json = null;
+        $json_error = null;
+        if ($body !== false && $body !== "") {
+            $json = json_decode($body, true);
+            if ($json === null && json_last_error() !== JSON_ERROR_NONE) {
+                $json_error = "Invalid JSON: " . json_last_error_msg();
+            }
+        }
+
+        return [
+            "ok" => $json_error === null,
+            "http_code" => $http_code,
+            "elapsed" => $elapsed,
+            "body" => $body,
+            "json" => $json,
+            "error" => $json_error,
+        ];
+    }
+
+    /**
      * Fetch URL with streaming multipart parsing.
      */
     private function fetch_streaming(
@@ -3968,6 +4347,14 @@ class ImportClient
             "status" => null,
             "cursor" => null,
             "stage" => null,
+            "preflight" => null,
+            "sql_preflight" => [
+                "file" => null,
+                "tables" => 0,
+                "rows_estimated" => 0,
+                "bytes" => 0,
+                "updated_at" => null,
+            ],
             "diff" => [
                 "remote_offset" => 0,
                 "local_after" => null,
@@ -4007,6 +4394,19 @@ class ImportClient
         $tuning = array_intersect_key($tuning, $defaults["tuning"]);
         $tuning = array_merge($defaults["tuning"], $tuning);
         $state["tuning"] = $tuning;
+        $sql_preflight = $state["sql_preflight"] ?? [];
+        if (!is_array($sql_preflight)) {
+            $sql_preflight = [];
+        }
+        $sql_preflight = array_intersect_key(
+            $sql_preflight,
+            $defaults["sql_preflight"],
+        );
+        $sql_preflight = array_merge(
+            $defaults["sql_preflight"],
+            $sql_preflight,
+        );
+        $state["sql_preflight"] = $sql_preflight;
         return $state;
     }
 
@@ -4243,6 +4643,11 @@ if (
         echo "                       - If in progress: resumes from cursor\n";
         echo "                       - If complete: requires --restart flag\n";
         echo "\n";
+        echo "  sql-preflight        Fetch table stats (name/rows/size)\n";
+        echo "                       - Streams table metadata to db-tables.jsonl\n";
+        echo "                       - If in progress: resumes from cursor\n";
+        echo "                       - If complete: requires --restart flag\n";
+        echo "\n";
         echo "Options:\n";
         echo "  --restart        Force restart of completed command (clears state)\n";
         echo "  --verbose, -v    Show detailed logs (default: show progress only)\n";
@@ -4322,7 +4727,7 @@ if (
         fwrite(STDERR, "Error: Command is required\n");
         fwrite(
             STDERR,
-            "Valid commands: files-sync-initial, files-sync-delta, sql-sync\n",
+            "Valid commands: files-sync-initial, files-sync-delta, sql-sync, sql-preflight\n",
         );
         exit(1);
     }

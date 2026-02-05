@@ -115,6 +115,10 @@ sizes. Any non-2xx/3xx response or timeout triggers error backoff and an immedia
 duty-cycle sleep (with jitter) spaces requests so we don’t monopolize PHP workers or synchronize multiple
 migrations on the same host.
 
+At the start of each run the importer performs a cheap preflight request. It records PHP and MySQL versions,
+memory limits, filesystem accessibility, and database charset/collation in the audit log and state file so
+we have context when debugging slow hosts or permission issues.
+
 What we **don't** do:
 
 * Use usleep on the exporting side. We could spread the CPU usage over time with something
@@ -134,9 +138,7 @@ What we **don't** do:
 
 ### Todos
 
-* Pre-flight request to
-  * Confirm the host is able to export the site
-  * Get runtime details so the importing side may decide if it's capable of importing the site.
+* In export.php, require `wp-load.php` if we cannot cheaply connect to MySQL using the database credentials from the wp-config.php file.
 * Account for the disk space limits for files and for MySQL data on the migration target.
 * Account for 3xx errors
 * Handle every single possible error case, e.g. fread() returning false prematurely etc.
@@ -146,6 +148,9 @@ What we **don't** do:
 * If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
 * Take note of any files modified while they were streamed, re-request them later on.
    * Tell the user when a file is too volatile to be synchronized
+✅ Pre-flight request to
+  ✅ Confirm the host is able to export the site
+  ✅ Get runtime details so the importing side may decide if it's capable of importing the site.
 ✅ Auto-constraining resource usage
 ✅ Handle 4xx and 5xx errors, support backoff strategies.
     How do we choose resource budgets for each host / runtime?
@@ -170,6 +175,7 @@ What we **don't** do:
 
 **Out of scope for this initial version**
 
+* Sites using multiple databases (either multiple MySQL instances or also Postgres, Redis, etc.)
 * When we're starting the import and we have access to local MySQL, detect our local `current_statement_size` and `max_allowed_packet` and send that
   over to the remote host to get an appropriately-chunked dump. Alternatively, if we ever need to store the dump now and execute it later, we could
   bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and
