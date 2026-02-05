@@ -318,69 +318,78 @@ class MultipartStreamParser
 /**
  * AdaptiveTuner
  *
- * Purpose:
- * - Keep each request within a target server-runtime budget while avoiding
- *   resource spikes on low-end hosts and still scaling up on fast hosts.
- * - Tune per-endpoint (files, index, SQL) using measured throughput on the
- *   exporting server, not client download time.
+ * The tuner makes each request do a safe amount of work for the host it is
+ * running on. It uses the server's own reported runtime together with how
+ * much work was actually completed in that request. This keeps the logic
+ * grounded in what the exporter experienced, not what the client observed.
  *
- * Core behavior:
- * - Measures work_done per request (bytes for file stream, entries for index,
- *   SQL bytes for SQL dump) and uses X-Time-Elapsed from the server to compute
- *   throughput.
- * - Maintains an EMA of throughput per endpoint to smooth noise.
- * - Computes target_work = throughput_ema * target_time * headroom, then scales
- *   next request size by target_work / work_done, clamped by scale_min/scale_max.
- * - By default, only tunes on partial responses to avoid tiny final batches
- *   skewing the signal (tune_only_partial).
- * - Optional duty-cycle sleep keeps overall request rate controlled without
- *   holding PHP workers on the server (sleep happens client-side).
- * - Detects likely response buffering by comparing client TTFB to server runtime.
- *   If buffering is likely, it temporarily reduces target time to keep responses
- *   small (buffered_mode with cooldown).
+ * Each endpoint is treated separately because files, index scans, and SQL
+ * dumps stress the system in different ways. The tuner learns a stable
+ * throughput for each type of request and sizes the next request to fit a
+ * target runtime window. It intentionally avoids using the last, tiny batch
+ * as a signal, and it backs off more aggressively when the host looks slow or
+ * when responses appear to be buffered instead of streamed.
  *
- * Parameters (config keys):
- * - enabled: Master toggle for tuning.
- * - use_server_time: Use server-reported elapsed time (recommended).
- * - target_time: Baseline target runtime (seconds) for all endpoints.
- * - target_time_file: Target runtime for file streaming (seconds).
- * - target_time_index: Target runtime for index streaming (seconds).
- * - target_time_sql: Target runtime for SQL dumping (seconds).
- * - max_execution_time: Sent to export.php for server-side time budgeting.
- * - memory_threshold: Sent to export.php for server-side memory budgeting.
- * - duty: Desired client duty cycle (work vs sleep), 0-1.
- * - duty_min: Minimum duty cycle allowed.
- * - duty_max: Maximum duty cycle allowed.
- * - min_sleep: Minimum client sleep between requests (seconds).
- * - max_sleep: Maximum client sleep between requests (seconds).
- * - throughput_ema_alpha: EMA smoothing factor for throughput (0-1).
- * - throughput_headroom: Safety margin below measured throughput (0-1).
- * - scale_min: Min scale per request (prevents huge drops).
- * - scale_max: Max scale per request (prevents huge jumps).
- * - tune_only_partial: Only tune on partial responses (default true).
- * - file_chunk_start/min/max: File chunk size bounds (bytes).
- * - index_batch_start/min/max: Index batch size bounds (entries).
- * - sql_fragments_start/min/max: SQL fragments per request bounds (count).
- * - db_unbuffered: Ask export.php to use unbuffered MySQL queries.
- * - db_query_time_limit: MySQL MAX_EXECUTION_TIME for SELECT (ms), if supported.
- * - buffered_ratio_threshold: TTFB/server_time ratio to flag buffering.
- * - buffered_min_server_time: Minimum server_time before buffering heuristic applies.
- * - buffered_target_time_factor: Multiplier applied to target_time in buffered mode.
- * - buffered_cooldown: Requests to keep buffered mode after detection.
- * - error_backoff_requests: Requests to stay in error-backoff mode after 429/503/timeout.
- * - error_target_time_factor: Multiplier applied to target_time during error backoff.
- * - error_force_scale_min: Force scale_min while error backoff is active.
- * - slow_host_threshold: Buffered detections before enabling slow-host caps.
- * - slow_host_file_chunk_max: Max file chunk size in slow-host mode.
- * - slow_host_index_batch_max: Max index batch size in slow-host mode.
- * - slow_host_sql_fragments_max: Max SQL fragments per request in slow-host mode.
- * - sleep_jitter: Fractional jitter applied to client sleep.
+ * When errors happen or buffering persists, the tuner shifts into more
+ * conservative modes that clamp maximum sizes and introduce extra spacing
+ * between requests. All of this happens on the client side so PHP workers on
+ * the host are not held open longer than necessary.
  */
 class AdaptiveTuner
 {
     private array $config;
     private array $state;
 
+    /**
+     * @param array $config {
+     *     Optional. An array of arguments.
+     *
+     *     @type bool       $enabled                  Enable adaptive tuning. Default true.
+     *     @type bool       $use_server_time           Prefer server-reported runtime. Default true.
+     *     @type float|null $target_time               Baseline target time (seconds). Default null (computed).
+     *     @type float|null $target_time_file          Target time for file streaming. Default null.
+     *     @type float|null $target_time_index         Target time for index streaming. Default null.
+     *     @type float|null $target_time_sql           Target time for SQL dumping. Default null.
+     *     @type int        $max_execution_time        Sent to export.php (seconds). Default 5.
+     *     @type float      $memory_threshold          Sent to export.php (0-1). Default 0.8.
+     *     @type float      $duty                      Desired duty cycle (0-1). Default 0.5.
+     *     @type float      $duty_min                  Minimum duty cycle. Default 0.35.
+     *     @type float      $duty_max                  Maximum duty cycle. Default 1.0.
+     *     @type float      $min_sleep                 Minimum sleep (seconds). Default 0.2.
+     *     @type float      $max_sleep                 Maximum sleep (seconds). Default 10.0.
+     *     @type float      $throughput_ema_alpha      EMA smoothing factor. Default 0.2.
+     *     @type float      $throughput_headroom       Safety headroom (0-1). Default 0.9.
+     *     @type float      $scale_min                 Min scale per request. Default 0.5.
+     *     @type float      $scale_max                 Max scale per request. Default 1.5.
+     *     @type bool       $tune_only_partial         Tune only on partial responses. Default true.
+     *     @type float      $buffered_ratio_threshold  TTFB/server_time ratio for buffering. Default 0.85.
+     *     @type float      $buffered_min_server_time  Minimum server_time to apply heuristic. Default 0.5.
+     *     @type float      $buffered_target_time_factor
+     *         Target-time multiplier in buffered mode. Default 0.5.
+     *     @type int        $buffered_cooldown         Requests to keep buffered mode. Default 3.
+     *     @type int        $error_backoff_requests    Requests to stay in error backoff. Default 3.
+     *     @type float      $error_target_time_factor  Target-time multiplier during error backoff. Default 0.5.
+     *     @type bool       $error_force_scale_min     Force scale_min in error backoff. Default true.
+     *     @type int        $slow_host_threshold       Buffered detections before slow-host mode. Default 3.
+     *     @type int        $slow_host_file_chunk_max  Max file chunk in slow-host mode. Default 2097152.
+     *     @type int        $slow_host_index_batch_max Max index batch in slow-host mode. Default 5000.
+     *     @type int        $slow_host_sql_fragments_max
+     *         Max SQL fragments in slow-host mode. Default 1000.
+     *     @type float      $sleep_jitter              Sleep jitter fraction (0-0.5). Default 0.1.
+     *     @type int        $file_chunk_start          Initial file chunk size. Default 5242880.
+     *     @type int        $file_chunk_min            Min file chunk size. Default 262144.
+     *     @type int        $file_chunk_max            Max file chunk size. Default 16777216.
+     *     @type int        $index_batch_start         Initial index batch size. Default 5000.
+     *     @type int        $index_batch_min           Min index batch size. Default 500.
+     *     @type int        $index_batch_max           Max index batch size. Default 50000.
+     *     @type int        $sql_fragments_start       Initial SQL fragments per request. Default 1000.
+     *     @type int        $sql_fragments_min         Min SQL fragments per request. Default 100.
+     *     @type int        $sql_fragments_max         Max SQL fragments per request. Default 5000.
+     *     @type bool       $db_unbuffered             Use unbuffered MySQL queries. Default false.
+     *     @type int        $db_query_time_limit       MySQL MAX_EXECUTION_TIME (ms). Default 0.
+     * }
+     * @param array $state Persisted tuner state (sizes, EMA values, modes).
+     */
     public function __construct(array $config, array $state = [])
     {
         $defaults = [
@@ -628,24 +637,50 @@ class AdaptiveTuner
         );
     }
 
+    /**
+     * Return the current config after defaults and clamps have been applied.
+     *
+     * This is useful for audit logs and for persisting the tuned configuration
+     * alongside the import state.
+     *
+     * @return array Normalized tuning configuration.
+     */
     public function get_config(): array
     {
         return $this->config;
     }
 
+    /**
+     * Return the current tuner state (sizes, EMA values, and modes).
+     *
+     * This is the mutable state that gets persisted between runs.
+     *
+     * @return array Current tuner state.
+     */
     public function get_state(): array
     {
         return $this->state;
     }
 
+    /**
+     * Build request parameters for a specific endpoint.
+     *
+     * This applies clamped sizes and slow-host caps, and injects any DB options
+     * required by the export endpoint.
+     *
+     * @param string $endpoint Endpoint name: file_stream, file_fetch, file_index, sql_chunk.
+     * @return array Query parameters to send to export.php.
+     */
     public function get_request_params(string $endpoint): array
     {
+        // Section: base limits shared by all endpoints.
         $params = [
             "max_execution_time" => $this->config["max_execution_time"],
             "memory_threshold" => $this->config["memory_threshold"],
         ];
 
         if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
+            // Section: file streaming sizes (bytes).
             $size_key = "file_chunk_size";
             $size = (int) $this->state[$size_key];
             $size = $this->clamp_int(
@@ -656,6 +691,7 @@ class AdaptiveTuner
             $this->state[$size_key] = $size;
             $params["chunk_size"] = $size;
         } elseif ($endpoint === "file_index") {
+            // Section: index batch sizes (entries).
             $size_key = "index_batch_size";
             $size = (int) $this->state[$size_key];
             $size = $this->clamp_int(
@@ -666,6 +702,7 @@ class AdaptiveTuner
             $this->state[$size_key] = $size;
             $params["batch_size"] = $size;
         } elseif ($endpoint === "sql_chunk") {
+            // Section: SQL fragment batch sizes and DB settings.
             $size_key = "sql_fragments_per_batch";
             $size = (int) $this->state[$size_key];
             $size = $this->clamp_int(
@@ -689,13 +726,28 @@ class AdaptiveTuner
     /**
      * Record the outcome of a request and update tuning state.
      *
-     * @param array $metrics ['wall_time','server_time','memory_used','memory_limit','status',
-     *                        'bytes_processed','entries_processed','sql_bytes']
-     * @return array Decision summary (sleep_seconds, decision, duty, size)
+     * @param string $endpoint Endpoint name: file_stream, file_fetch, file_index, sql_chunk.
+     * @param array  $metrics {
+     *     Optional. Request metrics.
+     *
+     *     @type float      $wall_time        Client wall time (seconds).
+     *     @type float      $server_time      Server-reported runtime (seconds).
+     *     @type int        $memory_used      Server memory peak (bytes).
+     *     @type int        $memory_limit     Server memory limit (bytes).
+     *     @type string     $status           Response status: partial|complete.
+     *     @type int        $bytes_processed  File bytes processed (file_stream/file_fetch).
+     *     @type int        $entries_processed Index entries emitted (file_index).
+     *     @type int        $sql_bytes        SQL bytes emitted (sql_chunk).
+     *     @type float      $ttfb             Client time-to-first-byte (seconds).
+     *     @type float      $total_time       Client total time (seconds).
+     * }
+     * @return array Decision summary for logging and sleep.
      */
     public function record_result(string $endpoint, array $metrics): array
     {
+        // Section: fast exits and basic timing selection.
         if (!$this->config["enabled"]) {
+            // Tuning disabled: don't touch state, don't sleep.
             return [
                 "decision" => "disabled",
                 "sleep_seconds" => 0.0,
@@ -707,6 +759,7 @@ class AdaptiveTuner
         $server_time = (float) ($metrics["server_time"] ?? 0);
         if ($this->config["use_server_time"]) {
             if ($server_time <= 0) {
+                // We can't tune without server time; skip sizing but still log.
                 return [
                     "decision" => "no_server_time",
                     "sleep_seconds" => 0.0,
@@ -721,6 +774,7 @@ class AdaptiveTuner
             $elapsed = $wall_time > 0 ? $wall_time : 0.001;
         }
 
+        // Section: memory ratio (observational only for now).
         $mem_ratio = null;
         $memory_used = (int) ($metrics["memory_used"] ?? 0);
         $memory_limit = (int) ($metrics["memory_limit"] ?? 0);
@@ -728,6 +782,7 @@ class AdaptiveTuner
             $mem_ratio = $memory_used / $memory_limit;
         }
 
+        // Section: buffering heuristic and slow-host detection.
         /**
          * Buffering heuristic:
          * - TTFB includes network/proxy latency, while X-Time-Elapsed is server runtime.
@@ -752,6 +807,7 @@ class AdaptiveTuner
             $this->state["buffered_cooldown"] = $this->config["buffered_cooldown"];
             $this->state["buffered_streak"]++;
         } elseif ($this->state["buffered_cooldown"] > 0) {
+            // Keep buffered mode for a few requests after detection, then clear.
             $this->state["buffered_cooldown"]--;
             if ($this->state["buffered_cooldown"] <= 0) {
                 $this->state["buffered_mode"] = false;
@@ -765,9 +821,11 @@ class AdaptiveTuner
             !$this->state["slow_host_mode"] &&
             $this->state["buffered_streak"] >= $this->config["slow_host_threshold"]
         ) {
+            // Persistent buffering suggests a slow host; clamp max sizes.
             $this->state["slow_host_mode"] = true;
         }
 
+        // Section: compute work done and decide whether to tune this response.
         $status = $metrics["status"] ?? null;
         $target_time = $this->target_time_for_endpoint($endpoint);
         $work_done = $this->work_done_for_endpoint($endpoint, $metrics);
@@ -788,14 +846,21 @@ class AdaptiveTuner
             $this->config["tune_only_partial"] &&
             $status !== "partial"
         ) {
+            // Skip tuning on tiny final batches to avoid skewing the signal.
             $should_tune = false;
             $decision = "skip_complete";
         }
 
+        // Section: throughput estimation and size adjustment.
         if ($should_tune) {
             $throughput = $work_done / max(0.0001, $elapsed);
             $ema_key = $this->throughput_key_for_endpoint($endpoint);
             if ($ema_key !== null) {
+                // EMA (Exponential Moving Average) smooths noisy throughput.
+                // It gives more weight to recent measurements without discarding
+                // older history, using: ema = (1 - alpha) * prev + alpha * current.
+                // This avoids overreacting to single slow/fast requests while
+                // still adapting when the host's performance changes.
                 $prev_ema = $this->state[$ema_key] ?? null;
                 $alpha = (float) $this->config["throughput_ema_alpha"];
                 if ($prev_ema === null || $prev_ema <= 0) {
@@ -821,6 +886,7 @@ class AdaptiveTuner
                         $this->state["error_backoff_remaining"] > 0 &&
                         $this->config["error_force_scale_min"]
                     ) {
+                        // During error backoff, force conservative scaling.
                         $scale = min($scale, (float) $this->config["scale_min"]);
                     }
                     $scale = $this->clamp_float(
@@ -843,13 +909,16 @@ class AdaptiveTuner
                 }
             }
         } elseif ($work_done === null || $work_done <= 0) {
+            // We can't compute throughput without any recorded work.
             $decision = "no_work";
         }
 
+        // Section: decay error backoff counter after each request.
         if ($this->state["error_backoff_remaining"] > 0) {
             $this->state["error_backoff_remaining"]--;
         }
 
+        // Section: compute client-side sleep from duty cycle, then add jitter.
         $this->state["duty"] = $this->clamp_float(
             (float) $this->state["duty"],
             $this->config["duty_min"],
@@ -880,6 +949,7 @@ class AdaptiveTuner
         }
 
         if ($status === "complete") {
+            // Don't sleep after completion; we're done with this endpoint.
             $sleep = 0.0;
         }
 
@@ -914,7 +984,14 @@ class AdaptiveTuner
     /**
      * Record a request-level error and trigger temporary backoff.
      *
-     * @param array $error ['http_code'=>int|null,'timeout'=>bool,'curl_errno'=>int|null]
+     * @param string $endpoint Endpoint name: file_stream, file_fetch, file_index, sql_chunk.
+     * @param array  $error {
+     *     Optional. Error details.
+     *
+     *     @type int  $http_code  HTTP status code, if any.
+     *     @type bool $timeout    Whether the request timed out.
+     *     @type int  $curl_errno Curl error code, if any.
+     * }
      * @return array Decision summary for logging.
      */
     public function record_error(string $endpoint, array $error): array
@@ -923,11 +1000,13 @@ class AdaptiveTuner
         $timeout = (bool) ($error["timeout"] ?? false);
         $curl_errno = (int) ($error["curl_errno"] ?? 0);
 
+        // Section: only engage backoff on real errors or timeouts.
         $should_backoff =
             $timeout ||
             ($http_code >= 400 && $http_code < 600) ||
             $http_code >= 600;
         if (!$should_backoff) {
+            // Non-error status: no state changes, just return context for logging.
             return [
                 "decision" => "ignore",
                 "http_code" => $http_code,
@@ -939,6 +1018,7 @@ class AdaptiveTuner
             ];
         }
 
+        // Section: enable conservative mode for the next few requests.
         $this->state["buffered_mode"] = true;
         $this->state["buffered_cooldown"] = max(
             $this->state["buffered_cooldown"],
@@ -949,6 +1029,7 @@ class AdaptiveTuner
             (int) $this->config["error_backoff_requests"],
         );
 
+        // Section: immediately shrink the next size if configured to do so.
         $size_key = $this->size_key_for_endpoint($endpoint);
         if (
             $size_key !== null &&
@@ -993,6 +1074,7 @@ class AdaptiveTuner
 
     private function effective_max_for_size(string $size_key): int
     {
+        // Section: compute per-endpoint max size, then apply slow-host caps.
         $max = (int) $this->config[$this->max_key_for_size($size_key)];
         if (!empty($this->state["slow_host_mode"])) {
             if ($size_key === "file_chunk_size") {
@@ -1016,6 +1098,7 @@ class AdaptiveTuner
 
     private function target_time_for_endpoint(string $endpoint): float
     {
+        // Section: choose base target time per endpoint.
         $target = (float) $this->config["target_time"];
         if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
             $target = (float) $this->config["target_time_file"];
@@ -1025,6 +1108,7 @@ class AdaptiveTuner
             $target = (float) $this->config["target_time_sql"];
         }
 
+        // Section: apply temporary conservative factors.
         if ($this->state["buffered_mode"]) {
             $target *= (float) $this->config["buffered_target_time_factor"];
         }
