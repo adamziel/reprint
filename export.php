@@ -1245,6 +1245,9 @@ function endpoint_preflight(array $config): array
             "theme_stylesheet" => null,
             "siteurl" => null,
             "home" => null,
+            "paths_urls" => null,
+            "multisite" => null,
+            "constants" => null,
             "error" => null,
         ],
         "error" => null,
@@ -1425,6 +1428,60 @@ function endpoint_preflight(array $config): array
                         $db["wp"]["theme_template"] = get_option("template");
                         $db["wp"]["siteurl"] = get_option("siteurl");
                         $db["wp"]["home"] = get_option("home");
+                        $paths_urls = [
+                            "abspath" => defined("ABSPATH")
+                                ? rtrim(ABSPATH, "/")
+                                : null,
+                            "content_dir" => defined("WP_CONTENT_DIR")
+                                ? rtrim(WP_CONTENT_DIR, "/")
+                                : null,
+                            "content_url" => function_exists("content_url")
+                                ? content_url()
+                                : (defined("WP_CONTENT_URL") ? WP_CONTENT_URL : null),
+                            "plugins_dir" => defined("WP_PLUGIN_DIR")
+                                ? rtrim(WP_PLUGIN_DIR, "/")
+                                : null,
+                            "plugins_url" => function_exists("plugins_url")
+                                ? plugins_url()
+                                : (defined("WP_PLUGIN_URL") ? WP_PLUGIN_URL : null),
+                            "mu_plugins_dir" => defined("WPMU_PLUGIN_DIR")
+                                ? rtrim(WPMU_PLUGIN_DIR, "/")
+                                : null,
+                            "mu_plugins_url" => function_exists("content_url")
+                                ? content_url("/mu-plugins")
+                                : (defined("WPMU_PLUGIN_URL") ? WPMU_PLUGIN_URL : null),
+                            "uploads" => [
+                                "basedir" => null,
+                                "baseurl" => null,
+                                "subdir" => null,
+                            ],
+                            "site_url" => function_exists("site_url")
+                                ? site_url()
+                                : null,
+                            "home_url" => function_exists("home_url")
+                                ? home_url()
+                                : null,
+                            "network_site_url" => function_exists("network_site_url")
+                                ? network_site_url()
+                                : null,
+                            "network_home_url" => function_exists("network_home_url")
+                                ? network_home_url()
+                                : null,
+                        ];
+
+                        if (function_exists("wp_upload_dir")) {
+                            $uploads = wp_upload_dir(null, false);
+                            if (is_array($uploads)) {
+                                $paths_urls["uploads"]["basedir"] =
+                                    $uploads["basedir"] ?? null;
+                                $paths_urls["uploads"]["baseurl"] =
+                                    $uploads["baseurl"] ?? null;
+                                $paths_urls["uploads"]["subdir"] =
+                                    $uploads["subdir"] ?? null;
+                            }
+                        }
+                        $db["wp"]["paths_urls"] = $paths_urls;
+
                         if (
                             function_exists("is_multisite") &&
                             is_multisite() &&
@@ -1434,6 +1491,100 @@ function endpoint_preflight(array $config): array
                                 "active_sitewide_plugins",
                             );
                         }
+
+                        $multisite = [
+                            "enabled" => false,
+                            "subdomain_install" => defined("SUBDOMAIN_INSTALL")
+                                ? (bool) SUBDOMAIN_INSTALL
+                                : null,
+                            "current_blog_id" =>
+                                function_exists("get_current_blog_id")
+                                    ? get_current_blog_id()
+                                    : null,
+                            "current_network_id" =>
+                                function_exists("get_current_network_id")
+                                    ? get_current_network_id()
+                                    : null,
+                            "domain_current_site" => defined("DOMAIN_CURRENT_SITE")
+                                ? DOMAIN_CURRENT_SITE
+                                : null,
+                            "path_current_site" => defined("PATH_CURRENT_SITE")
+                                ? PATH_CURRENT_SITE
+                                : null,
+                            "site_id_current_site" =>
+                                defined("SITE_ID_CURRENT_SITE")
+                                    ? SITE_ID_CURRENT_SITE
+                                    : null,
+                            "blog_id_current_site" =>
+                                defined("BLOG_ID_CURRENT_SITE")
+                                    ? BLOG_ID_CURRENT_SITE
+                                    : null,
+                            "network" => null,
+                            "site" => null,
+                        ];
+
+                        if (function_exists("is_multisite") && is_multisite()) {
+                            $multisite["enabled"] = true;
+                            $network_id = $multisite["current_network_id"];
+                            if ($network_id !== null && function_exists("get_network")) {
+                                $network = get_network($network_id);
+                                if (is_object($network)) {
+                                    $multisite["network"] = [
+                                        "id" => $network->id ?? null,
+                                        "domain" => $network->domain ?? null,
+                                        "path" => $network->path ?? null,
+                                        "site_id" => $network->site_id ?? null,
+                                        "registered" => $network->registered ?? null,
+                                        "last_updated" => $network->last_updated ?? null,
+                                    ];
+                                }
+                            }
+
+                            $blog_id = $multisite["current_blog_id"];
+                            if ($blog_id !== null && function_exists("get_site")) {
+                                $site = get_site($blog_id);
+                                if (is_object($site)) {
+                                    $multisite["site"] = [
+                                        "blog_id" => $site->blog_id ?? null,
+                                        "domain" => $site->domain ?? null,
+                                        "path" => $site->path ?? null,
+                                        "site_id" => $site->site_id ?? null,
+                                        "registered" => $site->registered ?? null,
+                                        "last_updated" => $site->last_updated ?? null,
+                                        "public" => $site->public ?? null,
+                                        "archived" => $site->archived ?? null,
+                                        "mature" => $site->mature ?? null,
+                                        "spam" => $site->spam ?? null,
+                                        "deleted" => $site->deleted ?? null,
+                                        "lang_id" => $site->lang_id ?? null,
+                                    ];
+                                }
+                            }
+                        }
+                        $db["wp"]["multisite"] = $multisite;
+
+                        $constants = [
+                            "WP_CONTENT_DIR",
+                            "WP_CONTENT_URL",
+                            "WP_PLUGIN_DIR",
+                            "WP_PLUGIN_URL",
+                            "WPMU_PLUGIN_DIR",
+                            "WPMU_PLUGIN_URL",
+                            "UPLOADS",
+                            "ABSPATH",
+                            "DOMAIN_CURRENT_SITE",
+                            "PATH_CURRENT_SITE",
+                            "SITE_ID_CURRENT_SITE",
+                            "BLOG_ID_CURRENT_SITE",
+                            "SUBDOMAIN_INSTALL",
+                        ];
+                        $constant_values = [];
+                        foreach ($constants as $name) {
+                            if (defined($name)) {
+                                $constant_values[$name] = constant($name);
+                            }
+                        }
+                        $db["wp"]["constants"] = $constant_values;
                     } catch (Throwable $e) {
                         if ($db["wp"]["error"] === null) {
                             $db["wp"]["error"] = $e->getMessage();
