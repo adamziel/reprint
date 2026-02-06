@@ -84,7 +84,12 @@ What we **don't** do:
   not be a big deal for a site of this size. It's still worth describing here, thought. The problem with breadth-first traversal is reentrancy.
   We'd need to keep the directories we've already seen but haven't yet traversed across the entire tree level. We'd keep them in memory and,
   potentially, in the cursor. That could take up some space!
-  
+* Stream sorting either inside PHP or via a shell call to `find ./ | sort`. While it would use less memory, the PHP version would be noticeably
+  slower and more complex. The shell call would also slow down the entire process because of its sheer overhead when listing 99% of the typical
+  smaller directories. Furthermore, we couold never be sure whether the shell call results can be trusted – find and sort could differ between
+  runtimes to the point where some runtimes replace them with stubs. PHP functions are much more portable. Large sites should have large memory
+  banks. If they don't, then we can revisit the stream-sorting approach.
+
 ### Volatile files
 
 Sometimes a file will keep changing every minute and we'll start streaming it, but won't finish before it's modified again. In that case,
