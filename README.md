@@ -161,9 +161,9 @@ What we **don't** do:
 
 ### Todos
 
-* Turn it into a WordPress plugin 
-  * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases we are trying to account for
+✅ Turn it into a WordPress plugin 
+  ✅ HMAC signatures per request with a shared secret + random number + microtime
 ✅ Handle every single possible error case, e.g. fread() returning false prematurely etc.
 ✅ Take note of any files modified while they were streamed, re-request them later on.
    ✅ Tell the user when a file is too volatile to be synchronized

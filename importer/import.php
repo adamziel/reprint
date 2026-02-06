@@ -1249,6 +1249,7 @@ class ImportClient
     private $shutdown_requested = false; // Flag for graceful shutdown
     private $current_curl_handle = null; // Active curl handle for abort
     private $tuner = null; // AdaptiveTuner instance or null
+    private $hmac_client = null; // Site_Export_HMAC_Client instance or null
     private $last_http_code = null;
     private $last_curl_errno = null;
     private $last_curl_timeout = false;
@@ -1546,6 +1547,16 @@ class ImportClient
 
         $this->state = $this->load_state();
         $this->initialize_tuner($options);
+
+        // Initialize HMAC authentication if a shared secret was provided.
+        // When set, every outgoing HTTP request will include X-Auth-Signature,
+        // X-Auth-Nonce, and X-Auth-Timestamp headers so api.php can verify
+        // the caller without a SECRET_KEY in the URL.
+        if (!empty($options["secret"])) {
+            require_once __DIR__ . "/../wordpress-plugin/generic/class-hmac-client.php";
+            $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
+        }
+
         $this->run_preflight();
 
         // Dispatch to appropriate command handler
@@ -4627,6 +4638,30 @@ class ImportClient
     }
 
     /**
+     * Return HMAC authentication headers formatted for curl ("Name: value"),
+     * or an empty array if no secret was configured.
+     *
+     * @param string $body The request body content whose SHA-256 hash will
+     *                     be included in the HMAC signature.  For CURLFile
+     *                     uploads, pass the raw file content (not the
+     *                     multipart envelope); for form-encoded POST, pass
+     *                     the http_build_query() output; for GET, omit or
+     *                     pass empty string.
+     */
+    private function get_hmac_headers(string $body = ''): array
+    {
+        if ($this->hmac_client === null) {
+            return [];
+        }
+        $auth = $this->hmac_client->get_auth_headers($body);
+        $curl_headers = [];
+        foreach ($auth as $name => $value) {
+            $curl_headers[] = "{$name}: {$value}";
+        }
+        return $curl_headers;
+    }
+
+    /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
     private function fetch_json(string $url): array
@@ -4648,6 +4683,7 @@ class ImportClient
             "Cache-Control: no-cache",
             "Pragma: no-cache",
             "Connection: keep-alive",
+            ...($this->get_hmac_headers()),
         ];
 
         curl_setopt_array($ch, [
@@ -4787,7 +4823,10 @@ class ImportClient
             $headers[] = "X-Export-Cursor: {$cursor}";
         }
 
-        // Configure POST data if provided
+        // Configure POST data if provided.  We need to know the body
+        // content BEFORE generating HMAC headers so the content hash
+        // can be included in the signature.
+        $body_for_signing = '';
         if ($post_data !== null) {
             curl_setopt($ch, CURLOPT_POST, true);
             $has_file = false;
@@ -4797,12 +4836,26 @@ class ImportClient
                     break;
                 }
             }
-            curl_setopt(
-                $ch,
-                CURLOPT_POSTFIELDS,
-                $has_file ? $post_data : http_build_query($post_data),
-            );
+            if ($has_file) {
+                // For CURLFile uploads, sign the raw file content — this
+                // is the logical payload the server will receive, even
+                // though curl wraps it in multipart framing.
+                foreach ($post_data as $value) {
+                    if ($value instanceof CURLFile) {
+                        $body_for_signing .= file_get_contents(
+                            $value->getFilename(),
+                        );
+                    }
+                }
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
+            } else {
+                $body_for_signing = http_build_query($post_data);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $body_for_signing);
+            }
         }
+
+        // Append HMAC auth headers now that we know the body content
+        array_push($headers, ...($this->get_hmac_headers($body_for_signing)));
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
@@ -5462,10 +5515,12 @@ if (
         echo "Usage: php import.php <remote-url> <local-path> <command> [options]\n";
         echo "\n";
         echo "Arguments:\n";
-        echo "  remote-url   URL to export.php script with required parameters:\n";
+        echo "  remote-url   URL to the export endpoint with required parameters:\n";
         echo "               - directory: Directory to export (use directory[] for multiple)\n";
-        echo "               - SECRET_KEY: Authentication key (required)\n";
-        echo "               Example: http://example.com/export.php?directory=/var/www/html&SECRET_KEY=xxx\n";
+        echo "               When using --secret (HMAC auth via api.php):\n";
+        echo "                 http://example.com/wp-content/plugins/site-export/api.php?directory=/var/www/html\n";
+        echo "               When using SECRET_KEY (direct export.php):\n";
+        echo "                 http://example.com/export.php?directory=/var/www/html&SECRET_KEY=xxx\n";
         echo "  local-path   Local directory to store imported data\n";
         echo "  command      Command to execute (required)\n";
         echo "\n";
@@ -5496,6 +5551,7 @@ if (
         echo "                       - If complete: requires --restart flag\n";
         echo "\n";
         echo "Options:\n";
+        echo "  --secret=TOKEN   HMAC shared secret for api.php authentication\n";
         echo "  --restart        Force restart of completed command (clears state)\n";
         echo "  --verbose, -v    Show detailed logs (default: show progress only)\n";
         echo "  --adaptive       Enable adaptive tuning (default)\n";
@@ -5541,20 +5597,14 @@ if (
         echo "  - State is stored in .import-state.json\n";
         echo "\n";
         echo "Examples:\n";
-        echo "  # Initial full sync (downloads everything)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-initial\n";
+        echo "  # With HMAC auth (WordPress plugin api.php):\n";
+        echo "  php import.php 'http://example.com/wp-content/plugins/site-export/api.php?directory=/var/www' ./backup files-sync-initial --secret=TOKEN\n";
         echo "\n";
-        echo "  # Resume interrupted initial sync (continues from saved state)\n";
+        echo "  # With SECRET_KEY auth (standalone export.php):\n";
         echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-initial\n";
         echo "\n";
         echo "  # Delta sync (only download changes since last sync)\n";
         echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-delta\n";
-        echo "\n";
-        echo "  # Full index only (no file downloads)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-index\n";
-        echo "\n";
-        echo "  # Restart completed delta sync\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-delta --restart\n";
         echo "\n";
         echo "  # Download database\n";
         echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup sql-sync\n";
@@ -5587,11 +5637,14 @@ if (
         "command" => $command,
         "restart" => false,
         "verbose" => false,
+        "secret" => null,
         "tuning_config" => [],
     ];
 
     for ($i = 4; $i < $argc; $i++) {
-        if ($argv[$i] === "--restart") {
+        if (strpos($argv[$i], "--secret=") === 0) {
+            $options["secret"] = substr($argv[$i], strlen("--secret="));
+        } elseif ($argv[$i] === "--restart") {
             $options["restart"] = true;
         } elseif ($argv[$i] === "--verbose" || $argv[$i] === "-v") {
             $options["verbose"] = true;

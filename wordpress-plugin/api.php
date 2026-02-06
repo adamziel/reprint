@@ -5,7 +5,10 @@
  * This file handles export requests WITHOUT loading WordPress.
  * It performs HMAC authentication and delegates to the export library.
  *
- * Direct URL: https://example.com/wp-content/plugins/site-export/api.php
+ * TODO: On hosts that allow direct PHP execution in wp-content/plugins/,
+ * this file can be called directly (bypassing WordPress entirely) for
+ * lower latency. The WordPress-routed path via ?site-export-api is the
+ * universal fallback.
  */
 
 // Capture any accidental output before headers are set
@@ -83,12 +86,22 @@ function site_export_get_header(string $name): ?string {
 /**
  * Verify HMAC authentication.
  *
- * Signature is computed as: HMAC-SHA256(nonce + timestamp + body, secret)
+ * The signature covers a SHA-256 hash of the request body rather than
+ * the raw bytes.  This sidesteps the problem that libcurl generates
+ * multipart boundaries internally so the client can't predict the exact
+ * byte stream — but it CAN hash the logical content before encoding.
+ *
+ * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), secret)
+ *
+ * The client sends X-Auth-Content-Hash = SHA256(body).  The server
+ * independently hashes what it received and checks both that the hash
+ * matches AND that the HMAC is valid.
  */
 function site_export_verify_hmac(string $secret): ?string {
     $signature = site_export_get_header('X-Auth-Signature');
     $nonce = site_export_get_header('X-Auth-Nonce');
     $timestamp = site_export_get_header('X-Auth-Timestamp');
+    $content_hash = site_export_get_header('X-Auth-Content-Hash');
 
     if (empty($signature)) {
         return 'Missing X-Auth-Signature header';
@@ -98,6 +111,9 @@ function site_export_verify_hmac(string $secret): ?string {
     }
     if (empty($timestamp)) {
         return 'Missing X-Auth-Timestamp header';
+    }
+    if (empty($content_hash)) {
+        return 'Missing X-Auth-Content-Hash header';
     }
 
     // Validate timestamp
@@ -122,16 +138,33 @@ function site_export_verify_hmac(string $secret): ?string {
         return 'Nonce must be at least 16 characters';
     }
 
-    // Get request body
-    $body = file_get_contents('php://input') ?: '';
-
-    // Compute expected signature
-    $message = $nonce . $timestamp . $body;
+    // Verify HMAC signature over nonce + timestamp + content_hash.
+    // This proves the content_hash was set by someone who knows the secret.
+    $message = $nonce . $timestamp . $content_hash;
     $expected = hash_hmac('sha256', $message, $secret);
 
-    // Constant-time comparison
     if (!hash_equals($expected, $signature)) {
         return 'HMAC signature verification failed';
+    }
+
+    // Now verify that the content hash matches what was actually received.
+    // For multipart/form-data, php://input is empty — PHP consumes it
+    // into $_FILES — so we hash the uploaded file contents instead.
+    if (!empty($_FILES)) {
+        $received_body = '';
+        ksort($_FILES);
+        foreach ($_FILES as $file_info) {
+            if (is_uploaded_file($file_info['tmp_name'])) {
+                $received_body .= file_get_contents($file_info['tmp_name']);
+            }
+        }
+    } else {
+        $received_body = file_get_contents('php://input') ?: '';
+    }
+
+    $received_hash = hash('sha256', $received_body);
+    if (!hash_equals($content_hash, $received_hash)) {
+        return 'Content hash mismatch: body was modified in transit';
     }
 
     return null; // Success

@@ -136,7 +136,7 @@ class Site_Export_Plugin {
         }
 
         $secret = $this->load_secret();
-        $api_url = plugins_url('api.php', SITE_EXPORT_PLUGIN_DIR . 'index.php');
+        $api_url = home_url('?site-export-api');
         $is_configured = !empty($secret);
 
         ?>

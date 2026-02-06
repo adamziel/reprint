@@ -64,16 +64,25 @@ class Site_Export_HMAC_Client {
     /**
      * Compute the HMAC signature for a request.
      *
-     * The signature is computed as:
-     *   HMAC-SHA256(nonce + timestamp + request_body, secret)
+     * The signature covers a SHA-256 hash of the body rather than the
+     * raw bytes.  This avoids having to predict the exact encoding that
+     * libcurl will produce for multipart/form-data uploads while still
+     * providing end-to-end integrity: the server independently hashes
+     * the received body and verifies it matches X-Auth-Content-Hash
+     * before checking the HMAC.
      *
-     * @param string $nonce     Random nonce for this request
-     * @param string $timestamp Request timestamp
-     * @param string $body      Request body (empty string if no body)
+     * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), secret)
+     *
+     * @param string $nonce        Random nonce for this request
+     * @param string $timestamp    Request timestamp
+     * @param string $content_hash Hex SHA-256 hash of the request body
      * @return string Hex-encoded HMAC signature
      */
-    public function compute_signature(string $nonce, string $timestamp, string $body = ''): string {
-        $message = $nonce . $timestamp . $body;
+    public function compute_signature(string $nonce, string $timestamp, string $content_hash = ''): string {
+        if ($content_hash === '') {
+            $content_hash = hash('sha256', '');
+        }
+        $message = $nonce . $timestamp . $content_hash;
         return hash_hmac('sha256', $message, $this->secret);
     }
 
@@ -81,8 +90,8 @@ class Site_Export_HMAC_Client {
      * Get all authentication headers for a request.
      *
      * This is the primary method to use when making requests.
-     * It generates fresh nonce and timestamp values and computes
-     * the HMAC signature.
+     * It generates fresh nonce and timestamp values, hashes the body,
+     * and computes the HMAC signature.
      *
      * @param string $body Request body (empty string for GET requests)
      * @return array Associative array of headers to add to the request
@@ -90,12 +99,14 @@ class Site_Export_HMAC_Client {
     public function get_auth_headers(string $body = ''): array {
         $nonce = $this->generate_nonce();
         $timestamp = $this->get_timestamp();
-        $signature = $this->compute_signature($nonce, $timestamp, $body);
+        $content_hash = hash('sha256', $body);
+        $signature = $this->compute_signature($nonce, $timestamp, $content_hash);
 
         return [
             'X-Auth-Signature' => $signature,
             'X-Auth-Nonce' => $nonce,
             'X-Auth-Timestamp' => $timestamp,
+            'X-Auth-Content-Hash' => $content_hash,
         ];
     }
 
