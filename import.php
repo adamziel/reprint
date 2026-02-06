@@ -2753,8 +2753,12 @@ class ImportClient
                     if (!is_array($item)) {
                         continue;
                     }
-                    $path = $item["path"] ?? "";
-                    if (!is_string($path) || $path === "") {
+                    $path_encoded = $item["path"] ?? "";
+                    if (!is_string($path_encoded) || $path_encoded === "") {
+                        continue;
+                    }
+                    $path = base64_decode($path_encoded);
+                    if ($path === "" || $path === false) {
                         continue;
                     }
                     $ctime = (int) ($item["ctime"] ?? 0);
@@ -2763,12 +2767,12 @@ class ImportClient
 
                     $line = json_encode(
                         [
-                            "path" => $path,
+                            "path" => base64_encode($path),
                             "ctime" => $ctime,
                             "size" => $size,
                             "type" => $type,
                         ],
-                        JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                        JSON_UNESCAPED_SLASHES,
                     );
                     if ($line === false) {
                         continue;
@@ -3068,7 +3072,7 @@ class ImportClient
             if (is_string($decoded)) {
                 $path = $decoded;
             } elseif (is_array($decoded) && isset($decoded["path"])) {
-                $path = $decoded["path"];
+                $path = base64_decode($decoded["path"]);
             } else {
                 continue;
             }
@@ -3077,7 +3081,7 @@ class ImportClient
             }
             $json_path = json_encode(
                 $path,
-                JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                JSON_UNESCAPED_SLASHES,
             );
             if ($json_path === false) {
                 continue;
@@ -3145,8 +3149,8 @@ class ImportClient
     private function append_download_list(string $path, $handle): void
     {
         $line = json_encode(
-            ["path" => $path],
-            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+            ["path" => base64_encode($path)],
+            JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
             fwrite($handle, $line . "\n");
@@ -3196,9 +3200,13 @@ class ImportClient
         if (!is_array($data)) {
             throw new RuntimeException("Invalid index line format");
         }
-        $path = $data["path"] ?? "";
-        if (!is_string($path) || $path === "") {
+        $path_encoded = $data["path"] ?? "";
+        if (!is_string($path_encoded) || $path_encoded === "") {
             throw new RuntimeException("Invalid index path");
+        }
+        $path = base64_decode($path_encoded);
+        if ($path === "" || $path === false) {
+            throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
         return [
             "path" => $path,
@@ -3276,12 +3284,12 @@ class ImportClient
         $line = json_encode(
             [
                 "op" => "F",
-                "path" => $path,
+                "path" => base64_encode($path),
                 "ctime" => $ctime,
                 "size" => $size,
                 "type" => $type,
             ],
-            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+            JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
             fwrite($this->index_updates_handle, $line . "\n");
@@ -3311,9 +3319,9 @@ class ImportClient
         $line = json_encode(
             [
                 "op" => "D",
-                "path" => $path,
+                "path" => base64_encode($path),
             ],
-            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+            JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
             fwrite($this->index_updates_handle, $line . "\n");
@@ -3380,12 +3388,12 @@ class ImportClient
         $write_line = function ($handle, array $entry): void {
             $line = json_encode(
                 [
-                    "path" => $entry["path"],
+                    "path" => base64_encode($entry["path"]),
                     "ctime" => (int) $entry["ctime"],
                     "size" => (int) $entry["size"],
                     "type" => (string) $entry["type"],
                 ],
-                JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                JSON_UNESCAPED_SLASHES,
             );
             if ($line !== false) {
                 fwrite($handle, $line . "\n");
@@ -3489,9 +3497,13 @@ class ImportClient
                 throw new RuntimeException("Invalid index update line format");
             }
             $op = $data["op"] ?? null;
-            $path = $data["path"] ?? null;
-            if (!is_string($path) || $path === "") {
+            $path_encoded = $data["path"] ?? null;
+            if (!is_string($path_encoded) || $path_encoded === "") {
                 throw new RuntimeException("Invalid index update path");
+            }
+            $path = base64_decode($path_encoded);
+            if ($path === false || $path === "") {
+                throw new RuntimeException("Invalid index update path (base64 decode failed)");
             }
             if ($op === "D") {
                 return [
@@ -3903,11 +3915,19 @@ class ImportClient
         StreamingContext $context,
     ): void {
         $headers = $chunk["headers"];
-        $path = base64_decode($headers["x-file-path"] ?? "");
+        $raw_header = $headers["x-file-path"] ?? "";
+        $path = base64_decode($raw_header);
         $is_first = ($headers["x-first-chunk"] ?? "0") === "1";
         $is_last = ($headers["x-last-chunk"] ?? "0") === "1";
 
         if (!$path) {
+            if ($raw_header !== "") {
+                $this->audit_log(
+                    "Warning: base64_decode failed for x-file-path header: " .
+                        substr($raw_header, 0, 100),
+                    true,
+                );
+            }
             return;
         }
 
@@ -4156,10 +4176,18 @@ class ImportClient
     private function handle_directory_chunk(array $chunk): void
     {
         $headers = $chunk["headers"];
-        $path = base64_decode($headers["x-directory-path"] ?? "");
+        $raw_header = $headers["x-directory-path"] ?? "";
+        $path = base64_decode($raw_header);
         $ctime = (int) ($headers["x-directory-ctime"] ?? 0);
 
         if (!$path) {
+            if ($raw_header !== "") {
+                $this->audit_log(
+                    "Warning: base64_decode failed for x-directory-path header: " .
+                        substr($raw_header, 0, 100),
+                    true,
+                );
+            }
             return;
         }
 
@@ -4193,12 +4221,20 @@ class ImportClient
     private function handle_symlink_chunk(array $chunk): void
     {
         $headers = $chunk["headers"];
-        $path = base64_decode($headers["x-symlink-path"] ?? "");
+        $raw_path = $headers["x-symlink-path"] ?? "";
+        $path = base64_decode($raw_path);
         $target = base64_decode($headers["x-symlink-target"] ?? "");
         $ctime = (int) ($headers["x-symlink-ctime"] ?? 0);
 
         // Skip if path or target is missing/empty
         if (!$path || $target === false || $target === "") {
+            if ($raw_path !== "" && !$path) {
+                $this->audit_log(
+                    "Warning: base64_decode failed for x-symlink-path header: " .
+                        substr($raw_path, 0, 100),
+                    true,
+                );
+            }
             // return;
         }
 
@@ -4958,6 +4994,7 @@ class ImportClient
             false,
         );
 
+        try {
         if (curl_errno($ch)) {
             $errno = curl_errno($ch);
             $error = curl_error($ch);
@@ -4973,7 +5010,6 @@ class ImportClient
                     "curl_errno" => $errno,
                 ]);
             }
-            curl_close($ch);
             throw new RuntimeException("cURL error: {$error}");
         }
 
@@ -4981,10 +5017,11 @@ class ImportClient
         $this->last_http_code = $http_code;
         $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
         $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
-        curl_close($ch);
-
-        // Clear curl handle reference
-        $this->current_curl_handle = null;
+        } finally {
+            curl_close($ch);
+            // Clear curl handle reference
+            $this->current_curl_handle = null;
+        }
 
         if (!isset($context->response_stats) || !is_array($context->response_stats)) {
             $context->response_stats = [];
@@ -5156,8 +5193,19 @@ class ImportClient
             return $this->default_state();
         }
 
-        $state = json_decode(file_get_contents($this->state_file), true);
+        $contents = file_get_contents($this->state_file);
+        if ($contents === false) {
+            return $this->default_state();
+        }
+
+        $state = json_decode($contents, true);
         if (!is_array($state)) {
+            $this->audit_log(
+                "Warning: corrupt state file detected, renaming and starting fresh",
+                true,
+            );
+            $corrupt_name = $this->state_file . ".corrupt." . time();
+            @rename($this->state_file, $corrupt_name);
             return $this->default_state();
         }
 
@@ -5326,8 +5374,13 @@ class ImportClient
             $is_status_change ||
             $now - $this->last_progress_output >= $this->progress_throttle
         ) {
-            echo json_encode($data) . "\n";
-            flush();
+            $written = @fwrite(STDOUT, json_encode($data) . "\n");
+            if ($written === false) {
+                // Broken pipe — save state and exit cleanly
+                $this->save_state($this->state);
+                exit(0);
+            }
+            @flush();
             $this->last_progress_output = $now;
         }
     }
@@ -5675,14 +5728,18 @@ if (
         $client = new ImportClient($remote_url, $local_path);
         $client->run($options);
         exit(0);
-    } catch (Exception $e) {
+    } catch (\Throwable $e) {
         $error = [
             "error" => $e->getMessage(),
             "exception" => get_class($e),
             "file" => $e->getFile(),
             "line" => $e->getLine(),
         ];
-        fwrite(STDERR, json_encode($error) . "\n");
+        $json = json_encode($error);
+        if ($json === false) {
+            $json = '{"error":"' . addslashes($e->getMessage()) . '","exception":"' . get_class($e) . '"}';
+        }
+        fwrite(STDERR, $json . "\n");
         exit(1);
     }
 }

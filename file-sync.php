@@ -114,8 +114,9 @@ class FileTreeProducer
         }
 
         $this->phase = $cursor["phase"] ?? self::PHASE_STREAMING;
-        $this->filesystem_root =
-            $cursor["root"] ?? ($this->directories[0] ?? "/");
+        $this->filesystem_root = isset($cursor["root"])
+            ? base64_decode($cursor["root"])
+            : ($this->directories[0] ?? "/");
         $this->current_chunk = null;
         $this->streaming_file_handle = null;
         $this->paths_sorted = false;
@@ -127,7 +128,7 @@ class FileTreeProducer
             return;
         }
 
-        $path = $cursor["path"] ?? null;
+        $path = isset($cursor["path"]) ? base64_decode($cursor["path"]) : null;
         $ctime = $cursor["ctime"] ?? null;
         $byte_offset = $cursor["bytes"] ?? 0;
 
@@ -395,10 +396,25 @@ class FileTreeProducer
                 return;
             }
             if ($this->streaming_file_offset > 0) {
-                fseek(
+                $seek_result = fseek(
                     $this->streaming_file_handle,
                     $this->streaming_file_offset,
                 );
+                if ($seek_result === -1) {
+                    fclose($this->streaming_file_handle);
+                    $this->streaming_file_handle = null;
+                    $this->current_file_meta = null;
+                    $this->current_chunk = [
+                        "type" => "error",
+                        "error_type" => "file_seek",
+                        "path" => $file["path"],
+                        "message" => "Failed to seek to offset {$this->streaming_file_offset}",
+                    ];
+                    $this->last_emitted_path = $file["path"];
+                    $this->last_emitted_ctime = $file["ctime"];
+                    $this->streaming_file_offset = 0;
+                    return;
+                }
             }
         }
 
@@ -514,23 +530,23 @@ class FileTreeProducer
         if ($this->phase === self::PHASE_FINISHED) {
             return json_encode([
                 "phase" => self::PHASE_FINISHED,
-                "root" => $this->filesystem_root,
+                "root" => base64_encode($this->filesystem_root),
             ]);
         }
 
         $cursor = [
             "phase" => $this->phase,
-            "root" => $this->filesystem_root,
+            "root" => base64_encode($this->filesystem_root),
         ];
 
         if ($this->current_file_meta !== null) {
             // In the middle of streaming a file
-            $cursor["path"] = $this->current_file_meta["path"];
+            $cursor["path"] = base64_encode($this->current_file_meta["path"]);
             $cursor["ctime"] = $this->current_file_meta["ctime"];
             $cursor["bytes"] = $this->streaming_file_offset;
         } else if ($this->last_emitted_path !== null) {
             // Just finished emitting something, continue after this path
-            $cursor["path"] = $this->last_emitted_path;
+            $cursor["path"] = base64_encode($this->last_emitted_path);
             $cursor["ctime"] = $this->last_emitted_ctime;
             $cursor["bytes"] = 0;
         }
@@ -550,12 +566,12 @@ class FileTreeProducer
 
         if ($this->phase === self::PHASE_STREAMING) {
             if ($this->last_emitted_path !== null) {
-                $progress["last_path"] = $this->last_emitted_path;
+                $progress["last_path"] = base64_encode($this->last_emitted_path);
             }
             if ($this->current_file_meta) {
                 $file = $this->current_file_meta;
                 $progress["current_file"] = [
-                    "path" => $file["path"],
+                    "path" => base64_encode($file["path"]),
                     "size" => $file["size"],
                     "bytes_read" => $this->streaming_file_offset,
                 ];

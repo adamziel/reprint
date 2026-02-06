@@ -18,7 +18,6 @@ The codebase follows a producer-consumer pattern with two main components:
 ### Import Side (Client)
 - **import.php**: CLI script that downloads from export.php using streaming multipart parsing, no buffering of entire response
 - **MultipartStreamParser**: Incremental multipart/mixed parser that processes chunks as they arrive
-- **tui.php**: Terminal User Interface for managing migrations interactively
 
 ### Supporting Classes
 - **MysqlValueFormatter**: Formats MySQL values by type (NULL, numeric, binary hex, quoted strings)
@@ -158,34 +157,7 @@ Comprehensive architecture docs are in markdown/:
 
 Always consult these when working on the respective components.
 
-## TUI and CLI API Design
-
-### import.php as the Canonical API
-
-The TUI (`tui.php`) deliberately interacts with `import.php` **only through shell calls**, never by importing classes or calling functions directly. This design choice serves several purposes:
-
-1. **API Validation**: If the TUI can do everything through shell calls, then `import.php` has a complete and useful CLI API
-2. **Decoupling**: The TUI and import.php can evolve independently
-3. **Debugging**: Users can always drop down to raw CLI commands if the TUI misbehaves
-4. **Protocol Minimalism**: import.php outputs minimal JSON progress events; the TUI computes rich progress displays client-side
-
-### TUI Features
-
-```bash
-# Launch the TUI in the current directory
-php tui.php
-
-# Launch the TUI in a specific migrations directory
-php tui.php /path/to/migrations
-```
-
-The TUI provides:
-- **Migration discovery**: Scans for directories with `.import-state.json`
-- **New migration wizard**: Interactive setup for URL, secret key, and directory name
-- **Status dashboard**: Shows command, stage, files indexed, downloaded, and SQL progress
-- **Context-sensitive actions**: Offers appropriate next steps based on current state
-- **Real-time progress**: Streams import.php output and displays transfer rates
-- **Audit log viewer**: Quick access to the `.import-audit.log`
+## CLI API Design
 
 ### Progress Computation
 

@@ -125,24 +125,27 @@ class ResumeEdgeCasesTest extends MySQLDumpProducerTestBase
             "cursor" => $cursor,
         ]);
 
-        // Should either skip the missing table or handle error gracefully
-        // The producer will try to continue but the table doesn't exist
-        // This tests that we don't crash catastrophically
-        $hasError = false;
-        try {
-            while ($producer2->next_sql_fragment()) {
-                $sql = $producer2->get_sql_fragment();
-                if ($sql !== null) {
-                    $fragments[] = $sql;
-                }
+        // The producer detects that the table was dropped (not found in
+        // tables_to_process) and gracefully skips to the next table instead
+        // of crashing. It should still produce output for other_table.
+        $resumedFragments = [];
+        while ($producer2->next_sql_fragment()) {
+            $sql = $producer2->get_sql_fragment();
+            if ($sql !== null) {
+                $resumedFragments[] = $sql;
             }
-        } catch (\PDOException $e) {
-            // Expected - table doesn't exist
-            $hasError = true;
-            $this->assertStringContainsString("temp_table", $e->getMessage());
         }
 
-        $this->assertTrue($hasError, "Should throw exception for missing table");
+        // Verify the producer continued past the dropped table and
+        // processed other_table
+        $hasOtherTable = false;
+        foreach ($resumedFragments as $fragment) {
+            if (str_contains($fragment, 'other_table')) {
+                $hasOtherTable = true;
+                break;
+            }
+        }
+        $this->assertTrue($hasOtherTable, "Should continue with other tables after dropped table");
     }
 
     /**

@@ -576,6 +576,12 @@ class MySQLDumpProducer
         if ($sql) {
             $header = "--\n-- Table structure for table `{$this->current_table}`\n--\n\n";
             $this->current_sql_fragment = $header . $sql . ";";
+        } else {
+            $keys = $row ? implode(", ", array_keys($row)) : "(no row returned)";
+            throw new \RuntimeException(
+                "SHOW CREATE TABLE `{$this->current_table}` returned no usable SQL. " .
+                "Available keys: {$keys}"
+            );
         }
     }
 
@@ -950,17 +956,25 @@ class MySQLDumpProducer
      */
     private function decode_oversized_queue_from_cursor($queue)
     {
+        if (!is_array($queue)) {
+            return [];
+        }
         $decoded = [];
         foreach ($queue as $item) {
+            if (!is_array($item) || !isset($item['chunks']) || !is_array($item['chunks'])) {
+                throw new \InvalidArgumentException(
+                    "Invalid cursor: oversized_queue item must contain a 'chunks' array"
+                );
+            }
             $decoded_chunks = [];
             foreach ($item['chunks'] as $chunk) {
                 $decoded_chunks[] = base64_decode($chunk);
             }
             $decoded[] = [
-                'column' => $item['column'],
-                'data_type' => $item['data_type'],
+                'column' => $item['column'] ?? '',
+                'data_type' => $item['data_type'] ?? '',
                 'chunks' => $decoded_chunks,
-                'chunk_index' => $item['chunk_index'],
+                'chunk_index' => $item['chunk_index'] ?? 0,
             ];
         }
         return $decoded;
@@ -984,15 +998,32 @@ class MySQLDumpProducer
         }
         if (is_array($cursor_data)) {
             $this->current_table = $cursor_data["current_table"] ?? null;
+            if ($this->current_table !== null && !is_string($this->current_table)) {
+                throw new \InvalidArgumentException(
+                    "Invalid cursor: current_table must be string or null, got " . gettype($this->current_table)
+                );
+            }
             $this->current_pk_columns =
                 $cursor_data["current_pk_columns"] ?? null;
             $this->last_pk_values = $cursor_data["last_pk_values"] ?? null;
             $this->current_offset = $cursor_data["current_offset"] ?? 0;
+            if (!is_int($this->current_offset) && !is_float($this->current_offset)) {
+                throw new \InvalidArgumentException(
+                    "Invalid cursor: current_offset must be numeric, got " . gettype($this->current_offset)
+                );
+            }
+            $this->current_offset = (int) $this->current_offset;
             $this->state = $cursor_data["state"] ?? self::STATE_INIT;
             // Decode binary data in current_row
             $encoded_row = $cursor_data["current_row"] ?? null;
             $this->current_row = $this->decode_row_from_cursor($encoded_row);
             $this->rows_in_batch = $cursor_data["rows_in_batch"] ?? 0;
+            if (!is_int($this->rows_in_batch) && !is_float($this->rows_in_batch)) {
+                throw new \InvalidArgumentException(
+                    "Invalid cursor: rows_in_batch must be numeric, got " . gettype($this->rows_in_batch)
+                );
+            }
+            $this->rows_in_batch = (int) $this->rows_in_batch;
             $this->current_column_names =
                 $cursor_data["current_column_names"] ?? null;
 
@@ -1011,14 +1042,21 @@ class MySQLDumpProducer
 
                 // Position the array pointer to the current table
                 if ($this->current_table) {
+                    $found = false;
                     reset($this->tables_to_process);
                     while (
                         ($table = current($this->tables_to_process)) !== false
                     ) {
                         if ($table === $this->current_table) {
+                            $found = true;
                             break; // Found it, pointer is now at current_table
                         }
                         next($this->tables_to_process);
+                    }
+                    // Table was dropped between requests — advance to next
+                    if (!$found) {
+                        $this->current_table = null;
+                        $this->state = self::STATE_INIT;
                     }
                 }
             }
@@ -1028,6 +1066,12 @@ class MySQLDumpProducer
                 $this->current_column_types = $this->get_column_types(
                     $this->current_table,
                 );
+                if (empty($this->current_column_types)) {
+                    throw new \RuntimeException(
+                        "Table `{$this->current_table}` was dropped between export requests " .
+                        "(no columns found in INFORMATION_SCHEMA)"
+                    );
+                }
             }
         }
     }

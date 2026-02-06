@@ -39,6 +39,9 @@ function emit_error_chunk($gz, string $boundary, string $message): void
         "path" => "",
         "message" => $message,
     ]);
+    if ($json === false) {
+        $json = '{"error_type":"php_error","path":"","message":"Error (json_encode failed)"}';
+    }
     $gz->write("--{$boundary}\r\n");
     $gz->write("Content-Type: application/json\r\n");
     $gz->write("Content-Length: " . strlen($json) . "\r\n");
@@ -47,6 +50,19 @@ function emit_error_chunk($gz, string $boundary, string $message): void
     $gz->write($json);
     $gz->write("\r\n");
     $gz->flush();
+}
+
+/**
+ * json_encode() wrapper that throws on failure instead of returning false.
+ * Do NOT use inside error/shutdown handlers — those need hardcoded fallback strings.
+ */
+function safe_json_encode($value, int $flags = 0): string
+{
+    $json = json_encode($value, $flags);
+    if ($json === false) {
+        throw new RuntimeException("json_encode failed: " . json_last_error_msg());
+    }
+    return $json;
 }
 
 // Global error handler — streaming-aware.
@@ -288,7 +304,10 @@ class GzipOutputStream
             $data,
             ZLIB_SYNC_FLUSH,
         );
-        if ($compressed !== false && $compressed !== "") {
+        if ($compressed === false) {
+            throw new \RuntimeException("deflate_add() failed during gzip write");
+        }
+        if ($compressed !== "") {
             echo $compressed;
         }
     }
@@ -311,7 +330,10 @@ class GzipOutputStream
             return;
         }
         $final = deflate_add($this->deflate_ctx, "", ZLIB_FINISH);
-        if ($final !== false && $final !== "") {
+        if ($final === false) {
+            throw new \RuntimeException("deflate_add() failed during gzip finish");
+        }
+        if ($final !== "") {
             echo $final;
         }
         flush();
@@ -915,7 +937,9 @@ function endpoint_sql_preflight(
     $tables_processed = 0;
     $rows_estimated = 0;
     $status = "partial";
+    $aborted = false;
 
+    try {
     while (
         should_continue(
             $script_start,
@@ -969,8 +993,8 @@ function endpoint_sql_preflight(
             }
         }
 
-        $payload = json_encode($tables);
-        $cursor_json = json_encode([
+        $payload = safe_json_encode($tables);
+        $cursor_json = safe_json_encode([
             "phase" => "tables",
             "last_table" => $last_table,
         ]);
@@ -991,12 +1015,16 @@ function endpoint_sql_preflight(
             break;
         }
     }
+    } catch (\Throwable $e) {
+        $aborted = true;
+        emit_error_chunk($gz, $boundary, get_class($e) . ": " . $e->getMessage());
+    }
 
     $gz->write("--{$boundary}\r\n");
     $gz->write("Content-Type: application/octet-stream\r\n");
     $gz->write("Content-Length: 0\r\n");
     $gz->write("X-Chunk-Type: completion\r\n");
-    $gz->write("X-Status: {$status}\r\n");
+    $gz->write("X-Status: " . ($aborted ? "partial" : $status) . "\r\n");
     $gz->write("X-Tables-Processed: {$tables_processed}\r\n");
     $gz->write("X-Rows-Estimated: {$rows_estimated}\r\n");
     $gz->write("X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n");
@@ -1968,7 +1996,13 @@ function endpoint_preflight(array $config): array
     ];
 
     header("Content-Type: application/json");
-    echo json_encode($response);
+    $json = json_encode($response);
+    if ($json === false) {
+        http_response_code(500);
+        echo '{"error":"Failed to serialize preflight response: ' . json_last_error_msg() . '"}';
+    } else {
+        echo $json;
+    }
 
     return [
         "status" => $response["ok"] ? "ok" : "error",
@@ -1999,7 +2033,7 @@ function stream_file_producer(
     $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
     $initial_progress = $producer->get_progress();
-    $initial_progress_json = json_encode($initial_progress);
+    $initial_progress_json = safe_json_encode($initial_progress);
     $initial_cursor = $producer->get_reentrancy_cursor();
     $gz->write("--{$boundary}\r\n");
     $gz->write("Content-Type: application/json\r\n");
@@ -2045,9 +2079,9 @@ function stream_file_producer(
             if (!$metadata_sent && $progress["phase"] === "streaming") {
                 $filesystem_root = $producer->get_filesystem_root();
                 $metadata = [
-                    "filesystem_root" => $filesystem_root,
+                    "filesystem_root" => base64_encode($filesystem_root ?? ""),
                 ];
-                $metadata_json = json_encode($metadata);
+                $metadata_json = safe_json_encode($metadata);
 
                 $gz->write("--{$boundary}\r\n");
                 $gz->write("Content-Type: application/json\r\n");
@@ -2069,7 +2103,7 @@ function stream_file_producer(
             if ($chunk === null) {
                 $now = microtime(true);
                 if ($iterations === 1 || $now - $last_progress_output >= 3.0) {
-                    $progress_json = json_encode($progress);
+                    $progress_json = safe_json_encode($progress);
                     $cursor = $producer->get_reentrancy_cursor();
                     $last_cursor = $cursor;
 
@@ -2157,7 +2191,7 @@ function stream_file_producer(
         } elseif ($chunk_type === "error") {
             $payload = [
                 "error_type" => $chunk["error_type"] ?? "unknown",
-                "path" => $chunk["path"] ?? "",
+                "path" => base64_encode($chunk["path"] ?? ""),
                 "message" => $chunk["message"] ?? "Error",
             ];
             if (isset($chunk["expected_ctime"])) {
@@ -2166,7 +2200,7 @@ function stream_file_producer(
             if (isset($chunk["actual_ctime"])) {
                 $payload["actual_ctime"] = $chunk["actual_ctime"];
             }
-            $json = json_encode($payload);
+            $json = safe_json_encode($payload);
             $gz->write("--{$boundary}\r\n");
             $gz->write("Content-Type: application/json\r\n");
             $gz->write("Content-Length: " . strlen($json) . "\r\n");
@@ -2240,7 +2274,7 @@ function stream_file_producer(
     }
 
     if ($abort_payload !== null) {
-        $json = json_encode($abort_payload);
+        $json = safe_json_encode($abort_payload);
         $gz->write("--{$boundary}\r\n");
         $gz->write("Content-Type: application/json\r\n");
         $gz->write("Content-Length: " . strlen($json) . "\r\n");
@@ -2290,6 +2324,40 @@ function stream_file_producer(
 }
 
 /**
+ * Encode a file_index stack for safe JSON serialization.
+ * Paths may contain non-UTF8 bytes, so dir and after are base64-encoded.
+ */
+function encode_index_stack(array $stack): array
+{
+    $encoded = [];
+    foreach ($stack as $frame) {
+        $encoded[] = [
+            "dir" => base64_encode($frame["dir"]),
+            "after" => $frame["after"] !== null ? base64_encode($frame["after"]) : null,
+        ];
+    }
+    return $encoded;
+}
+
+/**
+ * Encode file_index batch items for safe JSON serialization.
+ * Paths are base64-encoded to handle non-UTF8 bytes.
+ */
+function encode_index_batch(array $batch_items): array
+{
+    $encoded = [];
+    foreach ($batch_items as $item) {
+        $encoded[] = [
+            "path" => base64_encode($item["path"]),
+            "ctime" => $item["ctime"],
+            "size" => $item["size"],
+            "type" => $item["type"],
+        ];
+    }
+    return $encoded;
+}
+
+/**
  * Endpoint: Stream index in batches with gzip compression.
  *
  * Lists entries from a single directory, sorted lexicographically.
@@ -2333,14 +2401,16 @@ function endpoint_file_index(
             if (!is_array($frame)) {
                 throw new InvalidArgumentException("Invalid index cursor frame");
             }
-            $dir = $frame["dir"] ?? null;
-            if (!is_string($dir) || $dir === "") {
+            $dir_encoded = $frame["dir"] ?? null;
+            if (!is_string($dir_encoded) || $dir_encoded === "") {
                 throw new InvalidArgumentException("Index cursor frame missing dir");
             }
-            $after = $frame["after"] ?? null;
-            if ($after !== null && !is_string($after)) {
+            $dir = base64_decode($dir_encoded);
+            $after_encoded = $frame["after"] ?? null;
+            if ($after_encoded !== null && !is_string($after_encoded)) {
                 throw new InvalidArgumentException("Index cursor frame invalid after");
             }
+            $after = $after_encoded !== null ? base64_decode($after_encoded) : null;
             $stack[] = [
                 "dir" => $dir,
                 "after" => $after,
@@ -2418,10 +2488,10 @@ function endpoint_file_index(
 
     $filesystem_root = $directories[0] ?? "/";
     $metadata = [
-        "filesystem_root" => $filesystem_root,
-        "list_dir" => $list_dir_real,
+        "filesystem_root" => base64_encode($filesystem_root),
+        "list_dir" => base64_encode($list_dir_real),
     ];
-    $metadata_json = json_encode($metadata);
+    $metadata_json = safe_json_encode($metadata);
 
     $gz->write("--{$boundary}\r\n");
     $gz->write("Content-Type: application/json\r\n");
@@ -2464,14 +2534,14 @@ function endpoint_file_index(
             if ($current_real === false || !is_dir($current_real)) {
                 $abort_payload = [
                     "error_type" => "dir_open",
-                    "path" => $current_dir,
+                    "path" => base64_encode($current_dir),
                     "message" => "Directory does not exist or is not accessible",
                 ];
                 array_pop($stack);
-                $json = json_encode($abort_payload);
-                $cursor_json = json_encode(
-                    ["stack" => $stack],
-                    JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                $json = safe_json_encode($abort_payload);
+                $cursor_json = safe_json_encode(
+                    ["stack" => encode_index_stack($stack)],
+                    JSON_UNESCAPED_SLASHES,
                 );
                 $cursor_b64 = base64_encode($cursor_json);
                 $gz->write("--{$boundary}\r\n");
@@ -2500,14 +2570,14 @@ function endpoint_file_index(
             if (!$allowed) {
                 $abort_payload = [
                     "error_type" => "dir_outside_root",
-                    "path" => $current_real,
+                    "path" => base64_encode($current_real),
                     "message" => "Directory is outside allowed roots",
                 ];
                 array_pop($stack);
-                $json = json_encode($abort_payload);
-                $cursor_json = json_encode(
-                    ["stack" => $stack],
-                    JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                $json = safe_json_encode($abort_payload);
+                $cursor_json = safe_json_encode(
+                    ["stack" => encode_index_stack($stack)],
+                    JSON_UNESCAPED_SLASHES,
                 );
                 $cursor_b64 = base64_encode($cursor_json);
                 $gz->write("--{$boundary}\r\n");
@@ -2529,13 +2599,13 @@ function endpoint_file_index(
             if ($entries === false) {
                 $abort_payload = [
                     "error_type" => "dir_open",
-                    "path" => $current_real,
+                    "path" => base64_encode($current_real),
                     "message" => "Failed to open directory",
                 ];
-                $json = json_encode($abort_payload);
-                $cursor_json = json_encode(
-                    ["stack" => $stack],
-                    JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                $json = safe_json_encode($abort_payload);
+                $cursor_json = safe_json_encode(
+                    ["stack" => encode_index_stack($stack)],
+                    JSON_UNESCAPED_SLASHES,
                 );
                 $cursor_b64 = base64_encode($cursor_json);
                 $gz->write("--{$boundary}\r\n");
@@ -2613,14 +2683,14 @@ function endpoint_file_index(
                 ];
 
                 if (count($batch_items) >= $batch_size) {
-                    $cursor_json = json_encode(
-                        ["stack" => $stack],
-                        JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                    $cursor_json = safe_json_encode(
+                        ["stack" => encode_index_stack($stack)],
+                        JSON_UNESCAPED_SLASHES,
                     );
                     $cursor_b64 = base64_encode($cursor_json);
-                    $json = json_encode(
-                        $batch_items,
-                        JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                    $json = safe_json_encode(
+                        encode_index_batch($batch_items),
+                        JSON_UNESCAPED_SLASHES,
                     );
 
                     $gz->write("--{$boundary}\r\n");
@@ -2681,20 +2751,20 @@ function endpoint_file_index(
         $aborted = true;
         $abort_payload = [
             "error_type" => "exception",
-            "path" => $current_dir,
+            "path" => base64_encode($current_dir),
             "message" => $e->getMessage(),
         ];
     }
 
     if (!empty($batch_items)) {
-        $cursor_json = json_encode(
-            ["stack" => $stack],
-            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        $cursor_json = safe_json_encode(
+            ["stack" => encode_index_stack($stack)],
+            JSON_UNESCAPED_SLASHES,
         );
         $cursor_b64 = base64_encode($cursor_json);
-        $json = json_encode(
-            $batch_items,
-            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        $json = safe_json_encode(
+            encode_index_batch($batch_items),
+            JSON_UNESCAPED_SLASHES,
         );
 
         $gz->write("--{$boundary}\r\n");
@@ -2713,10 +2783,10 @@ function endpoint_file_index(
     }
 
     if ($abort_payload !== null) {
-        $json = json_encode($abort_payload);
-        $cursor_json = json_encode(
-            ["stack" => $stack],
-            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        $json = safe_json_encode($abort_payload);
+        $cursor_json = safe_json_encode(
+            ["stack" => encode_index_stack($stack)],
+            JSON_UNESCAPED_SLASHES,
         );
         $cursor_b64 = base64_encode($cursor_json);
         $gz->write("--{$boundary}\r\n");
@@ -2731,9 +2801,9 @@ function endpoint_file_index(
         $status = "partial";
     }
 
-    $cursor_json = json_encode(
-        ["stack" => $stack],
-        JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+    $cursor_json = safe_json_encode(
+        ["stack" => encode_index_stack($stack)],
+        JSON_UNESCAPED_SLASHES,
     );
     $cursor_b64 = base64_encode($cursor_json);
 

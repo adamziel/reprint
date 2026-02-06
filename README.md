@@ -161,15 +161,6 @@ What we **don't** do:
 
 ### Todos
 
-* Rewrite URLs in the incoming files
-  * All SQL strings. How do we handle strings that are not UTF-8 but latin1? Well, WordPress doesn't seem to actually
-    support latin1, right? It's, most likely, UTF-8 disguised as another encoding. Can we reject inputs that don't form
-    valid UTF-8 sequences? Or at least avoid modifying them? And then rewrite the ones that do look valid?
-  * Hardcoded in files. Most likely themes and plugins. We can parse and rewrite CSS, HTML, XML, JavaScript, JSON, and PHP
-    because we have structured parsers and tokenizers for all these formats. Should we leave this out of scope for the
-    initial version, though? It will be an annoying limitations for site that do need rewriting, but it's also a relatively
-    major scope creep.
-  * Figure out if we do a multi-pass rewrite or stream-rewrite (which could slow down the download).
 * Turn it into a WordPress plugin 
   * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases we are trying to account for
@@ -222,6 +213,17 @@ What we **don't** do:
   over to the remote host to get an appropriately-chunked dump. Alternatively, if we ever need to store the dump now and execute it later, we could
   bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and
   turn it into SQL statements locally. Let's not start there, though, as that would add complexity and make the REST endpoints harder to debug.
+* Rewrite URLs in the incoming files. We have the tools to do it, but version 1 is about migrating between hosting
+  providers without changing the domain.
+  * All SQL strings. How do we handle strings that are not UTF-8 but latin1? Well, WordPress doesn't seem to actually
+    support latin1, right? It's, most likely, UTF-8 disguised as another encoding. Can we reject inputs that don't form
+    valid UTF-8 sequences? Or at least avoid modifying them? And then rewrite the ones that do look valid?
+  * Hardcoded in files. Most likely themes and plugins. We can parse and rewrite CSS, HTML, XML, JavaScript, JSON, and PHP
+    because we have structured parsers and tokenizers for all these formats. Should we leave this out of scope for the
+    initial version, though? It will be an annoying limitations for site that do need rewriting, but it's also a relatively
+    major scope creep.
+  * Figure out if we do a multi-pass rewrite or stream-rewrite (which could slow down the download).
+
 
 ### Transport
 
