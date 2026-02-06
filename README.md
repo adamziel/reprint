@@ -55,11 +55,13 @@ the next file.
 ### Migration index
 
 As the migration target receives files from the migration source, it builds a local index of all the paths, ctimes, and filesizes
-it has seen (stored as a sorted TSV). Later on, we use this index for incremental synchronization to get files changed since the last sync.
+it has seen. The on-disk index is a sorted JSON-lines file, where each line is a JSON object containing `path`, `ctime`, `size`,
+and `type`. This lets us safely store any filename (including tabs and newlines) without escaping hacks. Later on, we use this index
+for incremental synchronization to get files changed since the last sync.
 Here's how that works now:
 
-1. The migration target requests an **index-only** stream from the migration source and stores it locally.
-2. The migration target advances through both lists (local TSV index and remote index file) using a two-pointer diff:
+1. The migration target requests an **index-only** stream from the migration source and stores it locally. The index batches are JSON arrays.
+2. The migration target advances through both lists (local index and remote index file) using a two-pointer diff:
    - Deletes local files that no longer exist remotely.
    - Builds a download list for new/changed files.
 3. The migration target uploads the download list to the migration source and streams just those files.
@@ -67,6 +69,22 @@ Here's how that works now:
 This keeps the server stateless, keeps all large lists streamed (no full buffering), and guarantees ordering using `strcmp`-equivalent
 binary collation on both sides.
 
+### Directory listing order
+
+The file index is produced by traversing directories depth-first. Each directory’s immediate entries are sorted in bytewise
+lexicographic order (equivalent to `strcmp` with `LC_ALL=C`). When a directory entry is encountered, that directory entry is
+emitted, and then we descend into it before moving to the next sibling entry. This makes the output deterministic while keeping
+the cursor small and resumable.
+
+What we **don't** do:
+
+* Breadth-first traversal. It is tempting, as we can just get to a directory, scan it, emit all its children, and move on to the next directory.
+  It could be significantly faster in case we'd ever see xxx,xxx subfolders in a directory. With the depth-first traversal, every time we pause
+  and resume on the next request, we'll have to sort those xxx,xxx subfolders. We're talking about 0-3 seconds on every such request, which may
+  not be a big deal for a site of this size. It's still worth describing here, thought. The problem with breadth-first traversal is reentrancy.
+  We'd need to keep the directories we've already seen but haven't yet traversed across the entire tree level. We'd keep them in memory and,
+  potentially, in the cursor. That could take up some space!
+  
 ### Volatile files
 
 Sometimes a file will keep changing every minute and we'll start streaming it, but won't finish before it's modified again. In that case,
@@ -138,16 +156,19 @@ What we **don't** do:
 
 ### Todos
 
-* In export.php, require `wp-load.php` if we cannot cheaply connect to MySQL using the database credentials from the wp-config.php file.
-* Account for the disk space limits for files and for MySQL data on the migration target.
-* Account for 3xx errors
+* Support paths with "\n" in them – they're valid paths
 * Handle every single possible error case, e.g. fread() returning false prematurely etc.
+  * Account for the disk space limits for files and for MySQL data on the migration target.
+  * we can be reactive – detect out of disk space errors when it happens. we won't know the storage quota
+     upfront anyway in most shared hosting environments.
+* Account for 3xx errors – just treat them as errors. Anything non-200 is an error.
 * Turn it into a WordPress plugin 
   * HMAC signatures per request with a shared secret + random number + microtime
-* Automated test suite to cover all the usual corner cases
+* Automated test suite to cover all the usual corner cases we are trying to account for
 * If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
 * Take note of any files modified while they were streamed, re-request them later on.
    * Tell the user when a file is too volatile to be synchronized
+✅ In export.php, require `wp-load.php` if we cannot cheaply connect to MySQL using the database credentials from the wp-config.php file.
 ✅ Pre-flight request to
   ✅ Confirm the host is able to export the site
   ✅ Get runtime details so the importing side may decide if it's capable of importing the site.
@@ -176,6 +197,9 @@ What we **don't** do:
 **Out of scope for this initial version**
 
 * Sites using multiple databases (either multiple MySQL instances or also Postgres, Redis, etc.)
+* Support for directories with more files than we can sort in memory at once. A million files with 64 byte names require around 100MB of memory to sort.
+  If you have so many files, you better have that much memory available. If it turns out people tend to have more files without the available memory,
+  we can trade CPU cycles and use streaming sorting. We'd also need to use a temporary file to store the sorted list.
 * When we're starting the import and we have access to local MySQL, detect our local `current_statement_size` and `max_allowed_packet` and send that
   over to the remote host to get an appropriately-chunked dump. Alternatively, if we ever need to store the dump now and execute it later, we could
   bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and

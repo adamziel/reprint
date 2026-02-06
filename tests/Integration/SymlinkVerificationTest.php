@@ -52,10 +52,20 @@ class SymlinkVerificationTest extends TestCase
         $this->assertNotEmpty($exportData, 'Export should produce data');
 
         // Parse boundary
-        if (!preg_match('/^--boundary-([a-f0-9]+)/m', $exportData, $matches)) {
-            $this->fail('Could not find boundary in export data');
+        $boundary = null;
+        foreach (explode("\n", $exportData) as $line) {
+            $line = trim($line);
+            if (strpos($line, "--boundary-") === 0) {
+                $suffix = substr($line, strlen("--boundary-"));
+                if ($suffix !== "") {
+                    $boundary = "boundary-" . $suffix;
+                    break;
+                }
+            }
         }
-        $boundary = 'boundary-' . $matches[1];
+        if ($boundary === null) {
+            $this->fail("Could not find boundary in export data");
+        }
 
         // Import
         require_once __DIR__ . '/../../import.php';

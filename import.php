@@ -640,7 +640,7 @@ class AdaptiveTuner
      * This applies clamped sizes and slow-host caps, and injects any DB options
      * required by the export endpoint.
      *
-     * @param string $endpoint Endpoint name: file_stream, file_fetch, file_index, sql_chunk.
+     * @param string $endpoint Endpoint name: file_fetch, file_index, sql_chunk.
      * @return array Query parameters to send to export.php.
      */
     public function get_request_params(string $endpoint): array
@@ -651,8 +651,8 @@ class AdaptiveTuner
             "memory_threshold" => $this->config["memory_threshold"],
         ];
 
-        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
-            // Section: file streaming sizes (bytes).
+        if ($endpoint === "file_fetch") {
+            // Section: file fetch sizes (bytes).
             $size_key = "file_chunk_size";
             $size = (int) $this->state[$size_key];
             $size = $this->clamp_int(
@@ -698,7 +698,7 @@ class AdaptiveTuner
     /**
      * Record the outcome of a request and update tuning state using AIMD.
      *
-     * @param string $endpoint Endpoint name: file_stream, file_fetch, file_index, sql_chunk.
+     * @param string $endpoint Endpoint name: file_fetch, file_index, sql_chunk.
      * @param array  $metrics {
      *     Optional. Request metrics.
      *
@@ -707,7 +707,7 @@ class AdaptiveTuner
      *     @type int        $memory_used      Server memory peak (bytes).
      *     @type int        $memory_limit     Server memory limit (bytes).
      *     @type string     $status           Response status: partial|complete.
-     *     @type int        $bytes_processed  File bytes processed (file_stream/file_fetch).
+     *     @type int        $bytes_processed  File bytes processed (file_fetch).
      *     @type int        $entries_processed Index entries emitted (file_index).
      *     @type int        $sql_bytes        SQL bytes emitted (sql_chunk).
      *     @type float      $ttfb             Client time-to-first-byte (seconds).
@@ -982,7 +982,7 @@ class AdaptiveTuner
     /**
      * Record a request-level error and trigger temporary backoff.
      *
-     * @param string $endpoint Endpoint name: file_stream, file_fetch, file_index, sql_chunk.
+     * @param string $endpoint Endpoint name: file_fetch, file_index, sql_chunk.
      * @param array  $error {
      *     Optional. Error details.
      *
@@ -1057,7 +1057,7 @@ class AdaptiveTuner
 
     private function throughput_key_for_endpoint(string $endpoint): ?string
     {
-        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
+        if ($endpoint === "file_fetch") {
             return "file_throughput_ema";
         }
         if ($endpoint === "file_index") {
@@ -1095,7 +1095,7 @@ class AdaptiveTuner
 
     private function work_done_for_endpoint(string $endpoint, array $metrics): ?int
     {
-        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
+        if ($endpoint === "file_fetch") {
             return isset($metrics["bytes_processed"])
                 ? (int) $metrics["bytes_processed"]
                 : null;
@@ -1119,7 +1119,7 @@ class AdaptiveTuner
 
     private function size_key_for_endpoint(string $endpoint): ?string
     {
-        if ($endpoint === "file_stream" || $endpoint === "file_fetch") {
+        if ($endpoint === "file_fetch") {
             return "file_chunk_size";
         }
         if ($endpoint === "file_index") {
@@ -1200,16 +1200,17 @@ class ImportClient
     private $state_file;
     private $last_progress_output = 0;
     private $progress_throttle = 1.0; // seconds
-    private $index_file; // Local index of imported files for delta detection (sorted TSV)
-    private $index_updates_file; // Temp file collecting sorted index updates this run
+    private $index_file; // Local index of imported files for delta detection (sorted JSON lines)
+    private $index_updates_file; // Temp file collecting sorted index updates this run (JSON lines)
     private $index_updates_handle;
     private $index_updates_count = 0;
     private $last_update_path = null;
     private $last_update_delete = null;
     private $last_update_ctime = null;
     private $last_update_size = null;
-    private $remote_index_file; // Path to latest remote index TSV
-    private $download_list_file; // Path to file list for downloads
+    private $last_update_type = null;
+    private $remote_index_file; // Path to latest remote index JSON lines
+    private $download_list_file; // Path to file list for downloads (JSON lines)
     private $audit_log; // Audit log file for all operations
     private $verbose_mode = false; // Whether to show verbose output
     private $is_tty; // Whether stdout is a TTY
@@ -1228,13 +1229,13 @@ class ImportClient
         $this->remote_url = rtrim($remote_url, "?&");
         $this->local_path = rtrim($local_path, "/");
         $this->state_file = $this->local_path . "/.import-state.json";
-        $this->index_file = $this->local_path . "/.import-index.tsv";
+        $this->index_file = $this->local_path . "/.import-index.jsonl";
         $this->index_updates_file =
-            $this->local_path . "/.import-index-updates.tsv";
+            $this->local_path . "/.import-index-updates.jsonl";
         $this->remote_index_file =
-            $this->local_path . "/.import-remote-index.tsv";
+            $this->local_path . "/.import-remote-index.jsonl";
         $this->download_list_file =
-            $this->local_path . "/.import-download-list.txt";
+            $this->local_path . "/.import-download-list.jsonl";
         $this->audit_log = $this->local_path . "/.import-audit.log";
 
         // Detect TTY for progress display
@@ -1286,8 +1287,9 @@ class ImportClient
         string $path,
         int $ctime,
         int $size,
+        string $type,
     ): void {
-        $this->record_index_update_file($path, $ctime, $size);
+        $this->record_index_update_file($path, $ctime, $size, $type);
     }
 
     /**
@@ -1374,7 +1376,7 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: files-sync-initial, files-sync-delta, sql-sync
+     *   - command: Required. One of: files-sync-initial, files-sync-delta, files-index, sql-sync
      *   - restart: Optional. Force restart of completed command
      *   - verbose: Optional. Enable verbose output
      */
@@ -1386,7 +1388,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync-initial, files-sync-delta, sql-sync, sql-preflight",
+                "Command is required. Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, sql-preflight",
             );
         }
 
@@ -1394,12 +1396,13 @@ class ImportClient
             !in_array($command, [
                 "files-sync-initial",
                 "files-sync-delta",
+                "files-index",
                 "sql-sync",
                 "sql-preflight",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, sql-sync, sql-preflight",
+                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, sql-preflight",
             );
         }
 
@@ -1416,6 +1419,10 @@ class ImportClient
 
                 case "files-sync-delta":
                     $this->run_files_sync_delta($restart);
+                    break;
+
+                case "files-index":
+                    $this->run_files_index($restart);
                     break;
 
                 case "sql-sync":
@@ -1534,23 +1541,6 @@ class ImportClient
         }
         $this->audit_log(implode(" | ", $log), false);
     }
-
-    private function detect_boundary_from_body(string $buffer): ?string
-    {
-        if (strncmp($buffer, "--boundary-", 11) !== 0) {
-            return null;
-        }
-        $line_end = strpos($buffer, "\n");
-        if ($line_end === false) {
-            return null;
-        }
-        $line = rtrim(substr($buffer, 0, $line_end), "\r\n");
-        if (strncmp($line, "--boundary-", 11) !== 0) {
-            return null;
-        }
-        return substr($line, 2);
-    }
-
 
     /**
      * Record request metrics, apply tuning decisions, and sleep if needed.
@@ -1677,16 +1667,17 @@ class ImportClient
      *
      * Rules:
      * - If target directory is empty: request new session id, start sync
-     * - If not empty and last state is files-sync-initial: resume using cursor
+     * - If not empty and last state is files-sync-initial: resume using saved state
      * - If restart flag: clear state and start fresh
      * - Otherwise: error
      */
     private function run_files_sync_initial(bool $restart): void
     {
         $state_command = $this->state["command"] ?? null;
-        $has_cursor =
+        $has_progress =
             $state_command === "files-sync-initial" &&
-            !empty($this->state["cursor"] ?? null);
+            ($this->state["status"] ?? null) !== null &&
+            ($this->state["status"] ?? null) !== "complete";
         $current_status =
             $state_command === "files-sync-initial"
                 ? $this->state["status"] ?? null
@@ -1726,8 +1717,10 @@ class ImportClient
                 @unlink($this->download_list_file);
                 $this->audit_log("FILE DELETE | {$this->download_list_file}");
             }
+            $this->state["index"] = $this->default_state()["index"];
+            $this->state["fetch"] = $this->default_state()["fetch"];
             $this->save_state($this->state);
-            $has_cursor = false;
+            $has_progress = false;
             $current_status = null;
         }
 
@@ -1740,24 +1733,25 @@ class ImportClient
             );
         }
 
-        // Validate state: if no cursor and target not empty, refuse to proceed
-        if (!$has_cursor && !$is_empty) {
+        // Validate state: if no saved progress and target not empty, refuse to proceed
+        if (!$has_progress && !$is_empty) {
             throw new RuntimeException(
                 "Target directory is not empty and no cursor found. " .
                     "Either clear the target directory or use --restart flag.",
             );
         }
 
-        // Start new run only when no cursor is available
-        if ($has_cursor) {
+        // Start new run only when no saved progress is available
+        if ($has_progress) {
             // Resuming - reset counter to 0 for this session (we'll count new completions)
             $this->files_imported = 0;
             $index_size = $this->index_count();
 
+            $stage = $this->state["stage"] ?? "index";
             $this->audit_log(
                 sprintf(
-                    "RESUME files-sync-initial | cursor=%s | indexed_files=%d",
-                    substr($this->state["cursor"], 0, 20) . "...",
+                    "RESUME files-sync-initial | stage=%s | indexed_files=%d",
+                    $stage,
                     $index_size,
                 ),
                 true,
@@ -1765,14 +1759,16 @@ class ImportClient
 
             if (!$this->verbose_mode) {
                 echo "Resuming files-sync-initial\n";
+                echo "  Stage: {$stage}\n";
                 echo "  Already indexed: {$index_size} files\n";
             }
         } else {
             $this->state["command"] = "files-sync-initial";
             $this->state["status"] = "in_progress";
-            $this->state["cursor"] = null;
-            $this->state["stage"] = null;
+            $this->state["stage"] = "index";
             $this->state["diff"] = $this->default_state()["diff"];
+            $this->state["index"] = $this->default_state()["index"];
+            $this->state["fetch"] = $this->default_state()["fetch"];
             $this->save_state($this->state);
 
             $this->audit_log("START files-sync-initial", true);
@@ -1785,30 +1781,82 @@ class ImportClient
         $this->state["command"] = "files-sync-initial";
         $this->save_state($this->state);
 
-        // Execute sync (no client state for initial sync)
-        do {
-            $completed = $this->download_file_stream("file_stream", null);
+        $stage = $this->state["stage"] ?? "index";
 
-            // Mark status based on completion
-            $this->state["status"] = $completed ? "complete" : "partial";
+        if ($stage === "index") {
+            $complete = $this->download_remote_index();
+            if (!$complete) {
+                $this->state["status"] = "partial";
+                $this->save_state($this->state);
+                return;
+            }
+            $this->sort_index_file($this->remote_index_file);
+            $this->state["stage"] = "diff";
+            $this->state["diff"] = $this->default_state()["diff"];
+            if (file_exists($this->download_list_file)) {
+                @unlink($this->download_list_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
+                );
+            }
             $this->save_state($this->state);
-        } while (!$completed);
+            $stage = "diff";
+        }
+
+        if ($stage === "diff") {
+            $complete = $this->diff_indexes_and_build_fetch_list();
+            if (!$complete) {
+                $this->state["status"] = "partial";
+                $this->save_state($this->state);
+                return;
+            }
+
+            $has_downloads =
+                file_exists($this->download_list_file) &&
+                filesize($this->download_list_file) > 0;
+            $this->state["stage"] = $has_downloads ? "fetch" : null;
+            $this->save_state($this->state);
+            $stage = $has_downloads ? "fetch" : null;
+
+            if (!$has_downloads && file_exists($this->download_list_file)) {
+                @unlink($this->download_list_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->download_list_file} | no files to fetch",
+                );
+            }
+        }
+
+        if ($stage === "fetch") {
+            $complete = $this->download_files_from_list();
+            if (!$complete) {
+                $this->state["status"] = "partial";
+                $this->save_state($this->state);
+                return;
+            }
+            $this->state["stage"] = null;
+            $this->state["fetch"] = $this->default_state()["fetch"];
+            $this->save_state($this->state);
+
+            if (file_exists($this->download_list_file)) {
+                @unlink($this->download_list_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->download_list_file} | fetch complete",
+                );
+            }
+        }
+
+        $this->state["status"] = "complete";
+        $this->save_state($this->state);
 
         $this->clear_progress_line();
         $index_size = $this->index_count();
         $this->audit_log(
-            sprintf(
-                "files-sync-initial %s: %d files indexed",
-                $completed ? "complete" : "partial",
-                $index_size,
-            ),
+            sprintf("files-sync-initial complete: %d files indexed", $index_size),
             true,
         );
 
         if (!$this->verbose_mode) {
-            echo "files-sync-initial " .
-                ($completed ? "complete" : "partial") .
-                ": {$index_size} files indexed\n";
+            echo "files-sync-initial complete: {$index_size} files indexed\n";
             echo "Audit log: {$this->audit_log}\n";
         }
     }
@@ -1849,6 +1897,8 @@ class ImportClient
                 @unlink($this->download_list_file);
                 $this->audit_log("FILE DELETE | {$this->download_list_file}");
             }
+            $this->state["index"] = $this->default_state()["index"];
+            $this->state["fetch"] = $this->default_state()["fetch"];
             $this->save_state($this->state);
             $current_status = null;
             $stage = null;
@@ -1887,9 +1937,9 @@ class ImportClient
         $this->state["stage"] = $stage;
         if ($starting_index_fresh) {
             $this->audit_log(
-                "DELTA INDEX FRESH | clearing cursor and remote index for new delta sync",
+                "DELTA INDEX FRESH | clearing index state and remote index for new delta sync",
             );
-            $this->state["cursor"] = null;
+            $this->state["index"] = $this->default_state()["index"];
             if (file_exists($this->remote_index_file)) {
                 @unlink($this->remote_index_file);
                 $this->audit_log("FILE DELETE | {$this->remote_index_file}");
@@ -1918,8 +1968,8 @@ class ImportClient
                 return;
             }
 
+            $this->sort_index_file($this->remote_index_file);
             $this->state["stage"] = "diff";
-            $this->state["cursor"] = null;
             $this->state["diff"] = $this->default_state()["diff"];
             if (file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
@@ -1963,7 +2013,7 @@ class ImportClient
                 return;
             }
             $this->state["stage"] = null;
-            $this->state["cursor"] = null;
+            $this->state["fetch"] = $this->default_state()["fetch"];
             $this->save_state($this->state);
 
             // Clean up download list after successful fetch
@@ -1987,6 +2037,128 @@ class ImportClient
 
         if (!$this->verbose_mode) {
             echo "files-sync-delta complete: {$index_size} files indexed\n";
+            echo "Audit log: {$this->audit_log}\n";
+        }
+    }
+
+    /**
+     * Command: files-index
+     *
+     * Rules:
+     * - Streams the full remote index (DFS across directories) until complete
+     * - If already completed: require --restart flag
+     * - If restart flag: clear remote index file and index cursor
+     */
+    private function run_files_index(bool $restart): void
+    {
+        $state_command = $this->state["command"] ?? null;
+        $current_status =
+            $state_command === "files-index"
+                ? $this->state["status"] ?? null
+                : null;
+
+        if ($restart) {
+            $this->audit_log(
+                "RESTART | Clearing files-index state and starting fresh",
+                true,
+            );
+            $this->state["command"] = "files-index";
+            $this->state["status"] = null;
+            $this->state["stage"] = null;
+            $this->state["index"] = $this->default_state()["index"];
+            if (file_exists($this->remote_index_file)) {
+                @unlink($this->remote_index_file);
+                $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+            }
+            $this->save_state($this->state);
+            $current_status = null;
+        }
+
+        if ($current_status === "complete" && !$restart) {
+            throw new RuntimeException(
+                "files-index already completed. Use --restart flag to start over.",
+            );
+        }
+
+        if ($current_status === null) {
+            $this->state["command"] = "files-index";
+            $this->state["status"] = "in_progress";
+            $this->state["stage"] = "index";
+            $this->save_state($this->state);
+            $this->audit_log("START files-index", true);
+            if (!$this->verbose_mode) {
+                echo "Starting files-index\n";
+            }
+        } else {
+            $cursor = $this->state["index"]["cursor"] ?? null;
+            $this->audit_log(
+                sprintf(
+                    "RESUME files-index | cursor=%s",
+                    $cursor ? substr($cursor, 0, 20) . "..." : "none",
+                ),
+                true,
+            );
+            if (!$this->verbose_mode) {
+                echo "Resuming files-index\n";
+            }
+        }
+
+        $this->state["command"] = "files-index";
+        $this->save_state($this->state);
+
+        $attempts = 0;
+        $last_cursor = $this->state["index"]["cursor"] ?? null;
+        while (true) {
+            $complete = $this->download_remote_index();
+            if ($complete) {
+                break;
+            }
+
+            if ($this->shutdown_requested) {
+                $this->state["status"] = "partial";
+                $this->save_state($this->state);
+                return;
+            }
+
+            $current_cursor = $this->state["index"]["cursor"] ?? null;
+            if ($current_cursor === $last_cursor) {
+                throw new RuntimeException(
+                    "files-index made no progress (cursor unchanged)",
+                );
+            }
+            $last_cursor = $current_cursor;
+
+            $attempts++;
+            if ($attempts > 100000) {
+                throw new RuntimeException(
+                    "files-index exceeded maximum attempts",
+                );
+            }
+        }
+
+        $this->sort_index_file($this->remote_index_file);
+        $this->state["status"] = "complete";
+        $this->state["stage"] = null;
+        $this->save_state($this->state);
+
+        $count = 0;
+        if (file_exists($this->remote_index_file)) {
+            $h = fopen($this->remote_index_file, "r");
+            if ($h) {
+                while (fgets($h) !== false) {
+                    $count++;
+                }
+                fclose($h);
+            }
+        }
+        $this->audit_log(
+            sprintf("files-index complete: %d entries indexed", $count),
+            true,
+        );
+
+        if (!$this->verbose_mode) {
+            echo "files-index complete: {$count} entries indexed\n";
+            echo "Remote index: {$this->remote_index_file}\n";
             echo "Audit log: {$this->audit_log}\n";
         }
     }
@@ -2204,16 +2376,16 @@ class ImportClient
     }
 
     /**
-     * Download file content stream from a server endpoint.
+     * Download file content for a prepared file list (file_fetch).
      *
-     * @param string $endpoint Endpoint name (file_stream or file_fetch)
      * @param array|null $post_data Optional POST data
+     * @param string|null $cursor Cursor for resumption within the current batch
      */
-    private function download_file_stream(
-        string $endpoint,
+    private function download_file_fetch(
         ?array $post_data,
+        ?string $cursor,
     ): bool {
-        $cursor = $this->state["cursor"] ?? null;
+        $cursor = $cursor ?? ($this->state["fetch"]["cursor"] ?? null);
         $complete = false;
         $this->chunks_since_save = 0;
 
@@ -2242,9 +2414,9 @@ class ImportClient
             }
         }
 
-        $params = $this->get_tuned_params($endpoint);
-        $url = $this->build_url($endpoint, $cursor, $params, null);
-        $this->audit_log("Downloading file stream from {$url}");
+        $params = $this->get_tuned_params("file_fetch");
+        $url = $this->build_url("file_fetch", $cursor, $params, null);
+        $this->audit_log("Downloading file fetch from {$url}");
         $this->audit_log("POST data: " . json_encode($post_data));
 
         $context = new StreamingContext();
@@ -2267,7 +2439,7 @@ class ImportClient
 
             $this->chunks_since_save++;
             if ($this->chunks_since_save >= 50) {
-                $this->state["cursor"] = $cursor;
+                $this->state["fetch"]["cursor"] = $cursor;
                 // Track current file for crash recovery
                 if ($context->file_handle && $context->file_path) {
                     // Flush to ensure bytes are on disk before saving state
@@ -2343,16 +2515,22 @@ class ImportClient
         };
 
         $request_start = microtime(true);
-        $this->fetch_streaming($url, $cursor, $context, $post_data, $endpoint);
+        $this->fetch_streaming(
+            $url,
+            $cursor,
+            $context,
+            $post_data,
+            "file_fetch",
+        );
         $wall_time = microtime(true) - $request_start;
 
         $this->finalize_tuned_request(
-            $endpoint,
+            "file_fetch",
             $wall_time,
             $context->response_stats ?? [],
         );
         $this->finalize_index_updates();
-        $this->state["cursor"] = $cursor;
+        $this->state["fetch"]["cursor"] = $cursor;
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
             fflush($context->file_handle);
@@ -2372,8 +2550,18 @@ class ImportClient
      */
     private function download_remote_index(): bool
     {
-        $cursor = $this->state["cursor"] ?? null;
-        $mode = $cursor ? "a" : "w";
+        $index_state = $this->state["index"] ?? $this->default_state()["index"];
+        $cursor = $index_state["cursor"] ?? null;
+
+        $roots = $this->get_root_directories_from_url();
+        if (empty($roots)) {
+            throw new RuntimeException(
+                "No root directories found in remote URL. " .
+                    "Provide directory=... in the export URL.",
+            );
+        }
+
+        $mode = file_exists($this->remote_index_file) ? "a" : "w";
         if ($mode === "w") {
             $this->audit_log(
                 "FILE CREATE | {$this->remote_index_file} | downloading fresh remote index",
@@ -2391,6 +2579,9 @@ class ImportClient
         $complete = false;
         $this->chunks_since_save = 0;
         $params = $this->get_tuned_params("file_index");
+        if ($cursor === null) {
+            $params["list_dir"] = $roots[0];
+        }
         $url = $this->build_url("file_index", $cursor, $params, null);
         $context = new StreamingContext();
 
@@ -2410,7 +2601,9 @@ class ImportClient
 
             $this->chunks_since_save++;
             if ($this->chunks_since_save >= 50) {
-                $this->state["cursor"] = $cursor;
+                $this->state["index"] = [
+                    "cursor" => $cursor,
+                ];
                 $this->save_state($this->state);
                 $this->chunks_since_save = 0;
             }
@@ -2422,39 +2615,42 @@ class ImportClient
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
             if ($chunk_type === "index_batch") {
-                // Batched format: gzipped TSV (path\tctime\tsize per line)
                 $body = $chunk["body"] ?? "";
-                $encoding = $chunk["headers"]["content-encoding"] ?? "";
-
-                // Decompress if gzipped
-                if ($encoding === "gzip") {
-                    $body = gzdecode($body);
+                if ($body === "") {
+                    return;
                 }
-
-                // Write TSV lines directly to the index file
-                if ($body !== false && $body !== "") {
-                    fwrite($handle, $body);
-                    // Ensure newline at end if not present
-                    if (substr($body, -1) !== "\n") {
-                        fwrite($handle, "\n");
+                $items = json_decode($body, true);
+                if (!is_array($items)) {
+                    throw new RuntimeException(
+                        "Invalid index batch JSON received from server",
+                    );
+                }
+                foreach ($items as $item) {
+                    if (!is_array($item)) {
+                        continue;
                     }
-                }
-            } elseif ($chunk_type === "index") {
-                // Legacy single-entry format (backwards compatibility)
-                $path = base64_decode($chunk["headers"]["x-index-path"] ?? "");
-                $ctime = (int) ($chunk["headers"]["x-file-ctime"] ?? 0);
-                $size = (int) ($chunk["headers"]["x-file-size"] ?? 0);
-                if ($path !== "") {
-                    fwrite($handle, "{$path}\t{$ctime}\t{$size}\n");
-                }
-            } elseif ($chunk_type === "symlink") {
-                // Legacy symlink format (backwards compatibility)
-                $path = base64_decode(
-                    $chunk["headers"]["x-symlink-path"] ?? "",
-                );
-                $ctime = (int) ($chunk["headers"]["x-symlink-ctime"] ?? 0);
-                if ($path !== "") {
-                    fwrite($handle, "{$path}\t{$ctime}\t0\n");
+                    $path = $item["path"] ?? "";
+                    if (!is_string($path) || $path === "") {
+                        continue;
+                    }
+                    $ctime = (int) ($item["ctime"] ?? 0);
+                    $size = (int) ($item["size"] ?? 0);
+                    $type = (string) ($item["type"] ?? "file");
+
+                    $line = json_encode(
+                        [
+                            "path" => $path,
+                            "ctime" => $ctime,
+                            "size" => $size,
+                            "type" => $type,
+                        ],
+                        JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                    );
+                    if ($line === false) {
+                        continue;
+                    }
+                    fwrite($handle, $line . "\n");
+
                 }
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "index");
@@ -2498,7 +2694,9 @@ class ImportClient
         );
         fclose($handle);
 
-        $this->state["cursor"] = $cursor;
+        $this->state["index"] = [
+            "cursor" => $complete ? null : $cursor,
+        ];
         $this->save_state($this->state);
 
         return $complete;
@@ -2583,7 +2781,8 @@ class ImportClient
             if ($local !== null && $local["path"] === $remote["path"]) {
                 if (
                     $local["ctime"] !== $remote["ctime"] ||
-                    $local["size"] !== $remote["size"]
+                    $local["size"] !== $remote["size"] ||
+                    $local["type"] !== $remote["type"]
                 ) {
                     $this->append_download_list(
                         $remote["path"],
@@ -2645,16 +2844,175 @@ class ImportClient
         if (filesize($this->download_list_file) === 0) {
             return true;
         }
+        $fetch_state = $this->state["fetch"] ?? $this->default_state()["fetch"];
+        $batch_file = $fetch_state["batch_file"] ?? null;
+        $batch_offset = (int) ($fetch_state["offset"] ?? 0);
+        $next_offset = (int) ($fetch_state["next_offset"] ?? 0);
+        $cursor = $fetch_state["cursor"] ?? null;
+
+        if ($batch_file === null || !file_exists($batch_file)) {
+            $batch = $this->prepare_fetch_batch($batch_offset);
+            if ($batch === null) {
+                return true;
+            }
+            $batch_file = $batch["file"];
+            $batch_offset = $batch["offset"];
+            $next_offset = $batch["next_offset"];
+            $cursor = null;
+            $this->state["fetch"] = [
+                "offset" => $batch_offset,
+                "next_offset" => $next_offset,
+                "batch_file" => $batch_file,
+                "cursor" => null,
+            ];
+            $this->save_state($this->state);
+        }
 
         $post_data = [
             "file_list" => new CURLFile(
-                $this->download_list_file,
-                "text/plain",
-                "file-list.txt",
+                $batch_file,
+                "application/json",
+                "file-list.json",
             ),
         ];
 
-        return $this->download_file_stream("file_fetch", $post_data);
+        $complete = $this->download_file_fetch($post_data, $cursor);
+        if (!$complete) {
+            return false;
+        }
+
+        if (file_exists($batch_file)) {
+            @unlink($batch_file);
+            $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
+        }
+
+        $this->state["fetch"] = [
+            "offset" => $next_offset,
+            "next_offset" => $next_offset,
+            "batch_file" => null,
+            "cursor" => null,
+        ];
+        $this->save_state($this->state);
+
+        return $next_offset >= filesize($this->download_list_file);
+    }
+
+    /**
+     * Build a batch file for file_fetch without exceeding request limits.
+     */
+    private function prepare_fetch_batch(int $offset): ?array
+    {
+        $max_request = $this->get_max_request_bytes();
+        $limit = (int) max(256 * 1024, $max_request * 0.8);
+
+        $handle = fopen($this->download_list_file, "r");
+        if (!$handle) {
+            throw new RuntimeException("Failed to open download list file");
+        }
+
+        if ($offset > 0) {
+            fseek($handle, $offset);
+        }
+
+        $tmp = tempnam(sys_get_temp_dir(), "file-fetch-");
+        if ($tmp === false) {
+            fclose($handle);
+            throw new RuntimeException("Failed to create fetch batch file");
+        }
+        $out = fopen($tmp, "w");
+        if (!$out) {
+            fclose($handle);
+            @unlink($tmp);
+            throw new RuntimeException("Failed to open fetch batch file");
+        }
+
+        $bytes = 0;
+        $first = true;
+        fwrite($out, "[");
+        $bytes = 1;
+        while (true) {
+            $line_start = ftell($handle);
+            $line = fgets($handle);
+            if ($line === false) {
+                break;
+            }
+            $line = trim($line);
+            if ($line === "") {
+                continue;
+            }
+            $decoded = json_decode($line, true);
+            if (is_string($decoded)) {
+                $path = $decoded;
+            } elseif (is_array($decoded) && isset($decoded["path"])) {
+                $path = $decoded["path"];
+            } else {
+                continue;
+            }
+            if (!is_string($path) || $path === "") {
+                continue;
+            }
+            $json_path = json_encode(
+                $path,
+                JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+            );
+            if ($json_path === false) {
+                continue;
+            }
+            $prefix = $first ? "" : ",";
+            $chunk = $prefix . $json_path;
+            $needed = $bytes + strlen($chunk) + 1; // +1 for closing bracket
+
+            if (!$first && $needed > $limit) {
+                fseek($handle, $line_start);
+                break;
+            }
+            if ($first && $needed > $limit) {
+                // Still write at least one entry even if it exceeds the limit.
+                fwrite($out, $chunk);
+                $bytes += strlen($chunk);
+                $first = false;
+                break;
+            }
+
+            fwrite($out, $chunk);
+            $bytes += strlen($chunk);
+            $first = false;
+        }
+        fwrite($out, "]");
+        $bytes += 1;
+
+        $next_offset = ftell($handle);
+        fclose($handle);
+        fclose($out);
+
+        if ($bytes <= 2) {
+            @unlink($tmp);
+            return null;
+        }
+
+        return [
+            "file" => $tmp,
+            "offset" => $offset,
+            "next_offset" => $next_offset,
+        ];
+    }
+
+    /**
+     * Determine maximum request size for file_fetch uploads.
+     */
+    private function get_max_request_bytes(): int
+    {
+        $preflight = $this->state["preflight"]["data"]["limits"] ?? null;
+        $max_request = null;
+        if (is_array($preflight) && isset($preflight["max_request_bytes"])) {
+            $max_request = (int) $preflight["max_request_bytes"];
+        }
+
+        if ($max_request === null || $max_request <= 0) {
+            return 4 * 1024 * 1024;
+        }
+
+        return $max_request;
     }
 
     /**
@@ -2662,7 +3020,13 @@ class ImportClient
      */
     private function append_download_list(string $path, $handle): void
     {
-        fwrite($handle, $path . "\n");
+        $line = json_encode(
+            ["path" => $path],
+            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        );
+        if ($line !== false) {
+            fwrite($handle, $line . "\n");
+        }
         $this->audit_log("Download: {$path}", false);
     }
 
@@ -2675,17 +3039,28 @@ class ImportClient
             return;
         }
         $local_path = $this->local_path . "/filesystem-root" . $path;
-        if (file_exists($local_path)) {
-            if (true !== @unlink($local_path)) {
-                $this->audit_log("Failed to delete: {$path}", true);
+        if (!file_exists($local_path) && !is_link($local_path)) {
+            return;
+        }
+
+        if (is_dir($local_path) && !is_link($local_path)) {
+            if (true !== @rmdir($local_path)) {
+                $this->audit_log("Failed to delete directory: {$path}", true);
             } else {
-                $this->audit_log("Deleted: {$path}", false);
+                $this->audit_log("Deleted directory: {$path}", false);
             }
+            return;
+        }
+
+        if (true !== @unlink($local_path)) {
+            $this->audit_log("Failed to delete: {$path}", true);
+        } else {
+            $this->audit_log("Deleted: {$path}", false);
         }
     }
 
     /**
-     * Parse one TSV index line into an array.
+     * Parse one JSON index line into an array.
      */
     private function parse_index_line(string $line): ?array
     {
@@ -2693,14 +3068,19 @@ class ImportClient
         if ($line === "") {
             return null;
         }
-        $parts = explode("\t", $line);
-        if (count($parts) < 3) {
-            return null;
+        $data = json_decode($line, true);
+        if (!is_array($data)) {
+            throw new RuntimeException("Invalid index line format");
+        }
+        $path = $data["path"] ?? "";
+        if (!is_string($path) || $path === "") {
+            throw new RuntimeException("Invalid index path");
         }
         return [
-            "path" => $parts[0],
-            "ctime" => (int) $parts[1],
-            "size" => (int) $parts[2],
+            "path" => $path,
+            "ctime" => (int) ($data["ctime"] ?? 0),
+            "size" => (int) ($data["size"] ?? 0),
+            "type" => (string) ($data["type"] ?? "file"),
         ];
     }
 
@@ -2745,6 +3125,7 @@ class ImportClient
         $this->last_update_delete = null;
         $this->last_update_ctime = null;
         $this->last_update_size = null;
+        $this->last_update_type = null;
     }
 
     /**
@@ -2754,6 +3135,7 @@ class ImportClient
         string $path,
         int $ctime,
         int $size,
+        string $type,
     ): void {
         if (!$this->index_updates_handle) {
             $this->begin_index_updates();
@@ -2762,17 +3144,30 @@ class ImportClient
             $this->last_update_path === $path &&
             $this->last_update_delete === false &&
             $this->last_update_ctime === $ctime &&
-            $this->last_update_size === $size
+            $this->last_update_size === $size &&
+            $this->last_update_type === $type
         ) {
             return;
         }
-        $line = sprintf("F\t%s\t%d\t%d\n", $path, $ctime, $size);
-        fwrite($this->index_updates_handle, $line);
+        $line = json_encode(
+            [
+                "op" => "F",
+                "path" => $path,
+                "ctime" => $ctime,
+                "size" => $size,
+                "type" => $type,
+            ],
+            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        );
+        if ($line !== false) {
+            fwrite($this->index_updates_handle, $line . "\n");
+        }
         $this->index_updates_count++;
         $this->last_update_path = $path;
         $this->last_update_delete = false;
         $this->last_update_ctime = $ctime;
         $this->last_update_size = $size;
+        $this->last_update_type = $type;
     }
 
     /**
@@ -2789,13 +3184,22 @@ class ImportClient
         ) {
             return;
         }
-        $line = sprintf("D\t%s\n", $path);
-        fwrite($this->index_updates_handle, $line);
+        $line = json_encode(
+            [
+                "op" => "D",
+                "path" => $path,
+            ],
+            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        );
+        if ($line !== false) {
+            fwrite($this->index_updates_handle, $line . "\n");
+        }
         $this->index_updates_count++;
         $this->last_update_path = $path;
         $this->last_update_delete = true;
         $this->last_update_ctime = null;
         $this->last_update_size = null;
+        $this->last_update_type = null;
     }
 
     /**
@@ -2811,6 +3215,7 @@ class ImportClient
         $this->last_update_delete = null;
         $this->last_update_ctime = null;
         $this->last_update_size = null;
+        $this->last_update_type = null;
 
         $has_updates =
             $this->index_updates_count > 0 ||
@@ -2848,6 +3253,21 @@ class ImportClient
             throw new RuntimeException("Failed to merge index updates");
         }
 
+        $write_line = function ($handle, array $entry): void {
+            $line = json_encode(
+                [
+                    "path" => $entry["path"],
+                    "ctime" => (int) $entry["ctime"],
+                    "size" => (int) $entry["size"],
+                    "type" => (string) $entry["type"],
+                ],
+                JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+            );
+            if ($line !== false) {
+                fwrite($handle, $line . "\n");
+            }
+        };
+
         $old = $this->read_index_line($old_handle);
         $carry = null;
         $upd = $this->read_update_line($upd_handle, $carry);
@@ -2856,15 +3276,7 @@ class ImportClient
         while ($old !== null || $upd !== null) {
             if ($upd === null) {
                 if ($last_written_path !== $old["path"]) {
-                    fwrite(
-                        $new_handle,
-                        sprintf(
-                            "%s\t%d\t%d\n",
-                            $old["path"],
-                            $old["ctime"],
-                            $old["size"],
-                        ),
-                    );
+                    $write_line($new_handle, $old);
                     $last_written_path = $old["path"];
                 }
                 $old = $this->read_index_line($old_handle);
@@ -2873,15 +3285,7 @@ class ImportClient
 
             if ($old === null) {
                 if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    fwrite(
-                        $new_handle,
-                        sprintf(
-                            "%s\t%d\t%d\n",
-                            $upd["path"],
-                            $upd["ctime"],
-                            $upd["size"],
-                        ),
-                    );
+                    $write_line($new_handle, $upd);
                     $last_written_path = $upd["path"];
                 }
                 $upd = $this->read_update_line($upd_handle, $carry);
@@ -2891,44 +3295,20 @@ class ImportClient
             $cmp = strcmp($old["path"], $upd["path"]);
             if ($cmp === 0) {
                 if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    fwrite(
-                        $new_handle,
-                        sprintf(
-                            "%s\t%d\t%d\n",
-                            $upd["path"],
-                            $upd["ctime"],
-                            $upd["size"],
-                        ),
-                    );
+                    $write_line($new_handle, $upd);
                     $last_written_path = $upd["path"];
                 }
                 $old = $this->read_index_line($old_handle);
                 $upd = $this->read_update_line($upd_handle, $carry);
             } elseif ($cmp < 0) {
                 if ($last_written_path !== $old["path"]) {
-                    fwrite(
-                        $new_handle,
-                        sprintf(
-                            "%s\t%d\t%d\n",
-                            $old["path"],
-                            $old["ctime"],
-                            $old["size"],
-                        ),
-                    );
+                    $write_line($new_handle, $old);
                     $last_written_path = $old["path"];
                 }
                 $old = $this->read_index_line($old_handle);
             } else {
                 if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    fwrite(
-                        $new_handle,
-                        sprintf(
-                            "%s\t%d\t%d\n",
-                            $upd["path"],
-                            $upd["ctime"],
-                            $upd["size"],
-                        ),
-                    );
+                    $write_line($new_handle, $upd);
                     $last_written_path = $upd["path"];
                 }
                 $upd = $this->read_update_line($upd_handle, $carry);
@@ -2951,7 +3331,7 @@ class ImportClient
     }
 
     /**
-     * Read one TSV record from the on-disk index.
+     * Read one JSON record from the on-disk index.
      */
     private function read_index_line($handle): ?array
     {
@@ -2959,29 +3339,9 @@ class ImportClient
             return null;
         }
         while (($line = fgets($handle)) !== false) {
-            $line = trim($line);
-            if ($line === "") {
-                continue;
-            }
-            $parts = explode("\t", $line);
-            if (count($parts) >= 3) {
-                if ($parts[0] === "F" && count($parts) >= 4) {
-                    // Recover from accidental update lines in the index file.
-                    return [
-                        "path" => $parts[1],
-                        "ctime" => (int) $parts[2],
-                        "size" => (int) $parts[3],
-                    ];
-                }
-                if ($parts[0] === "D") {
-                    // Skip deletion markers accidentally written to the index.
-                    continue;
-                }
-                return [
-                    "path" => $parts[0],
-                    "ctime" => (int) $parts[1],
-                    "size" => (int) $parts[2],
-                ];
+            $parsed = $this->parse_index_line($line);
+            if ($parsed !== null) {
+                return $parsed;
             }
         }
         return null;
@@ -3000,23 +3360,31 @@ class ImportClient
             if ($line === "") {
                 continue;
             }
-            $parts = explode("\t", $line);
-            if (count($parts) < 2) {
-                continue;
+            $data = json_decode($line, true);
+            if (!is_array($data)) {
+                throw new RuntimeException("Invalid index update line format");
             }
-            if ($parts[0] === "D") {
+            $op = $data["op"] ?? null;
+            $path = $data["path"] ?? null;
+            if (!is_string($path) || $path === "") {
+                throw new RuntimeException("Invalid index update path");
+            }
+            if ($op === "D") {
                 return [
-                    "path" => $parts[1],
+                    "path" => $path,
                     "delete" => true,
                     "ctime" => 0,
                     "size" => 0,
+                    "type" => null,
                 ];
-            } elseif ($parts[0] === "F" && count($parts) >= 4) {
+            }
+            if ($op === "F") {
                 return [
-                    "path" => $parts[1],
+                    "path" => $path,
                     "delete" => false,
-                    "ctime" => (int) $parts[2],
-                    "size" => (int) $parts[3],
+                    "ctime" => (int) ($data["ctime"] ?? 0),
+                    "size" => (int) ($data["size"] ?? 0),
+                    "type" => (string) ($data["type"] ?? "file"),
                 ];
             }
         }
@@ -3510,7 +3878,7 @@ class ImportClient
                 touch($context->file_path, $context->file_ctime);
             }
 
-            // Index update (TSV)
+            // Index update (JSON lines)
             $file_size = (int) ($headers["x-file-size"] ?? 0);
             $final_size = file_exists($context->file_path)
                 ? filesize($context->file_path)
@@ -3523,6 +3891,7 @@ class ImportClient
                     $path,
                     $context->file_ctime,
                     $file_size,
+                    "file",
                 );
                 $this->files_imported++; // Count completed files only
                 $this->audit_log(
@@ -3648,6 +4017,7 @@ class ImportClient
     {
         $headers = $chunk["headers"];
         $path = base64_decode($headers["x-directory-path"] ?? "");
+        $ctime = (int) ($headers["x-directory-ctime"] ?? 0);
 
         if (!$path) {
             return;
@@ -3667,6 +4037,10 @@ class ImportClient
         $this->ensure_directory_path($local_path);
 
         $this->audit_log("Directory: {$path}", false);
+
+        if ($ctime > 0) {
+            $this->upsert_index_entry($path, $ctime, 0, "dir");
+        }
     }
 
     /**
@@ -3747,7 +4121,7 @@ class ImportClient
         $this->audit_log("Symlink: {$path} -> {$target}", false);
 
         if ($ctime > 0) {
-            $this->upsert_index_entry($path, $ctime, 0);
+            $this->upsert_index_entry($path, $ctime, 0, "link");
         }
 
         $this->output_progress([
@@ -3859,6 +4233,180 @@ class ImportClient
     }
 
     /**
+     * Extract root directories from the remote URL query.
+     */
+    private function get_root_directories_from_url(): array
+    {
+        $parts = parse_url($this->remote_url);
+        $query = $parts["query"] ?? "";
+        if ($query === "") {
+            return [];
+        }
+        $params = [];
+        parse_str($query, $params);
+        $dirs = $params["directory"] ?? [];
+        if (!is_array($dirs)) {
+            $dirs = [$dirs];
+        }
+        $normalized = [];
+        foreach ($dirs as $dir) {
+            if (!is_string($dir)) {
+                continue;
+            }
+            $dir = rtrim($dir, "/");
+            if ($dir === "") {
+                continue;
+            }
+            $normalized[] = $dir;
+        }
+        return array_values(array_unique($normalized));
+    }
+
+    /**
+     * Check if a function is available (not disabled).
+     */
+    private function function_available(string $name): bool
+    {
+        if (!function_exists($name)) {
+            return false;
+        }
+        $disabled = ini_get("disable_functions");
+        if ($disabled === false || trim($disabled) === "") {
+            return true;
+        }
+        $list = array_map("trim", explode(",", $disabled));
+        return !in_array($name, $list, true);
+    }
+
+    /**
+     * Sort an index file by path (first column).
+     */
+    private function sort_index_file(string $path): void
+    {
+        if (!file_exists($path)) {
+            return;
+        }
+        if (filesize($path) === 0) {
+            return;
+        }
+
+        $tmp = $path . ".sorted";
+        if ($this->function_available("exec")) {
+            $keyed = $path . ".keyed";
+            $sorted_keyed = $path . ".keyed.sorted";
+            $in = fopen($path, "r");
+            $out = fopen($keyed, "w");
+            if (!$in || !$out) {
+                if ($in) {
+                    fclose($in);
+                }
+                if ($out) {
+                    fclose($out);
+                }
+                throw new RuntimeException("Failed to prepare index file for sorting");
+            }
+            while (($line = fgets($in)) !== false) {
+                $line = rtrim($line, "\r\n");
+                if ($line === "") {
+                    continue;
+                }
+                $entry = $this->parse_index_line($line);
+                if ($entry === null) {
+                    continue;
+                }
+                $key = bin2hex($entry["path"]);
+                fwrite($out, $key . "\t" . $line . "\n");
+            }
+            fclose($in);
+            fclose($out);
+
+            $cmd =
+                "LC_ALL=C sort -t '\t' -k1,1 " .
+                escapeshellarg($keyed) .
+                " > " .
+                escapeshellarg($sorted_keyed);
+            $output = [];
+            $code = 0;
+            exec($cmd, $output, $code);
+            if ($code !== 0) {
+                @unlink($keyed);
+                @unlink($sorted_keyed);
+                throw new RuntimeException("Failed to sort index file");
+            }
+            $sorted_in = fopen($sorted_keyed, "r");
+            $sorted_out = fopen($tmp, "w");
+            if (!$sorted_in || !$sorted_out) {
+                if ($sorted_in) {
+                    fclose($sorted_in);
+                }
+                if ($sorted_out) {
+                    fclose($sorted_out);
+                }
+                @unlink($keyed);
+                @unlink($sorted_keyed);
+                throw new RuntimeException("Failed to finalize sorted index file");
+            }
+            while (($line = fgets($sorted_in)) !== false) {
+                $pos = strpos($line, "\t");
+                if ($pos === false) {
+                    continue;
+                }
+                $data = substr($line, $pos + 1);
+                if ($data === "") {
+                    continue;
+                }
+                fwrite($sorted_out, $data);
+            }
+            fclose($sorted_in);
+            fclose($sorted_out);
+            @unlink($keyed);
+            @unlink($sorted_keyed);
+            if (!rename($tmp, $path)) {
+                throw new RuntimeException("Failed to replace sorted index file");
+            }
+            return;
+        }
+
+        $size = filesize($path);
+        $limit = 50 * 1024 * 1024;
+        if ($size > $limit) {
+            throw new RuntimeException(
+                "Index file is too large to sort without exec()",
+            );
+        }
+
+        $raw_lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($raw_lines === false) {
+            throw new RuntimeException("Failed to read index file for sorting");
+        }
+        $entries = [];
+        foreach ($raw_lines as $line) {
+            $entry = $this->parse_index_line($line);
+            if ($entry === null) {
+                continue;
+            }
+            $entries[] = [
+                "path" => $entry["path"],
+                "line" => $line,
+            ];
+        }
+        usort($entries, function ($a, $b) {
+            return strcmp($a["path"], $b["path"]);
+        });
+        $lines = [];
+        foreach ($entries as $entry) {
+            $lines[] = $entry["line"];
+        }
+        $data = implode("\n", $lines) . "\n";
+        if (file_put_contents($tmp, $data) === false) {
+            throw new RuntimeException("Failed to write sorted index file");
+        }
+        if (!rename($tmp, $path)) {
+            throw new RuntimeException("Failed to replace sorted index file");
+        }
+    }
+
+    /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
     private function fetch_json(string $url): array
@@ -3883,7 +4431,7 @@ class ImportClient
         ];
 
         curl_setopt_array($ch, [
-            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_TIMEOUT => 30,
             CURLOPT_ENCODING => "",
             CURLOPT_HTTPHEADER => $headers,
@@ -3920,6 +4468,18 @@ class ImportClient
         $this->last_http_code = $http_code;
         curl_close($ch);
         $this->current_curl_handle = null;
+
+        if ($http_code !== 200) {
+            return [
+                "ok" => false,
+                "http_code" => $http_code,
+                "elapsed" => $elapsed,
+                "body" => $body,
+                "json" => null,
+                "error" => "HTTP error {$http_code}" .
+                    ($body ? ": " . substr($body, 0, 500) : ""),
+            ];
+        }
 
         $json = null;
         $json_error = null;
@@ -4025,7 +4585,7 @@ class ImportClient
         }
 
         curl_setopt_array($ch, [
-            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_TIMEOUT => 300,
             CURLOPT_ENCODING => "", // Auto-decompress gzip/deflate/br responses
             CURLOPT_HTTPHEADER => $headers,
@@ -4129,48 +4689,60 @@ class ImportClient
                 // If no parser yet, we might be receiving an error response
                 if (!$parser) {
                     $error_body .= $data;
-                    $boundary = $this->detect_boundary_from_body($error_body);
-                    if ($boundary !== null) {
-                        $this->audit_log(
-                            "Detected boundary in body (no Content-Type): {$boundary}",
-                            false,
-                        );
-                        $parser = new MultipartStreamParser(
-                            $boundary,
-                            function ($event) use (&$current_chunk, $context) {
-                                if ($event["type"] === "body") {
-                                    if (!$current_chunk) {
-                                        $current_chunk = [
-                                            "headers" => $event["headers"],
-                                            "body" => $event["data"],
-                                        ];
-                                    } else {
-                                        $current_chunk["body"] =
-                                            ($current_chunk["body"] ?? "") .
-                                            $event["data"];
-                                    }
-                                } elseif ($event["type"] === "complete") {
-                                    if ($current_chunk) {
-                                        if ($context->on_chunk) {
-                                            ($context->on_chunk)($current_chunk);
-                                        }
-                                    } elseif ($event["headers"]) {
-                                        if ($context->on_chunk) {
-                                            ($context->on_chunk)([
-                                                "headers" => $event["headers"],
-                                                "body" => "",
-                                            ]);
-                                        }
-                                    }
-                                    $current_chunk = null;
-                                }
-                            },
-                        );
-                        $parser->feed($error_body);
-                        $error_body = "";
-                    } elseif (strlen($error_body) > 65536) {
+                    if (strlen($error_body) > 65536) {
                         $error_body = substr($error_body, -65536);
                     }
+
+                    // Strict fallback: if body starts with a boundary line, parse it.
+                    if (strncmp($error_body, "--boundary-", 11) === 0) {
+                        $line_end = strpos($error_body, "\n");
+                        if ($line_end !== false) {
+                            $line = rtrim(substr($error_body, 0, $line_end), "\r\n");
+                            if (strncmp($line, "--boundary-", 11) === 0) {
+                                $boundary = substr($line, 2);
+                                if ($boundary !== "") {
+                                    $this->audit_log(
+                                        "Detected boundary in body (no Content-Type): {$boundary}",
+                                        false,
+                                    );
+                                    $parser = new MultipartStreamParser(
+                                        $boundary,
+                                        function ($event) use (&$current_chunk, $context) {
+                                            if ($event["type"] === "body") {
+                                                if (!$current_chunk) {
+                                                    $current_chunk = [
+                                                        "headers" => $event["headers"],
+                                                        "body" => $event["data"],
+                                                    ];
+                                                } else {
+                                                    $current_chunk["body"] =
+                                                        ($current_chunk["body"] ?? "") .
+                                                        $event["data"];
+                                                }
+                                            } elseif ($event["type"] === "complete") {
+                                                if ($current_chunk) {
+                                                    if ($context->on_chunk) {
+                                                        ($context->on_chunk)($current_chunk);
+                                                    }
+                                                } elseif ($event["headers"]) {
+                                                    if ($context->on_chunk) {
+                                                        ($context->on_chunk)([
+                                                            "headers" => $event["headers"],
+                                                            "body" => "",
+                                                        ]);
+                                                    }
+                                                }
+                                                $current_chunk = null;
+                                            }
+                                        },
+                                    );
+                                    $parser->feed($error_body);
+                                    $error_body = "";
+                                }
+                            }
+                        }
+                    }
+
                     static $logged_no_parser = false;
                     if (!$logged_no_parser && strlen($error_body) > 0) {
                         $this->audit_log(
@@ -4359,6 +4931,15 @@ class ImportClient
                 "remote_offset" => 0,
                 "local_after" => null,
             ],
+            "index" => [
+                "cursor" => null,
+            ],
+            "fetch" => [
+                "offset" => 0,
+                "next_offset" => 0,
+                "batch_file" => null,
+                "cursor" => null,
+            ],
             // Crash recovery: track in-progress file downloads
             // If we crash mid-write, we can truncate to the expected size on resume
             "current_file" => null,        // Path to file being written
@@ -4387,6 +4968,18 @@ class ImportClient
         }
         $diff = array_intersect_key($diff, $defaults["diff"]);
         $state["diff"] = array_merge($defaults["diff"], $diff);
+        $index = $state["index"] ?? [];
+        if (!is_array($index)) {
+            $index = [];
+        }
+        $index = array_intersect_key($index, $defaults["index"]);
+        $state["index"] = array_merge($defaults["index"], $index);
+        $fetch = $state["fetch"] ?? [];
+        if (!is_array($fetch)) {
+            $fetch = [];
+        }
+        $fetch = array_intersect_key($fetch, $defaults["fetch"]);
+        $state["fetch"] = array_merge($defaults["fetch"], $fetch);
         $tuning = $state["tuning"] ?? [];
         if (!is_array($tuning)) {
             $tuning = [];
@@ -4450,7 +5043,11 @@ class ImportClient
 
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run
-        $cursor_info = $state["cursor"] ? "cursor=saved" : "cursor=none";
+        $has_cursor =
+            !empty($state["cursor"] ?? null) ||
+            !empty($state["index"]["cursor"] ?? null) ||
+            !empty($state["fetch"]["cursor"] ?? null);
+        $cursor_info = $has_cursor ? "cursor=saved" : "cursor=none";
 
         $this->audit_log(
             sprintf(
@@ -4629,13 +5226,17 @@ if (
         echo "Commands:\n";
         echo "  files-sync-initial   Initial full file sync\n";
         echo "                       - If target empty: starts new sync\n";
-        echo "                       - If in progress: resumes from cursor\n";
+        echo "                       - If in progress: resumes from saved state\n";
         echo "                       - If complete: requires --restart flag\n";
         echo "\n";
         echo "  files-sync-delta     Delta file sync (only changed/new/deleted files)\n";
         echo "                       - Requires completed files-sync-initial\n";
         echo "                       - Downloads remote index and diffs locally\n";
-        echo "                       - If in progress: resumes from cursor\n";
+        echo "                       - If in progress: resumes from saved state\n";
+        echo "                       - If complete: requires --restart flag\n";
+        echo "\n";
+        echo "  files-index          Download full remote index only\n";
+        echo "                       - Traverses the full directory tree\n";
         echo "                       - If complete: requires --restart flag\n";
         echo "\n";
         echo "  sql-sync             Download database dump\n";
@@ -4688,8 +5289,8 @@ if (
         echo "  --db-query-time-limit=N MySQL MAX_EXECUTION_TIME (ms) for SELECT\n";
         echo "\n";
         echo "State Management:\n";
-        echo "  - Each command tracks its own state (cursor, status, session)\n";
-        echo "  - Interrupted commands automatically resume from last cursor\n";
+        echo "  - Each command tracks its own state (stage/cursor/status)\n";
+        echo "  - Interrupted commands automatically resume from last saved state\n";
         echo "  - Completed commands require --restart to run again\n";
         echo "  - State is stored in .import-state.json\n";
         echo "\n";
@@ -4697,11 +5298,14 @@ if (
         echo "  # Initial full sync (downloads everything)\n";
         echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-initial\n";
         echo "\n";
-        echo "  # Resume interrupted initial sync (continues from cursor)\n";
+        echo "  # Resume interrupted initial sync (continues from saved state)\n";
         echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-initial\n";
         echo "\n";
         echo "  # Delta sync (only download changes since last sync)\n";
         echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-delta\n";
+        echo "\n";
+        echo "  # Full index only (no file downloads)\n";
+        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-index\n";
         echo "\n";
         echo "  # Restart completed delta sync\n";
         echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-delta --restart\n";
@@ -4714,7 +5318,7 @@ if (
         echo "  - SQL written to <local-path>/db.sql\n";
         echo "  - Files written to <local-path>/filesystem-root/\n";
         echo "  - State written to <local-path>/.import-state.json\n";
-        echo "  - Index written to <local-path>/.import-index.tsv\n";
+        echo "  - Index written to <local-path>/.import-index.jsonl\n";
         echo "  - Audit log written to <local-path>/.import-audit.log\n";
         exit(1);
     }
@@ -4727,7 +5331,7 @@ if (
         fwrite(STDERR, "Error: Command is required\n");
         fwrite(
             STDERR,
-            "Valid commands: files-sync-initial, files-sync-delta, sql-sync, sql-preflight\n",
+            "Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, sql-preflight\n",
         );
         exit(1);
     }

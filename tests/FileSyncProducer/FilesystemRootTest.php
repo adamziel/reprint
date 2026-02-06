@@ -31,7 +31,7 @@ class FilesystemRootTest extends FileSyncProducerTestBase
         symlink('../wordpress', $symlinkPath);
 
         // This should NOT throw an error
-        $sync = new \FileSyncProducer($htdocsDir, [
+        $sync = new \FileTreeProducer($htdocsDir, [
             'follow_symlinks' => true
         ]);
 
@@ -77,7 +77,7 @@ class FilesystemRootTest extends FileSyncProducerTestBase
         $symlinkPath = $htdocsDir . '/__wp__';
         symlink('../../wordpress', $symlinkPath);
 
-        $sync = new \FileSyncProducer($htdocsDir, [
+        $sync = new \FileTreeProducer($htdocsDir, [
             'follow_symlinks' => true
         ]);
 
@@ -106,7 +106,7 @@ class FilesystemRootTest extends FileSyncProducerTestBase
             'file2.txt' => 'Content 2'
         ]);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
 
         $fsRoot = $sync->get_filesystem_root();
@@ -136,7 +136,7 @@ class FilesystemRootTest extends FileSyncProducerTestBase
         symlink('../lib1', $siteDir . '/lib1');
         symlink('../lib2', $siteDir . '/lib2');
 
-        $sync = new \FileSyncProducer($siteDir, [
+        $sync = new \FileTreeProducer($siteDir, [
             'follow_symlinks' => true
         ]);
 
@@ -172,7 +172,7 @@ class FilesystemRootTest extends FileSyncProducerTestBase
         symlink('../nonexistent/wordpress', $symlinkPath);
 
         // Should not throw error
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'follow_symlinks' => true
         ]);
 

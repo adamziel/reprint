@@ -239,7 +239,8 @@ class LargeDatasetReentrancyTest extends MySQLDumpProducerTestBase
                 if ($sql !== null) {
                     $allFragments[] = $sql;
                     // Count row fragments (they start with opening parenthesis)
-                    if (preg_match("/^\s*\(/", $sql)) {
+                    $trimmed = ltrim($sql);
+                    if ($trimmed !== "" && $trimmed[0] === "(") {
                         $rowsInIteration++;
                     }
                 }

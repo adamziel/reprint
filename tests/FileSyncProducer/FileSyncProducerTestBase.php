@@ -7,7 +7,7 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../file-sync.php';
 
 /**
- * Base test class for FileSyncProducer tests
+ * Base test class for FileTreeProducer tests
  */
 abstract class FileSyncProducerTestBase extends TestCase
 {
@@ -136,7 +136,7 @@ abstract class FileSyncProducerTestBase extends TestCase
     /**
      * Process all chunks from sync producer
      */
-    protected function processAllChunks(\FileSyncProducer $sync): array
+    protected function processAllChunks(\FileTreeProducer $sync): array
     {
         $chunks = [];
 

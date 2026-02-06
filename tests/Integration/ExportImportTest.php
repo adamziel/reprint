@@ -338,9 +338,18 @@ class ExportImportTest extends TestCase
 
         // Extract boundary from the first boundary marker in the output
         // Format: --boundary-hexstring
-        if (preg_match('/^--boundary-([a-f0-9]+)/m', $output, $matches)) {
-            $boundary = 'boundary-' . $matches[1];
-        } else {
+        $boundary = null;
+        foreach (explode("\n", $output) as $line) {
+            $line = trim($line);
+            if (strpos($line, "--boundary-") === 0) {
+                $suffix = substr($line, strlen("--boundary-"));
+                if ($suffix !== "") {
+                    $boundary = "boundary-" . $suffix;
+                    break;
+                }
+            }
+        }
+        if ($boundary === null) {
             $this->fail('Could not extract boundary from output. First 500 chars: ' . substr($output, 0, 500));
         }
 

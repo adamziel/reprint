@@ -1897,77 +1897,83 @@ function stream_file_producer(
     $last_progress_output = microtime(true);
     $metadata_sent = false;
     $iterations = 0;
+    $aborted = false;
+    $abort_payload = null;
+    $last_cursor = $initial_cursor;
 
-    while (true) {
-        if (
-            !should_continue(
-                $script_start,
-                $max_execution_time,
-                $max_memory,
-                $memory_threshold,
-            )
-        ) {
-            break;
-        }
+    try {
+        while (true) {
+            if (
+                !should_continue(
+                    $script_start,
+                    $max_execution_time,
+                    $max_memory,
+                    $memory_threshold,
+                )
+            ) {
+                break;
+            }
 
-        if (!$producer->next_chunk()) {
-            break;
-        }
+            if (!$producer->next_chunk()) {
+                break;
+            }
 
-        $iterations++;
-        $chunk = $producer->get_current_chunk();
-        $progress = $producer->get_progress();
+            $iterations++;
+            $chunk = $producer->get_current_chunk();
+            $progress = $producer->get_progress();
 
-        if (!$metadata_sent && $progress["phase"] === "streaming") {
-            $filesystem_root = $producer->get_filesystem_root();
-            $metadata = [
-                "filesystem_root" => $filesystem_root,
-            ];
-            $metadata_json = json_encode($metadata);
-
-            $gz->write("--{$boundary}\r\n");
-            $gz->write("Content-Type: application/json\r\n");
-            $gz->write("Content-Length: " . strlen($metadata_json) . "\r\n");
-            $gz->write("X-Chunk-Type: metadata\r\n");
-            $gz->write(
-                "X-Filesystem-Root: " .
-                    base64_encode($filesystem_root ?? "") .
-                    "\r\n",
-            );
-            $gz->write("\r\n");
-            $gz->write($metadata_json);
-            $gz->write("\r\n");
-            $gz->flush();
-
-            $metadata_sent = true;
-        }
-
-        if ($chunk === null) {
-            $now = microtime(true);
-            if ($iterations === 1 || $now - $last_progress_output >= 3.0) {
-                $progress_json = json_encode($progress);
-                $cursor = $producer->get_reentrancy_cursor();
+            if (!$metadata_sent && $progress["phase"] === "streaming") {
+                $filesystem_root = $producer->get_filesystem_root();
+                $metadata = [
+                    "filesystem_root" => $filesystem_root,
+                ];
+                $metadata_json = json_encode($metadata);
 
                 $gz->write("--{$boundary}\r\n");
                 $gz->write("Content-Type: application/json\r\n");
+                $gz->write("Content-Length: " . strlen($metadata_json) . "\r\n");
+                $gz->write("X-Chunk-Type: metadata\r\n");
                 $gz->write(
-                    "Content-Length: " . strlen($progress_json) . "\r\n",
+                    "X-Filesystem-Root: " .
+                        base64_encode($filesystem_root ?? "") .
+                        "\r\n",
                 );
-                $gz->write("X-Chunk-Type: progress\r\n");
-                $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
                 $gz->write("\r\n");
-                $gz->write($progress_json);
+                $gz->write($metadata_json);
                 $gz->write("\r\n");
                 $gz->flush();
 
-                $last_progress_output = $now;
+                $metadata_sent = true;
             }
 
-            continue;
-        }
+            if ($chunk === null) {
+                $now = microtime(true);
+                if ($iterations === 1 || $now - $last_progress_output >= 3.0) {
+                    $progress_json = json_encode($progress);
+                    $cursor = $producer->get_reentrancy_cursor();
+                    $last_cursor = $cursor;
 
-        $chunk_type = $chunk["type"] ?? "file";
-        $cursor = $producer->get_reentrancy_cursor();
+                    $gz->write("--{$boundary}\r\n");
+                    $gz->write("Content-Type: application/json\r\n");
+                    $gz->write(
+                        "Content-Length: " . strlen($progress_json) . "\r\n",
+                    );
+                    $gz->write("X-Chunk-Type: progress\r\n");
+                    $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
+                    $gz->write("\r\n");
+                    $gz->write($progress_json);
+                    $gz->write("\r\n");
+                    $gz->flush();
+
+                    $last_progress_output = $now;
+                }
+
+                continue;
+            }
+
+            $chunk_type = $chunk["type"] ?? "file";
+            $cursor = $producer->get_reentrancy_cursor();
+            $last_cursor = $cursor;
 
         if ($chunk_type === "directory") {
             $gz->write("--{$boundary}\r\n");
@@ -1978,6 +1984,9 @@ function stream_file_producer(
             $gz->write(
                 "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n",
             );
+            if (isset($chunk["ctime"])) {
+                $gz->write("X-Directory-Ctime: " . $chunk["ctime"] . "\r\n");
+            }
             $gz->write("\r\n");
             $gz->write("\r\n");
             $gz->flush();
@@ -2100,11 +2109,31 @@ function stream_file_producer(
             $gz->write("\r\n");
             $gz->flush();
         }
+    }
+    } catch (Throwable $e) {
+        $aborted = true;
+        $abort_payload = [
+            "error_type" => "exception",
+            "path" => "",
+            "message" => $e->getMessage(),
+        ];
+    }
 
+    if ($abort_payload !== null) {
+        $json = json_encode($abort_payload);
+        $gz->write("--{$boundary}\r\n");
+        $gz->write("Content-Type: application/json\r\n");
+        $gz->write("Content-Length: " . strlen($json) . "\r\n");
+        $gz->write("X-Chunk-Type: error\r\n");
+        $gz->write("X-Cursor: " . base64_encode($last_cursor) . "\r\n");
+        $gz->write("\r\n");
+        $gz->write($json);
+        $gz->write("\r\n");
+        $gz->flush();
     }
 
     $progress = $producer->get_progress();
-    $is_complete = $progress["phase"] === "finished";
+    $is_complete = $progress["phase"] === "finished" && !$aborted;
     $status = $is_complete ? "complete" : "partial";
 
     error_log(
@@ -2141,63 +2170,14 @@ function stream_file_producer(
 }
 
 /**
- * Endpoint: Stream files.
- *
- * If `paths` is provided (array of specific file paths), streams only those files.
- * Otherwise, streams all files via directory traversal (initial sync).
- *
- * The paths array is passed in memory - no filesystem writes required.
- */
-function endpoint_file_stream(
-    array $config,
-    float $script_start,
-    int $max_execution_time,
-    int $max_memory,
-    float $memory_threshold,
-): array {
-    $directories = resolve_directories($config);
-    $chunk_size = $config["chunk_size"] ?? 5 * 1024 * 1024;
-    $chunk_size = require_int_range(
-        "chunk_size",
-        (int) $chunk_size,
-        EXPORT_MIN_CHUNK_SIZE,
-        EXPORT_MAX_CHUNK_SIZE,
-    );
-
-    $sync_options = [
-        "chunk_size" => $chunk_size,
-    ];
-    if (isset($config["cursor"])) {
-        $sync_options["cursor"] = $config["cursor"];
-    }
-
-    // Optional paths filter: when provided, only stream these specific paths
-    // instead of doing full directory traversal
-    if (isset($config["paths"]) && is_array($config["paths"])) {
-        $sync_options["paths"] = $config["paths"];
-    }
-
-    $producer = new FileTreeProducer($directories, $sync_options);
-    return stream_file_producer(
-        $producer,
-        $script_start,
-        $max_execution_time,
-        $max_memory,
-        $memory_threshold,
-    );
-}
-
-/**
  * Endpoint: Stream index in batches with gzip compression.
  *
- * Instead of emitting one multipart chunk per file, collects up to
- * `batch_size` (default 5000) index entries and emits them as a single
- * TSV chunk. The entire response is gzip-compressed.
+ * Lists entries from a single directory, sorted lexicographically.
+ * The client supplies list_dir and drives traversal breadth-first by
+ * enqueuing directories as they are discovered.
  *
- * Output format per batch:
- *   X-Chunk-Type: index_batch
- *   X-Cursor: <base64 cursor>
- *   Body: TSV (path\tctime\tsize per line)
+ * Output format per batch (gzipped):
+ *   JSON array of {path, ctime, size, type} objects.
  */
 function endpoint_file_index(
     array $config,
@@ -2215,25 +2195,94 @@ function endpoint_file_index(
         EXPORT_MAX_INDEX_BATCH,
     );
 
-    $chunk_size = $config["chunk_size"] ?? 5 * 1024 * 1024;
-    $chunk_size = require_int_range(
-        "chunk_size",
-        (int) $chunk_size,
-        EXPORT_MIN_CHUNK_SIZE,
-        EXPORT_MAX_CHUNK_SIZE,
-    );
+    $list_dir = $config["list_dir"] ?? null;
+    $list_dir_real = null;
+    $stack = [];
+    $cursor_provided = isset($config["cursor"]);
 
-    $sync_options = [
-        "chunk_size" => $chunk_size,
-        "index_only" => true,
-    ];
-    if (isset($config["cursor"])) {
-        $sync_options["cursor"] = $config["cursor"];
-    } elseif (isset($config["index_after"])) {
-        $sync_options["start_after"] = $config["index_after"];
+    if ($cursor_provided) {
+        $cursor_data = json_decode($config["cursor"], true);
+        if (!is_array($cursor_data)) {
+            throw new InvalidArgumentException("Invalid index cursor format");
+        }
+        if (!isset($cursor_data["stack"]) || !is_array($cursor_data["stack"])) {
+            throw new InvalidArgumentException("Index cursor missing stack");
+        }
+        foreach ($cursor_data["stack"] as $frame) {
+            if (!is_array($frame)) {
+                throw new InvalidArgumentException("Invalid index cursor frame");
+            }
+            $dir = $frame["dir"] ?? null;
+            if (!is_string($dir) || $dir === "") {
+                throw new InvalidArgumentException("Index cursor frame missing dir");
+            }
+            $after = $frame["after"] ?? null;
+            if ($after !== null && !is_string($after)) {
+                throw new InvalidArgumentException("Index cursor frame invalid after");
+            }
+            $stack[] = [
+                "dir" => $dir,
+                "after" => $after,
+            ];
+        }
+    } else {
+        if (!$list_dir) {
+            throw new InvalidArgumentException("list_dir is required for file_index");
+        }
+
+        $list_dir_real = realpath($list_dir);
+        if ($list_dir_real === false || !is_dir($list_dir_real)) {
+            throw new InvalidArgumentException(
+                "list_dir does not exist or is not accessible: {$list_dir}",
+            );
+        }
+
+        $allowed = false;
+        foreach ($directories as $root) {
+            if (
+                $list_dir_real === $root ||
+                str_starts_with($list_dir_real, $root . "/")
+            ) {
+                $allowed = true;
+                break;
+            }
+        }
+        if (!$allowed) {
+            throw new InvalidArgumentException(
+                "list_dir is outside of allowed roots: {$list_dir_real}",
+            );
+        }
+
+        $ordered = [$list_dir_real];
+        $extra_roots = [];
+        foreach ($directories as $root) {
+            if ($root === $list_dir_real) {
+                continue;
+            }
+            $extra_roots[] = $root;
+        }
+        if (!empty($extra_roots)) {
+            sort($extra_roots, SORT_STRING);
+            foreach ($extra_roots as $root) {
+                $ordered[] = $root;
+            }
+        }
+
+        for ($i = count($ordered) - 1; $i >= 0; $i--) {
+            $stack[] = [
+                "dir" => $ordered[$i],
+                "after" => null,
+            ];
+        }
     }
 
-    $producer = new FileTreeProducer($directories, $sync_options);
+    if ($list_dir_real === null) {
+        if (!empty($stack)) {
+            $list_dir_real = $stack[count($stack) - 1]["dir"];
+        } else {
+            $list_dir_real = $directories[0] ?? "/";
+        }
+    }
 
     prepare_streaming_response();
 
@@ -2245,9 +2294,11 @@ function endpoint_file_index(
 
     $gz = new GzipOutputStream($can_send_headers);
 
-    // Emit initial metadata
-    $filesystem_root = $producer->get_filesystem_root();
-    $metadata = ["filesystem_root" => $filesystem_root];
+    $filesystem_root = $directories[0] ?? "/";
+    $metadata = [
+        "filesystem_root" => $filesystem_root,
+        "list_dir" => $list_dir_real,
+    ];
     $metadata_json = json_encode($metadata);
 
     $gz->write("--{$boundary}\r\n");
@@ -2257,6 +2308,9 @@ function endpoint_file_index(
     $gz->write(
         "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n",
     );
+    $gz->write(
+        "X-Index-Dir: " . base64_encode($list_dir_real ?? "") . "\r\n",
+    );
     $gz->write("\r\n");
     $gz->write($metadata_json);
     $gz->write("\r\n");
@@ -2264,124 +2318,310 @@ function endpoint_file_index(
 
     $batches_emitted = 0;
     $total_entries = 0;
-    $batch_lines = [];
+    $batch_items = [];
+    $status = "partial";
+    $aborted = false;
+    $abort_payload = null;
 
-    while (true) {
-        if (
-            !should_continue(
-                $script_start,
-                $max_execution_time,
-                $max_memory,
-                $memory_threshold,
-            )
-        ) {
-            break;
-        }
+    $current_dir = $list_dir_real;
 
-        if (!$producer->next_chunk()) {
-            break;
-        }
-
-        $chunk = $producer->get_current_chunk();
-
-        if ($chunk === null) {
-            continue;
-        }
-
-        $chunk_type = $chunk["type"] ?? "file";
-
-        // Collect index entries as TSV lines
-        if ($chunk_type === "index") {
-            $batch_lines[] =
-                $chunk["path"] .
-                "\t" .
-                $chunk["ctime"] .
-                "\t" .
-                $chunk["size"];
-        } elseif ($chunk_type === "symlink") {
-            $batch_lines[] =
-                $chunk["path"] . "\t" . ($chunk["ctime"] ?? 0) . "\t0";
-        } elseif ($chunk_type === "directory") {
-            // Skip directories in index - they're implicit from file paths
-            continue;
-        } elseif ($chunk_type === "error") {
-            $payload = [
-                "error_type" => $chunk["error_type"] ?? "unknown",
-                "path" => $chunk["path"] ?? "",
-                "message" => $chunk["message"] ?? "Error",
-            ];
-            if (isset($chunk["expected_ctime"])) {
-                $payload["expected_ctime"] = $chunk["expected_ctime"];
+    try {
+        $stop = false;
+        while (!$stop) {
+            if (empty($stack)) {
+                $status = "complete";
+                break;
             }
-            if (isset($chunk["actual_ctime"])) {
-                $payload["actual_ctime"] = $chunk["actual_ctime"];
+
+            $frame_index = count($stack) - 1;
+            $frame = $stack[$frame_index];
+            $current_dir = $frame["dir"];
+            $current_after = $frame["after"] ?? null;
+
+            $current_real = realpath($current_dir);
+            if ($current_real === false || !is_dir($current_real)) {
+                $abort_payload = [
+                    "error_type" => "dir_open",
+                    "path" => $current_dir,
+                    "message" => "Directory does not exist or is not accessible",
+                ];
+                array_pop($stack);
+                $json = json_encode($abort_payload);
+                $cursor_json = json_encode(
+                    ["stack" => $stack],
+                    JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                );
+                $cursor_b64 = base64_encode($cursor_json);
+                $gz->write("--{$boundary}\r\n");
+                $gz->write("Content-Type: application/json\r\n");
+                $gz->write("Content-Length: " . strlen($json) . "\r\n");
+                $gz->write("X-Chunk-Type: error\r\n");
+                $gz->write("X-Cursor: " . $cursor_b64 . "\r\n");
+                $gz->write("\r\n");
+                $gz->write($json);
+                $gz->write("\r\n");
+                $gz->flush();
+                $abort_payload = null;
+                continue;
             }
-            $json = json_encode($payload);
-            $cursor = $producer->get_reentrancy_cursor();
-            $gz->write("--{$boundary}\r\n");
-            $gz->write("Content-Type: application/json\r\n");
-            $gz->write("Content-Length: " . strlen($json) . "\r\n");
-            $gz->write("X-Chunk-Type: error\r\n");
-            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
-            $gz->write("\r\n");
-            $gz->write($json);
-            $gz->write("\r\n");
-            $gz->flush();
-            continue;
+
+            $allowed = false;
+            foreach ($directories as $root) {
+                if (
+                    $current_real === $root ||
+                    str_starts_with($current_real, $root . "/")
+                ) {
+                    $allowed = true;
+                    break;
+                }
+            }
+            if (!$allowed) {
+                $abort_payload = [
+                    "error_type" => "dir_outside_root",
+                    "path" => $current_real,
+                    "message" => "Directory is outside allowed roots",
+                ];
+                array_pop($stack);
+                $json = json_encode($abort_payload);
+                $cursor_json = json_encode(
+                    ["stack" => $stack],
+                    JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                );
+                $cursor_b64 = base64_encode($cursor_json);
+                $gz->write("--{$boundary}\r\n");
+                $gz->write("Content-Type: application/json\r\n");
+                $gz->write("Content-Length: " . strlen($json) . "\r\n");
+                $gz->write("X-Chunk-Type: error\r\n");
+                $gz->write("X-Cursor: " . $cursor_b64 . "\r\n");
+                $gz->write("\r\n");
+                $gz->write($json);
+                $gz->write("\r\n");
+                $gz->flush();
+                $abort_payload = null;
+                continue;
+            }
+
+            $stack[$frame_index]["dir"] = $current_real;
+            $current_dir = $current_real;
+            $entries = @scandir($current_real, SCANDIR_SORT_ASCENDING);
+            if ($entries === false) {
+                $abort_payload = [
+                    "error_type" => "dir_open",
+                    "path" => $current_real,
+                    "message" => "Failed to open directory",
+                ];
+                $json = json_encode($abort_payload);
+                $cursor_json = json_encode(
+                    ["stack" => $stack],
+                    JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                );
+                $cursor_b64 = base64_encode($cursor_json);
+                $gz->write("--{$boundary}\r\n");
+                $gz->write("Content-Type: application/json\r\n");
+                $gz->write("Content-Length: " . strlen($json) . "\r\n");
+                $gz->write("X-Chunk-Type: error\r\n");
+                $gz->write("X-Cursor: " . $cursor_b64 . "\r\n");
+                $gz->write("\r\n");
+                $gz->write($json);
+                $gz->write("\r\n");
+                $gz->flush();
+                $abort_payload = null;
+                array_pop($stack);
+                continue;
+            }
+
+            $filtered = [];
+            foreach ($entries as $entry) {
+                if ($entry === "." || $entry === "..") {
+                    continue;
+                }
+                $filtered[] = $entry;
+            }
+
+            $position = 0;
+            if ($current_after !== null && $current_after !== "") {
+                $position = position_after_entry($filtered, $current_after);
+            }
+
+            while (true) {
+                if ($position >= count($filtered)) {
+                    array_pop($stack);
+                    break;
+                }
+                $entry = $filtered[$position];
+                $position++;
+
+                $stack[$frame_index]["after"] = $entry;
+                $path = $current_real . "/" . $entry;
+                $stat = @lstat($path);
+                if ($stat === false) {
+                    if (
+                        !should_continue(
+                            $script_start,
+                            $max_execution_time,
+                            $max_memory,
+                            $memory_threshold,
+                        )
+                    ) {
+                        $status = "partial";
+                        $stop = true;
+                        break;
+                    }
+                    continue;
+                }
+
+                $mode = $stat["mode"] & 0170000;
+                $type = "file";
+                if ($mode === 0120000) {
+                    $type = "link";
+                } elseif ($mode === 0040000) {
+                    $type = "dir";
+                } elseif ($mode !== 0100000) {
+                    $type = "other";
+                }
+
+                $ctime = (int) ($stat["ctime"] ?? 0);
+                $size = $type === "file" ? (int) ($stat["size"] ?? 0) : 0;
+
+                $batch_items[] = [
+                    "path" => $path,
+                    "ctime" => $ctime,
+                    "size" => $size,
+                    "type" => $type,
+                ];
+
+                if (count($batch_items) >= $batch_size) {
+                    $cursor_json = json_encode(
+                        ["stack" => $stack],
+                        JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                    );
+                    $cursor_b64 = base64_encode($cursor_json);
+                    $json = json_encode(
+                        $batch_items,
+                        JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+                    );
+
+                    $gz->write("--{$boundary}\r\n");
+                    $gz->write("Content-Type: application/json\r\n");
+                    $gz->write("Content-Length: " . strlen($json) . "\r\n");
+                    $gz->write("X-Chunk-Type: index_batch\r\n");
+                    $gz->write("X-Cursor: " . $cursor_b64 . "\r\n");
+                    $gz->write("X-Batch-Size: " . count($batch_items) . "\r\n");
+                    $gz->write("\r\n");
+                    $gz->write($json);
+                    $gz->write("\r\n");
+                    $gz->flush();
+
+                    $batches_emitted++;
+                    $total_entries += count($batch_items);
+                    $batch_items = [];
+                }
+
+                if ($type === "dir") {
+                    $stack[] = [
+                        "dir" => $path,
+                        "after" => null,
+                    ];
+                    break;
+                }
+
+                if (
+                    !should_continue(
+                        $script_start,
+                        $max_execution_time,
+                        $max_memory,
+                        $memory_threshold,
+                    )
+                ) {
+                    $status = "partial";
+                    $stop = true;
+                    break;
+                }
+            }
+
+            if ($stop) {
+                break;
+            }
+
+            if (
+                !should_continue(
+                    $script_start,
+                    $max_execution_time,
+                    $max_memory,
+                    $memory_threshold,
+                )
+            ) {
+                $status = "partial";
+                break;
+            }
         }
-
-        // Emit batch when full or when we need to stop
-        if (count($batch_lines) >= $batch_size) {
-            $cursor = $producer->get_reentrancy_cursor();
-            $tsv = implode("\n", $batch_lines) . "\n";
-
-            $gz->write("--{$boundary}\r\n");
-            $gz->write("Content-Type: text/tab-separated-values\r\n");
-            $gz->write("Content-Length: " . strlen($tsv) . "\r\n");
-            $gz->write("X-Chunk-Type: index_batch\r\n");
-            $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
-            $gz->write("X-Batch-Size: " . count($batch_lines) . "\r\n");
-            $gz->write("\r\n");
-            $gz->write($tsv);
-            $gz->write("\r\n");
-            $gz->flush();
-
-            $batches_emitted++;
-            $total_entries += count($batch_lines);
-            $batch_lines = [];
-
-        }
+    } catch (Throwable $e) {
+        $aborted = true;
+        $abort_payload = [
+            "error_type" => "exception",
+            "path" => $current_dir,
+            "message" => $e->getMessage(),
+        ];
     }
 
-    // Emit any remaining entries
-    if (!empty($batch_lines)) {
-        $cursor = $producer->get_reentrancy_cursor();
-        $tsv = implode("\n", $batch_lines) . "\n";
+    if (!empty($batch_items)) {
+        $cursor_json = json_encode(
+            ["stack" => $stack],
+            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        );
+        $cursor_b64 = base64_encode($cursor_json);
+        $json = json_encode(
+            $batch_items,
+            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        );
 
         $gz->write("--{$boundary}\r\n");
-        $gz->write("Content-Type: text/tab-separated-values\r\n");
-        $gz->write("Content-Length: " . strlen($tsv) . "\r\n");
+        $gz->write("Content-Type: application/json\r\n");
+        $gz->write("Content-Length: " . strlen($json) . "\r\n");
         $gz->write("X-Chunk-Type: index_batch\r\n");
-        $gz->write("X-Cursor: " . base64_encode($cursor) . "\r\n");
-        $gz->write("X-Batch-Size: " . count($batch_lines) . "\r\n");
+        $gz->write("X-Cursor: " . $cursor_b64 . "\r\n");
+        $gz->write("X-Batch-Size: " . count($batch_items) . "\r\n");
         $gz->write("\r\n");
-        $gz->write($tsv);
+        $gz->write($json);
         $gz->write("\r\n");
         $gz->flush();
 
         $batches_emitted++;
-        $total_entries += count($batch_lines);
+        $total_entries += count($batch_items);
     }
 
-    $progress = $producer->get_progress();
-    $is_complete = $progress["phase"] === "finished";
-    $status = $is_complete ? "complete" : "partial";
+    if ($abort_payload !== null) {
+        $json = json_encode($abort_payload);
+        $cursor_json = json_encode(
+            ["stack" => $stack],
+            JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        );
+        $cursor_b64 = base64_encode($cursor_json);
+        $gz->write("--{$boundary}\r\n");
+        $gz->write("Content-Type: application/json\r\n");
+        $gz->write("Content-Length: " . strlen($json) . "\r\n");
+        $gz->write("X-Chunk-Type: error\r\n");
+        $gz->write("X-Cursor: " . $cursor_b64 . "\r\n");
+        $gz->write("\r\n");
+        $gz->write($json);
+        $gz->write("\r\n");
+        $gz->flush();
+        $status = "partial";
+    }
+
+    $cursor_json = json_encode(
+        ["stack" => $stack],
+        JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+    );
+    $cursor_b64 = base64_encode($cursor_json);
 
     $gz->write("--{$boundary}\r\n");
     $gz->write("Content-Type: application/octet-stream\r\n");
     $gz->write("Content-Length: 0\r\n");
     $gz->write("X-Chunk-Type: completion\r\n");
-    $gz->write("X-Status: {$status}\r\n");
+    $gz->write("X-Status: " . ($aborted ? "partial" : $status) . "\r\n");
+    $gz->write("X-Cursor: " . $cursor_b64 . "\r\n");
+    $gz->write("X-Index-Dir: " . base64_encode($list_dir_real) . "\r\n");
     $gz->write("X-Batches-Emitted: {$batches_emitted}\r\n");
     $gz->write("X-Total-Entries: {$total_entries}\r\n");
     $gz->write("X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n");
@@ -2393,7 +2633,7 @@ function endpoint_file_index(
     $gz->finish();
 
     return [
-        "status" => $status,
+        "status" => $aborted ? "partial" : $status,
         "stats" => [
             "batches_emitted" => $batches_emitted,
             "total_entries" => $total_entries,
@@ -2406,7 +2646,7 @@ function endpoint_file_index(
 /**
  * Endpoint: Stream files from a provided list.
  *
- * Reads paths from an uploaded file (one path per line) and streams
+ * Reads paths from an uploaded JSON file (array of strings) and streams
  * those files using FileTreeProducer with paths mode.
  */
 function endpoint_file_fetch(
@@ -2436,17 +2676,23 @@ function endpoint_file_fetch(
         );
     }
 
-    // Read paths from the file
+    // Read paths from the JSON file
+    $raw = file_get_contents($list_path);
+    if ($raw === false) {
+        throw new InvalidArgumentException("Failed to read file_list");
+    }
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        throw new InvalidArgumentException(
+            "file_list must be a JSON array of paths",
+        );
+    }
     $paths = [];
-    $handle = fopen($list_path, "r");
-    if ($handle) {
-        while (($line = fgets($handle)) !== false) {
-            $path = trim($line);
-            if ($path !== "") {
-                $paths[] = $path;
-            }
+    foreach ($decoded as $path) {
+        if (!is_string($path) || $path === "") {
+            continue;
         }
-        fclose($handle);
+        $paths[] = $path;
     }
 
     $chunk_size = $config["chunk_size"] ?? 5 * 1024 * 1024;
@@ -2553,6 +2799,25 @@ function should_continue(
     return true;
 }
 
+/**
+ * Find the position after a given entry name in a sorted list.
+ */
+function position_after_entry(array $entries, string $after): int
+{
+    $low = 0;
+    $high = count($entries);
+    while ($low < $high) {
+        $mid = (int) (($low + $high) / 2);
+        $entry = $entries[$mid];
+        if (strcmp($entry, $after) <= 0) {
+            $low = $mid + 1;
+        } else {
+            $high = $mid;
+        }
+    }
+    return $low;
+}
+
 // ============================================================================
 // HTTP Runtime
 // ============================================================================
@@ -2617,7 +2882,7 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
         if (!$endpoint) {
             throw new InvalidArgumentException(
                 "endpoint parameter is required. " .
-                    "Valid endpoints: 'file_stream', 'file_index', 'file_fetch', 'sql_chunk', 'sql_preflight', 'preflight'",
+                    "Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'sql_preflight', 'preflight'",
             );
         }
 
@@ -2650,16 +2915,6 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
 
         // Dispatch to appropriate endpoint
         switch ($endpoint) {
-            case "file_stream":
-                $result = endpoint_file_stream(
-                    $config,
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                );
-                break;
-
             case "file_index":
                 $result = endpoint_file_index(
                     $config,
@@ -2705,7 +2960,7 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
             default:
                 throw new InvalidArgumentException(
                     "Invalid endpoint: '{$endpoint}'. " .
-                        "Valid endpoints: 'file_stream', 'file_index', 'file_fetch', 'sql_chunk', 'sql_preflight', 'preflight'",
+                        "Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'sql_preflight', 'preflight'",
                 );
         }
     } catch (Exception $e) {

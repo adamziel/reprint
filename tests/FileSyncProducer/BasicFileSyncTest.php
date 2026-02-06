@@ -12,7 +12,7 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
     public function testSyncEmptyDirectory()
     {
         $dir = $this->createTestDirectory('empty');
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
 
         $chunks = $this->processAllChunks($sync);
 
@@ -28,7 +28,7 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
             'test.txt' => 'Hello, World!'
         ]);
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'chunk_size' => 1024
         ]);
 
@@ -48,7 +48,7 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
             'file3.txt' => 'Content 3'
         ]);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
         $files = $this->getFilesFromChunks($chunks);
 
@@ -63,7 +63,7 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
             'large.txt' => $largeContent
         ]);
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'chunk_size' => 4096 // 4KB chunks
         ]);
 
@@ -91,7 +91,7 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
             'sub1/sub2/sub3/file3.txt' => 'Sub3 file'
         ]);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
         $files = $this->getFilesFromChunks($chunks);
 
@@ -107,7 +107,7 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
             'file_with_underscores.txt' => 'Underscores'
         ]);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
         $files = $this->getFilesFromChunks($chunks);
 
@@ -122,7 +122,7 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
             'file3.txt' => str_repeat('C', 3000)
         ]);
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'chunk_size' => 1024
         ]);
 

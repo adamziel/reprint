@@ -21,7 +21,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // First sync - create snapshot
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync1);
@@ -32,7 +32,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $this->deleteFile($dir, 'file2.txt');
 
         // Second sync - detect deletion
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync2);
@@ -57,7 +57,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // First sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync1);
@@ -68,7 +68,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $this->deleteFile($dir, 'delete3.txt');
 
         // Second sync
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync2);
@@ -85,7 +85,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         ]);
 
         // Sync without snapshot storage
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $this->processAllChunks($sync);
 
         $deletions = $sync->get_deletions();
@@ -103,7 +103,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // First sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync1);
@@ -112,7 +112,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $this->createFile($dir, 'new.txt', 'new content');
 
         // Second sync
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync2);
@@ -133,7 +133,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // First sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync1);
@@ -142,7 +142,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $this->deleteFile($dir, 'file2.txt');
 
         // Second sync - detects deletion
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync2);
@@ -151,7 +151,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $this->assertCount(1, $deletions2);
 
         // Third sync - deletion record should still be in snapshot
-        $sync3 = new \FileSyncProducer($dir, [
+        $sync3 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync3);
@@ -176,7 +176,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $storage = new \SqliteSnapshotStorage($dbFile);
 
         // First sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync1);
@@ -187,7 +187,7 @@ class DeletionTrackingTest extends FileSyncProducerTestBase
         $this->deleteFile($dir, 'file2.txt');
 
         // Second sync
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync2);

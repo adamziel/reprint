@@ -20,7 +20,7 @@ class SymlinkFollowingTest extends FileSyncProducerTestBase
         $linkPath = $dir . '/link.txt';
         symlink($dir . '/target/file.txt', $linkPath);
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'follow_symlinks' => true
         ]);
 
@@ -69,7 +69,7 @@ class SymlinkFollowingTest extends FileSyncProducerTestBase
         $linkPath = $scanDir . '/lib.php';
         symlink($externalDir . '/lib.php', $linkPath);
 
-        $sync = new \FileSyncProducer($scanDir, [
+        $sync = new \FileTreeProducer($scanDir, [
             'follow_symlinks' => true
         ]);
 
@@ -116,7 +116,7 @@ class SymlinkFollowingTest extends FileSyncProducerTestBase
         symlink($targetPath, $link2);
         symlink($targetPath, $link3);
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'follow_symlinks' => true
         ]);
 
@@ -162,7 +162,7 @@ class SymlinkFollowingTest extends FileSyncProducerTestBase
         $linkDir = $siteDir . '/lib';
         symlink($libDir, $linkDir);
 
-        $sync = new \FileSyncProducer($siteDir, [
+        $sync = new \FileTreeProducer($siteDir, [
             'follow_symlinks' => true
         ]);
 
@@ -217,7 +217,7 @@ class SymlinkFollowingTest extends FileSyncProducerTestBase
         $linkPath = $scanDir . '/link.txt';
         symlink($externalDir . '/target.txt', $linkPath);
 
-        $sync = new \FileSyncProducer($scanDir, [
+        $sync = new \FileTreeProducer($scanDir, [
             'follow_symlinks' => false
         ]);
 

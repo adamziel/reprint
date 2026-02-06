@@ -20,7 +20,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $linkPath = $dir . '/external';
         symlink('../../../some/external/path', $linkPath);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
 
         // Should capture the symlink with its original target
@@ -48,7 +48,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $linkPath = $dir . '/absolute';
         symlink('/usr/local/bin/something', $linkPath);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
 
         // Should capture the symlink with its absolute target
@@ -78,7 +78,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $link2Path = $dir . '/wp-load.php';
         symlink('__wp__/wp-load.php', $link2Path);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
 
         // Should capture both symlinks
@@ -111,7 +111,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $link1 = $dir . '/link1';
         symlink('link2', $link1);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
 
         // Should capture all symlinks in the chain
@@ -135,7 +135,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $linkPath = $dir . '/normal-link';
         symlink('target.txt', $linkPath);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
 
         $symlinkChunks = array_filter($chunks, fn($c) => ($c['type'] ?? 'file') === 'symlink');
@@ -166,7 +166,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $link = $dir . '/mydir-link';
         symlink('mydir', $link);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
 
         // Should have both symlink and directory
@@ -191,7 +191,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $linkPath = $dir . '/link.txt';
         symlink($dir . '/target.txt', $linkPath);
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'follow_symlinks' => true
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -222,7 +222,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         $linkDir = $dir . '/link-dir';
         symlink($targetDir, $linkDir);
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'follow_symlinks' => false
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -256,7 +256,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         symlink('target.txt', $link2);
         symlink('target.txt', $link3);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
 
         // Should capture all three symlinks
@@ -286,7 +286,7 @@ class SymlinkSecurityTest extends FileSyncProducerTestBase
         // Get actual ctime
         $expectedCtime = filectime($linkPath);
 
-        $sync = new \FileSyncProducer($dir);
+        $sync = new \FileTreeProducer($dir);
         $chunks = $this->processAllChunks($sync);
 
         $symlinkChunks = array_filter($chunks, fn($c) => ($c['type'] ?? 'file') === 'symlink');

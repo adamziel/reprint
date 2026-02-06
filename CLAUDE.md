@@ -103,7 +103,7 @@ MySQLDumpProducer accumulates rows internally (default 250 rows per batch) and e
 
 ### File Synchronization Phases
 
-FileSyncProducer operates in three phases visible via get_progress():
+FileTreeProducer operates in three phases visible via get_progress():
 1. **scanning**: Directory traversal to enumerate files
 2. **sorting**: Sorting files by (ctime, path) for deterministic ordering
 3. **streaming**: Emitting file chunks with resumption support
@@ -152,7 +152,7 @@ This ensures SQL is correct, valid, and preserves data without loss or corruptio
 
 Comprehensive architecture docs are in markdown/:
 - ARCHITECTURE.md: MySQL export component diagram and data flow
-- FILESYNC-USAGE.md: Complete FileSyncProducer API guide
+- FILESYNC-USAGE.md: Complete FileTreeProducer API guide
 - SYMLINKS.md: Symlink handling and security model
 - MYSQL-DUMP-PRODUCER.md: MySQLDumpProducer architecture and usage
 
@@ -191,9 +191,9 @@ The TUI provides:
 
 Progress is computed client-side by reading state files:
 - `.import-state.json`: Current command, status, cursor, stage
-- `.import-index.tsv`: Local file index (line count = files indexed)
-- `.import-remote-index.tsv`: Remote file index (for delta comparison)
-- `.import-download-list.txt`: Files pending download
+- `.import-index.jsonl`: Local file index (line count = files indexed)
+- `.import-remote-index.jsonl`: Remote file index (for delta comparison)
+- `.import-download-list.jsonl`: Files pending download
 - `filesystem-root/`: Actual downloaded files (recursive size/count)
 - `db.sql`: SQL dump file size
 

@@ -108,7 +108,7 @@ abstract class MySQLDumpProducerTestBase extends TestCase
         $lines = explode("\n", $sql);
         $cleanedLines = array_filter($lines, function ($line) {
             $trimmed = trim($line);
-            return !empty($trimmed) && !preg_match("/^--/", $trimmed);
+            return $trimmed !== "" && strncmp($trimmed, "--", 2) !== 0;
         });
         $cleanedSQL = implode("\n", $cleanedLines);
 
@@ -131,7 +131,7 @@ abstract class MySQLDumpProducerTestBase extends TestCase
         $statements = preg_split('/;\s*\n/', $sql);
         return array_filter($statements, function ($stmt) {
             $trimmed = trim($stmt);
-            return !empty($trimmed) && !preg_match("/^--/", $trimmed);
+            return $trimmed !== "" && strncmp($trimmed, "--", 2) !== 0;
         });
     }
 
@@ -212,7 +212,7 @@ abstract class MySQLDumpProducerTestBase extends TestCase
      */
     protected function countInsertStatements(string $sql): int
     {
-        return preg_match_all("/INSERT INTO/i", $sql);
+        return substr_count(strtolower($sql), "insert into");
     }
 
     /**
@@ -220,7 +220,23 @@ abstract class MySQLDumpProducerTestBase extends TestCase
      */
     protected function extractTableNames(string $sql): array
     {
-        preg_match_all("/CREATE TABLE `([^`]+)`/i", $sql, $matches);
-        return $matches[1] ?? [];
+        $names = [];
+        $needle = "CREATE TABLE `";
+        $offset = 0;
+        $len = strlen($needle);
+        while (true) {
+            $pos = stripos($sql, $needle, $offset);
+            if ($pos === false) {
+                break;
+            }
+            $start = $pos + $len;
+            $end = strpos($sql, "`", $start);
+            if ($end === false) {
+                break;
+            }
+            $names[] = substr($sql, $start, $end - $start);
+            $offset = $end + 1;
+        }
+        return $names;
     }
 }

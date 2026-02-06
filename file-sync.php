@@ -9,8 +9,6 @@
  * cursors for transport.
  */
 
-require_once __DIR__ . '/class-directory-listing.php';
-
 /**
  * Stream filesystem entries in deterministic, sorted DFS order.
  *
@@ -119,7 +117,8 @@ class FileTreeProducer
             $this->traversal_stack[] = [
                 "dir" => $dir,
                 "last_visited" => null,
-                "listing" => null,
+                "entries" => null,
+                "position" => 0,
             ];
         }
     }
@@ -210,7 +209,8 @@ class FileTreeProducer
                     $this->traversal_stack[] = [
                         "dir" => $dir,
                         "last_visited" => null,
-                        "listing" => null,
+                        "entries" => null,
+                        "position" => 0,
                     ];
                 }
             }
@@ -243,7 +243,8 @@ class FileTreeProducer
                 $this->traversal_stack[] = [
                     "dir" => $dir,
                     "last_visited" => null,
-                    "listing" => null,
+                    "entries" => null,
+                    "position" => 0,
                 ];
             }
             return;
@@ -261,7 +262,8 @@ class FileTreeProducer
             $frames[] = [
                 "dir" => $current_dir,
                 "last_visited" => $part,
-                "listing" => null,
+                "entries" => null,
+                "position" => 0,
             ];
             $current_dir .= "/" . $part;
         }
@@ -270,7 +272,8 @@ class FileTreeProducer
             $frames[] = [
                 "dir" => $matched_root,
                 "last_visited" => basename($last_path),
-                "listing" => null,
+                "entries" => null,
+                "position" => 0,
             ];
         }
 
@@ -284,7 +287,8 @@ class FileTreeProducer
                 array_unshift($this->traversal_stack, [
                     "dir" => $roots[$i],
                     "last_visited" => null,
-                    "listing" => null,
+                    "entries" => null,
+                    "position" => 0,
                 ]);
             }
         }
@@ -299,6 +303,25 @@ class FileTreeProducer
             return [rtrim($directories, "/")];
         }
         return array_map(fn($d) => rtrim($d, "/"), $directories);
+    }
+
+    /**
+     * Find the position after the given entry name in a sorted list.
+     */
+    private function position_after_entry(array $entries, string $after): int
+    {
+        $low = 0;
+        $high = count($entries);
+        while ($low < $high) {
+            $mid = (int) (($low + $high) / 2);
+            $entry = $entries[$mid];
+            if (strcmp($entry, $after) <= 0) {
+                $low = $mid + 1;
+            } else {
+                $high = $mid;
+            }
+        }
+        return $low;
     }
 
     /**
@@ -372,7 +395,7 @@ class FileTreeProducer
      * Fetch the next server file (or structural chunk) in lexicographic DFS order.
      * In paths mode, iterates through the provided paths array instead.
      *
-     * Uses binary search based on entry names to find position after resumption,
+     * Uses binary search on scandir results to find position after resumption,
      * not stored indices. This ensures correctness when directory contents change.
      */
     private function get_next_server_file(): ?array
@@ -388,62 +411,63 @@ class FileTreeProducer
             $idx = count($this->traversal_stack) - 1;
             $frame = &$this->traversal_stack[$idx];
 
-            if ($frame["listing"] === null) {
-				/**
-				 * Use DirectoryListing which handles large directories efficiently.
-				 *
-				 * DirectoryListing uses php://temp which stores entries in memory up to a threshold
-				 * (default 2MB), then automatically spills to a temporary file. This allows handling
-				 * directories with millions of files without exhausting memory.
-				 *
-				 * We use readdir() internally (not scandir()) to avoid loading all entries into
-				 * memory at once during the scan phase.
-				 */
-                $listing = DirectoryListing::scan($frame["dir"]);
-                if ($listing === null) {
-                    $path = $frame["dir"];
-                    array_pop($this->traversal_stack);
-                    $this->last_emitted_path = $path;
-                    $this->last_emitted_ctime = null;
+            if ($frame["entries"] === null) {
+                $entries = @scandir($frame["dir"], SCANDIR_SORT_ASCENDING);
+                if ($entries === false) {
                     $this->current_chunk = [
                         "type" => "error",
                         "error_type" => "dir_open",
-                        "path" => $path,
-                        "message" => "Failed to open directory",
+                        "path" => $frame["dir"],
+                        "message" => "Failed to list directory",
                     ];
-                    return null;
-                }
-                $listing->sort();
-                $frame["listing"] = $listing;
-
-				// Empty directory? Emit that as a chunk:
-                if ($listing->isEmpty()) {
-                    array_pop($this->traversal_stack);
                     $this->last_emitted_path = $frame["dir"];
                     $this->last_emitted_ctime = null;
+                    array_pop($this->traversal_stack);
+                    return null;
+                }
+                $filtered = [];
+                foreach ($entries as $entry) {
+                    if ($entry === "." || $entry === "..") {
+                        continue;
+                    }
+                    $filtered[] = $entry;
+                }
+                $frame["entries"] = $filtered;
+                $frame["position"] = 0;
+
+                // Empty directory? Emit that as a chunk.
+                if (empty($filtered)) {
+                    $dir_info = $this->lstat_path($frame["dir"]);
+                    $dir_ctime = $dir_info["ctime"] ?? 0;
+                    array_pop($this->traversal_stack);
+                    $this->last_emitted_path = $frame["dir"];
+                    $this->last_emitted_ctime = $dir_ctime ?: null;
                     $this->current_chunk = [
                         "type" => "directory",
                         "path" => $frame["dir"],
+                        "ctime" => $dir_ctime,
                     ];
                     return null;
                 }
+
+                $last = $frame["last_visited"] ?? null;
+                if ($last !== null) {
+                    $frame["position"] = $this->position_after_entry(
+                        $filtered,
+                        $last,
+                    );
+                }
             }
 
-            $listing = $frame["listing"];
-
-            // Use DirectoryListing's binary search to find position after last_visited
-            $last = $frame["last_visited"] ?? null;
-            if ($last !== null) {
-                $listing->seekAfter($last);
-            } else {
-                $listing->rewind();
-            }
-
-            $entry = $listing->next();
-            if ($entry === null) {
+            $entries = $frame["entries"];
+            $pos = $frame["position"];
+            if ($pos >= count($entries)) {
                 array_pop($this->traversal_stack);
                 continue;
             }
+
+            $entry = $entries[$pos];
+            $frame["position"] = $pos + 1;
 
             $frame["last_visited"] = $entry;
             $path = $frame["dir"] . "/" . $entry;
@@ -470,7 +494,8 @@ class FileTreeProducer
                 $this->traversal_stack[] = [
                     "dir" => $path,
                     "last_visited" => null,
-                    "listing" => null,
+                    "entries" => null,
+                    "position" => 0,
                 ];
                 continue;
             }
@@ -559,10 +584,11 @@ class FileTreeProducer
 
             if ($info["type"] === "dir") {
                 $this->last_emitted_path = $resolved_path;
-                $this->last_emitted_ctime = null;
+                $this->last_emitted_ctime = $info["ctime"] ?? null;
                 $this->current_chunk = [
                     "type" => "directory",
                     "path" => $resolved_path,
+                    "ctime" => $info["ctime"] ?? 0,
                 ];
                 return null;
             }
@@ -858,6 +884,3 @@ class FileTreeProducer
         ];
     }
 }
-
-// Backward compatibility alias for tests
-class_alias("FileTreeProducer", "FileSyncProducer");

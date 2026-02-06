@@ -20,7 +20,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // First sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync1);
@@ -31,7 +31,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
 
         // Second sync - should detect modification via snapshot comparison
         // Scans all files (for deletion detection) but only streams changed files
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $chunks = $this->processAllChunks($sync2);
@@ -56,7 +56,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
             'growing.txt' => $initialContent
         ]);
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'chunk_size' => 2048
         ]);
 
@@ -94,7 +94,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // First sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync1);
@@ -106,7 +106,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         // file3.txt unchanged
 
         // Second sync - filters via snapshot comparison
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $chunks = $this->processAllChunks($sync2);
@@ -125,7 +125,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // Initial sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync1);
@@ -135,7 +135,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
             sleep(1);
             $this->updateFile($dir, 'volatile.txt', "Change $i");
 
-            $sync = new \FileSyncProducer($dir, [
+            $sync = new \FileTreeProducer($dir, [
                 'snapshot_storage' => $storage
             ]);
             $chunks = $this->processAllChunks($sync);
@@ -157,7 +157,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
             'file3.txt' => str_repeat('B', 5000)
         ]);
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'chunk_size' => 2048
         ]);
 
@@ -189,7 +189,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // First sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $chunks1 = $this->processAllChunks($sync1);
@@ -202,7 +202,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         $this->updateFile($dir, 'data.txt', 'Modified content is longer');
 
         // Second sync
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $chunks2 = $this->processAllChunks($sync2);
@@ -222,7 +222,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // First sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $chunks1 = $this->processAllChunks($sync1);
@@ -230,7 +230,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         $this->assertNotEmpty($chunks1, 'First sync should process files');
 
         // Second sync without changes - filters via snapshot comparison
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $chunks2 = $this->processAllChunks($sync2);
@@ -248,7 +248,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         $storage = new \FileSnapshotStorage($snapshotFile);
 
         // First sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage
         ]);
         $this->processAllChunks($sync1);
@@ -258,7 +258,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
         $this->updateFile($dir, 'growing.txt', str_repeat('X', 10000));
 
         // Second sync
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'snapshot_storage' => $storage,
             'chunk_size' => 2048
         ]);

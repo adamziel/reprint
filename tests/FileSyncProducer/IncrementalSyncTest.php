@@ -24,7 +24,7 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         $this->createFile($dir, 'newer.txt', 'Newer content');
 
         // Sync with min_ctime filter
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'min_ctime' => $cutoffTime
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -45,7 +45,7 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         ]);
 
         // Sync with min_ctime = 0 (all files)
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'min_ctime' => 0
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -62,7 +62,7 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         ]);
 
         // First full sync
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'min_ctime' => 0
         ]);
         $chunks1 = $this->processAllChunks($sync1);
@@ -79,7 +79,7 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         $this->createFile($dir, 'batch2-d.txt', 'D');
 
         // Second incremental sync
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'min_ctime' => $cutoffTime
         ]);
         $chunks2 = $this->processAllChunks($sync2);
@@ -106,7 +106,7 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         $this->updateFile($dir, 'original.txt', 'Modified');
 
         // Sync should pick up modification
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'min_ctime' => $cutoffTime
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -131,7 +131,7 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         $cutoffTime = time() - 100; // Before file creation
 
         // Start sync with filter
-        $sync1 = new \FileSyncProducer($dir, [
+        $sync1 = new \FileTreeProducer($dir, [
             'min_ctime' => $cutoffTime,
             'chunk_size' => 1024
         ]);
@@ -145,7 +145,7 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         $cursor = $sync1->get_reentrancy_cursor();
 
         // Resume with same filter
-        $sync2 = new \FileSyncProducer($dir, [
+        $sync2 = new \FileTreeProducer($dir, [
             'min_ctime' => $cutoffTime,
             'chunk_size' => 1024,
             'cursor' => $cursor
@@ -166,7 +166,7 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         // Use future timestamp
         $futureTime = time() + 1000;
 
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'min_ctime' => $futureTime
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -189,7 +189,7 @@ class IncrementalSyncTest extends FileSyncProducerTestBase
         $this->createFile($dir, 'after.txt', 'After');
 
         // Sync with exact timestamp
-        $sync = new \FileSyncProducer($dir, [
+        $sync = new \FileTreeProducer($dir, [
             'min_ctime' => $exactTime
         ]);
         $chunks = $this->processAllChunks($sync);
