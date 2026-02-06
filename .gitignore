@@ -6,7 +6,7 @@ sql-exports
 *.meta
 adamadam.blog-export
 adamadam-blog-export
-secrets.php
+wordpress-plugin/generic/secrets.php
 secrets.sh
 tester.sh
 exports.sh

@@ -8,7 +8,7 @@
 require_once __DIR__ . "/../vendor/autoload.php";
 
 // Load required classes
-require_once __DIR__ . "/../class-mysql-dump-producer.php";
+require_once __DIR__ . "/../../wordpress-plugin/generic/class-mysql-dump-producer.php";
 
 // Display test environment info
 echo "\n";

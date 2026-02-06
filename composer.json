@@ -13,7 +13,7 @@
     },
     "autoload": {
         "psr-4": {
-            "WordPress\\DataLiberation\\": ""
+            "WordPress\\DataLiberation\\": "wordpress-plugin/generic/"
         }
     },
     "scripts": {

@@ -42,7 +42,7 @@ class SymlinkVerificationTest extends TestCase
 
         // Export
         $_GET['SECRET_KEY'] = 'your-secret-pw';
-        require_once __DIR__ . '/../../export.php';
+        require_once __DIR__ . '/../../wordpress-plugin/generic/export.php';
 
         ob_start();
         $config = ['directory' => $this->sourceDir . '/srv/htdocs'];
@@ -68,7 +68,7 @@ class SymlinkVerificationTest extends TestCase
         }
 
         // Import
-        require_once __DIR__ . '/../../import.php';
+        require_once __DIR__ . '/../../importer/import.php';
         mkdir($this->importDir . '/filesystem-root', 0755, true);
 
         $filesystemRoot = null;

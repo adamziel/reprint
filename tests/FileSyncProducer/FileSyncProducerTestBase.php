@@ -4,7 +4,7 @@ namespace FileSyncProducerTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../file-sync.php';
+require_once __DIR__ . '/../../wordpress-plugin/generic/file-sync.php';
 
 /**
  * Base test class for FileTreeProducer tests

@@ -202,7 +202,6 @@ What we **don't** do:
   * we can be reactive – detect out of disk space errors when it happens. we won't know the storage quota
      upfront anyway in most shared hosting environments.
 
-
 **Out of scope for this initial version**
 
 * Sites using multiple databases (either multiple MySQL instances or also Postgres, Redis, etc.)

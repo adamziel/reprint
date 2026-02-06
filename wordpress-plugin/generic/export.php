@@ -190,8 +190,8 @@ register_shutdown_function(function () {
     }
 });
 
-if (file_exists("./secrets.php")) {
-    require_once "./secrets.php";
+if (file_exists(__DIR__ . "/secrets.php")) {
+    require_once __DIR__ . "/secrets.php";
 }
 
 if (

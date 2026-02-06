@@ -10,12 +10,12 @@ This is a WordPress site export/import system that enables resumable, cursor-bas
 
 The codebase follows a producer-consumer pattern with two main components:
 
-### Export Side (Server)
+### Export Side (Server) — `wordpress-plugin/generic/`
 - **export.php**: HTTP endpoint that serves as the export API, handling authentication and routing requests to the appropriate producer
 - **MySQLDumpProducer**: Generates SQL dump fragments with cursor-based resumption, supporting batched INSERT statements and all MySQL data types
 - **FileTreeProducer / FileListProducer**: Streams filesystem contents (full tree or explicit list) in chunks with support for symlinks and cursor-based resumption
 
-### Import Side (Client)
+### Import Side (Client) — `importer/`
 - **import.php**: CLI script that downloads from export.php using streaming multipart parsing, no buffering of entire response
 - **MultipartStreamParser**: Incremental multipart/mixed parser that processes chunks as they arrive
 
@@ -122,7 +122,12 @@ PHPUnit tests automatically create/drop test databases. The naming convention is
 
 ## File Organization
 
-- Root PHP files: Main export/import scripts and producer classes
+- wordpress-plugin/: Self-contained WordPress plugin directory
+  - index.php: Thin WordPress plugin loader (plugin header, constants)
+  - api.php: Standalone HTTP entry point (no WordPress dependency)
+  - generic/: Core export engine (export.php, producers, HMAC client, secrets)
+  - wordpress/: WordPress admin UI (site-export.php)
+- importer/: Import client (import.php)
 - markdown/: Architecture documentation (read these for deep understanding)
 - tests/: PHPUnit test suite organized by component
 - tests/e2e/: End-to-end Docker-based integration tests

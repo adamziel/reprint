@@ -316,7 +316,7 @@ class ExportImportTest extends TestCase
 
         // Include export.php but prevent it from executing
         // We'll call endpoint_file_chunk() directly
-        require_once __DIR__ . '/../../export.php';
+        require_once __DIR__ . '/../../wordpress-plugin/generic/export.php';
 
         $config = [
             'directory' => $directory,
@@ -369,7 +369,7 @@ class ExportImportTest extends TestCase
         $multipartData = $exportResult['data'];
 
         // Create import client
-        require_once __DIR__ . '/../../import.php';
+        require_once __DIR__ . '/../../importer/import.php';
 
         $client = new \ImportClient('http://dummy-url', $targetDir);
 
