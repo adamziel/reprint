@@ -284,7 +284,6 @@ function prepare_streaming_response(): void
     @ini_set("implicit_flush", "1");
 
     @ob_implicit_flush(true);
-    flush();
 }
 
 /**

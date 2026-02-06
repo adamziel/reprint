@@ -327,8 +327,10 @@ try {
             );
     }
 } catch (Exception $e) {
-    http_response_code(400);
-    header('Content-Type: application/json');
+    if (!headers_sent()) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+    }
     echo json_encode([
         'error' => $e->getMessage(),
         'trace' => $e->getTraceAsString(),
