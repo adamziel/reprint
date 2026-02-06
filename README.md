@@ -156,18 +156,18 @@ What we **don't** do:
 
 ### Todos
 
-* Support paths with "\n" in them – they're valid paths
+* Take note of any files modified while they were streamed, re-request them later on.
+   * Tell the user when a file is too volatile to be synchronized
 * Handle every single possible error case, e.g. fread() returning false prematurely etc.
   * Account for the disk space limits for files and for MySQL data on the migration target.
   * we can be reactive – detect out of disk space errors when it happens. we won't know the storage quota
      upfront anyway in most shared hosting environments.
-* Account for 3xx errors – just treat them as errors. Anything non-200 is an error.
 * Turn it into a WordPress plugin 
   * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases we are trying to account for
-* If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
-* Take note of any files modified while they were streamed, re-request them later on.
-   * Tell the user when a file is too volatile to be synchronized
+✅ Support paths with "\n" in them – they're valid paths
+✅ Account for 3xx errors – just treat them as errors. Anything non-200 is an error.
+✅ If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
 ✅ In export.php, require `wp-load.php` if we cannot cheaply connect to MySQL using the database credentials from the wp-config.php file.
 ✅ Pre-flight request to
   ✅ Confirm the host is able to export the site
