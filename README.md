@@ -161,10 +161,19 @@ What we **don't** do:
 
 ### Todos
 
-* Handle every single possible error case, e.g. fread() returning false prematurely etc.
+* Rewrite URLs in the incoming files
+  * All SQL strings. How do we handle strings that are not UTF-8 but latin1? Well, WordPress doesn't seem to actually
+    support latin1, right? It's, most likely, UTF-8 disguised as another encoding. Can we reject inputs that don't form
+    valid UTF-8 sequences? Or at least avoid modifying them? And then rewrite the ones that do look valid?
+  * Hardcoded in files. Most likely themes and plugins. We can parse and rewrite CSS, HTML, XML, JavaScript, JSON, and PHP
+    because we have structured parsers and tokenizers for all these formats. Should we leave this out of scope for the
+    initial version, though? It will be an annoying limitations for site that do need rewriting, but it's also a relatively
+    major scope creep.
+  * Figure out if we do a multi-pass rewrite or stream-rewrite (which could slow down the download).
 * Turn it into a WordPress plugin 
   * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases we are trying to account for
+✅ Handle every single possible error case, e.g. fread() returning false prematurely etc.
 ✅ Take note of any files modified while they were streamed, re-request them later on.
    ✅ Tell the user when a file is too volatile to be synchronized
 ✅ Support paths with "\n" in them – they're valid paths

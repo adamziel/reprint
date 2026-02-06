@@ -18,8 +18,43 @@ if (!ob_get_level()) {
  * - Producers (FileTreeProducer, MySQLDumpProducer) work with JSON strings only, never base64
  */
 
-// Global error handler to send errors back to client
+/**
+ * Global streaming context. When set, the error handlers emit error chunks
+ * into the active gzip multipart stream instead of sending plain JSON
+ * (which would corrupt the compressed response).
+ *
+ * Set by each streaming endpoint right after creating $gz and $boundary.
+ * Keys: 'gz' => GzipOutputStream, 'boundary' => string
+ */
+$streaming_context = null;
+
+/**
+ * Emit a well-formed error chunk into a gzip multipart stream.
+ * Used by error/exception/shutdown handlers and by streaming try-catch blocks.
+ */
+function emit_error_chunk($gz, string $boundary, string $message): void
+{
+    $json = json_encode([
+        "error_type" => "php_error",
+        "path" => "",
+        "message" => $message,
+    ]);
+    $gz->write("--{$boundary}\r\n");
+    $gz->write("Content-Type: application/json\r\n");
+    $gz->write("Content-Length: " . strlen($json) . "\r\n");
+    $gz->write("X-Chunk-Type: error\r\n");
+    $gz->write("\r\n");
+    $gz->write($json);
+    $gz->write("\r\n");
+    $gz->flush();
+}
+
+// Global error handler — streaming-aware.
+// Pre-stream: JSON error response with HTTP 500.
+// Mid-stream: emits an error chunk into the gzip multipart stream.
 set_error_handler(function ($errno, $errstr, $errfile, $errline) {
+    global $streaming_context;
+
     $error = [
         "error" => "PHP Error: $errstr",
         "file" => $errfile,
@@ -27,13 +62,29 @@ set_error_handler(function ($errno, $errstr, $errfile, $errline) {
         "type" => $errno,
     ];
     error_log("Export error: " . json_encode($error));
+
+    if ($streaming_context !== null) {
+        // Mid-stream: emit error chunk into the gzip multipart stream
+        emit_error_chunk(
+            $streaming_context['gz'],
+            $streaming_context['boundary'],
+            "PHP Error ({$errno}): {$errstr} in {$errfile}:{$errline}",
+        );
+        // Return true to suppress PHP's default error output
+        return true;
+    }
+
+    // Pre-stream: plain JSON error response
     http_response_code(500);
     @header("Content-Type: application/json");
     echo json_encode($error);
     exit(1);
 });
 
+// Global exception handler — streaming-aware.
 set_exception_handler(function ($e) {
+    global $streaming_context;
+
     $error = [
         "error" => get_class($e) . ": " . $e->getMessage(),
         "file" => $e->getFile(),
@@ -41,10 +92,66 @@ set_exception_handler(function ($e) {
         "trace" => $e->getTraceAsString(),
     ];
     error_log("Export exception: " . json_encode($error));
+
+    if ($streaming_context !== null) {
+        emit_error_chunk(
+            $streaming_context['gz'],
+            $streaming_context['boundary'],
+            get_class($e) . ": " . $e->getMessage(),
+        );
+        return;
+    }
+
     http_response_code(500);
     header("Content-Type: application/json");
     echo json_encode($error);
     exit(1);
+});
+
+// Shutdown function catches E_ERROR/E_PARSE fatals that set_error_handler cannot.
+register_shutdown_function(function () {
+    global $streaming_context;
+
+    $error = error_get_last();
+    if ($error === null) {
+        return;
+    }
+    // Only handle fatal errors that set_error_handler can't catch
+    $fatal_types = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR;
+    if (!($error['type'] & $fatal_types)) {
+        return;
+    }
+
+    $message = "Fatal: {$error['message']} in {$error['file']}:{$error['line']}";
+    error_log("Export fatal: " . json_encode($error));
+
+    if ($streaming_context !== null) {
+        // Best-effort attempt to emit an error chunk into the stream.
+        // The stream may already be in a broken state, but this gives
+        // the client the best chance of receiving structured error info.
+        try {
+            emit_error_chunk(
+                $streaming_context['gz'],
+                $streaming_context['boundary'],
+                $message,
+            );
+        } catch (Throwable $ignored) {
+            // Stream is too broken to write to — nothing more we can do.
+        }
+        return;
+    }
+
+    // Pre-stream fatal: send JSON if headers haven't been sent yet
+    if (!headers_sent()) {
+        http_response_code(500);
+        @header("Content-Type: application/json");
+        echo json_encode([
+            "error" => $message,
+            "file" => $error['file'],
+            "line" => $error['line'],
+            "type" => $error['type'],
+        ]);
+    }
 });
 
 if (file_exists("./secrets.php")) {
@@ -468,6 +575,7 @@ function endpoint_sql_chunk(
     int $max_memory,
     float $memory_threshold,
 ): array {
+    global $streaming_context;
     prepare_streaming_response();
     // Try to get credentials from config, constants, env vars, or wp-config.php
     $db_host =
@@ -607,11 +715,14 @@ function endpoint_sql_chunk(
     }
     @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
     $gz = new GzipOutputStream(true);
+    $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
     $batches_processed = 0;
     $sql_bytes_processed = 0;
+    $aborted = false;
 
     // Process batches
+    try {
     while (
         should_continue(
             $script_start,
@@ -665,9 +776,14 @@ function endpoint_sql_chunk(
             break;
         }
     }
+    } catch (Throwable $e) {
+        $aborted = true;
+        error_log("SQL streaming error: " . $e->getMessage());
+        emit_error_chunk($gz, $boundary, $e->getMessage());
+    }
 
     // Output completion chunk with stats in headers
-    $status = $reader->is_finished() ? "complete" : "partial";
+    $status = $aborted ? "partial" : ($reader->is_finished() ? "complete" : "partial");
 
     $gz->write("--{$boundary}\r\n");
     $gz->write("Content-Type: application/octet-stream\r\n");
@@ -716,6 +832,7 @@ function endpoint_sql_preflight(
     int $max_memory,
     float $memory_threshold,
 ): array {
+    global $streaming_context;
     prepare_streaming_response();
 
     $db_host =
@@ -793,6 +910,7 @@ function endpoint_sql_preflight(
         @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
     }
     $gz = new GzipOutputStream($can_send_headers);
+    $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
     $tables_processed = 0;
     $rows_estimated = 0;
@@ -1868,6 +1986,7 @@ function stream_file_producer(
     int $max_memory,
     float $memory_threshold,
 ): array {
+    global $streaming_context;
     prepare_streaming_response();
 
     $boundary = "boundary-" . bin2hex(random_bytes(16));
@@ -1877,6 +1996,7 @@ function stream_file_producer(
     }
 
     $gz = new GzipOutputStream($can_send_headers);
+    $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
     $initial_progress = $producer->get_progress();
     $initial_progress_json = json_encode($initial_progress);
@@ -2186,6 +2306,7 @@ function endpoint_file_index(
     int $max_memory,
     float $memory_threshold,
 ): array {
+    global $streaming_context;
     $directories = resolve_directories($config);
     $batch_size = $config["batch_size"] ?? 5000;
     $batch_size = require_int_range(
@@ -2293,6 +2414,7 @@ function endpoint_file_index(
     }
 
     $gz = new GzipOutputStream($can_send_headers);
+    $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
     $filesystem_root = $directories[0] ?? "/";
     $metadata = [
@@ -2825,7 +2947,7 @@ function position_after_entry(array $entries, string $after): int
 // Only execute if called directly (not included as a library)
 if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
     error_reporting(E_ALL);
-    ini_set("display_errors", 1);
+    ini_set("display_errors", 0);
 
     try {
         $config = parse_http_config();

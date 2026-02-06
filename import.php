@@ -10,7 +10,7 @@
  * - Three-phase import: files, SQL, then file deltas
  */
 error_reporting(E_ALL);
-ini_set("display_errors", 1);
+ini_set("display_errors", "stderr");
 ini_set("display_startup_errors", 1);
 
 /**
@@ -19,6 +19,8 @@ ini_set("display_startup_errors", 1);
  */
 class MultipartStreamParser
 {
+    private const MAX_BUFFER_SIZE = 64 * 1024 * 1024; // 64MB
+
     private $boundary;
     private $boundary_length;
     private $buffer = "";
@@ -41,6 +43,11 @@ class MultipartStreamParser
     public function feed(string $data): void
     {
         $this->buffer .= $data;
+        if (strlen($this->buffer) > self::MAX_BUFFER_SIZE) {
+            throw new RuntimeException(
+                "Multipart parser buffer exceeded 64MB — response may be malformed (missing boundary delimiter)."
+            );
+        }
         $this->parse();
     }
 
@@ -1255,10 +1262,14 @@ class ImportClient
 
         // Create directories
         if (!is_dir($this->local_path)) {
-            mkdir($this->local_path, 0755, true);
+            if (!mkdir($this->local_path, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->local_path}");
+            }
         }
         if (!is_dir($this->local_path . "/filesystem-root")) {
-            mkdir($this->local_path . "/filesystem-root", 0755, true);
+            if (!mkdir($this->local_path . "/filesystem-root", 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->local_path}/filesystem-root");
+            }
         }
     }
 
@@ -3630,10 +3641,15 @@ class ImportClient
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                     if ($chunk_type === "sql") {
-                        $bytes = fwrite($sql_handle, $chunk["body"]);
-                        if ($bytes !== false) {
-                            $sql_bytes_written += $bytes;
+                        $data = $chunk["body"];
+                        $bytes = fwrite($sql_handle, $data);
+                        if ($bytes === false || $bytes !== strlen($data)) {
+                            throw new RuntimeException(
+                                "SQL write failed: wrote " . ($bytes === false ? "0" : $bytes) .
+                                "/" . strlen($data) . " bytes (disk full?)"
+                            );
                         }
+                        $sql_bytes_written += $bytes;
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
                     } elseif ($chunk_type === "completion") {
@@ -3769,9 +3785,13 @@ class ImportClient
                             foreach ($data as $row) {
                                 $line = json_encode($row) . "\n";
                                 $bytes = fwrite($handle, $line);
-                                if ($bytes !== false) {
-                                    $bytes_written += $bytes;
+                                if ($bytes === false || $bytes !== strlen($line)) {
+                                    throw new RuntimeException(
+                                        "Table stats write failed: wrote " . ($bytes === false ? "0" : $bytes) .
+                                        "/" . strlen($line) . " bytes (disk full?)"
+                                    );
                                 }
+                                $bytes_written += $bytes;
                                 $tables_written++;
                                 if (
                                     isset($row["rows"]) &&
@@ -3975,10 +3995,16 @@ class ImportClient
         // Write body data if present
         if (isset($chunk["body"]) && $chunk["body"] !== "") {
             if ($context->file_handle) {
-                $bytes = fwrite($context->file_handle, $chunk["body"]);
-                if ($bytes !== false) {
-                    $context->file_bytes_written += $bytes;
+                $data = $chunk["body"];
+                $bytes = fwrite($context->file_handle, $data);
+                if ($bytes === false || $bytes !== strlen($data)) {
+                    throw new RuntimeException(
+                        "Write failed for {$context->file_path}: wrote " .
+                        ($bytes === false ? "0" : $bytes) . "/" . strlen($data) .
+                        " bytes (disk full?)"
+                    );
                 }
+                $context->file_bytes_written += $bytes;
             }
         }
 
@@ -5156,8 +5182,17 @@ class ImportClient
 
         // Write to temp file first, then atomic rename
         $tmp_file = $this->state_file . '.tmp';
-        file_put_contents($tmp_file, json_encode($state, JSON_PRETTY_PRINT));
-        rename($tmp_file, $this->state_file);
+        $json = json_encode($state, JSON_PRETTY_PRINT);
+        if ($json === false) {
+            throw new RuntimeException("Failed to encode state: " . json_last_error_msg());
+        }
+        $bytes = file_put_contents($tmp_file, $json);
+        if ($bytes === false) {
+            throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");
+        }
+        if (!rename($tmp_file, $this->state_file)) {
+            throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->state_file}");
+        }
 
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run
@@ -5641,8 +5676,13 @@ if (
         $client->run($options);
         exit(0);
     } catch (Exception $e) {
-        fwrite(STDERR, "Error: " . $e->getMessage() . "\n");
-        fwrite(STDERR, $e->getTraceAsString() . "\n");
+        $error = [
+            "error" => $e->getMessage(),
+            "exception" => get_class($e),
+            "file" => $e->getFile(),
+            "line" => $e->getLine(),
+        ];
+        fwrite(STDERR, json_encode($error) . "\n");
         exit(1);
     }
 }
