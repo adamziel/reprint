@@ -12,11 +12,15 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
     public function testSyncEmptyDirectory()
     {
         $dir = $this->createTestDirectory('empty');
-        $sync = new \FileTreeProducer($dir);
+        $paths = $this->enumerateFiles($dir);
+
+        $sync = new \FileTreeProducer($dir, [
+            'paths' => $paths,
+        ]);
 
         $chunks = $this->processAllChunks($sync);
 
-        // Empty directories emit a directory chunk so import can create them
+        // Empty directory: the only path is the directory itself
         $this->assertCount(1, $chunks, 'Empty directory should produce one directory chunk');
         $this->assertEquals('directory', $chunks[0]['type']);
         $this->assertEquals($dir, $chunks[0]['path']);
@@ -29,7 +33,8 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
         ]);
 
         $sync = new \FileTreeProducer($dir, [
-            'chunk_size' => 1024
+            'chunk_size' => 1024,
+            'paths' => $this->enumerateFiles($dir),
         ]);
 
         $chunks = $this->processAllChunks($sync);
@@ -48,7 +53,9 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
             'file3.txt' => 'Content 3'
         ]);
 
-        $sync = new \FileTreeProducer($dir);
+        $sync = new \FileTreeProducer($dir, [
+            'paths' => $this->enumerateFiles($dir),
+        ]);
         $chunks = $this->processAllChunks($sync);
         $files = $this->getFilesFromChunks($chunks);
 
@@ -64,7 +71,8 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
         ]);
 
         $sync = new \FileTreeProducer($dir, [
-            'chunk_size' => 4096 // 4KB chunks
+            'chunk_size' => 4096, // 4KB chunks
+            'paths' => $this->enumerateFiles($dir),
         ]);
 
         $chunks = $this->processAllChunks($sync);
@@ -91,7 +99,9 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
             'sub1/sub2/sub3/file3.txt' => 'Sub3 file'
         ]);
 
-        $sync = new \FileTreeProducer($dir);
+        $sync = new \FileTreeProducer($dir, [
+            'paths' => $this->enumerateFiles($dir),
+        ]);
         $chunks = $this->processAllChunks($sync);
         $files = $this->getFilesFromChunks($chunks);
 
@@ -107,7 +117,9 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
             'file_with_underscores.txt' => 'Underscores'
         ]);
 
-        $sync = new \FileTreeProducer($dir);
+        $sync = new \FileTreeProducer($dir, [
+            'paths' => $this->enumerateFiles($dir),
+        ]);
         $chunks = $this->processAllChunks($sync);
         $files = $this->getFilesFromChunks($chunks);
 
@@ -123,7 +135,8 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
         ]);
 
         $sync = new \FileTreeProducer($dir, [
-            'chunk_size' => 1024
+            'chunk_size' => 1024,
+            'paths' => $this->enumerateFiles($dir),
         ]);
 
         $phases = [];

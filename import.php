@@ -1212,6 +1212,7 @@ class ImportClient
     private $remote_index_file; // Path to latest remote index JSON lines
     private $download_list_file; // Path to file list for downloads (JSON lines)
     private $audit_log; // Audit log file for all operations
+    private $volatile_files_file; // Path to .import-volatile-files.json
     private $verbose_mode = false; // Whether to show verbose output
     private $is_tty; // Whether stdout is a TTY
     private $files_imported = 0; // Counter for imported files
@@ -1237,6 +1238,7 @@ class ImportClient
         $this->download_list_file =
             $this->local_path . "/.import-download-list.jsonl";
         $this->audit_log = $this->local_path . "/.import-audit.log";
+        $this->volatile_files_file = $this->local_path . "/.import-volatile-files.json";
 
         // Detect TTY for progress display
         $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
@@ -1331,6 +1333,109 @@ class ImportClient
         if ($to_console && $this->verbose_mode) {
             echo $log_line;
         }
+    }
+
+    /**
+     * Load the volatile files tracker from disk.
+     *
+     * @return array<string, int> Map of path => change count
+     */
+    private function load_volatile_files(): array
+    {
+        if (!file_exists($this->volatile_files_file)) {
+            return [];
+        }
+        $json = file_get_contents($this->volatile_files_file);
+        if ($json === false) {
+            return [];
+        }
+        $data = json_decode($json, true);
+        return is_array($data) ? $data : [];
+    }
+
+    /**
+     * Save the volatile files tracker to disk.
+     * Deletes the file if the array is empty.
+     */
+    private function save_volatile_files(array $files): void
+    {
+        if (empty($files)) {
+            if (file_exists($this->volatile_files_file)) {
+                @unlink($this->volatile_files_file);
+            }
+            return;
+        }
+        file_put_contents(
+            $this->volatile_files_file,
+            json_encode($files, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+        );
+    }
+
+    /**
+     * Record that a file changed during streaming.
+     * Increments the change counter for the given path.
+     */
+    private function record_volatile_file(string $path): void
+    {
+        $files = $this->load_volatile_files();
+        $count = ($files[$path] ?? 0) + 1;
+        $files[$path] = $count;
+        $this->save_volatile_files($files);
+        $this->audit_log("VOLATILE | path={$path} | count={$count}");
+    }
+
+    /**
+     * Clear a file from the volatile tracker after a successful download.
+     */
+    private function clear_volatile_file(string $path): void
+    {
+        $files = $this->load_volatile_files();
+        if (!isset($files[$path])) {
+            return;
+        }
+        unset($files[$path]);
+        $this->save_volatile_files($files);
+        $this->audit_log("VOLATILE CLEARED | path={$path}");
+    }
+
+    /**
+     * Report volatile files to the user at sync completion.
+     */
+    private function report_volatile_files(): void
+    {
+        $files = $this->load_volatile_files();
+        if (empty($files)) {
+            return;
+        }
+
+        $count = count($files);
+        $this->audit_log(
+            sprintf("VOLATILE SUMMARY | %d file(s) changed during sync", $count),
+            true,
+        );
+
+        if (!$this->verbose_mode) {
+            echo "{$count} file(s) changed during sync and need re-syncing (run files-sync-delta):\n";
+        }
+
+        foreach ($files as $path => $changes) {
+            $suffix = $changes >= 3
+                ? " (changed {$changes} times — may be too volatile to sync)"
+                : " (changed {$changes} time" . ($changes > 1 ? "s" : "") . ")";
+            $this->audit_log("  VOLATILE FILE | path={$path} | count={$changes}");
+            if (!$this->verbose_mode) {
+                echo "  {$path}{$suffix}\n";
+            }
+        }
+
+        $this->output_progress(
+            [
+                "type" => "volatile_files",
+                "files" => $files,
+                "count" => $count,
+            ],
+            true,
+        );
     }
 
     /**
@@ -1717,6 +1822,10 @@ class ImportClient
                 @unlink($this->download_list_file);
                 $this->audit_log("FILE DELETE | {$this->download_list_file}");
             }
+            if (file_exists($this->volatile_files_file)) {
+                @unlink($this->volatile_files_file);
+                $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
+            }
             $this->state["index"] = $this->default_state()["index"];
             $this->state["fetch"] = $this->default_state()["fetch"];
             $this->save_state($this->state);
@@ -1859,6 +1968,8 @@ class ImportClient
             echo "files-sync-initial complete: {$index_size} files indexed\n";
             echo "Audit log: {$this->audit_log}\n";
         }
+
+        $this->report_volatile_files();
     }
 
     /**
@@ -2039,6 +2150,8 @@ class ImportClient
             echo "files-sync-delta complete: {$index_size} files indexed\n";
             echo "Audit log: {$this->audit_log}\n";
         }
+
+        $this->report_volatile_files();
     }
 
     /**
@@ -3894,6 +4007,7 @@ class ImportClient
                     "file",
                 );
                 $this->files_imported++; // Count completed files only
+                $this->clear_volatile_file($path);
                 $this->audit_log(
                     sprintf("  Indexed (wrote %d bytes)", $final_size),
                     false,
@@ -4173,6 +4287,10 @@ class ImportClient
                 @unlink($local_path);
             }
             $this->delete_index_entry($path);
+
+            if ($error_type === "file_changed") {
+                $this->record_volatile_file($path);
+            }
         }
 
         $this->show_progress_line(

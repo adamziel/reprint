@@ -161,15 +161,12 @@ What we **don't** do:
 
 ### Todos
 
-* Take note of any files modified while they were streamed, re-request them later on.
-   * Tell the user when a file is too volatile to be synchronized
 * Handle every single possible error case, e.g. fread() returning false prematurely etc.
-  * Account for the disk space limits for files and for MySQL data on the migration target.
-  * we can be reactive – detect out of disk space errors when it happens. we won't know the storage quota
-     upfront anyway in most shared hosting environments.
 * Turn it into a WordPress plugin 
   * HMAC signatures per request with a shared secret + random number + microtime
 * Automated test suite to cover all the usual corner cases we are trying to account for
+✅ Take note of any files modified while they were streamed, re-request them later on.
+   ✅ Tell the user when a file is too volatile to be synchronized
 ✅ Support paths with "\n" in them – they're valid paths
 ✅ Account for 3xx errors – just treat them as errors. Anything non-200 is an error.
 ✅ If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
@@ -197,6 +194,13 @@ What we **don't** do:
 ✅ Double check we're generating a useful, append-only audit log for every export call
 ❌ Directory tree snapshots – store root-relative path. Don't store the entire absolute path, it inflates the snapshot size.
   ^ this is okay, repetitive paths gzip exceptionally well.
+
+**Nice to haves**
+
+* Importer – emit dedicated errors when we run out of the disk space or DB space on the importing end.
+  * Account for the disk space limits for files and for MySQL data on the migration target.
+  * we can be reactive – detect out of disk space errors when it happens. we won't know the storage quota
+     upfront anyway in most shared hosting environments.
 
 
 **Out of scope for this initial version**

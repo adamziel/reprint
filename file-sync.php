@@ -1,24 +1,19 @@
 <?php
 /**
- * File synchronization producers.
+ * File synchronization producer.
  *
- * - FileTreeProducer: Stream filesystem entries in sorted DFS order.
- * - FileListProducer: Stream a provided list of paths (in order).
- *
- * Cursors are JSON strings (not base64). Callers are responsible for encoding
- * cursors for transport.
+ * Streams a provided list of filesystem paths in sorted order, with
+ * cursor-based resumption. Callers are responsible for encoding cursors
+ * for transport.
  */
 
 /**
- * Stream filesystem entries in deterministic, sorted DFS order.
+ * Stream a provided list of filesystem paths in sorted order.
  *
- * Supports two modes of operation:
- * 1. Tree traversal mode (default): DFS traversal of all directories
- * 2. Paths mode: Stream a specific list of paths passed in memory
- *
- * When `paths` option is provided, the producer iterates through those specific
- * paths instead of doing full directory traversal. This allows filtering without
- * any filesystem writes.
+ * The caller passes an explicit array of paths to stream. This is
+ * how both export.php (endpoint_file_fetch) and the test suite use it.
+ * The caller must pass the same paths array on each request when
+ * resuming from a cursor.
  */
 class FileTreeProducer
 {
@@ -33,12 +28,8 @@ class FileTreeProducer
     private string $phase;
     private ?array $current_chunk = null;
 
-    // Traversal state: stack of frames (dir, last child name emitted, entries cached)
-    // Rebuilt on each request from cursor path - never stored in cursor
-    private array $traversal_stack = [];
-
-    // Paths mode state: explicit list of paths to stream (sorted on first use)
-    private ?array $paths = null;
+    // Paths state: explicit list of paths to stream (sorted on first use)
+    private array $paths;
     private bool $paths_sorted = false;
     private bool $paths_positioned = false;
     private int $paths_position = 0;  // Ephemeral index, NOT stored in cursor
@@ -58,8 +49,7 @@ class FileTreeProducer
      *   - chunk_size: bytes per file chunk
      *   - index_only: if true, emit index entries instead of file contents
      *   - cursor: JSON cursor string for resumption
-     *   - start_after: last path processed (used only when cursor is absent)
-     *   - paths: optional array of specific paths to stream (skips tree traversal)
+     *   - paths: array of specific paths to stream (required)
      */
     public function __construct(string|array $directories, array $options = [])
     {
@@ -67,31 +57,30 @@ class FileTreeProducer
         $this->chunk_size = $options["chunk_size"] ?? 5 * 1024 * 1024;
         $this->index_only = $options["index_only"] ?? false;
 
-        // Paths mode: if a list of specific paths is provided, iterate through
-        // those instead of doing full tree traversal. The caller must pass the
-        // same paths array on each request when resuming from a cursor.
-        if (isset($options["paths"]) && is_array($options["paths"])) {
-            $this->paths = $options["paths"];
+        if (!isset($options["paths"]) || !is_array($options["paths"])) {
+            throw new InvalidArgumentException(
+                "The 'paths' option is required and must be an array",
+            );
         }
+        $this->paths = $options["paths"];
 
         if (isset($options["cursor"])) {
             $this->initialize_from_cursor($options["cursor"]);
         } else {
-            $this->initialize_new($options["start_after"] ?? null);
+            $this->initialize_new();
         }
     }
 
     /**
-     * Initialize a fresh traversal, optionally resuming after a known path.
+     * Initialize a fresh traversal.
      */
-    private function initialize_new(?string $start_after_path): void
+    private function initialize_new(): void
     {
         $this->phase = self::PHASE_STREAMING;
         $dirs = $this->directories;
         sort($dirs, SORT_STRING);
         $this->filesystem_root = $dirs[0] ?? "/";
 
-        $this->traversal_stack = [];
         $this->current_chunk = null;
         $this->streaming_file_handle = null;
         $this->streaming_file_offset = 0;
@@ -101,26 +90,6 @@ class FileTreeProducer
         $this->paths_sorted = false;
         $this->paths_positioned = false;
         $this->paths_position = 0;
-
-        // In paths mode, we don't need to build a traversal stack - we just
-        // iterate through the paths array sequentially
-        if ($this->paths !== null) {
-            return;
-        }
-
-        if ($start_after_path) {
-            $this->build_traversal_stack_from_last_path($start_after_path);
-            return;
-        }
-
-        foreach (array_reverse($dirs) as $dir) {
-            $this->traversal_stack[] = [
-                "dir" => $dir,
-                "last_visited" => null,
-                "entries" => null,
-                "position" => 0,
-            ];
-        }
     }
 
     /**
@@ -131,9 +100,9 @@ class FileTreeProducer
      * - ctime: the ctime of the file when we started (for change detection)
      * - b: byte offset within the file (0 if finished or non-file)
      *
-     * The traversal stack is rebuilt from the path on each request - never
-     * stored in the cursor. This ensures correctness even when the filesystem
-     * changes between requests.
+     * On resume, position within the paths array is determined by binary
+     * search based on the path. This ensures correctness even when the
+     * paths array changes between requests.
      */
     private function initialize_from_cursor(string $cursor_json): void
     {
@@ -149,7 +118,6 @@ class FileTreeProducer
             $cursor["root"] ?? ($this->directories[0] ?? "/");
         $this->current_chunk = null;
         $this->streaming_file_handle = null;
-        $this->traversal_stack = [];
         $this->paths_sorted = false;
         $this->paths_positioned = false;
         $this->paths_position = 0;
@@ -181,8 +149,6 @@ class FileTreeProducer
                     "size" => $size,
                 ];
                 $this->streaming_file_offset = $byte_offset;
-                // Set last_emitted_path so we build the traversal stack
-                // to continue from AFTER this file finishes streaming
                 $this->last_emitted_path = $path;
             }
         } else {
@@ -191,107 +157,8 @@ class FileTreeProducer
             $this->streaming_file_offset = 0;
             $this->last_emitted_path = $path;  // might be null
         }
-
-        // Build traversal state from path (not from stored indices)
-        // This must happen even when resuming mid-file, so we know where
-        // to continue after the current file finishes streaming
-        if ($this->paths === null) {
-            // Tree mode: rebuild traversal stack from last emitted path
-            if ($this->last_emitted_path !== null) {
-                $this->build_traversal_stack_from_last_path(
-                    $this->last_emitted_path,
-                );
-            } else {
-                // Starting fresh - initialize root directories
-                $dirs = $this->directories;
-                sort($dirs, SORT_STRING);
-                foreach (array_reverse($dirs) as $dir) {
-                    $this->traversal_stack[] = [
-                        "dir" => $dir,
-                        "last_visited" => null,
-                        "entries" => null,
-                        "position" => 0,
-                    ];
-                }
-            }
-        }
-        // For paths mode, we'll sort and position when get_next_path_entry is called
-    }
-
-    /**
-     * Build traversal stack so the next emitted entry is after $last_path.
-     */
-    private function build_traversal_stack_from_last_path(
-        string $last_path,
-    ): void {
-        $roots = $this->directories;
-        sort($roots, SORT_STRING);
-
-        $matched_root = null;
-        foreach ($roots as $root) {
-            if (
-                str_starts_with($last_path, $root . "/") ||
-                $last_path === $root
-            ) {
-                $matched_root = $root;
-                break;
-            }
-        }
-
-        if ($matched_root === null) {
-            foreach (array_reverse($roots) as $dir) {
-                $this->traversal_stack[] = [
-                    "dir" => $dir,
-                    "last_visited" => null,
-                    "entries" => null,
-                    "position" => 0,
-                ];
-            }
-            return;
-        }
-
-        $suffix =
-            $last_path === $matched_root
-                ? ""
-                : ltrim(substr($last_path, strlen($matched_root)), "/");
-        $parts = $suffix === "" ? [] : explode("/", $suffix);
-
-        $frames = [];
-        $current_dir = $matched_root;
-        foreach ($parts as $part) {
-            $frames[] = [
-                "dir" => $current_dir,
-                "last_visited" => $part,
-                "entries" => null,
-                "position" => 0,
-            ];
-            $current_dir .= "/" . $part;
-        }
-
-        if (empty($frames)) {
-            $frames[] = [
-                "dir" => $matched_root,
-                "last_visited" => basename($last_path),
-                "entries" => null,
-                "position" => 0,
-            ];
-        }
-
-        // Keep frames in root -> leaf order so the stack top is the deepest dir.
-        $this->traversal_stack = $frames;
-
-        $root_index = array_search($matched_root, $roots, true);
-        if ($root_index !== false) {
-            // Prepend roots that come after the matched root so they are processed later.
-            for ($i = $root_index + 1; $i < count($roots); $i++) {
-                array_unshift($this->traversal_stack, [
-                    "dir" => $roots[$i],
-                    "last_visited" => null,
-                    "entries" => null,
-                    "position" => 0,
-                ]);
-            }
-        }
+        // Position within paths array will be resolved by binary search
+        // when get_next_path_entry() is first called
     }
 
     /**
@@ -303,25 +170,6 @@ class FileTreeProducer
             return [rtrim($directories, "/")];
         }
         return array_map(fn($d) => rtrim($d, "/"), $directories);
-    }
-
-    /**
-     * Find the position after the given entry name in a sorted list.
-     */
-    private function position_after_entry(array $entries, string $after): int
-    {
-        $low = 0;
-        $high = count($entries);
-        while ($low < $high) {
-            $mid = (int) (($low + $high) / 2);
-            $entry = $entries[$mid];
-            if (strcmp($entry, $after) <= 0) {
-                $low = $mid + 1;
-            } else {
-                $high = $mid;
-            }
-        }
-        return $low;
     }
 
     /**
@@ -392,131 +240,15 @@ class FileTreeProducer
     }
 
     /**
-     * Fetch the next server file (or structural chunk) in lexicographic DFS order.
-     * In paths mode, iterates through the provided paths array instead.
+     * Fetch the next server file (or structural chunk) from the paths array.
      *
-     * Uses binary search on scandir results to find position after resumption,
-     * not stored indices. This ensures correctness when directory contents change.
+     * Position is determined by binary search based on last_emitted_path,
+     * not by a stored index. This ensures correctness even when the paths
+     * array changes between requests.
      */
     private function get_next_server_file(): ?array
     {
-        // Paths mode: iterate through the explicit paths array
-        if ($this->paths !== null) {
-            return $this->get_next_path_entry();
-        }
-
-        // Depth-first traversal of the filesystem
-		// @TODO: Why do we need traversal stack? Can't we just string paths?
-        while (!empty($this->traversal_stack)) {
-            $idx = count($this->traversal_stack) - 1;
-            $frame = &$this->traversal_stack[$idx];
-
-            if ($frame["entries"] === null) {
-                $entries = @scandir($frame["dir"], SCANDIR_SORT_ASCENDING);
-                if ($entries === false) {
-                    $this->current_chunk = [
-                        "type" => "error",
-                        "error_type" => "dir_open",
-                        "path" => $frame["dir"],
-                        "message" => "Failed to list directory",
-                    ];
-                    $this->last_emitted_path = $frame["dir"];
-                    $this->last_emitted_ctime = null;
-                    array_pop($this->traversal_stack);
-                    return null;
-                }
-                $filtered = [];
-                foreach ($entries as $entry) {
-                    if ($entry === "." || $entry === "..") {
-                        continue;
-                    }
-                    $filtered[] = $entry;
-                }
-                $frame["entries"] = $filtered;
-                $frame["position"] = 0;
-
-                // Empty directory? Emit that as a chunk.
-                if (empty($filtered)) {
-                    $dir_info = $this->lstat_path($frame["dir"]);
-                    $dir_ctime = $dir_info["ctime"] ?? 0;
-                    array_pop($this->traversal_stack);
-                    $this->last_emitted_path = $frame["dir"];
-                    $this->last_emitted_ctime = $dir_ctime ?: null;
-                    $this->current_chunk = [
-                        "type" => "directory",
-                        "path" => $frame["dir"],
-                        "ctime" => $dir_ctime,
-                    ];
-                    return null;
-                }
-
-                $last = $frame["last_visited"] ?? null;
-                if ($last !== null) {
-                    $frame["position"] = $this->position_after_entry(
-                        $filtered,
-                        $last,
-                    );
-                }
-            }
-
-            $entries = $frame["entries"];
-            $pos = $frame["position"];
-            if ($pos >= count($entries)) {
-                array_pop($this->traversal_stack);
-                continue;
-            }
-
-            $entry = $entries[$pos];
-            $frame["position"] = $pos + 1;
-
-            $frame["last_visited"] = $entry;
-            $path = $frame["dir"] . "/" . $entry;
-
-            $info = $this->lstat_path($path);
-            if ($info === null) {
-                continue;
-            }
-
-            if ($info["type"] === "link") {
-                $target = readlink($path);
-                $this->last_emitted_path = $path;
-                $this->last_emitted_ctime = $info["ctime"];
-                $this->current_chunk = [
-                    "type" => "symlink",
-                    "path" => $path,
-                    "target" => $target !== false ? $target : "",
-                    "ctime" => $info["ctime"] ?? 0,
-                ];
-                return null;
-            }
-
-            if ($info["type"] === "dir") {
-                $this->traversal_stack[] = [
-                    "dir" => $path,
-                    "last_visited" => null,
-                    "entries" => null,
-                    "position" => 0,
-                ];
-                continue;
-            }
-
-            if ($info["type"] === "file") {
-                $ctime = $info["ctime"];
-                $size = $info["size"];
-                if ($ctime === null || $size === null) {
-                    continue;
-                }
-                $this->current_file_meta = [
-                    "path" => $path,
-                    "ctime" => $ctime,
-                    "size" => $size,
-                ];
-                $this->streaming_file_offset = 0;
-                return $this->current_file_meta;
-            }
-        }
-
-        return null;
+        return $this->get_next_path_entry();
     }
 
     /**
@@ -615,18 +347,22 @@ class FileTreeProducer
     /**
      * Resolve a path that might be relative to one of the root directories.
      * Returns the absolute path if it exists, null otherwise.
+     *
+     * Uses both file_exists() and is_link() because file_exists() follows
+     * symlinks and returns false for broken symlinks, but the symlink
+     * itself is still a valid filesystem entry we want to stream.
      */
     private function resolve_path(string $path): ?string
     {
         // If it's already an absolute path and exists, use it
-        if ($path[0] === "/" && file_exists($path)) {
+        if ($path[0] === "/" && (file_exists($path) || is_link($path))) {
             return $path;
         }
 
         // Try resolving relative to each root directory
         foreach ($this->directories as $dir) {
             $candidate = $dir . "/" . ltrim($path, "/");
-            if (file_exists($candidate)) {
+            if (file_exists($candidate) || is_link($candidate)) {
                 return $candidate;
             }
         }

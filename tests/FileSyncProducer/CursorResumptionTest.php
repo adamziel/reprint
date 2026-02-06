@@ -17,9 +17,12 @@ class CursorResumptionTest extends FileSyncProducerTestBase
             'file3.txt' => str_repeat('C', 5000)
         ]);
 
+        $paths = $this->enumerateFiles($dir);
+
         // First sync - process 2 chunks then save cursor
         $sync1 = new \FileTreeProducer($dir, [
-            'chunk_size' => 2048
+            'chunk_size' => 2048,
+            'paths' => $paths,
         ]);
 
         $chunksBeforePause = [];
@@ -37,7 +40,8 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         // Second sync - resume from cursor
         $sync2 = new \FileTreeProducer($dir, [
             'chunk_size' => 2048,
-            'cursor' => $cursor
+            'cursor' => $cursor,
+            'paths' => $paths,
         ]);
 
         $chunksAfterResume = $this->processAllChunks($sync2);
@@ -56,10 +60,12 @@ class CursorResumptionTest extends FileSyncProducerTestBase
             'test.txt' => str_repeat('X', 3000)
         ]);
 
+        $paths = $this->enumerateFiles($dir);
         $cursorFile = $this->fixturesDir . '/test-cursor.json';
 
         $sync1 = new \FileTreeProducer($dir, [
-            'chunk_size' => 1024
+            'chunk_size' => 1024,
+            'paths' => $paths,
         ]);
 
         // Process one chunk
@@ -74,7 +80,8 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         $loadedCursor = file_get_contents($cursorFile);
         $sync2 = new \FileTreeProducer($dir, [
             'chunk_size' => 1024,
-            'cursor' => $loadedCursor
+            'cursor' => $loadedCursor,
+            'paths' => $paths,
         ]);
 
         $this->assertInstanceOf(\FileTreeProducer::class, $sync2);
@@ -92,13 +99,17 @@ class CursorResumptionTest extends FileSyncProducerTestBase
             'file4.txt' => str_repeat('4', 2000)
         ]);
 
+        $paths = $this->enumerateFiles($dir);
         $allChunks = [];
         $cursor = null;
         $maxIterationsPerCycle = 2;
 
         // Simulate multiple resume cycles
         for ($cycle = 0; $cycle < 5; $cycle++) {
-            $options = ['chunk_size' => 1024];
+            $options = [
+                'chunk_size' => 1024,
+                'paths' => $paths,
+            ];
             if ($cursor) {
                 $options['cursor'] = $cursor;
             }
@@ -136,7 +147,8 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         $this->expectException(\InvalidArgumentException::class);
 
         new \FileTreeProducer($dir, [
-            'cursor' => 'invalid-json-data'
+            'cursor' => 'invalid-json-data',
+            'paths' => $this->enumerateFiles($dir),
         ]);
     }
 
@@ -149,9 +161,12 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         }
 
         $dir = $this->createTestDirectory('scan-resume', $files);
+        $paths = $this->enumerateFiles($dir);
 
         // Start sync
-        $sync1 = new \FileTreeProducer($dir);
+        $sync1 = new \FileTreeProducer($dir, [
+            'paths' => $paths,
+        ]);
 
         // Process a few iterations (might still be in scanning phase)
         for ($i = 0; $i < 3; $i++) {
@@ -162,7 +177,8 @@ class CursorResumptionTest extends FileSyncProducerTestBase
 
         // Resume and complete
         $sync2 = new \FileTreeProducer($dir, [
-            'cursor' => $cursor
+            'cursor' => $cursor,
+            'paths' => $paths,
         ]);
 
         $chunks = $this->processAllChunks($sync2);

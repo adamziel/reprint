@@ -134,6 +134,51 @@ abstract class FileSyncProducerTestBase extends TestCase
     }
 
     /**
+     * Recursively enumerate all filesystem entries (files, directories, symlinks)
+     * under a directory. Returns sorted absolute paths. This replaces what tree
+     * traversal used to do: tests create fixture dirs, enumerate them, and pass
+     * the resulting paths to FileTreeProducer.
+     */
+    protected function enumerateFiles(string $dir): array
+    {
+        $paths = [];
+        $this->enumerateFilesRecursive($dir, $paths);
+        sort($paths, SORT_STRING);
+        return $paths;
+    }
+
+    private function enumerateFilesRecursive(string $dir, array &$paths): void
+    {
+        $entries = @scandir($dir, SCANDIR_SORT_ASCENDING);
+        if ($entries === false) {
+            return;
+        }
+
+        $hasChildren = false;
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            $path = $dir . '/' . $entry;
+            $hasChildren = true;
+
+            if (is_link($path)) {
+                $paths[] = $path;
+            } elseif (is_dir($path)) {
+                $this->enumerateFilesRecursive($path, $paths);
+            } else {
+                $paths[] = $path;
+            }
+        }
+
+        // Include empty directories so import can recreate them
+        if (!$hasChildren) {
+            $paths[] = $dir;
+        }
+    }
+
+    /**
      * Process all chunks from sync producer
      */
     protected function processAllChunks(\FileTreeProducer $sync): array
