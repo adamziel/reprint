@@ -361,7 +361,13 @@ class MySQLDumpProducer
     {
         if (!$this->current_result_set) {
             $query = $this->build_select_query();
-            $this->current_result_set = $this->db->query($query);
+            try {
+                $this->current_result_set = $this->db->query($query);
+            } catch (\PDOException $e) {
+                throw new \RuntimeException(
+                    "Database query `{$query}` failed for table `{$this->current_table}`: " . $e->getMessage(),
+                );
+            }
             $this->rows_fetched_from_current_query = 0;
         }
 
@@ -559,10 +565,15 @@ class MySQLDumpProducer
      */
     private function emit_create_table_statement()
     {
-        $result = $this->db->query(
-            "SHOW CREATE TABLE `{$this->current_table}`",
-        );
-        $row = $result->fetch(PDO::FETCH_ASSOC);
+        try {
+            $query = "SHOW CREATE TABLE `{$this->current_table}`";
+            $result = $this->db->query($query);
+            $row = $result->fetch(PDO::FETCH_ASSOC);
+        } catch (\PDOException $e) {
+            throw new \RuntimeException(
+                "Failed to get CREATE TABLE for `{$this->current_table}`: " . $e->getMessage() . " Query: {$query}",
+            );
+        }
 
         $sql = null;
         if ($row) {
@@ -760,16 +771,21 @@ class MySQLDumpProducer
     {
         $pk_columns = [];
 
-        $db_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
-        $stmt = $this->db->prepare(
-            "SELECT COLUMN_NAME
-             FROM information_schema.KEY_COLUMN_USAGE
-             WHERE TABLE_SCHEMA = ?
-               AND TABLE_NAME = ?
-               AND CONSTRAINT_NAME = 'PRIMARY'
-             ORDER BY ORDINAL_POSITION",
-        );
-        $stmt->execute([$db_name, $table]);
+        $query = "SELECT COLUMN_NAME
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = ?
+            AND TABLE_NAME = ?
+            AND CONSTRAINT_NAME = 'PRIMARY'
+            ORDER BY ORDINAL_POSITION";
+        try {
+            $db_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$db_name, $table]);
+        } catch (\PDOException $e) {
+            throw new \RuntimeException(
+                "Failed to get primary key columns for `{$table}`: " . $e->getMessage() . " Query: {$query}",
+            );
+        }
 
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
             $pk_columns[] = $row["COLUMN_NAME"];
@@ -857,7 +873,7 @@ class MySQLDumpProducer
         $encoded_current_row = $this->encode_row_for_cursor($this->current_row);
         $encoded_oversized_queue = $this->encode_oversized_queue_for_cursor($this->oversized_queue);
 
-        return json_encode([
+        $json = json_encode([
             "current_table" => $this->current_table,
             "current_pk_columns" => $this->current_pk_columns,
             "last_pk_values" => $this->last_pk_values,
@@ -873,6 +889,12 @@ class MySQLDumpProducer
             // Statement size tracking
             "current_statement_size" => $this->current_statement_size,
         ]);
+        if ($json === false) {
+            throw new \RuntimeException(
+                "Failed to encode reentrancy cursor: " . json_last_error_msg(),
+            );
+        }
+        return $json;
     }
 
     /**
@@ -1089,16 +1111,22 @@ class MySQLDumpProducer
             return $this->column_type_cache[$table_name];
         }
 
-        $database_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
+        try {
+            $database_name = $this->db->query("SELECT DATABASE()")->fetchColumn();
 
-        $stmt = $this->db->prepare(
-            'SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE
-             FROM INFORMATION_SCHEMA.COLUMNS
-             WHERE TABLE_SCHEMA = ?
-               AND TABLE_NAME = ?
-             ORDER BY ORDINAL_POSITION',
-        );
-        $stmt->execute([$database_name, $table_name]);
+            $stmt = $this->db->prepare(
+                'SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE
+                 FROM INFORMATION_SCHEMA.COLUMNS
+                 WHERE TABLE_SCHEMA = ?
+                   AND TABLE_NAME = ?
+                 ORDER BY ORDINAL_POSITION',
+            );
+            $stmt->execute([$database_name, $table_name]);
+        } catch (\PDOException $e) {
+            throw new \RuntimeException(
+                "Failed to get column types for `{$table_name}`: " . $e->getMessage(),
+            );
+        }
 
         $columns = [];
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {

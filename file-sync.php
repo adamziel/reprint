@@ -303,7 +303,7 @@ class FileTreeProducer
             }
 
             if ($info["type"] === "link") {
-                $target = readlink($resolved_path);
+                $target = @readlink($resolved_path);
                 $this->last_emitted_path = $resolved_path;
                 $this->last_emitted_ctime = $info["ctime"];
                 $this->current_chunk = [
@@ -355,6 +355,10 @@ class FileTreeProducer
      */
     private function resolve_path(string $path): ?string
     {
+        if ($path === "") {
+            return null;
+        }
+
         // If it's already an absolute path and exists, use it
         if ($path[0] === "/" && (file_exists($path) || is_link($path))) {
             return $path;

@@ -42,15 +42,23 @@ function emit_error_chunk($gz, string $boundary, string $message): void
     if ($json === false) {
         $json = '{"error_type":"php_error","path":"","message":"Error (json_encode failed)"}';
     }
-    $gz->write(
+    $chunk =
         "--{$boundary}\r\n" .
         "Content-Type: application/json\r\n" .
         "Content-Length: " . strlen($json) . "\r\n" .
         "X-Chunk-Type: error\r\n" .
         "\r\n" .
-        $json . "\r\n",
-    );
-    $gz->sync();
+        $json . "\r\n";
+    try {
+        $gz->write($chunk);
+        $gz->sync();
+    } catch (\Throwable $e) {
+        // Gzip stream is broken — fall back to raw output.
+        // The response is already partially gzipped so the client likely
+        // can't parse this, but it's better than silent failure.
+        echo $chunk;
+        flush();
+    }
 }
 
 /**
@@ -69,6 +77,9 @@ function safe_json_encode($value, int $flags = 0): string
 // Global error handler — streaming-aware.
 // Pre-stream: JSON error response with HTTP 500.
 // Mid-stream: emits an error chunk into the gzip multipart stream.
+// Respects the @ operator: suppressed errors are logged but never emitted
+// into the stream or sent as responses, since the calling code already
+// handles the failure (e.g. @readlink checks for false).
 set_error_handler(function ($errno, $errstr, $errfile, $errline) {
     global $streaming_context;
 
@@ -78,6 +89,14 @@ set_error_handler(function ($errno, $errstr, $errfile, $errline) {
         "line" => $errline,
         "type" => $errno,
     ];
+
+    // If the @ operator was used, log the error but don't emit it — the
+    // calling code already handles the failure return value.
+    if (!(error_reporting() & $errno)) {
+        error_log("Export error (suppressed): " . json_encode($error));
+        return true;
+    }
+
     error_log("Export error: " . json_encode($error));
 
     if ($streaming_context !== null) {
@@ -285,6 +304,11 @@ class GzipOutputStream
         $this->enabled = $enabled;
         if ($this->enabled) {
             $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
+            if ($this->deflate_ctx === false) {
+                throw new \RuntimeException(
+                    "deflate_init() failed — zlib may be misconfigured",
+                );
+            }
             if (!headers_sent()) {
                 @header("Content-Encoding: gzip");
             }
@@ -840,25 +864,29 @@ function endpoint_sql_chunk(
         emit_error_chunk($gz, $boundary, $e->getMessage());
     }
 
-    // Output completion chunk with stats in headers
+    // Best-effort completion chunk — the client already has the data chunks.
     $status = $aborted ? "partial" : ($reader->is_finished() ? "complete" : "partial");
 
-    $gz->write(
-        "--{$boundary}\r\n" .
-        "Content-Type: application/octet-stream\r\n" .
-        "Content-Length: 0\r\n" .
-        "X-Chunk-Type: completion\r\n" .
-        "X-Status: {$status}\r\n" .
-        "X-Batches-Processed: {$batches_processed}\r\n" .
-        "X-SQL-Bytes: {$sql_bytes_processed}\r\n" .
-        "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
-        "X-Memory-Limit: " . $max_memory . "\r\n" .
-        "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
-        "\r\n" .
-        "\r\n" .
-        "--{$boundary}--\r\n",
-    );
-    $gz->finish();
+    try {
+        $gz->write(
+            "--{$boundary}\r\n" .
+            "Content-Type: application/octet-stream\r\n" .
+            "Content-Length: 0\r\n" .
+            "X-Chunk-Type: completion\r\n" .
+            "X-Status: {$status}\r\n" .
+            "X-Batches-Processed: {$batches_processed}\r\n" .
+            "X-SQL-Bytes: {$sql_bytes_processed}\r\n" .
+            "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
+            "X-Memory-Limit: " . $max_memory . "\r\n" .
+            "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
+            "\r\n" .
+            "\r\n" .
+            "--{$boundary}--\r\n",
+        );
+        $gz->finish();
+    } catch (\Throwable $e) {
+        error_log("Export: failed to write completion chunk: " . $e->getMessage());
+    }
 
     return [
         "status" => $status,
@@ -1057,22 +1085,26 @@ function endpoint_sql_preflight(
         emit_error_chunk($gz, $boundary, get_class($e) . ": " . $e->getMessage());
     }
 
-    $gz->write(
-        "--{$boundary}\r\n" .
-        "Content-Type: application/octet-stream\r\n" .
-        "Content-Length: 0\r\n" .
-        "X-Chunk-Type: completion\r\n" .
-        "X-Status: " . ($aborted ? "partial" : $status) . "\r\n" .
-        "X-Tables-Processed: {$tables_processed}\r\n" .
-        "X-Rows-Estimated: {$rows_estimated}\r\n" .
-        "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
-        "X-Memory-Limit: " . $max_memory . "\r\n" .
-        "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
-        "\r\n" .
-        "\r\n" .
-        "--{$boundary}--\r\n",
-    );
-    $gz->finish();
+    try {
+        $gz->write(
+            "--{$boundary}\r\n" .
+            "Content-Type: application/octet-stream\r\n" .
+            "Content-Length: 0\r\n" .
+            "X-Chunk-Type: completion\r\n" .
+            "X-Status: " . ($aborted ? "partial" : $status) . "\r\n" .
+            "X-Tables-Processed: {$tables_processed}\r\n" .
+            "X-Rows-Estimated: {$rows_estimated}\r\n" .
+            "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
+            "X-Memory-Limit: " . $max_memory . "\r\n" .
+            "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
+            "\r\n" .
+            "\r\n" .
+            "--{$boundary}--\r\n",
+        );
+        $gz->finish();
+    } catch (\Throwable $e) {
+        error_log("Export: failed to write completion chunk: " . $e->getMessage());
+    }
 
     return [
         "status" => $status,
@@ -2070,20 +2102,6 @@ function stream_file_producer(
     $gz = new GzipOutputStream($can_send_headers);
     $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
-    $initial_progress = $producer->get_progress();
-    $initial_progress_json = safe_json_encode($initial_progress);
-    $initial_cursor = $producer->get_reentrancy_cursor();
-    $gz->write(
-        "--{$boundary}\r\n" .
-        "Content-Type: application/json\r\n" .
-        "Content-Length: " . strlen($initial_progress_json) . "\r\n" .
-        "X-Chunk-Type: progress\r\n" .
-        "X-Cursor: " . base64_encode($initial_cursor) . "\r\n" .
-        "\r\n" .
-        $initial_progress_json . "\r\n",
-    );
-    $gz->sync();
-
     $chunks_processed = 0;
     $files_completed = 0;
     $bytes_processed = 0;
@@ -2092,9 +2110,23 @@ function stream_file_producer(
     $iterations = 0;
     $aborted = false;
     $abort_payload = null;
-    $last_cursor = $initial_cursor;
+    $last_cursor = "";
 
     try {
+        $initial_progress = $producer->get_progress();
+        $initial_progress_json = safe_json_encode($initial_progress);
+        $initial_cursor = $producer->get_reentrancy_cursor();
+        $last_cursor = $initial_cursor;
+        $gz->write(
+            "--{$boundary}\r\n" .
+            "Content-Type: application/json\r\n" .
+            "Content-Length: " . strlen($initial_progress_json) . "\r\n" .
+            "X-Chunk-Type: progress\r\n" .
+            "X-Cursor: " . base64_encode($initial_cursor) . "\r\n" .
+            "\r\n" .
+            $initial_progress_json . "\r\n",
+        );
+        $gz->sync();
         while (true) {
             if (
                 !should_continue(
@@ -2283,46 +2315,54 @@ function stream_file_producer(
         ];
     }
 
-    if ($abort_payload !== null) {
-        $json = safe_json_encode($abort_payload);
+    // Best-effort error and completion chunks — the client already has the
+    // data chunks. If the stream is broken at this point, log and move on.
+    try {
+        if ($abort_payload !== null) {
+            $json = safe_json_encode($abort_payload);
+            $gz->write(
+                "--{$boundary}\r\n" .
+                "Content-Type: application/json\r\n" .
+                "Content-Length: " . strlen($json) . "\r\n" .
+                "X-Chunk-Type: error\r\n" .
+                "X-Cursor: " . base64_encode($last_cursor) . "\r\n" .
+                "\r\n" .
+                $json . "\r\n",
+            );
+            $gz->sync();
+        }
+
+        $progress = $producer->get_progress();
+        $is_complete = $progress["phase"] === "finished" && !$aborted;
+        $status = $is_complete ? "complete" : "partial";
+
+        error_log(
+            "Export completion: status={$status}, phase={$progress["phase"]}, " .
+                "chunks={$chunks_processed}, files={$files_completed}, bytes={$bytes_processed}",
+        );
+
         $gz->write(
             "--{$boundary}\r\n" .
-            "Content-Type: application/json\r\n" .
-            "Content-Length: " . strlen($json) . "\r\n" .
-            "X-Chunk-Type: error\r\n" .
-            "X-Cursor: " . base64_encode($last_cursor) . "\r\n" .
+            "Content-Type: application/octet-stream\r\n" .
+            "Content-Length: 0\r\n" .
+            "X-Chunk-Type: completion\r\n" .
+            "X-Status: {$status}\r\n" .
+            "X-Chunks-Processed: {$chunks_processed}\r\n" .
+            "X-Files-Completed: {$files_completed}\r\n" .
+            "X-Bytes-Processed: {$bytes_processed}\r\n" .
+            "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
+            "X-Memory-Limit: " . $max_memory . "\r\n" .
+            "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
             "\r\n" .
-            $json . "\r\n",
+            "\r\n" .
+            "--{$boundary}--\r\n",
         );
-        $gz->sync();
+        $gz->finish();
+    } catch (\Throwable $e) {
+        error_log("Export: failed to write completion chunk: " . $e->getMessage());
     }
 
-    $progress = $producer->get_progress();
-    $is_complete = $progress["phase"] === "finished" && !$aborted;
-    $status = $is_complete ? "complete" : "partial";
-
-    error_log(
-        "Export completion: status={$status}, phase={$progress["phase"]}, " .
-            "chunks={$chunks_processed}, files={$files_completed}, bytes={$bytes_processed}",
-    );
-
-    $gz->write(
-        "--{$boundary}\r\n" .
-        "Content-Type: application/octet-stream\r\n" .
-        "Content-Length: 0\r\n" .
-        "X-Chunk-Type: completion\r\n" .
-        "X-Status: {$status}\r\n" .
-        "X-Chunks-Processed: {$chunks_processed}\r\n" .
-        "X-Files-Completed: {$files_completed}\r\n" .
-        "X-Bytes-Processed: {$bytes_processed}\r\n" .
-        "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
-        "X-Memory-Limit: " . $max_memory . "\r\n" .
-        "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
-        "\r\n" .
-        "\r\n" .
-        "--{$boundary}--\r\n",
-    );
-    $gz->finish();
+    $status = $aborted ? "partial" : ($status ?? "partial");
 
     return [
         "status" => $status,
@@ -2500,24 +2540,6 @@ function endpoint_file_index(
     $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
     $filesystem_root = $directories[0] ?? "/";
-    $metadata = [
-        "filesystem_root" => base64_encode($filesystem_root),
-        "list_dir" => base64_encode($list_dir_real),
-    ];
-    $metadata_json = safe_json_encode($metadata);
-
-    $gz->write(
-        "--{$boundary}\r\n" .
-        "Content-Type: application/json\r\n" .
-        "Content-Length: " . strlen($metadata_json) . "\r\n" .
-        "X-Chunk-Type: metadata\r\n" .
-        "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n" .
-        "X-Index-Dir: " . base64_encode($list_dir_real ?? "") . "\r\n" .
-        "\r\n" .
-        $metadata_json . "\r\n",
-    );
-    $gz->sync();
-
     $batches_emitted = 0;
     $total_entries = 0;
     $batch_items = [];
@@ -2528,6 +2550,23 @@ function endpoint_file_index(
     $current_dir = $list_dir_real;
 
     try {
+        $metadata = [
+            "filesystem_root" => base64_encode($filesystem_root),
+            "list_dir" => base64_encode($list_dir_real),
+        ];
+        $metadata_json = safe_json_encode($metadata);
+
+        $gz->write(
+            "--{$boundary}\r\n" .
+            "Content-Type: application/json\r\n" .
+            "Content-Length: " . strlen($metadata_json) . "\r\n" .
+            "X-Chunk-Type: metadata\r\n" .
+            "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n" .
+            "X-Index-Dir: " . base64_encode($list_dir_real ?? "") . "\r\n" .
+            "\r\n" .
+            $metadata_json . "\r\n",
+        );
+        $gz->sync();
         $stop = false;
         while (!$stop) {
             if (empty($stack)) {
@@ -2799,50 +2838,54 @@ function endpoint_file_index(
         $total_entries += count($batch_items);
     }
 
-    if ($abort_payload !== null) {
-        $json = safe_json_encode($abort_payload);
+    try {
+        if ($abort_payload !== null) {
+            $json = safe_json_encode($abort_payload);
+            $cursor_json = safe_json_encode(
+                ["stack" => encode_index_stack($stack)],
+                JSON_UNESCAPED_SLASHES,
+            );
+            $cursor_b64 = base64_encode($cursor_json);
+            $gz->write(
+                "--{$boundary}\r\n" .
+                "Content-Type: application/json\r\n" .
+                "Content-Length: " . strlen($json) . "\r\n" .
+                "X-Chunk-Type: error\r\n" .
+                "X-Cursor: " . $cursor_b64 . "\r\n" .
+                "\r\n" .
+                $json . "\r\n",
+            );
+            $gz->sync();
+            $status = "partial";
+        }
+
         $cursor_json = safe_json_encode(
             ["stack" => encode_index_stack($stack)],
             JSON_UNESCAPED_SLASHES,
         );
         $cursor_b64 = base64_encode($cursor_json);
+
         $gz->write(
             "--{$boundary}\r\n" .
-            "Content-Type: application/json\r\n" .
-            "Content-Length: " . strlen($json) . "\r\n" .
-            "X-Chunk-Type: error\r\n" .
+            "Content-Type: application/octet-stream\r\n" .
+            "Content-Length: 0\r\n" .
+            "X-Chunk-Type: completion\r\n" .
+            "X-Status: " . ($aborted ? "partial" : $status) . "\r\n" .
             "X-Cursor: " . $cursor_b64 . "\r\n" .
+            "X-Index-Dir: " . base64_encode($list_dir_real) . "\r\n" .
+            "X-Batches-Emitted: {$batches_emitted}\r\n" .
+            "X-Total-Entries: {$total_entries}\r\n" .
+            "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
+            "X-Memory-Limit: " . $max_memory . "\r\n" .
+            "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
             "\r\n" .
-            $json . "\r\n",
+            "\r\n" .
+            "--{$boundary}--\r\n",
         );
-        $gz->sync();
-        $status = "partial";
+        $gz->finish();
+    } catch (\Throwable $e) {
+        error_log("Export: failed to write completion chunk: " . $e->getMessage());
     }
-
-    $cursor_json = safe_json_encode(
-        ["stack" => encode_index_stack($stack)],
-        JSON_UNESCAPED_SLASHES,
-    );
-    $cursor_b64 = base64_encode($cursor_json);
-
-    $gz->write(
-        "--{$boundary}\r\n" .
-        "Content-Type: application/octet-stream\r\n" .
-        "Content-Length: 0\r\n" .
-        "X-Chunk-Type: completion\r\n" .
-        "X-Status: " . ($aborted ? "partial" : $status) . "\r\n" .
-        "X-Cursor: " . $cursor_b64 . "\r\n" .
-        "X-Index-Dir: " . base64_encode($list_dir_real) . "\r\n" .
-        "X-Batches-Emitted: {$batches_emitted}\r\n" .
-        "X-Total-Entries: {$total_entries}\r\n" .
-        "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
-        "X-Memory-Limit: " . $max_memory . "\r\n" .
-        "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
-        "\r\n" .
-        "\r\n" .
-        "--{$boundary}--\r\n",
-    );
-    $gz->finish();
 
     return [
         "status" => $aborted ? "partial" : $status,

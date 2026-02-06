@@ -13,6 +13,27 @@ error_reporting(E_ALL);
 ini_set("display_errors", "stderr");
 ini_set("display_startup_errors", 1);
 
+register_shutdown_function(function () {
+    $error = error_get_last();
+    if ($error === null) {
+        return;
+    }
+    $fatal_types = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR;
+    if (!($error['type'] & $fatal_types)) {
+        return;
+    }
+    $json = json_encode([
+        "error" => "Fatal: {$error['message']}",
+        "file" => $error['file'],
+        "line" => $error['line'],
+        "type" => $error['type'],
+    ]);
+    if ($json === false) {
+        $json = '{"error":"Fatal PHP error","file":"' . addslashes($error['file']) . '"}';
+    }
+    fwrite(STDERR, $json . "\n");
+});
+
 /**
  * Streaming multipart parser.
  * Parses multipart/mixed responses incrementally without buffering entire response.
@@ -1376,10 +1397,11 @@ class ImportClient
             }
             return;
         }
-        file_put_contents(
-            $this->volatile_files_file,
-            json_encode($files, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-        );
+        $json = json_encode($files, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if ($json === false) {
+            return; // Don't corrupt the file
+        }
+        file_put_contents($this->volatile_files_file, $json . "\n");
     }
 
     /**
@@ -2777,7 +2799,10 @@ class ImportClient
                     if ($line === false) {
                         continue;
                     }
-                    fwrite($handle, $line . "\n");
+                    $bytes = fwrite($handle, $line . "\n");
+                    if ($bytes === false) {
+                        throw new RuntimeException("Failed to write to remote index file (disk full?)");
+                    }
 
                 }
             } elseif ($chunk_type === "progress") {
@@ -3096,13 +3121,17 @@ class ImportClient
             }
             if ($first && $needed > $limit) {
                 // Still write at least one entry even if it exceeds the limit.
-                fwrite($out, $chunk);
+                if (fwrite($out, $chunk) === false) {
+                    throw new RuntimeException("Failed to write fetch batch file (disk full?)");
+                }
                 $bytes += strlen($chunk);
                 $first = false;
                 break;
             }
 
-            fwrite($out, $chunk);
+            if (fwrite($out, $chunk) === false) {
+                throw new RuntimeException("Failed to write fetch batch file (disk full?)");
+            }
             $bytes += strlen($chunk);
             $first = false;
         }
@@ -3292,7 +3321,10 @@ class ImportClient
             JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
-            fwrite($this->index_updates_handle, $line . "\n");
+            $bytes = fwrite($this->index_updates_handle, $line . "\n");
+            if ($bytes === false) {
+                throw new RuntimeException("Failed to write to index updates file (disk full?)");
+            }
         }
         $this->index_updates_count++;
         $this->last_update_path = $path;
@@ -3324,7 +3356,10 @@ class ImportClient
             JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
-            fwrite($this->index_updates_handle, $line . "\n");
+            $bytes = fwrite($this->index_updates_handle, $line . "\n");
+            if ($bytes === false) {
+                throw new RuntimeException("Failed to write to index updates file (disk full?)");
+            }
         }
         $this->index_updates_count++;
         $this->last_update_path = $path;
@@ -4318,6 +4353,11 @@ class ImportClient
         $body = $chunk["body"] ?? "";
         $data = json_decode($body, true);
         if (!$data) {
+            $this->audit_log(
+                "REMOTE ERROR | phase={$phase} | raw (JSON decode failed): " .
+                    substr($body, 0, 500),
+                true,
+            );
             return;
         }
 
