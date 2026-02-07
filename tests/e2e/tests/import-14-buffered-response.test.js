@@ -1,0 +1,66 @@
+/**
+ * Test 14: Buffered Response via import.php
+ * Tests file sync and SQL sync through buffered Nginx proxy (port 8098).
+ */
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+    runImporter, createTempDir, cleanupTempDir,
+    getSiteUrl, getSiteSecret, getSiteDir,
+    hashDirectory, compareDirectoryHashes,
+} from '../lib/test-helpers.js';
+
+describe('Import: Buffered Response', () => {
+    const site = 'buffered';
+    let tempDir;
+
+    before(() => {
+        tempDir = createTempDir('e2e-import-buffered');
+    });
+
+    after(() => {
+        cleanupTempDir(tempDir);
+    });
+
+    function importUrl() {
+        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+    }
+
+    it('files-sync-initial through buffered proxy completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+            secret: getSiteSecret(site),
+        });
+        assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+    });
+
+    it('files are correct', () => {
+        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const sourceHashes = hashDirectory(getSiteDir(site));
+        const importedHashes = hashDirectory(importedRoot);
+
+        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
+        assert.ok(comparison.match,
+            `File mismatch: missing=${JSON.stringify(comparison.missing.slice(0, 5))}, ` +
+            `different=${JSON.stringify(comparison.different.slice(0, 5))}`);
+    });
+
+    it('sql-sync through buffered proxy completes', () => {
+        const sqlDir = createTempDir('e2e-import-buffered-sql');
+        try {
+            const result = runImporter(importUrl(), sqlDir, 'sql-sync', {
+                secret: getSiteSecret(site),
+            });
+            assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}`);
+
+            const sqlFile = join(sqlDir, 'db.sql');
+            assert.ok(existsSync(sqlFile), 'Expected db.sql to exist');
+
+            const sql = readFileSync(sqlFile, 'utf-8');
+            assert.ok(sql.includes('CREATE TABLE'), 'Expected CREATE TABLE in db.sql');
+        } finally {
+            cleanupTempDir(sqlDir);
+        }
+    });
+});

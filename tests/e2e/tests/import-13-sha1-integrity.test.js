@@ -1,0 +1,67 @@
+/**
+ * Test 13: SHA1 Integrity via import.php
+ * Tests that file hashes match after sync, including large binary files.
+ */
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+    runImporter, createTempDir, cleanupTempDir,
+    getSiteUrl, getSiteSecret, getSiteDir,
+    hashDirectory, compareDirectoryHashes, sha1File,
+} from '../lib/test-helpers.js';
+
+describe('Import: SHA1 Integrity', () => {
+    const site = 'sha1-verify';
+    let tempDir;
+
+    before(() => {
+        tempDir = createTempDir('e2e-import-sha1');
+    });
+
+    after(() => {
+        cleanupTempDir(tempDir);
+    });
+
+    function importUrl() {
+        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+    }
+
+    it('files-sync-initial completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+            secret: getSiteSecret(site),
+        });
+        assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+    });
+
+    it('all file hashes match source', () => {
+        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const sourceHashes = hashDirectory(getSiteDir(site));
+        const importedHashes = hashDirectory(importedRoot);
+
+        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
+        assert.ok(comparison.match,
+            `File mismatch: missing=${comparison.missing.length}, different=${comparison.different.length}\n` +
+            `missing: ${JSON.stringify(comparison.missing.slice(0, 5))}\n` +
+            `different: ${JSON.stringify(comparison.different.slice(0, 5))}`);
+    });
+
+    it('at least 20 files with correct hashes', () => {
+        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedHashes = hashDirectory(importedRoot);
+        assert.ok(importedHashes.size >= 20, `Expected at least 20 files, got ${importedHashes.size}`);
+    });
+
+    it('large binary file (256KB) hash matches', () => {
+        const sourcePath = join(getSiteDir(site), 'test-data', 'large-binary.bin');
+        const importedPath = join(tempDir, 'filesystem-root', getSiteDir(site), 'test-data', 'large-binary.bin');
+
+        assert.ok(existsSync(sourcePath), 'Expected source large-binary.bin to exist');
+        assert.ok(existsSync(importedPath), 'Expected imported large-binary.bin to exist');
+
+        const sourceHash = sha1File(sourcePath);
+        const importedHash = sha1File(importedPath);
+        assert.equal(sourceHash, importedHash, 'Large binary file hash mismatch');
+    });
+});

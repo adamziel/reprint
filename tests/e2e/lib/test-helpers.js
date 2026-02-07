@@ -11,7 +11,7 @@ import { HmacClient } from './hmac-client.js';
 import { gunzipSync } from 'node:zlib';
 
 const SITE_ROOT = '/srv/e2e-sites';
-const PROJECT_ROOT = join(import.meta.dirname, '..', '..');
+const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = join(PROJECT_ROOT, 'importer', 'import.php');
 const DB_HOST = '127.0.0.1';
 const DB_USER = 'e2e_admin';
@@ -245,7 +245,7 @@ export function runImporter(url, outputDir, command, options = {}) {
         command,
     ];
     if (secret) {
-        args.push('--secret', secret);
+        args.push(`--secret=${secret}`);
     }
     if (options.extraArgs) {
         args.push(...options.extraArgs);

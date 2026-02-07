@@ -1,0 +1,91 @@
+/**
+ * Test 03: Delta File Sync via import.php
+ * Tests files-sync-delta after initial sync, with and without changes.
+ */
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, existsSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+import { join } from 'node:path';
+import {
+    runImporter, createTempDir, cleanupTempDir,
+    getSiteUrl, getSiteSecret, getSiteDir,
+    hashDirectory, compareDirectoryHashes,
+} from '../lib/test-helpers.js';
+
+describe('Import: Delta Sync', () => {
+    const site = 'file-changes';
+    let tempDir;
+    const addedFile = join(getSiteDir(site), 'test-data', 'delta-test-added.txt');
+
+    before(() => {
+        tempDir = createTempDir('e2e-import-delta');
+        // Clean up any leftover test file
+        try { execSync(`sudo rm -f ${JSON.stringify(addedFile)}`); } catch (e) {}
+    });
+
+    after(() => {
+        cleanupTempDir(tempDir);
+        try { execSync(`sudo rm -f ${JSON.stringify(addedFile)}`); } catch (e) {}
+    });
+
+    function importUrl() {
+        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+    }
+
+    it('files-sync-initial completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+            secret: getSiteSecret(site),
+        });
+        assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+    });
+
+    it('files-sync-delta with no changes completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-sync-delta', {
+            secret: getSiteSecret(site),
+        });
+        assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+
+        // Hashes should still match
+        const sourceHashes = hashDirectory(getSiteDir(site));
+        const importedHashes = hashDirectory(join(tempDir, 'filesystem-root', getSiteDir(site)));
+        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
+        assert.ok(comparison.match, `Files should still match after no-change delta`);
+    });
+
+    it('files-sync-delta picks up new file after --restart', () => {
+        // Add a file on the source
+        execSync(`echo "delta test content" | sudo tee ${JSON.stringify(addedFile)} > /dev/null`);
+        execSync(`sudo chown nginx:nginx ${JSON.stringify(addedFile)}`);
+
+        const result = runImporter(importUrl(), tempDir, 'files-sync-delta', {
+            secret: getSiteSecret(site),
+            extraArgs: ['--restart'],
+        });
+        assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+
+        // The new file should appear in the output
+        const importedPath = join(tempDir, 'filesystem-root', getSiteDir(site), 'test-data', 'delta-test-added.txt');
+        assert.ok(existsSync(importedPath), 'Expected delta-test-added.txt in output');
+
+        // Clean up added file
+        execSync(`sudo rm -f ${JSON.stringify(addedFile)}`);
+    });
+
+    it('files-sync-delta on fresh dir fails with useful error', () => {
+        const freshDir = createTempDir('e2e-import-delta-fresh');
+        try {
+            const result = runImporter(importUrl(), freshDir, 'files-sync-delta', {
+                secret: getSiteSecret(site),
+            });
+            assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code');
+            const output = result.stdout + result.stderr;
+            assert.ok(
+                output.includes('initial') || output.includes('files-sync-initial'),
+                `Expected message about needing initial sync first, got: ${output}`
+            );
+        } finally {
+            cleanupTempDir(freshDir);
+        }
+    });
+});
