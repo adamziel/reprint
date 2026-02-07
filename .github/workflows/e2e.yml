@@ -35,10 +35,14 @@ jobs:
       - name: Debug logs on failure
         if: failure()
         run: |
+          echo "--- Listening ports ---"
+          sudo ss -tlnp 2>/dev/null || true
           echo "--- PHP-FPM error log ---"
           sudo cat /tmp/php-e2e-errors.log 2>/dev/null || echo "(empty)"
           echo "--- Nginx error log ---"
           sudo tail -100 /var/log/nginx/error.log 2>/dev/null || echo "(empty)"
+          echo "--- Nginx config test ---"
+          sudo nginx -t 2>&1 || true
           echo "--- PHP-FPM journal ---"
           sudo journalctl -u php8.2-fpm --no-pager -n 30 2>/dev/null || true
           echo "--- Nginx journal ---"

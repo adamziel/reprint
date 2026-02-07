@@ -10,13 +10,13 @@ FPM_SOCKET="/run/php/e2e.sock"
 echo "=== Installing PHP 8.2 ==="
 sudo add-apt-repository -y ppa:ondrej/php
 sudo apt-get update -qq
-sudo apt-get install -y -qq \
+sudo apt-get install -y \
     php8.2-cli php8.2-fpm \
     php8.2-mysql php8.2-mbstring php8.2-curl php8.2-xml php8.2-zip
 
 # ---------- MariaDB ----------
 echo "=== Installing MariaDB ==="
-sudo apt-get install -y -qq mariadb-server
+sudo apt-get install -y mariadb-server
 sudo systemctl start mariadb
 
 echo "=== Creating MySQL users ==="
@@ -32,7 +32,11 @@ SQL
 
 # ---------- Nginx ----------
 echo "=== Installing Nginx ==="
-sudo apt-get install -y -qq nginx
+sudo apt-get install -y nginx
+
+# Stop nginx immediately — apt auto-starts it with the default config.
+# We need it fully stopped before reconfiguring to avoid port conflicts.
+sudo systemctl stop nginx
 
 # ---------- nginx user ----------
 echo "=== Creating nginx user ==="
@@ -185,7 +189,16 @@ VHOST
 # ---------- Start services ----------
 echo "=== Starting services ==="
 sudo systemctl restart php8.2-fpm
-sudo systemctl restart nginx
+
+# Kill anything lingering on our ports before starting Nginx
+for port in 8081 8082 8083 8084 8085 8086 8087 8088 8089 8090 8091 8092 8093 8094 8095 8096 8097 8098 8099 8100; do
+    sudo fuser -k "${port}/tcp" 2>/dev/null || true
+done
+sleep 1
+
+# Validate config before starting
+sudo nginx -t
+sudo systemctl start nginx
 
 # ---------- Verify ----------
 echo "=== Verifying services ==="
