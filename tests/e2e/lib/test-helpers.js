@@ -1,0 +1,571 @@
+/**
+ * E2E test helpers for the streaming site migration system.
+ */
+import { execSync, execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, unlinkSync, lstatSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createConnection } from 'mysql2/promise';
+import { HmacClient } from './hmac-client.js';
+import { gunzipSync } from 'node:zlib';
+
+const SITE_ROOT = '/srv/e2e-sites';
+const PROJECT_ROOT = join(import.meta.dirname, '..', '..');
+const IMPORTER_PATH = join(PROJECT_ROOT, 'importer', 'import.php');
+const DB_HOST = '127.0.0.1';
+const DB_USER = 'e2e_admin';
+const DB_PASS = 'e2e_password';
+
+/**
+ * Get the base URL for a test site.
+ */
+export function getSiteUrl(siteName, port = null) {
+    const ports = {
+        'basic': 8081,
+        'symlinks-outside': 8082,
+        'custom-wp-content': 8083,
+        'chmod-denied': 8084,
+        'mysql-restricted': 8085,
+        'circular-symlinks': 8086,
+        'file-changes': 8087,
+        'dir-deleted': 8088,
+        'volatile-file': 8089,
+        'emoji-paths': 8090,
+        'large-directory': 8091,
+        'hmac-errors': 8092,
+        'sha1-verify': 8093,
+        'http-errors': 8094,
+        'request-cutoff': 8095,
+        'gzip-corrupt': 8096,
+        'redirect-301': 8097,
+        'buffered': 8098,
+        'error-chunks': 8099,
+        'import-failures': 8100,
+    };
+    const p = port || ports[siteName];
+    if (!p) throw new Error(`Unknown site: ${siteName}`);
+    return `http://127.0.0.1:${p}/api.php`;
+}
+
+/**
+ * Get the HMAC secret for a test site.
+ */
+export function getSiteSecret(siteName) {
+    return `test-secret-${siteName}`;
+}
+
+/**
+ * Get site directory path.
+ */
+export function getSiteDir(siteName) {
+    return join(SITE_ROOT, siteName);
+}
+
+/**
+ * Get test data directory path.
+ */
+export function getTestDataDir(siteName) {
+    return join(SITE_ROOT, siteName, 'test-data');
+}
+
+/**
+ * Create HMAC client for a site.
+ */
+export function createHmacClient(siteName) {
+    return new HmacClient(getSiteSecret(siteName));
+}
+
+/**
+ * Make an authenticated HTTP request to the export API.
+ * @param {string} siteName - Site name
+ * @param {string} endpoint - API endpoint
+ * @param {Object} params - Query parameters
+ * @param {Object} options - Additional options (method, body, rawResponse, followRedirects)
+ * @returns {Promise<Object>} Parsed response or raw response
+ */
+export async function apiRequest(siteName, endpoint, params = {}, options = {}) {
+    const client = createHmacClient(siteName);
+    const url = new URL(options.url || getSiteUrl(siteName));
+    url.searchParams.set('endpoint', endpoint);
+    for (const [k, v] of Object.entries(params)) {
+        url.searchParams.set(k, String(v));
+    }
+
+    const body = options.body || '';
+    const method = options.method || 'GET';
+    const headers = client.getAuthHeaders(body);
+    headers['Accept-Encoding'] = 'gzip';
+
+    const fetchOptions = {
+        method,
+        headers,
+        redirect: options.followRedirects === false ? 'manual' : 'follow',
+    };
+    if (body && method !== 'GET') {
+        fetchOptions.body = body;
+        fetchOptions.headers['Content-Type'] = options.contentType || 'application/json';
+    }
+
+    const response = await fetch(url.toString(), fetchOptions);
+
+    if (options.rawResponse) {
+        return response;
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+
+    if (contentType.includes('application/json')) {
+        return {
+            status: response.status,
+            json: await response.json(),
+            headers: Object.fromEntries(response.headers.entries()),
+        };
+    }
+
+    if (contentType.includes('multipart/mixed')) {
+        const arrayBuf = await response.arrayBuffer();
+        let bodyBuf = Buffer.from(arrayBuf);
+
+        // Node.js fetch auto-decompresses gzip when Content-Encoding: gzip.
+        // Only manually decompress if the data is still gzipped (starts with 0x1f8b).
+        if (bodyBuf.length >= 2 && bodyBuf[0] === 0x1f && bodyBuf[1] === 0x8b) {
+            try {
+                bodyBuf = gunzipSync(bodyBuf);
+            } catch (e) {
+                // Partial gzip stream - return what we can
+                return {
+                    status: response.status,
+                    headers: Object.fromEntries(response.headers.entries()),
+                    chunks: [],
+                    raw: bodyBuf,
+                    gzipError: e.message,
+                };
+            }
+        }
+
+        const boundary = extractBoundary(contentType);
+        const chunks = parseMultipart(bodyBuf.toString('binary'), boundary);
+        return {
+            status: response.status,
+            headers: Object.fromEntries(response.headers.entries()),
+            chunks,
+            raw: bodyBuf,
+        };
+    }
+
+    // Plain text / error response
+    const text = await response.text();
+    return {
+        status: response.status,
+        text,
+        headers: Object.fromEntries(response.headers.entries()),
+    };
+}
+
+/**
+ * Extract boundary from Content-Type header.
+ */
+function extractBoundary(contentType) {
+    const match = contentType.match(/boundary="?([^";\s]+)"?/);
+    if (!match) throw new Error(`No boundary in Content-Type: ${contentType}`);
+    return match[1];
+}
+
+/**
+ * Parse multipart/mixed response body into chunks.
+ */
+function parseMultipart(body, boundary) {
+    const chunks = [];
+    const delimiter = `--${boundary}`;
+    const parts = body.split(delimiter);
+
+    for (const part of parts) {
+        if (!part || part.trim() === '' || part.trim() === '--') continue;
+        if (part.startsWith('--')) continue; // closing boundary
+
+        const headerEnd = part.indexOf('\r\n\r\n');
+        if (headerEnd === -1) continue;
+
+        const headerSection = part.substring(0, headerEnd);
+        const bodySection = part.substring(headerEnd + 4);
+
+        const headers = {};
+        for (const line of headerSection.split('\r\n')) {
+            const colonIdx = line.indexOf(':');
+            if (colonIdx === -1) continue;
+            const key = line.substring(0, colonIdx).trim().toLowerCase();
+            const value = line.substring(colonIdx + 1).trim();
+            headers[key] = value;
+        }
+
+        const chunkType = headers['x-chunk-type'] || 'unknown';
+        const contentLength = parseInt(headers['content-length'] || '0', 10);
+
+        let chunkBody = bodySection;
+        if (contentLength > 0) {
+            chunkBody = bodySection.substring(0, contentLength);
+        }
+
+        const chunk = {
+            type: chunkType,
+            headers,
+            body: chunkBody,
+        };
+
+        // Parse JSON bodies
+        if (headers['content-type']?.includes('application/json') && chunkBody) {
+            try {
+                chunk.json = JSON.parse(chunkBody);
+            } catch (e) {
+                chunk.jsonError = e.message;
+            }
+        }
+
+        chunks.push(chunk);
+    }
+
+    return chunks;
+}
+
+/**
+ * Run the importer CLI.
+ * @param {string} url - Export URL
+ * @param {string} outputDir - Local output directory
+ * @param {string} command - Import command (files-sync-initial, sql-sync, etc.)
+ * @param {Object} options - Additional options
+ * @returns {Object} { stdout, stderr, exitCode }
+ */
+export function runImporter(url, outputDir, command, options = {}) {
+    const secret = options.secret || '';
+    const args = [
+        IMPORTER_PATH,
+        url,
+        outputDir,
+        command,
+    ];
+    if (secret) {
+        args.push('--secret', secret);
+    }
+    if (options.extraArgs) {
+        args.push(...options.extraArgs);
+    }
+
+    try {
+        const result = execFileSync('php', args, {
+            timeout: options.timeout || 60000,
+            encoding: 'utf-8',
+            env: { ...process.env },
+            maxBuffer: 50 * 1024 * 1024,
+        });
+        return { stdout: result, stderr: '', exitCode: 0 };
+    } catch (e) {
+        return {
+            stdout: e.stdout || '',
+            stderr: e.stderr || '',
+            exitCode: e.status || 1,
+        };
+    }
+}
+
+/**
+ * Create a temporary directory for import output.
+ */
+export function createTempDir(prefix = 'e2e-import') {
+    const dir = join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+}
+
+/**
+ * Clean up a temporary directory.
+ */
+export function cleanupTempDir(dir) {
+    try {
+        execSync(`rm -rf ${JSON.stringify(dir)}`, { timeout: 10000 });
+    } catch (e) {
+        // Ignore cleanup errors
+    }
+}
+
+/**
+ * Compute SHA1 hash of a file.
+ */
+export function sha1File(filePath) {
+    const content = readFileSync(filePath);
+    return createHash('sha1').update(content).digest('hex');
+}
+
+/**
+ * Recursively list all files in a directory with their SHA1 hashes.
+ * @returns {Map<string, string>} Map of relative path -> SHA1 hash
+ */
+export function hashDirectory(dirPath) {
+    const hashes = new Map();
+
+    function walk(currentDir) {
+        let entries;
+        try {
+            entries = readdirSync(currentDir);
+        } catch (e) {
+            return; // Skip unreadable directories
+        }
+
+        for (const entry of entries) {
+            const fullPath = join(currentDir, entry);
+            let stat;
+            try {
+                stat = lstatSync(fullPath);
+            } catch (e) {
+                continue;
+            }
+
+            if (stat.isSymbolicLink()) {
+                continue; // Skip symlinks for hash comparison
+            }
+
+            if (stat.isDirectory()) {
+                walk(fullPath);
+            } else if (stat.isFile()) {
+                try {
+                    const relPath = relative(dirPath, fullPath);
+                    const hash = sha1File(fullPath);
+                    hashes.set(relPath, hash);
+                } catch (e) {
+                    // Skip unreadable files
+                }
+            }
+        }
+    }
+
+    walk(dirPath);
+    return hashes;
+}
+
+/**
+ * Compare two directory hashes and return differences.
+ */
+export function compareDirectoryHashes(source, imported) {
+    const missing = [];
+    const extra = [];
+    const different = [];
+
+    for (const [path, hash] of source) {
+        if (!imported.has(path)) {
+            missing.push(path);
+        } else if (imported.get(path) !== hash) {
+            different.push({ path, sourceHash: hash, importedHash: imported.get(path) });
+        }
+    }
+
+    for (const [path] of imported) {
+        if (!source.has(path)) {
+            extra.push(path);
+        }
+    }
+
+    return { missing, extra, different, match: missing.length === 0 && different.length === 0 };
+}
+
+/**
+ * Create a MySQL connection.
+ */
+export async function createMysqlConnection(dbName = null) {
+    const config = {
+        host: DB_HOST,
+        user: DB_USER,
+        password: DB_PASS,
+    };
+    if (dbName) {
+        config.database = dbName;
+    }
+    return createConnection(config);
+}
+
+/**
+ * Get database name for a site.
+ */
+export function getDbName(siteName) {
+    return `e2e_${siteName.replace(/-/g, '_')}`;
+}
+
+/**
+ * Compare two databases (table list and row counts).
+ */
+export async function compareDatabases(sourceDb, importDb) {
+    const sourceConn = await createMysqlConnection(sourceDb);
+    const importConn = await createMysqlConnection(importDb);
+
+    try {
+        const [sourceTables] = await sourceConn.query(
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
+            [sourceDb]
+        );
+        const [importTables] = await importConn.query(
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
+            [importDb]
+        );
+
+        const sourceNames = sourceTables.map(r => r.TABLE_NAME);
+        const importNames = importTables.map(r => r.TABLE_NAME);
+
+        const missingTables = sourceNames.filter(t => !importNames.includes(t));
+        const extraTables = importNames.filter(t => !sourceNames.includes(t));
+
+        const rowCounts = {};
+        for (const table of sourceNames) {
+            if (importNames.includes(table)) {
+                const [[srcRow]] = await sourceConn.query(`SELECT COUNT(*) as cnt FROM \`${table}\``);
+                const [[impRow]] = await importConn.query(`SELECT COUNT(*) as cnt FROM \`${table}\``);
+                rowCounts[table] = {
+                    source: Number(srcRow.cnt),
+                    imported: Number(impRow.cnt),
+                    match: Number(srcRow.cnt) === Number(impRow.cnt),
+                };
+            }
+        }
+
+        return {
+            sourceTableCount: sourceNames.length,
+            importTableCount: importNames.length,
+            missingTables,
+            extraTables,
+            rowCounts,
+            match: missingTables.length === 0 && Object.values(rowCounts).every(r => r.match),
+        };
+    } finally {
+        await sourceConn.end();
+        await importConn.end();
+    }
+}
+
+/**
+ * Write a test-hooks.php file for a site.
+ */
+export function writeTestHooks(siteName, phpCode) {
+    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
+    const code = `<?php\n${phpCode}\n`;
+    execSync(`sudo tee ${JSON.stringify(hookPath)} > /dev/null <<'HOOKEOF'\n${code}\nHOOKEOF`);
+    execSync(`sudo chown nginx:nginx ${JSON.stringify(hookPath)}`);
+}
+
+/**
+ * Remove test-hooks.php for a site.
+ */
+export function removeTestHooks(siteName) {
+    const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
+    try {
+        execSync(`sudo rm -f ${JSON.stringify(hookPath)}`);
+    } catch (e) {
+        // Ignore
+    }
+}
+
+/**
+ * Write a state file that test hooks can read/write.
+ */
+export function writeHookState(siteName, data) {
+    const statePath = `/tmp/e2e-hook-state-${siteName}`;
+    writeFileSync(statePath, JSON.stringify(data));
+    execSync(`chmod 666 ${statePath}`);
+}
+
+/**
+ * Read a state file written by test hooks.
+ */
+export function readHookState(siteName) {
+    const statePath = `/tmp/e2e-hook-state-${siteName}`;
+    try {
+        return JSON.parse(readFileSync(statePath, 'utf-8'));
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Clear hook state file.
+ */
+export function clearHookState(siteName) {
+    const statePath = `/tmp/e2e-hook-state-${siteName}`;
+    try {
+        unlinkSync(statePath);
+    } catch (e) {
+        // Ignore
+    }
+}
+
+/**
+ * Make a file_fetch request with a file_list upload.
+ * Uses multipart/form-data to upload the file list as a file.
+ */
+export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
+    const client = createHmacClient(siteName);
+    const url = new URL(getSiteUrl(siteName));
+    url.searchParams.set('endpoint', 'file_fetch');
+    for (const [k, v] of Object.entries(params)) {
+        url.searchParams.set(k, String(v));
+    }
+
+    const fileListJson = JSON.stringify(filePaths);
+
+    // Create form data with file upload
+    const formData = new FormData();
+    const blob = new Blob([fileListJson], { type: 'application/json' });
+    formData.append('file_list', blob, 'file_list.json');
+
+    // For HMAC: hash the file content (what the server will hash from $_FILES)
+    const headers = client.getAuthHeaders(fileListJson);
+
+    const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers,
+        body: formData,
+    });
+
+    const contentType = response.headers.get('content-type') || '';
+
+    if (contentType.includes('application/json')) {
+        return {
+            status: response.status,
+            json: await response.json(),
+            headers: Object.fromEntries(response.headers.entries()),
+        };
+    }
+
+    if (contentType.includes('multipart/mixed')) {
+        const arrayBuf = await response.arrayBuffer();
+        let bodyBuf = Buffer.from(arrayBuf);
+
+        if (bodyBuf.length >= 2 && bodyBuf[0] === 0x1f && bodyBuf[1] === 0x8b) {
+            try {
+                bodyBuf = gunzipSync(bodyBuf);
+            } catch (e) {
+                return {
+                    status: response.status,
+                    headers: Object.fromEntries(response.headers.entries()),
+                    chunks: [],
+                    raw: bodyBuf,
+                    gzipError: e.message,
+                };
+            }
+        }
+
+        const boundary = extractBoundary(contentType);
+        const chunks = parseMultipart(bodyBuf.toString('binary'), boundary);
+        return {
+            status: response.status,
+            headers: Object.fromEntries(response.headers.entries()),
+            chunks,
+            raw: bodyBuf,
+        };
+    }
+
+    return {
+        status: response.status,
+        text: await response.text(),
+        headers: Object.fromEntries(response.headers.entries()),
+    };
+}
+
+// Re-export constants
+export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, DB_HOST, DB_USER, DB_PASS };

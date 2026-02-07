@@ -194,6 +194,54 @@ if (file_exists(__DIR__ . "/secrets.php")) {
     require_once __DIR__ . "/secrets.php";
 }
 
+// ============================================================================
+// Test Hook System (only active when SITE_EXPORT_TEST_MODE env var is set)
+// ============================================================================
+if (getenv('SITE_EXPORT_TEST_MODE')) {
+    /**
+     * Load test hooks from a well-known path relative to the site root.
+     * The hook file can define callback functions that are called at key
+     * points during export for testing error conditions and edge cases.
+     *
+     * Supported hook functions:
+     *   test_hook_before_sql_batch(&$sql, $cursor)     - Before SQL batch emitted
+     *   test_hook_before_file_chunk($path, $offset, &$data) - Before file chunk
+     *   test_hook_after_gzip_init($gz, $boundary)       - After gzip stream init
+     *   test_hook_before_completion($status, $gz, $boundary) - Before completion chunk
+     *   test_hook_before_index_batch(&$batch_items, $stack)  - Before index batch emitted
+     *   test_hook_during_dir_scan($dir, &$entries)       - During directory scanning
+     */
+    $__test_hook_file_loaded = false;
+    function _e2e_load_test_hooks_if_needed(array $config): void {
+        global $__test_hook_file_loaded;
+        if ($__test_hook_file_loaded) {
+            return;
+        }
+        $candidates = [];
+        if (isset($config['directory'])) {
+            $dirs = is_array($config['directory']) ? $config['directory'] : [$config['directory']];
+            foreach ($dirs as $d) {
+                $candidates[] = rtrim($d, '/') . '/wp-content/plugins/site-export/test-hooks.php';
+            }
+        }
+        // Also check relative to this file's parent
+        $candidates[] = dirname(__DIR__) . '/test-hooks.php';
+        foreach ($candidates as $candidate) {
+            if (file_exists($candidate)) {
+                require_once $candidate;
+                $__test_hook_file_loaded = true;
+                return;
+            }
+        }
+    }
+
+    function _e2e_call_hook(string $name, array &$args = []): void {
+        if (function_exists($name)) {
+            call_user_func_array($name, $args);
+        }
+    }
+}
+
 if (
     !defined("SECRET_KEY") ||
     !isset($_GET["SECRET_KEY"]) ||
@@ -796,6 +844,13 @@ function endpoint_sql_chunk(
     $gz = new GzipOutputStream(true);
     $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
+    // E2E test hook: after gzip stream initialization
+    if (getenv('SITE_EXPORT_TEST_MODE')) {
+        _e2e_load_test_hooks_if_needed($config);
+        $hook_args = [$gz, $boundary];
+        _e2e_call_hook('test_hook_after_gzip_init', $hook_args);
+    }
+
     $batches_processed = 0;
     $sql_bytes_processed = 0;
     $aborted = false;
@@ -837,6 +892,13 @@ function endpoint_sql_chunk(
         $sql = implode("", $sql);
         $sql_bytes_processed += strlen($sql);
 
+        // E2E test hook: before SQL batch is emitted
+        if (getenv('SITE_EXPORT_TEST_MODE')) {
+            $cursor_for_hook = $reader->get_reentrancy_cursor();
+            $hook_args = [&$sql, $cursor_for_hook];
+            _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
+        }
+
         // Output SQL batch as multipart chunk
         $cursor = $reader->get_reentrancy_cursor();
         $gz->write(
@@ -865,6 +927,12 @@ function endpoint_sql_chunk(
 
     // Best-effort completion chunk — the client already has the data chunks.
     $status = $aborted ? "partial" : ($reader->is_finished() ? "complete" : "partial");
+
+    // E2E test hook: before completion chunk
+    if (getenv('SITE_EXPORT_TEST_MODE')) {
+        $hook_args = [$status, $gz, $boundary];
+        _e2e_call_hook('test_hook_before_completion', $hook_args);
+    }
 
     try {
         $gz->write(
@@ -2101,6 +2169,12 @@ function stream_file_producer(
     $gz = new GzipOutputStream($can_send_headers);
     $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
+    // E2E test hook: after gzip stream initialization (file producer)
+    if (getenv('SITE_EXPORT_TEST_MODE')) {
+        $hook_args = [$gz, $boundary];
+        _e2e_call_hook('test_hook_after_gzip_init', $hook_args);
+    }
+
     $chunks_processed = 0;
     $files_completed = 0;
     $bytes_processed = 0;
@@ -2269,6 +2343,14 @@ function stream_file_producer(
             );
             $gz->sync();
         } else {
+            // E2E test hook: before file chunk is emitted
+            if (getenv('SITE_EXPORT_TEST_MODE')) {
+                $hook_data = $chunk["data"];
+                $hook_args = [$chunk["path"], $chunk["offset"], &$hook_data];
+                _e2e_call_hook('test_hook_before_file_chunk', $hook_args);
+                $chunk["data"] = $hook_data;
+            }
+
             $chunks_processed++;
             $bytes_processed += strlen($chunk["data"]);
             if ($chunk["is_first_chunk"]) {
@@ -2334,6 +2416,12 @@ function stream_file_producer(
         $progress = $producer->get_progress();
         $is_complete = $progress["phase"] === "finished" && !$aborted;
         $status = $is_complete ? "complete" : "partial";
+
+        // E2E test hook: before completion chunk (file producer)
+        if (getenv('SITE_EXPORT_TEST_MODE')) {
+            $hook_args = [$status, $gz, $boundary];
+            _e2e_call_hook('test_hook_before_completion', $hook_args);
+        }
 
         error_log(
             "Export completion: status={$status}, phase={$progress["phase"]}, " .
@@ -2673,6 +2761,13 @@ function endpoint_file_index(
                 continue;
             }
 
+            // E2E test hook: during directory scanning
+            if (getenv('SITE_EXPORT_TEST_MODE')) {
+                _e2e_load_test_hooks_if_needed($config);
+                $hook_args = [$current_real, &$entries];
+                _e2e_call_hook('test_hook_during_dir_scan', $hook_args);
+            }
+
             $filtered = [];
             foreach ($entries as $entry) {
                 if ($entry === "." || $entry === "..") {
@@ -2734,6 +2829,13 @@ function endpoint_file_index(
                 ];
 
                 if (count($batch_items) >= $batch_size) {
+                    // E2E test hook: before index batch is emitted
+                    if (getenv('SITE_EXPORT_TEST_MODE')) {
+                        _e2e_load_test_hooks_if_needed($config);
+                        $hook_args = [&$batch_items, $stack];
+                        _e2e_call_hook('test_hook_before_index_batch', $hook_args);
+                    }
+
                     $cursor_json = safe_json_encode(
                         ["stack" => encode_index_stack($stack)],
                         JSON_UNESCAPED_SLASHES,
