@@ -11,6 +11,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, compareDirectoryHashes,
+    assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 
 describe('Import: Delta Sync', () => {
@@ -38,6 +39,14 @@ describe('Import: Delta Sync', () => {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+    });
+
+    it('indexed at least 3000 files from remote', () => {
+        assertFileCount(tempDir);
+    });
+
+    it('imported files form a valid WordPress site mirror', () => {
+        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
     it('files-sync-delta with no changes completes', () => {

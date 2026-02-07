@@ -1,6 +1,7 @@
 /**
  * E2E test helpers for the streaming site migration system.
  */
+import assert from 'node:assert/strict';
 import { execSync, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, unlinkSync, lstatSync } from 'node:fs';
@@ -565,6 +566,55 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
         text: await response.text(),
         headers: Object.fromEntries(response.headers.entries()),
     };
+}
+
+/**
+ * Count non-empty lines in a JSONL file.
+ */
+export function countJsonlLines(filePath) {
+    if (!existsSync(filePath)) return 0;
+    const content = readFileSync(filePath, 'utf-8');
+    return content.split('\n').filter(l => l.trim()).length;
+}
+
+/**
+ * Read the audit log as a string.
+ */
+export function readAuditLog(outputDir) {
+    const logPath = join(outputDir, '.import-audit.log');
+    if (!existsSync(logPath)) return '';
+    return readFileSync(logPath, 'utf-8');
+}
+
+/**
+ * Assert that the import indexed at least minCount files.
+ * Checks .import-index.jsonl line count.
+ */
+export function assertFileCount(outputDir, minCount = 3000) {
+    const indexPath = join(outputDir, '.import-index.jsonl');
+    assert.ok(existsSync(indexPath), `Expected ${indexPath} to exist`);
+    const count = countJsonlLines(indexPath);
+    assert.ok(count >= minCount,
+        `Expected at least ${minCount} files in index, got ${count}`);
+}
+
+/**
+ * Assert that the imported site root looks like a real WordPress installation.
+ * Checks for key WP paths.
+ */
+export function assertSiteMirror(importedSiteRoot) {
+    const requiredPaths = [
+        'wp-includes/version.php',
+        'wp-admin/index.php',
+        'wp-content/themes',
+        'index.php',
+        'wp-load.php',
+    ];
+    for (const p of requiredPaths) {
+        const fullPath = join(importedSiteRoot, p);
+        assert.ok(existsSync(fullPath),
+            `Expected WordPress path to exist: ${p} (checked ${fullPath})`);
+    }
 }
 
 // Re-export constants

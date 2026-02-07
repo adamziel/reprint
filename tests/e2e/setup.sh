@@ -16,6 +16,19 @@ echo "Project root: $PROJECT_ROOT"
 echo "Plugin source: $PLUGIN_SRC"
 echo "Site root: $SITE_ROOT"
 
+# Download WordPress to use as template for test sites
+WP_VERSION="6.7"
+WP_TARBALL="/tmp/wordpress-${WP_VERSION}.tar.gz"
+WP_TEMPLATE="/tmp/wordpress-template"
+
+if [ ! -d "$WP_TEMPLATE" ]; then
+    echo "Downloading WordPress ${WP_VERSION}..."
+    curl -sL "https://wordpress.org/wordpress-${WP_VERSION}.tar.gz" -o "$WP_TARBALL"
+    mkdir -p "$WP_TEMPLATE"
+    tar xzf "$WP_TARBALL" -C "$WP_TEMPLATE" --strip-components=1
+    echo "WordPress template ready at $WP_TEMPLATE"
+fi
+
 # Ensure site root exists
 sudo mkdir -p "$SITE_ROOT"
 sudo chown nginx:nginx "$SITE_ROOT"
@@ -30,11 +43,15 @@ create_site() {
 
     echo "  Creating site: $name (db: $db_name)"
 
-    # Create directory structure
+    # Copy WordPress template files into site directory
+    sudo mkdir -p "$site_dir"
+    sudo cp -a "$WP_TEMPLATE/." "$site_dir/"
+
+    # Create additional directories
     sudo mkdir -p "$site_dir/wp-content/plugins/site-export"
     sudo mkdir -p "$site_dir/test-data"
 
-    # Create wp-config.php
+    # Create wp-config.php (overrides WP default)
     sudo tee "$site_dir/wp-config.php" > /dev/null <<WPEOF
 <?php
 define('DB_HOST', '${DB_HOST}');
@@ -43,13 +60,6 @@ define('DB_USER', '${DB_USER}');
 define('DB_PASSWORD', '${DB_PASS}');
 \$table_prefix = 'wp_';
 WPEOF
-
-    # Create dummy wp-load.php (for WP root detection)
-    sudo tee "$site_dir/wp-load.php" > /dev/null <<'WLEOF'
-<?php
-// Dummy wp-load.php for e2e testing
-// This file exists so export.php can detect the WordPress root
-WLEOF
 
     # Create secret.php for HMAC auth
     sudo tee "$site_dir/wp-content/plugins/site-export/secret.php" > /dev/null <<SEOF

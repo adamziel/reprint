@@ -10,6 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory,
+    assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 
 describe('Import: Volatile Files', () => {
@@ -41,6 +42,14 @@ describe('Import: Volatile Files', () => {
             const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
             const hashes = hashDirectory(importedRoot);
             assert.ok(hashes.size > 0, 'Expected at least some files downloaded');
+        });
+
+        it('indexed at least 3000 files from remote', () => {
+            assertFileCount(tempDir);
+        });
+
+        it('imported files form a valid WordPress site mirror', () => {
+            assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
         });
     });
 

@@ -11,6 +11,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, compareDirectoryHashes,
+    assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 
 describe('Import: Basic File Sync', () => {
@@ -66,6 +67,14 @@ describe('Import: Basic File Sync', () => {
         assert.ok(existsSync(indexFile), 'Expected .import-index.jsonl to exist');
         const lines = readFileSync(indexFile, 'utf-8').trim().split('\n').filter(l => l);
         assert.ok(lines.length > 0, 'Expected at least one index entry');
+    });
+
+    it('indexed at least 3000 files from remote', () => {
+        assertFileCount(tempDir);
+    });
+
+    it('imported files form a valid WordPress site mirror', () => {
+        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
     it('re-running without --restart fails with useful message', () => {

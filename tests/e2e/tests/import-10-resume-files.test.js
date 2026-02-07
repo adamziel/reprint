@@ -1,7 +1,7 @@
 /**
  * Test 10: File Resume via import.php
  * Tests that files-sync-initial can resume after a partial transfer.
- * Uses large-directory site (2000 files) with --max-exec=1 to force short requests.
+ * Uses large-directory site (5000+ files) with --max-exec=3 to force short requests.
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,6 +11,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, compareDirectoryHashes,
+    assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 
 describe('Import: Resume Files', { timeout: 180000 }, () => {
@@ -30,13 +31,13 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
     }
 
     it('files-sync-initial completes via multiple resumable requests', () => {
-        // Use --max-exec=1 to force very short server execution times,
-        // which means each request only transfers a few files before returning partial.
+        // Use --max-exec=3 to force short server execution times,
+        // which means each request only transfers a subset of files before returning partial.
         // The importer automatically resumes from the cursor.
         const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
             secret: getSiteSecret(site),
-            timeout: 120000,
-            extraArgs: ['--max-exec=1'],
+            timeout: 180000,
+            extraArgs: ['--max-exec=3'],
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
@@ -47,6 +48,14 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
 
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(state.status, 'complete', 'Expected status to be complete');
+    });
+
+    it('indexed at least 3000 files from remote', () => {
+        assertFileCount(tempDir);
+    });
+
+    it('imported files form a valid WordPress site mirror', () => {
+        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
     it('all files present and correct after multi-request sync', () => {

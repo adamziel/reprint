@@ -10,6 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, compareDirectoryHashes,
+    assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 
 describe('Import: Buffered Response', () => {
@@ -44,6 +45,14 @@ describe('Import: Buffered Response', () => {
         assert.ok(comparison.match,
             `File mismatch: missing=${JSON.stringify(comparison.missing.slice(0, 5))}, ` +
             `different=${JSON.stringify(comparison.different.slice(0, 5))}`);
+    });
+
+    it('indexed at least 3000 files from remote', () => {
+        assertFileCount(tempDir);
+    });
+
+    it('imported files form a valid WordPress site mirror', () => {
+        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
     it('sql-sync through buffered proxy completes', () => {

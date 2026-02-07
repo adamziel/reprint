@@ -10,6 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory,
+    assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 
 describe('Import: Large Directory', () => {
@@ -42,6 +43,14 @@ describe('Import: Large Directory', () => {
 
         const hashes = hashDirectory(importedRoot);
         assert.ok(hashes.size >= 2000, `Expected at least 2000 files, got ${hashes.size}`);
+    });
+
+    it('indexed at least 3000 files from remote', () => {
+        assertFileCount(tempDir);
+    });
+
+    it('imported files form a valid WordPress site mirror', () => {
+        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
     it('spot-check file content matches content-NNNN pattern', () => {

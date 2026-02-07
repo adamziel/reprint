@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
+    countJsonlLines,
 } from '../lib/test-helpers.js';
 
 describe('Import: Files Index', () => {
@@ -46,5 +47,12 @@ describe('Import: Files Index', () => {
             return typeof path === 'string' && path.length > 0;
         });
         assert.ok(hasPaths, `Expected entries with file paths, got: ${JSON.stringify(entries.slice(0, 2))}`);
+    });
+
+    it('remote index has at least 3000 entries', () => {
+        const indexFile = join(tempDir, '.import-remote-index.jsonl');
+        const count = countJsonlLines(indexFile);
+        assert.ok(count >= 3000,
+            `Expected at least 3000 entries in remote index, got ${count}`);
     });
 });

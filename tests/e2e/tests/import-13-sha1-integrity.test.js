@@ -10,6 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, compareDirectoryHashes, sha1File,
+    assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 
 describe('Import: SHA1 Integrity', () => {
@@ -45,6 +46,14 @@ describe('Import: SHA1 Integrity', () => {
             `File mismatch: missing=${comparison.missing.length}, different=${comparison.different.length}\n` +
             `missing: ${JSON.stringify(comparison.missing.slice(0, 5))}\n` +
             `different: ${JSON.stringify(comparison.different.slice(0, 5))}`);
+    });
+
+    it('indexed at least 3000 files from remote', () => {
+        assertFileCount(tempDir);
+    });
+
+    it('imported files form a valid WordPress site mirror', () => {
+        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
     it('at least 20 files with correct hashes', () => {

@@ -47,6 +47,7 @@ describe('Import: Permission Errors', () => {
                 'Expected hello.txt to be downloaded'
             );
         });
+
     });
 
     describe('mysql-restricted', () => {
