@@ -2,7 +2,7 @@
  * Test 13: SHA1 Integrity via import.php
  * Tests that file hashes match after sync, including large binary files.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ describe('Import: SHA1 Integrity', () => {
     const site = 'sha1-verify';
     let tempDir;
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site, {
             files: 'none',
             afterCreate: async (siteDir) => {
@@ -35,7 +35,7 @@ describe('Import: SHA1 Integrity', () => {
         tempDir = createTempDir('e2e-import-sha1');
     });
 
-    after(() => {
+    afterAll(() => {
         cleanupTempDir(tempDir);
     });
 

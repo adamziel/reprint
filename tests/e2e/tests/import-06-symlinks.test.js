@@ -2,7 +2,7 @@
  * Test 06: Symlinks via import.php
  * Tests that symlinks-outside and circular-symlinks sites sync properly.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -20,7 +20,7 @@ describe('Import: Symlinks', () => {
         const site = 'symlinks-outside';
         let tempDir;
 
-        before(async () => {
+        beforeAll(async () => {
             await ensureSite(site, {
                 afterCreate: async (siteDir) => {
                     // External dir may be nginx-owned from a previous run
@@ -36,7 +36,7 @@ describe('Import: Symlinks', () => {
             tempDir = createTempDir('e2e-import-symlinks');
         });
 
-        after(() => {
+        afterAll(() => {
             cleanupTempDir(tempDir);
         });
 
@@ -77,7 +77,7 @@ describe('Import: Symlinks', () => {
         const site = 'circular-symlinks';
         let tempDir;
 
-        before(async () => {
+        beforeAll(async () => {
             await ensureSite(site, {
                 afterCreate: async (siteDir) => {
                     const dataDir = join(siteDir, 'test-data');
@@ -89,7 +89,7 @@ describe('Import: Symlinks', () => {
             tempDir = createTempDir('e2e-import-circular');
         });
 
-        after(() => {
+        afterAll(() => {
             cleanupTempDir(tempDir);
         });
 

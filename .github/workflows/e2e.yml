@@ -30,7 +30,7 @@ jobs:
 
       - name: Run E2E tests
         working-directory: tests/e2e
-        run: node --test tests/import-*.test.js
+        run: npx vitest run
 
       - name: Debug logs on failure
         if: failure()

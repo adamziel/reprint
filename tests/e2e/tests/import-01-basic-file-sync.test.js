@@ -2,7 +2,7 @@
  * Test 01: Basic File Sync via import.php
  * Tests files-sync-initial completes, files match source, and restart behavior.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,12 +18,12 @@ describe('Import: Basic File Sync', () => {
     const site = 'basic';
     let tempDir;
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site);
         tempDir = createTempDir('e2e-import-basic-files');
     });
 
-    after(() => {
+    afterAll(() => {
         cleanupTempDir(tempDir);
     });
 

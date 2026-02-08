@@ -4,7 +4,7 @@
  * Since server-side test hooks are unreliable for injecting gzip corruption,
  * this test verifies the client handles an unreachable endpoint correctly.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -16,7 +16,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Error Resilience', () => {
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite('gzip-corrupt');
     });
 
@@ -44,11 +44,11 @@ describe('Import: Error Resilience', () => {
         const site = 'gzip-corrupt';
         let tempDir;
 
-        before(() => {
+        beforeAll(() => {
             tempDir = createTempDir('e2e-import-gzip-files');
         });
 
-        after(() => {
+        afterAll(() => {
             cleanupTempDir(tempDir);
         });
 

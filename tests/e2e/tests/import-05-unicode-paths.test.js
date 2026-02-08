@@ -2,7 +2,7 @@
  * Test 05: Unicode/Emoji Paths via import.php
  * Tests file sync and SQL sync with unicode filenames.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,7 +18,7 @@ describe('Import: Unicode Paths', () => {
     const site = 'emoji-paths';
     let tempDir;
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site, {
             files: 'none',
             afterCreate: async (siteDir) => {
@@ -45,7 +45,7 @@ describe('Import: Unicode Paths', () => {
         tempDir = createTempDir('e2e-import-unicode');
     });
 
-    after(() => {
+    afterAll(() => {
         cleanupTempDir(tempDir);
     });
 

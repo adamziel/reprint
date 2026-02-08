@@ -2,7 +2,7 @@
  * Test 11: Error Messages via import.php
  * Tests that various error conditions produce useful error messages.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -13,13 +13,13 @@ import { ensureSite } from '../lib/site-setup.js';
 describe('Import: Error Messages', () => {
     let tempDir;
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite('hmac-errors');
         await ensureSite('basic');
         tempDir = createTempDir('e2e-import-errors');
     });
 
-    after(() => {
+    afterAll(() => {
         cleanupTempDir(tempDir);
     });
 

@@ -2,7 +2,7 @@
  * Test 02: SQL Sync via import.php
  * Tests sql-sync and sql-preflight commands produce correct output.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ describe('Import: SQL Sync', () => {
     let tempDir;
     const importDb = 'e2e_basic_import_02';
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site);
         tempDir = createTempDir('e2e-import-sql');
         // Ensure import DB doesn't exist
@@ -28,7 +28,7 @@ describe('Import: SQL Sync', () => {
         await conn.end();
     });
 
-    after(async () => {
+    afterAll(async () => {
         cleanupTempDir(tempDir);
         const conn = await createMysqlConnection();
         await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);

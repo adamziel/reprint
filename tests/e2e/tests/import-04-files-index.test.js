@@ -2,7 +2,7 @@
  * Test 04: Files Index via import.php
  * Tests files-index command produces .import-remote-index.jsonl.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -17,12 +17,12 @@ describe('Import: Files Index', () => {
     const site = 'basic';
     let tempDir;
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site);
         tempDir = createTempDir('e2e-import-files-index');
     });
 
-    after(() => {
+    afterAll(() => {
         cleanupTempDir(tempDir);
     });
 

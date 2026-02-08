@@ -2,7 +2,7 @@
  * Test 09: SQL Resume via import.php
  * Tests that sql-sync resumes correctly when using short max_execution_time.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -19,7 +19,7 @@ describe('Import: Resume SQL', { timeout: 120000 }, () => {
     let tempDir;
     const importDb = 'e2e_basic_import_09';
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site);
         tempDir = createTempDir('e2e-import-resume-sql');
         const conn = await createMysqlConnection();
@@ -27,7 +27,7 @@ describe('Import: Resume SQL', { timeout: 120000 }, () => {
         await conn.end();
     });
 
-    after(async () => {
+    afterAll(async () => {
         cleanupTempDir(tempDir);
         const conn = await createMysqlConnection();
         await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);

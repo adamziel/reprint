@@ -3,10 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/",
-    "test:basic": "node --test tests/01-basic-export.test.js"
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "mysql2": "^3.9.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
   }
 }

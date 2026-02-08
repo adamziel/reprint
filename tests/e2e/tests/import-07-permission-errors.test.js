@@ -2,7 +2,7 @@
  * Test 07: Permission Errors via import.php
  * Tests chmod-denied and mysql-restricted sites complete gracefully.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -19,7 +19,7 @@ describe('Import: Permission Errors', () => {
         const site = 'chmod-denied';
         let tempDir;
 
-        before(async () => {
+        beforeAll(async () => {
             await ensureSite(site, {
                 afterCreate: async (siteDir) => {
                     const dataDir = join(siteDir, 'test-data');
@@ -35,7 +35,7 @@ describe('Import: Permission Errors', () => {
             tempDir = createTempDir('e2e-import-chmod');
         });
 
-        after(() => {
+        afterAll(() => {
             cleanupTempDir(tempDir);
         });
 
@@ -68,7 +68,7 @@ describe('Import: Permission Errors', () => {
         const site = 'mysql-restricted';
         let tempDir;
 
-        before(async () => {
+        beforeAll(async () => {
             await ensureSite(site, {
                 db: 'custom',
                 wpConfig: {
@@ -105,7 +105,7 @@ INSERT INTO wp_secret_table VALUES (1, 'top secret');
             tempDir = createTempDir('e2e-import-mysql-restricted');
         });
 
-        after(() => {
+        afterAll(() => {
             cleanupTempDir(tempDir);
         });
 

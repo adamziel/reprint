@@ -2,7 +2,7 @@
  * Test 03: Delta File Sync via import.php
  * Tests files-sync-delta after initial sync, with and without changes.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -20,14 +20,14 @@ describe('Import: Delta Sync', () => {
     let tempDir;
     const addedFile = join(getSiteDir(site), 'test-data', 'delta-test-added.txt');
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site);
         tempDir = createTempDir('e2e-import-delta');
         // Clean up any leftover test file
         try { execSync(`sudo rm -f ${JSON.stringify(addedFile)}`); } catch (e) {}
     });
 
-    after(() => {
+    afterAll(() => {
         cleanupTempDir(tempDir);
         try { execSync(`sudo rm -f ${JSON.stringify(addedFile)}`); } catch (e) {}
     });

@@ -2,7 +2,7 @@
  * Test 15: Volatile Files and Deleted Dirs via import.php
  * Tests that file sync handles edge-case sites gracefully.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,12 +19,12 @@ describe('Import: Volatile Files', () => {
         const site = 'volatile-file';
         let tempDir;
 
-        before(async () => {
+        beforeAll(async () => {
             await ensureSite(site);
             tempDir = createTempDir('e2e-import-volatile');
         });
 
-        after(() => {
+        afterAll(() => {
             cleanupTempDir(tempDir);
         });
 
@@ -59,12 +59,12 @@ describe('Import: Volatile Files', () => {
         const site = 'dir-deleted';
         let tempDir;
 
-        before(async () => {
+        beforeAll(async () => {
             await ensureSite(site);
             tempDir = createTempDir('e2e-import-dir-deleted');
         });
 
-        after(() => {
+        afterAll(() => {
             cleanupTempDir(tempDir);
         });
 

@@ -2,7 +2,7 @@
  * Test 16: Custom WP Content via import.php
  * Tests file sync and SQL sync for site with non-standard wp-content directory.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,7 +18,7 @@ describe('Import: Custom WP Content', () => {
     const site = 'custom-wp-content';
     let tempDir;
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site, {
             afterCreate: async (siteDir) => {
                 const customPlugin = join(siteDir, 'custom-content', 'plugins', 'site-export', 'generic');
@@ -34,7 +34,7 @@ describe('Import: Custom WP Content', () => {
         tempDir = createTempDir('e2e-import-custom-wp');
     });
 
-    after(() => {
+    afterAll(() => {
         cleanupTempDir(tempDir);
     });
 

@@ -2,7 +2,7 @@
  * Test 14: Buffered Response via import.php
  * Tests file sync and SQL sync through buffered Nginx proxy (port 8098).
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,12 +18,12 @@ describe('Import: Buffered Response', () => {
     const site = 'buffered';
     let tempDir;
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site);
         tempDir = createTempDir('e2e-import-buffered');
     });
 
-    after(() => {
+    afterAll(() => {
         cleanupTempDir(tempDir);
     });
 

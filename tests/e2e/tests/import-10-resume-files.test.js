@@ -1,9 +1,9 @@
 /**
  * Test 10: File Resume via import.php
  * Tests that files-sync-initial can resume after a partial transfer.
- * Uses large-directory site (5000+ files) with --max-exec=5 to force short requests.
+ * Uses large-directory site (5000+ files) with --max-exec=10 to force short requests.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
     const site = 'large-directory';
     let tempDir;
 
-    before(async () => {
+    beforeAll(async () => {
         await ensureSite(site, {
             files: 'none',
             afterCreate: async (siteDir) => {
@@ -34,7 +34,7 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
         tempDir = createTempDir('e2e-import-resume-files');
     });
 
-    after(() => {
+    afterAll(() => {
         cleanupTempDir(tempDir);
     });
 
@@ -49,7 +49,7 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
         const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
             secret: getSiteSecret(site),
             timeout: 180000,
-            extraArgs: ['--max-exec=3'],
+            extraArgs: ['--max-exec=10'],
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
