@@ -2,11 +2,12 @@
  * Site setup module — replaces setup.sh.
  * Provides idempotent site creation for E2E tests.
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, openSync, closeSync, unlinkSync, constants } from 'node:fs';
 import { execSync, execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { createConnection } from 'mysql2/promise';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
 
@@ -19,23 +20,60 @@ const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const PLUGIN_SRC = join(PROJECT_ROOT, 'wordpress-plugin');
 const WP_TARBALL = `/tmp/wordpress-${WP_VERSION}.tar.gz`;
 const WP_TEMPLATE = '/tmp/wordpress-template';
+const WP_READY = '/tmp/wordpress-template/.wp-ready';
+const WP_LOCK = '/tmp/wordpress-template-downloading.lock';
 const MARKER = '.e2e-provisioned';
 
 /**
  * Download and extract WordPress once, caching at /tmp/wordpress-template.
+ * Uses a lock file to prevent races when Node runs test files in parallel.
  */
 export async function ensureWpTemplate() {
-    if (existsSync(WP_TEMPLATE) && existsSync(join(WP_TEMPLATE, 'wp-includes'))) {
+    // Fast path: already complete
+    if (existsSync(WP_READY)) {
         return;
     }
-    console.log(`Downloading WordPress ${WP_VERSION}...`);
-    execSync(
-        `curl -sL "https://wordpress.org/wordpress-${WP_VERSION}.tar.gz" -o "${WP_TARBALL}"`,
-        { timeout: 120000 }
-    );
-    execSync(`mkdir -p "${WP_TEMPLATE}"`);
-    execSync(`tar xzf "${WP_TARBALL}" -C "${WP_TEMPLATE}" --strip-components=1`);
-    console.log(`WordPress template ready at ${WP_TEMPLATE}`);
+
+    // Try to acquire lock (atomic via O_EXCL)
+    let acquired = false;
+    try {
+        const fd = openSync(WP_LOCK, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+        closeSync(fd);
+        acquired = true;
+    } catch (e) {
+        // Another process holds the lock — wait for it
+    }
+
+    if (acquired) {
+        try {
+            // Double-check after acquiring lock
+            if (existsSync(WP_READY)) {
+                return;
+            }
+            console.log(`Downloading WordPress ${WP_VERSION}...`);
+            execSync(
+                `curl -sfL "https://wordpress.org/wordpress-${WP_VERSION}.tar.gz" -o "${WP_TARBALL}"`,
+                { timeout: 120000 }
+            );
+            execSync(`rm -rf "${WP_TEMPLATE}"`);
+            execSync(`mkdir -p "${WP_TEMPLATE}"`);
+            execSync(`tar xzf "${WP_TARBALL}" -C "${WP_TEMPLATE}" --strip-components=1`);
+            // Write ready marker after successful extraction
+            writeFileSync(WP_READY, `${WP_VERSION}\n`);
+            console.log(`WordPress template ready at ${WP_TEMPLATE}`);
+        } finally {
+            try { unlinkSync(WP_LOCK); } catch (e) {}
+        }
+    } else {
+        // Wait for the other process to finish (poll for ready marker)
+        const deadline = Date.now() + 120000;
+        while (!existsSync(WP_READY)) {
+            if (Date.now() > deadline) {
+                throw new Error('Timed out waiting for WordPress template download');
+            }
+            await sleep(500);
+        }
+    }
 }
 
 /**
