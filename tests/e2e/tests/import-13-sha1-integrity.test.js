@@ -4,8 +4,9 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
@@ -22,14 +23,13 @@ describe('Import: SHA1 Integrity', () => {
         await ensureSite(site, {
             files: 'none',
             afterCreate: async (siteDir) => {
-                const { execSync } = await import('node:child_process');
-                execSync(`sudo mkdir -p "${siteDir}/test-data/deep/nested/path"`);
+                const dataDir = join(siteDir, 'test-data');
+                mkdirSync(join(dataDir, 'deep', 'nested', 'path'), { recursive: true });
                 for (let i = 1; i <= 20; i++) {
-                    execSync(`printf "File content number ${i} with some padding to make it non-trivial\\n" | sudo tee "${siteDir}/test-data/file-${i}.txt" > /dev/null`);
+                    writeFileSync(join(dataDir, `file-${i}.txt`), `File content number ${i} with some padding to make it non-trivial\n`);
                 }
-                execSync(`sudo dd if=/dev/urandom of="${siteDir}/test-data/large-binary.bin" bs=1024 count=256 2>/dev/null`);
-                execSync(`echo "Deep nested content" | sudo tee "${siteDir}/test-data/deep/nested/path/deep-file.txt" > /dev/null`);
-                execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+                writeFileSync(join(dataDir, 'large-binary.bin'), randomBytes(256 * 1024));
+                writeFileSync(join(dataDir, 'deep', 'nested', 'path', 'deep-file.txt'), 'Deep nested content\n');
             },
         });
         tempDir = createTempDir('e2e-import-sha1');

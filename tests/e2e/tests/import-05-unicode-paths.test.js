@@ -4,7 +4,7 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -22,23 +22,24 @@ describe('Import: Unicode Paths', () => {
         await ensureSite(site, {
             files: 'none',
             afterCreate: async (siteDir) => {
-                const { execSync } = await import('node:child_process');
-                const dataDir = `${siteDir}/test-data`;
-                execSync(`sudo mkdir -p "${dataDir}/dir-with-dashes"`);
-                execSync(`echo "emoji file" | sudo tee "${dataDir}/fire.txt" > /dev/null`);
-                execSync(`echo "rocket content" | sudo tee "${dataDir}/rocket-file.txt" > /dev/null`);
-                execSync(`echo "spaces" | sudo tee "${dataDir}/file with spaces.txt" > /dev/null`);
-                execSync(`echo "dashed" | sudo tee "${dataDir}/dir-with-dashes/inner.txt" > /dev/null`);
-                // Unicode filenames (must use printf for proper UTF-8 encoding)
-                execSync(`printf 'unicode content' | sudo tee "$(printf '${dataDir}/caf\\xc3\\xa9.txt')" > /dev/null`);
-                execSync(`printf 'chinese' | sudo tee "$(printf '${dataDir}/\\xe4\\xb8\\xad\\xe6\\x96\\x87.txt')" > /dev/null`);
-                // Actual emoji characters in filename
-                execSync(`printf 'emoji content' | sudo tee "$(printf '${dataDir}/\\xf0\\x9f\\x94\\xa5\\xf0\\x9f\\x9a\\x80.txt')" > /dev/null`);
-                // File with newlines in the name
-                execSync(`printf 'newline content' | sudo tee "$(printf '${dataDir}/file\\nwith\\nnewlines.txt')" > /dev/null`);
-                // Invalid UTF-8 sequence filename
-                execSync(`printf 'invalid utf8' | sudo tee "$(printf '${dataDir}/invalid\\xff\\xfeutf8.txt')" > /dev/null`);
-                execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+                const dataDir = join(siteDir, 'test-data');
+                mkdirSync(join(dataDir, 'dir-with-dashes'), { recursive: true });
+                writeFileSync(join(dataDir, 'fire.txt'), 'emoji file');
+                writeFileSync(join(dataDir, 'rocket-file.txt'), 'rocket content');
+                writeFileSync(join(dataDir, 'file with spaces.txt'), 'spaces');
+                writeFileSync(join(dataDir, 'dir-with-dashes', 'inner.txt'), 'dashed');
+                // Node handles UTF-8 natively — no shell/printf needed
+                writeFileSync(join(dataDir, 'caf\u00e9.txt'), 'unicode content');
+                writeFileSync(join(dataDir, '\u4e2d\u6587.txt'), 'chinese');
+                writeFileSync(join(dataDir, '\u{1F525}\u{1F680}.txt'), 'emoji content');
+                writeFileSync(join(dataDir, 'file\nwith\nnewlines.txt'), 'newline content');
+                // Invalid UTF-8 filename: use Buffer for the path
+                const invalidPath = Buffer.concat([
+                    Buffer.from(join(dataDir, 'invalid')),
+                    Buffer.from([0xff, 0xfe]),
+                    Buffer.from('utf8.txt'),
+                ]);
+                writeFileSync(invalidPath, 'invalid utf8');
             },
         });
         tempDir = createTempDir('e2e-import-unicode');

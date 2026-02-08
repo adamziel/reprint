@@ -4,7 +4,8 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -22,11 +23,14 @@ describe('Import: Symlinks', () => {
         before(async () => {
             await ensureSite(site, {
                 afterCreate: async (siteDir) => {
-                    const { execSync } = await import('node:child_process');
-                    execSync('sudo mkdir -p /tmp/e2e-external-data');
-                    execSync('echo "External file" | sudo tee /tmp/e2e-external-data/external.txt > /dev/null');
+                    // External dir may be nginx-owned from a previous run
+                    execSync('sudo rm -rf /tmp/e2e-external-data');
+                    mkdirSync('/tmp/e2e-external-data', { recursive: true });
+                    writeFileSync('/tmp/e2e-external-data/external.txt', 'External file\n');
+                    symlinkSync('/tmp/e2e-external-data', join(siteDir, 'test-data', 'external-link'));
+                },
+                afterPermissions: async () => {
                     execSync('sudo chown -R nginx:nginx /tmp/e2e-external-data');
-                    execSync(`sudo ln -sfn /tmp/e2e-external-data "${siteDir}/test-data/external-link"`);
                 },
             });
             tempDir = createTempDir('e2e-import-symlinks');
@@ -76,11 +80,10 @@ describe('Import: Symlinks', () => {
         before(async () => {
             await ensureSite(site, {
                 afterCreate: async (siteDir) => {
-                    const { execSync } = await import('node:child_process');
-                    execSync(`sudo ln -sfn "${siteDir}/test-data/link-b" "${siteDir}/test-data/link-a"`);
-                    execSync(`sudo ln -sfn "${siteDir}/test-data/link-a" "${siteDir}/test-data/link-b"`);
-                    execSync(`sudo ln -sfn "${siteDir}/test-data/self-link" "${siteDir}/test-data/self-link"`);
-                    execSync(`sudo chown -R nginx:nginx "${siteDir}" 2>/dev/null || true`);
+                    const dataDir = join(siteDir, 'test-data');
+                    symlinkSync(join(dataDir, 'link-b'), join(dataDir, 'link-a'));
+                    symlinkSync(join(dataDir, 'link-a'), join(dataDir, 'link-b'));
+                    symlinkSync(join(dataDir, 'self-link'), join(dataDir, 'self-link'));
                 },
             });
             tempDir = createTempDir('e2e-import-circular');

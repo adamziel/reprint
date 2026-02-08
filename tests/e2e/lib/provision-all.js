@@ -8,13 +8,11 @@
  *
  * Usage:  node lib/provision-all.js
  */
-import { ensureSite } from './site-setup.js';
+import { ensureSite, SITE_ROOT } from './site-setup.js';
+import { writeFileSync, mkdirSync, copyFileSync, readdirSync, symlinkSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { createRequire } from 'node:module';
-import { createConnection } from 'mysql2/promise';
-
-const registry = createRequire(import.meta.url)('../site-registry.json');
-const SITE_ROOT = registry.siteRoot;
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 
 // Standard sites (default sample DB + files)
 for (const name of [
@@ -28,40 +26,52 @@ for (const name of [
 // symlinks-outside: create external symlink
 await ensureSite('symlinks-outside', {
     afterCreate: async (siteDir) => {
-        execSync('sudo mkdir -p /tmp/e2e-external-data');
-        execSync('echo "External file" | sudo tee /tmp/e2e-external-data/external.txt > /dev/null');
+        // External dir may be nginx-owned from a previous run
+        execSync('sudo rm -rf /tmp/e2e-external-data');
+        mkdirSync('/tmp/e2e-external-data', { recursive: true });
+        writeFileSync('/tmp/e2e-external-data/external.txt', 'External file\n');
+        symlinkSync('/tmp/e2e-external-data', join(siteDir, 'test-data', 'external-link'));
+    },
+    afterPermissions: async () => {
         execSync('sudo chown -R nginx:nginx /tmp/e2e-external-data');
-        execSync(`sudo ln -sfn /tmp/e2e-external-data "${siteDir}/test-data/external-link"`);
     },
 });
 
 // custom-wp-content: copy plugin to custom-content directory
 await ensureSite('custom-wp-content', {
     afterCreate: async (siteDir) => {
-        execSync(`sudo mkdir -p "${siteDir}/custom-content/plugins/site-export/generic"`);
-        execSync(`sudo cp "${siteDir}/wp-content/plugins/site-export/api.php" "${siteDir}/custom-content/plugins/site-export/api.php"`);
-        execSync(`sudo cp "${siteDir}/wp-content/plugins/site-export/generic/"*.php "${siteDir}/custom-content/plugins/site-export/generic/"`);
-        execSync(`sudo cp "${siteDir}/wp-content/plugins/site-export/secret.php" "${siteDir}/custom-content/plugins/site-export/secret.php"`);
-        execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+        const customPlugin = join(siteDir, 'custom-content', 'plugins', 'site-export', 'generic');
+        const srcPlugin = join(siteDir, 'wp-content', 'plugins', 'site-export');
+        mkdirSync(customPlugin, { recursive: true });
+        copyFileSync(join(srcPlugin, 'api.php'), join(customPlugin, '..', 'api.php'));
+        for (const f of readdirSync(join(srcPlugin, 'generic')).filter(f => f.endsWith('.php'))) {
+            copyFileSync(join(srcPlugin, 'generic', f), join(customPlugin, f));
+        }
+        copyFileSync(join(srcPlugin, 'secret.php'), join(customPlugin, '..', 'secret.php'));
     },
 });
 
-// emoji-paths: unicode/emoji filenames
+// emoji-paths: unicode/emoji filenames (Node handles UTF-8 natively)
 await ensureSite('emoji-paths', {
     files: 'none',
     afterCreate: async (siteDir) => {
-        const dataDir = `${siteDir}/test-data`;
-        execSync(`sudo mkdir -p "${dataDir}/dir-with-dashes"`);
-        execSync(`echo "emoji file" | sudo tee "${dataDir}/fire.txt" > /dev/null`);
-        execSync(`echo "rocket content" | sudo tee "${dataDir}/rocket-file.txt" > /dev/null`);
-        execSync(`echo "spaces" | sudo tee "${dataDir}/file with spaces.txt" > /dev/null`);
-        execSync(`echo "dashed" | sudo tee "${dataDir}/dir-with-dashes/inner.txt" > /dev/null`);
-        execSync(`printf 'unicode content' | sudo tee "$(printf '${dataDir}/caf\\xc3\\xa9.txt')" > /dev/null`);
-        execSync(`printf 'chinese' | sudo tee "$(printf '${dataDir}/\\xe4\\xb8\\xad\\xe6\\x96\\x87.txt')" > /dev/null`);
-        execSync(`printf 'emoji content' | sudo tee "$(printf '${dataDir}/\\xf0\\x9f\\x94\\xa5\\xf0\\x9f\\x9a\\x80.txt')" > /dev/null`);
-        execSync(`printf 'newline content' | sudo tee "$(printf '${dataDir}/file\\nwith\\nnewlines.txt')" > /dev/null`);
-        execSync(`printf 'invalid utf8' | sudo tee "$(printf '${dataDir}/invalid\\xff\\xfeutf8.txt')" > /dev/null`);
-        execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+        const dataDir = join(siteDir, 'test-data');
+        mkdirSync(join(dataDir, 'dir-with-dashes'), { recursive: true });
+        writeFileSync(join(dataDir, 'fire.txt'), 'emoji file');
+        writeFileSync(join(dataDir, 'rocket-file.txt'), 'rocket content');
+        writeFileSync(join(dataDir, 'file with spaces.txt'), 'spaces');
+        writeFileSync(join(dataDir, 'dir-with-dashes', 'inner.txt'), 'dashed');
+        writeFileSync(join(dataDir, 'caf\u00e9.txt'), 'unicode content');
+        writeFileSync(join(dataDir, '\u4e2d\u6587.txt'), 'chinese');
+        writeFileSync(join(dataDir, '\u{1F525}\u{1F680}.txt'), 'emoji content');
+        writeFileSync(join(dataDir, 'file\nwith\nnewlines.txt'), 'newline content');
+        // Invalid UTF-8 filename: use Buffer for the path
+        const invalidPath = Buffer.concat([
+            Buffer.from(join(dataDir, 'invalid')),
+            Buffer.from([0xff, 0xfe]),
+            Buffer.from('utf8.txt'),
+        ]);
+        writeFileSync(invalidPath, 'invalid utf8');
     },
 });
 
@@ -69,33 +79,36 @@ await ensureSite('emoji-paths', {
 await ensureSite('sha1-verify', {
     files: 'none',
     afterCreate: async (siteDir) => {
-        execSync(`sudo mkdir -p "${siteDir}/test-data/deep/nested/path"`);
+        const dataDir = join(siteDir, 'test-data');
+        mkdirSync(join(dataDir, 'deep', 'nested', 'path'), { recursive: true });
         for (let i = 1; i <= 20; i++) {
-            execSync(`printf "File content number ${i} with some padding to make it non-trivial\\n" | sudo tee "${siteDir}/test-data/file-${i}.txt" > /dev/null`);
+            writeFileSync(join(dataDir, `file-${i}.txt`), `File content number ${i} with some padding to make it non-trivial\n`);
         }
-        execSync(`sudo dd if=/dev/urandom of="${siteDir}/test-data/large-binary.bin" bs=1024 count=256 2>/dev/null`);
-        execSync(`echo "Deep nested content" | sudo tee "${siteDir}/test-data/deep/nested/path/deep-file.txt" > /dev/null`);
-        execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+        writeFileSync(join(dataDir, 'large-binary.bin'), randomBytes(256 * 1024));
+        writeFileSync(join(dataDir, 'deep', 'nested', 'path', 'deep-file.txt'), 'Deep nested content\n');
     },
 });
 
 // circular-symlinks
 await ensureSite('circular-symlinks', {
     afterCreate: async (siteDir) => {
-        execSync(`sudo ln -sfn "${siteDir}/test-data/link-b" "${siteDir}/test-data/link-a"`);
-        execSync(`sudo ln -sfn "${siteDir}/test-data/link-a" "${siteDir}/test-data/link-b"`);
-        execSync(`sudo ln -sfn "${siteDir}/test-data/self-link" "${siteDir}/test-data/self-link"`);
-        execSync(`sudo chown -R nginx:nginx "${siteDir}" 2>/dev/null || true`);
+        const dataDir = join(siteDir, 'test-data');
+        symlinkSync(join(dataDir, 'link-b'), join(dataDir, 'link-a'));
+        symlinkSync(join(dataDir, 'link-a'), join(dataDir, 'link-b'));
+        symlinkSync(join(dataDir, 'self-link'), join(dataDir, 'self-link'));
     },
 });
 
 // chmod-denied: unreadable files
 await ensureSite('chmod-denied', {
     afterCreate: async (siteDir) => {
-        execSync(`echo "secret content" | sudo tee "${siteDir}/test-data/unreadable.txt" > /dev/null`);
+        const dataDir = join(siteDir, 'test-data');
+        writeFileSync(join(dataDir, 'unreadable.txt'), 'secret content');
+        mkdirSync(join(dataDir, 'unreadable-dir'), { recursive: true });
+        writeFileSync(join(dataDir, 'unreadable-dir', 'inside.txt'), 'inside');
+    },
+    afterPermissions: async (siteDir) => {
         execSync(`sudo chmod 000 "${siteDir}/test-data/unreadable.txt"`);
-        execSync(`sudo mkdir -p "${siteDir}/test-data/unreadable-dir"`);
-        execSync(`echo "inside" | sudo tee "${siteDir}/test-data/unreadable-dir/inside.txt" > /dev/null`);
         execSync(`sudo chmod 000 "${siteDir}/test-data/unreadable-dir"`);
     },
 });
@@ -125,7 +138,7 @@ CREATE TABLE wp_secret_table (
 INSERT INTO wp_secret_table VALUES (1, 'top secret');
         `);
     },
-    afterCreate: async () => {
+    afterPermissions: async () => {
         execSync(
             `mysql -u e2e_admin -pe2e_password -h 127.0.0.1 -e "GRANT SELECT ON e2e_mysql_restricted.* TO 'e2e_restricted'@'localhost' IDENTIFIED BY 'e2e_restricted_pw'; FLUSH PRIVILEGES;" 2>/dev/null || true`
         );
@@ -136,12 +149,12 @@ INSERT INTO wp_secret_table VALUES (1, 'top secret');
 await ensureSite('large-directory', {
     files: 'none',
     afterCreate: async (siteDir) => {
-        execSync(`sudo mkdir -p "${siteDir}/test-data/many-files"`);
+        const manyDir = join(siteDir, 'test-data', 'many-files');
+        mkdirSync(manyDir, { recursive: true });
         for (let i = 1; i <= 2000; i++) {
             const num = String(i).padStart(4, '0');
-            execSync(`printf "content-${num}" | sudo tee "${siteDir}/test-data/many-files/file-${num}.txt" > /dev/null`);
+            writeFileSync(join(manyDir, `file-${num}.txt`), `content-${num}`);
         }
-        execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
     },
 });
 

@@ -1,17 +1,25 @@
 /**
- * Site setup module — replaces setup.sh.
- * Provides idempotent site creation for E2E tests.
+ * Site setup module — provides idempotent site creation for E2E tests.
+ *
+ * Uses Node fs APIs for file operations wherever possible, falling back to
+ * execSync only for privileged operations (sudo chown/chmod) and external
+ * tools (curl, tar, mysql).
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, openSync, closeSync, unlinkSync, constants } from 'node:fs';
-import { execSync, execFileSync } from 'node:child_process';
+import {
+    existsSync, writeFileSync, mkdirSync, readdirSync,
+    copyFileSync, symlinkSync, chmodSync,
+    openSync, closeSync, unlinkSync, constants,
+} from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { createConnection } from 'mysql2/promise';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { randomBytes } from 'node:crypto';
 
 const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
 
-const SITE_ROOT = REGISTRY.siteRoot;
+export const SITE_ROOT = REGISTRY.siteRoot;
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
 const DB_PASS = REGISTRY.dbPass;
@@ -29,7 +37,6 @@ const MARKER = '.e2e-provisioned';
  * Uses a lock file to prevent races when Node runs test files in parallel.
  */
 export async function ensureWpTemplate() {
-    // Fast path: already complete
     if (existsSync(WP_READY)) {
         return;
     }
@@ -46,7 +53,6 @@ export async function ensureWpTemplate() {
 
     if (acquired) {
         try {
-            // Double-check after acquiring lock
             if (existsSync(WP_READY)) {
                 return;
             }
@@ -55,17 +61,13 @@ export async function ensureWpTemplate() {
                 `curl -sfL "https://wordpress.org/wordpress-${WP_VERSION}.tar.gz" -o "${WP_TARBALL}"`,
                 { timeout: 120000 }
             );
-            execSync(`rm -rf "${WP_TEMPLATE}"`);
-            execSync(`mkdir -p "${WP_TEMPLATE}"`);
-            execSync(`tar xzf "${WP_TARBALL}" -C "${WP_TEMPLATE}" --strip-components=1`);
-            // Write ready marker after successful extraction
+            execSync(`rm -rf "${WP_TEMPLATE}" && mkdir -p "${WP_TEMPLATE}" && tar xzf "${WP_TARBALL}" -C "${WP_TEMPLATE}" --strip-components=1`);
             writeFileSync(WP_READY, `${WP_VERSION}\n`);
             console.log(`WordPress template ready at ${WP_TEMPLATE}`);
         } finally {
             try { unlinkSync(WP_LOCK); } catch (e) {}
         }
     } else {
-        // Wait for the other process to finish (poll for ready marker)
         const deadline = Date.now() + 120000;
         while (!existsSync(WP_READY)) {
             if (Date.now() > deadline) {
@@ -144,18 +146,17 @@ INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES
 }
 
 /**
- * Create standard sample test files in a site's test-data directory.
+ * Create standard sample test files using Node fs APIs.
  */
 export function createSampleFiles(siteDir) {
     const dataDir = join(siteDir, 'test-data');
-    execSync(`sudo mkdir -p "${dataDir}/subdir/nested"`);
-    execSync(`echo "Hello World" | sudo tee "${dataDir}/hello.txt" > /dev/null`);
-    execSync(`echo "Test file content" | sudo tee "${dataDir}/subdir/test.txt" > /dev/null`);
-    execSync(`echo "Nested file" | sudo tee "${dataDir}/subdir/nested/deep.txt" > /dev/null`);
-    execSync(`sudo dd if=/dev/urandom of="${dataDir}/binary.bin" bs=1024 count=10 2>/dev/null`);
-    execSync(`sudo touch "${dataDir}/empty.txt"`);
-    execSync(`printf 'Line 1\\nLine 2\\nLine with tab\\there\\nLine with null\\x00byte\\n' | sudo tee "${dataDir}/special-content.txt" > /dev/null`);
-    execSync(`sudo chown -R nginx:nginx "${dataDir}"`);
+    mkdirSync(join(dataDir, 'subdir', 'nested'), { recursive: true });
+    writeFileSync(join(dataDir, 'hello.txt'), 'Hello World\n');
+    writeFileSync(join(dataDir, 'subdir', 'test.txt'), 'Test file content\n');
+    writeFileSync(join(dataDir, 'subdir', 'nested', 'deep.txt'), 'Nested file\n');
+    writeFileSync(join(dataDir, 'binary.bin'), randomBytes(10240));
+    writeFileSync(join(dataDir, 'empty.txt'), '');
+    writeFileSync(join(dataDir, 'special-content.txt'), 'Line 1\\nLine 2\\nLine with tab\\there\\nLine with null\\x00byte\\n');
 }
 
 /**
@@ -166,13 +167,13 @@ export function createSampleFiles(siteDir) {
  *   files: 'sample' (default) | 'none'
  *   customDb: async (dbName, conn) => {} — for custom DB setup
  *   wpConfig: { DB_USER: '...', ... } — override wp-config.php fields
- *   afterCreate: async (siteDir, dbName) => {} — post-creation hook
+ *   afterCreate: async (siteDir, dbName) => {} — post-creation hook (dir is writable)
+ *   afterPermissions: async (siteDir) => {} — runs after final chown/chmod (for chmod 000 etc.)
  */
 export async function ensureSite(name, options = {}) {
     const siteDir = join(SITE_ROOT, name);
     const markerPath = join(siteDir, MARKER);
 
-    // Idempotency: skip if already provisioned
     if (existsSync(markerPath)) {
         return;
     }
@@ -184,77 +185,86 @@ export async function ensureSite(name, options = {}) {
 
     console.log(`  Setting up site: ${name} (db: ${dbName})`);
 
-    // Ensure WP template exists
     await ensureWpTemplate();
 
-    // Ensure site root exists
-    execSync(`sudo mkdir -p "${SITE_ROOT}"`);
-    execSync(`sudo chown nginx:nginx "${SITE_ROOT}"`);
-    execSync(`sudo chmod 755 "${SITE_ROOT}"`);
-
-    // Copy WordPress template
-    execSync(`sudo mkdir -p "${siteDir}"`);
+    // Create site dir, copy WP template, make writable for Node fs operations
+    execSync(`sudo mkdir -p "${SITE_ROOT}" && sudo mkdir -p "${siteDir}"`);
     execSync(`sudo cp -a "${WP_TEMPLATE}/." "${siteDir}/"`);
+    execSync(`sudo chmod -R 777 "${siteDir}"`);
 
-    // Create plugin directories
-    execSync(`sudo mkdir -p "${siteDir}/wp-content/plugins/site-export/generic"`);
-    execSync(`sudo mkdir -p "${siteDir}/test-data"`);
+    // Create directories (writable now, no sudo needed)
+    mkdirSync(join(siteDir, 'wp-content', 'plugins', 'site-export', 'generic'), { recursive: true });
+    mkdirSync(join(siteDir, 'test-data'), { recursive: true });
 
     // Write wp-config.php
     const wpDbUser = options.wpConfig?.DB_USER || DB_USER;
     const wpDbPass = options.wpConfig?.DB_PASSWORD || DB_PASS;
     const wpDbName = options.wpConfig?.DB_NAME || dbName;
     const wpDbHost = options.wpConfig?.DB_HOST || DB_HOST;
-    const wpConfig = `<?php
+    writeFileSync(join(siteDir, 'wp-config.php'), `<?php
 define('DB_HOST', '${wpDbHost}');
 define('DB_NAME', '${wpDbName}');
 define('DB_USER', '${wpDbUser}');
 define('DB_PASSWORD', '${wpDbPass}');
 $table_prefix = 'wp_';
-`;
-    execSync(`sudo tee "${siteDir}/wp-config.php" > /dev/null <<'WPEOF'\n${wpConfig}\nWPEOF`);
+`);
 
     // Write secret.php
-    execSync(`sudo tee "${siteDir}/wp-content/plugins/site-export/secret.php" > /dev/null <<'SEOF'\n<?php return '${secret}';\nSEOF`);
+    writeFileSync(
+        join(siteDir, 'wp-content', 'plugins', 'site-export', 'secret.php'),
+        `<?php return '${secret}';\n`
+    );
 
     // Copy plugin source files
-    execSync(`sudo cp "${PLUGIN_SRC}/api.php" "${siteDir}/wp-content/plugins/site-export/api.php"`);
-    execSync(`sudo cp "${PLUGIN_SRC}/generic/"*.php "${siteDir}/wp-content/plugins/site-export/generic/"`);
-
-    // Create database
-    execSync(
-        `mysql -u "${DB_USER}" -p"${DB_PASS}" -h "${DB_HOST}" -e "DROP DATABASE IF EXISTS \\\`${dbName}\\\`; CREATE DATABASE \\\`${dbName}\\\`;" 2>/dev/null`
+    copyFileSync(
+        join(PLUGIN_SRC, 'api.php'),
+        join(siteDir, 'wp-content', 'plugins', 'site-export', 'api.php')
     );
+    for (const f of readdirSync(join(PLUGIN_SRC, 'generic')).filter(f => f.endsWith('.php'))) {
+        copyFileSync(
+            join(PLUGIN_SRC, 'generic', f),
+            join(siteDir, 'wp-content', 'plugins', 'site-export', 'generic', f)
+        );
+    }
+
+    // Create database using mysql2 (no exec needed)
+    const adminConn = await createConnection({
+        host: DB_HOST, user: DB_USER, password: DB_PASS, multipleStatements: true,
+    });
+    await adminConn.query(`DROP DATABASE IF EXISTS \`${dbName}\`; CREATE DATABASE \`${dbName}\``);
+    await adminConn.end();
 
     // Populate database
     if (dbOpt === 'sample') {
         await createSampleDb(dbName);
     } else if (dbOpt === 'custom' && options.customDb) {
         const conn = await createConnection({
-            host: DB_HOST,
-            user: DB_USER,
-            password: DB_PASS,
-            database: dbName,
-            multipleStatements: true,
+            host: DB_HOST, user: DB_USER, password: DB_PASS,
+            database: dbName, multipleStatements: true,
         });
         await options.customDb(dbName, conn);
         await conn.end();
     }
 
-    // Create sample files
+    // Create sample files (pure Node fs)
     if (filesOpt === 'sample') {
         createSampleFiles(siteDir);
     }
 
-    // Set ownership
-    execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
-    execSync(`sudo chmod -R 755 "${siteDir}"`);
-
-    // Run afterCreate hook
+    // Run afterCreate hook (dir is still writable — use Node fs, not exec)
     if (options.afterCreate) {
         await options.afterCreate(siteDir, dbName);
     }
 
-    // Write marker file
+    // Set final ownership and permissions
+    execSync(`sudo chown -R nginx:nginx "${siteDir}" && sudo chmod -R 755 "${siteDir}"`);
+
+    // Run afterPermissions hook (for operations that need to happen after chown/chmod,
+    // e.g. chmod 000 for permission-denied tests)
+    if (options.afterPermissions) {
+        await options.afterPermissions(siteDir, dbName);
+    }
+
+    // Write marker
     execSync(`sudo touch "${markerPath}"`);
 }

@@ -4,7 +4,8 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -21,11 +22,13 @@ describe('Import: Permission Errors', () => {
         before(async () => {
             await ensureSite(site, {
                 afterCreate: async (siteDir) => {
-                    const { execSync } = await import('node:child_process');
-                    execSync(`echo "secret content" | sudo tee "${siteDir}/test-data/unreadable.txt" > /dev/null`);
+                    const dataDir = join(siteDir, 'test-data');
+                    writeFileSync(join(dataDir, 'unreadable.txt'), 'secret content');
+                    mkdirSync(join(dataDir, 'unreadable-dir'), { recursive: true });
+                    writeFileSync(join(dataDir, 'unreadable-dir', 'inside.txt'), 'inside');
+                },
+                afterPermissions: async (siteDir) => {
                     execSync(`sudo chmod 000 "${siteDir}/test-data/unreadable.txt"`);
-                    execSync(`sudo mkdir -p "${siteDir}/test-data/unreadable-dir"`);
-                    execSync(`echo "inside" | sudo tee "${siteDir}/test-data/unreadable-dir/inside.txt" > /dev/null`);
                     execSync(`sudo chmod 000 "${siteDir}/test-data/unreadable-dir"`);
                 },
             });
@@ -93,8 +96,7 @@ CREATE TABLE wp_secret_table (
 INSERT INTO wp_secret_table VALUES (1, 'top secret');
                     `);
                 },
-                afterCreate: async () => {
-                    const { execSync } = await import('node:child_process');
+                afterPermissions: async () => {
                     execSync(
                         `mysql -u e2e_admin -pe2e_password -h 127.0.0.1 -e "GRANT SELECT ON e2e_mysql_restricted.* TO 'e2e_restricted'@'localhost' IDENTIFIED BY 'e2e_restricted_pw'; FLUSH PRIVILEGES;" 2>/dev/null || true`
                     );

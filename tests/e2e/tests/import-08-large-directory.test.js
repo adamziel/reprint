@@ -4,7 +4,7 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -22,13 +22,12 @@ describe('Import: Large Directory', () => {
         await ensureSite(site, {
             files: 'none',
             afterCreate: async (siteDir) => {
-                const { execSync } = await import('node:child_process');
-                execSync(`sudo mkdir -p "${siteDir}/test-data/many-files"`);
+                const manyDir = join(siteDir, 'test-data', 'many-files');
+                mkdirSync(manyDir, { recursive: true });
                 for (let i = 1; i <= 2000; i++) {
                     const num = String(i).padStart(4, '0');
-                    execSync(`printf "content-${num}" | sudo tee "${siteDir}/test-data/many-files/file-${num}.txt" > /dev/null`);
+                    writeFileSync(join(manyDir, `file-${num}.txt`), `content-${num}`);
                 }
-                execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
             },
         });
         tempDir = createTempDir('e2e-import-large');

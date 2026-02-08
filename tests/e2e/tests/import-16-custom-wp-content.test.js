@@ -4,7 +4,7 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -21,14 +21,14 @@ describe('Import: Custom WP Content', () => {
     before(async () => {
         await ensureSite(site, {
             afterCreate: async (siteDir) => {
-                const { execSync } = await import('node:child_process');
-                const pluginSrc = `${siteDir}/../../..`;
-                // Set up custom-content directory with plugin files
-                execSync(`sudo mkdir -p "${siteDir}/custom-content/plugins/site-export/generic"`);
-                execSync(`sudo cp "${siteDir}/wp-content/plugins/site-export/api.php" "${siteDir}/custom-content/plugins/site-export/api.php"`);
-                execSync(`sudo cp "${siteDir}/wp-content/plugins/site-export/generic/"*.php "${siteDir}/custom-content/plugins/site-export/generic/"`);
-                execSync(`sudo cp "${siteDir}/wp-content/plugins/site-export/secret.php" "${siteDir}/custom-content/plugins/site-export/secret.php"`);
-                execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+                const customPlugin = join(siteDir, 'custom-content', 'plugins', 'site-export', 'generic');
+                const srcPlugin = join(siteDir, 'wp-content', 'plugins', 'site-export');
+                mkdirSync(customPlugin, { recursive: true });
+                copyFileSync(join(srcPlugin, 'api.php'), join(customPlugin, '..', 'api.php'));
+                for (const f of readdirSync(join(srcPlugin, 'generic')).filter(f => f.endsWith('.php'))) {
+                    copyFileSync(join(srcPlugin, 'generic', f), join(customPlugin, f));
+                }
+                copyFileSync(join(srcPlugin, 'secret.php'), join(customPlugin, '..', 'secret.php'));
             },
         });
         tempDir = createTempDir('e2e-import-custom-wp');

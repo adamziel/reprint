@@ -4,8 +4,7 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -91,7 +90,7 @@ describe('Import: Basic File Sync', () => {
     it('re-running with --restart succeeds', () => {
         // Clean filesystem-root so restart doesn't fail on non-empty check
         const fsRoot = join(tempDir, 'filesystem-root');
-        execSync(`rm -rf ${JSON.stringify(fsRoot)}`);
+        rmSync(fsRoot, { recursive: true, force: true });
 
         const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
             secret: getSiteSecret(site),
