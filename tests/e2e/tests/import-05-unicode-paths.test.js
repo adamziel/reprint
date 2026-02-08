@@ -12,12 +12,35 @@ import {
     hashDirectory, compareDirectoryHashes,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Unicode Paths', () => {
     const site = 'emoji-paths';
     let tempDir;
 
-    before(() => {
+    before(async () => {
+        await ensureSite(site, {
+            files: 'none',
+            afterCreate: async (siteDir) => {
+                const { execSync } = await import('node:child_process');
+                const dataDir = `${siteDir}/test-data`;
+                execSync(`sudo mkdir -p "${dataDir}/dir-with-dashes"`);
+                execSync(`echo "emoji file" | sudo tee "${dataDir}/fire.txt" > /dev/null`);
+                execSync(`echo "rocket content" | sudo tee "${dataDir}/rocket-file.txt" > /dev/null`);
+                execSync(`echo "spaces" | sudo tee "${dataDir}/file with spaces.txt" > /dev/null`);
+                execSync(`echo "dashed" | sudo tee "${dataDir}/dir-with-dashes/inner.txt" > /dev/null`);
+                // Unicode filenames (must use printf for proper UTF-8 encoding)
+                execSync(`printf 'unicode content' | sudo tee "$(printf '${dataDir}/caf\\xc3\\xa9.txt')" > /dev/null`);
+                execSync(`printf 'chinese' | sudo tee "$(printf '${dataDir}/\\xe4\\xb8\\xad\\xe6\\x96\\x87.txt')" > /dev/null`);
+                // Actual emoji characters in filename
+                execSync(`printf 'emoji content' | sudo tee "$(printf '${dataDir}/\\xf0\\x9f\\x94\\xa5\\xf0\\x9f\\x9a\\x80.txt')" > /dev/null`);
+                // File with newlines in the name
+                execSync(`printf 'newline content' | sudo tee "$(printf '${dataDir}/file\\nwith\\nnewlines.txt')" > /dev/null`);
+                // Invalid UTF-8 sequence filename
+                execSync(`printf 'invalid utf8' | sudo tee "$(printf '${dataDir}/invalid\\xff\\xfeutf8.txt')" > /dev/null`);
+                execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+            },
+        });
         tempDir = createTempDir('e2e-import-unicode');
     });
 

@@ -12,13 +12,15 @@ import {
     hashDirectory,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Volatile Files', () => {
     describe('volatile-file site', () => {
         const site = 'volatile-file';
         let tempDir;
 
-        before(() => {
+        before(async () => {
+            await ensureSite(site);
             tempDir = createTempDir('e2e-import-volatile');
         });
 
@@ -57,7 +59,8 @@ describe('Import: Volatile Files', () => {
         const site = 'dir-deleted';
         let tempDir;
 
-        before(() => {
+        before(async () => {
+            await ensureSite(site);
             tempDir = createTempDir('e2e-import-dir-deleted');
         });
 

@@ -14,36 +14,20 @@ let
     all.ctype
   ]);
 
-  siteRoot = "/srv/e2e-sites";
+  # Read site definitions from registry (single source of truth)
+  registry = builtins.fromJSON (builtins.readFile ./site-registry.json);
+  siteRoot = registry.siteRoot;
 
   # All test sites with their nginx configurations
   # Each site gets a unique port on 127.0.0.1
-  testSites = {
-    basic               = { port = 8081; };
-    symlinks-outside    = { port = 8082; };
-    custom-wp-content   = { port = 8083; };
-    chmod-denied        = { port = 8084; };
-    mysql-restricted    = { port = 8085; };
-    circular-symlinks   = { port = 8086; };
-    file-changes        = { port = 8087; };
-    dir-deleted         = { port = 8088; };
-    volatile-file       = { port = 8089; };
-    emoji-paths         = { port = 8090; };
-    large-directory     = { port = 8091; };
-    hmac-errors         = { port = 8092; };
-    sha1-verify         = { port = 8093; };
+  testSites = lib.mapAttrs (name: value: { port = value.port; }) registry.sites;
 
-    # Error simulation sites
-    http-errors         = { port = 8094; };
-    request-cutoff      = { port = 8095; };
-    gzip-corrupt        = { port = 8096; };
-    redirect-301        = { port = 8097; };
-    buffered            = { port = 8098; };
-    error-chunks        = { port = 8099; };
-    import-failures     = { port = 8100; };
-  };
+  # Filter sites by nginx type from registry
+  standardSites = lib.filterAttrs (n: v: !(v ? nginx)) registry.sites;
+  bufferedSites = lib.filterAttrs (n: v: (v.nginx or null) == "buffered") registry.sites;
+  redirectSites = lib.filterAttrs (n: v: (v.nginx or null) == "redirect") registry.sites;
 
-  # Generate Nginx virtualHost config for each site
+  # Generate Nginx virtualHost config for standard sites
   makeVhost = name: cfg: {
     name = "e2e-${name}";
     value = {
@@ -68,12 +52,12 @@ let
     };
   };
 
-  # Special config for buffered site (tests proxy buffering)
-  bufferedVhost = {
-    name = "e2e-buffered";
+  # Generate buffered vhost
+  makeBufferedVhost = name: cfg: {
+    name = "e2e-${name}";
     value = {
-      listen = [{ addr = "127.0.0.1"; port = 8098; }];
-      root = "${siteRoot}/buffered/wp-content/plugins/site-export";
+      listen = [{ addr = "127.0.0.1"; port = cfg.port; }];
+      root = "${siteRoot}/${name}/wp-content/plugins/site-export";
       locations = {
         "/" = {
           tryFiles = "$uri $uri/ /api.php?$query_string";
@@ -96,22 +80,23 @@ let
     };
   };
 
-  # 301 redirect site
-  redirectVhost = {
-    name = "e2e-redirect-301";
+  # Generate redirect vhost
+  makeRedirectVhost = name: cfg: {
+    name = "e2e-${name}";
     value = {
-      listen = [{ addr = "127.0.0.1"; port = 8097; }];
+      listen = [{ addr = "127.0.0.1"; port = cfg.port; }];
       locations = {
         "/" = {
-          return = "301 http://127.0.0.1:8081$request_uri";
+          return = "301 http://127.0.0.1:${toString cfg.redirectTo}$request_uri";
         };
       };
     };
   };
 
   allVhosts = builtins.listToAttrs (
-    (lib.mapAttrsToList makeVhost (builtins.removeAttrs testSites ["buffered" "redirect-301"]))
-    ++ [ bufferedVhost redirectVhost ]
+    (lib.mapAttrsToList makeVhost standardSites)
+    ++ (lib.mapAttrsToList makeBufferedVhost bufferedSites)
+    ++ (lib.mapAttrsToList makeRedirectVhost redirectSites)
   );
 
 in {

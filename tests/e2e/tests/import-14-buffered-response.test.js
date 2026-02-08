@@ -12,12 +12,14 @@ import {
     hashDirectory, compareDirectoryHashes,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Buffered Response', () => {
     const site = 'buffered';
     let tempDir;
 
-    before(() => {
+    before(async () => {
+        await ensureSite(site);
         tempDir = createTempDir('e2e-import-buffered');
     });
 

@@ -8,13 +8,8 @@ echo "=== E2E Test Runner ==="
 echo "Working directory: $SCRIPT_DIR"
 echo ""
 
-# Step 1: Run setup
-echo "--- Step 1: Setting up test sites ---"
-bash setup.sh
-echo ""
-
-# Step 2: Run tests
-echo "--- Step 2: Running test suite ---"
+# Run tests (sites self-provision via ensureSite in before() hooks)
+echo "--- Running test suite ---"
 echo ""
 
 FAILED=0
@@ -27,7 +22,7 @@ else
     echo "=== Some tests failed ==="
 fi
 
-# Step 3: Report
+# Report
 echo ""
 echo "--- Test run complete ---"
 

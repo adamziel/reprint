@@ -12,6 +12,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: SQL Sync', () => {
     const site = 'basic';
@@ -19,6 +20,7 @@ describe('Import: SQL Sync', () => {
     const importDb = 'e2e_basic_import_02';
 
     before(async () => {
+        await ensureSite(site);
         tempDir = createTempDir('e2e-import-sql');
         // Ensure import DB doesn't exist
         const conn = await createMysqlConnection();

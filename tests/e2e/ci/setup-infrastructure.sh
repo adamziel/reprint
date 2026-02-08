@@ -3,7 +3,9 @@
 # Installs and configures MariaDB, PHP 8.2 FPM, and Nginx on an Ubuntu runner.
 set -euo pipefail
 
-SITE_ROOT="/srv/e2e-sites"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REGISTRY="${SCRIPT_DIR}/../site-registry.json"
+SITE_ROOT=$(jq -r '.siteRoot' "$REGISTRY")
 FPM_SOCKET="/run/php/e2e.sock"
 
 # ---------- PHP 8.2 ----------
@@ -106,30 +108,9 @@ EOF
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo rm -f /etc/nginx/conf.d/default.conf
 
+# Read site definitions from registry (single source of truth)
 # Standard sites — each gets the same fastcgi template on its own port.
-declare -A SITES=(
-    [basic]=8081
-    [symlinks-outside]=8082
-    [custom-wp-content]=8083
-    [chmod-denied]=8084
-    [mysql-restricted]=8085
-    [circular-symlinks]=8086
-    [file-changes]=8087
-    [dir-deleted]=8088
-    [volatile-file]=8089
-    [emoji-paths]=8090
-    [large-directory]=8091
-    [hmac-errors]=8092
-    [sha1-verify]=8093
-    [http-errors]=8094
-    [request-cutoff]=8095
-    [gzip-corrupt]=8096
-    [error-chunks]=8099
-    [import-failures]=8100
-)
-
-for site in "${!SITES[@]}"; do
-    port="${SITES[$site]}"
+jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port; do
     cat <<VHOST | sudo tee "/etc/nginx/conf.d/e2e-${site}.conf" >/dev/null
 server {
     listen 127.0.0.1:${port};
@@ -152,21 +133,24 @@ server {
 VHOST
 done
 
-# 301 redirect site (port 8097 → 8081)
-cat <<'VHOST' | sudo tee /etc/nginx/conf.d/e2e-redirect-301.conf >/dev/null
+# Redirect sites
+jq -r '.sites | to_entries[] | select(.value.nginx == "redirect") | "\(.key) \(.value.port) \(.value.redirectTo)"' "$REGISTRY" | while read site port target; do
+    cat <<VHOST | sudo tee "/etc/nginx/conf.d/e2e-${site}.conf" >/dev/null
 server {
-    listen 127.0.0.1:8097;
+    listen 127.0.0.1:${port};
     location / {
-        return 301 http://127.0.0.1:8081$request_uri;
+        return 301 http://127.0.0.1:${target}\$request_uri;
     }
 }
 VHOST
+done
 
-# Buffered-response site (port 8098)
-cat <<VHOST | sudo tee /etc/nginx/conf.d/e2e-buffered.conf >/dev/null
+# Buffered sites
+jq -r '.sites | to_entries[] | select(.value.nginx == "buffered") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port; do
+    cat <<VHOST | sudo tee "/etc/nginx/conf.d/e2e-${site}.conf" >/dev/null
 server {
-    listen 127.0.0.1:8098;
-    root ${SITE_ROOT}/buffered/wp-content/plugins/site-export;
+    listen 127.0.0.1:${port};
+    root ${SITE_ROOT}/${site}/wp-content/plugins/site-export;
 
     location / {
         try_files \$uri \$uri/ /api.php?\$query_string;
@@ -185,13 +169,14 @@ server {
     }
 }
 VHOST
+done
 
 # ---------- Start services ----------
 echo "=== Starting services ==="
 sudo systemctl restart php8.2-fpm
 
 # Kill anything lingering on our ports before starting Nginx
-for port in 8081 8082 8083 8084 8085 8086 8087 8088 8089 8090 8091 8092 8093 8094 8095 8096 8097 8098 8099 8100; do
+for port in $(jq -r '.sites[].port' "$REGISTRY"); do
     sudo fuser -k "${port}/tcp" 2>/dev/null || true
 done
 sleep 1

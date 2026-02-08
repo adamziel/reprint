@@ -12,12 +12,26 @@ import {
     hashDirectory, compareDirectoryHashes, sha1File,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: SHA1 Integrity', () => {
     const site = 'sha1-verify';
     let tempDir;
 
-    before(() => {
+    before(async () => {
+        await ensureSite(site, {
+            files: 'none',
+            afterCreate: async (siteDir) => {
+                const { execSync } = await import('node:child_process');
+                execSync(`sudo mkdir -p "${siteDir}/test-data/deep/nested/path"`);
+                for (let i = 1; i <= 20; i++) {
+                    execSync(`printf "File content number ${i} with some padding to make it non-trivial\\n" | sudo tee "${siteDir}/test-data/file-${i}.txt" > /dev/null`);
+                }
+                execSync(`sudo dd if=/dev/urandom of="${siteDir}/test-data/large-binary.bin" bs=1024 count=256 2>/dev/null`);
+                execSync(`echo "Deep nested content" | sudo tee "${siteDir}/test-data/deep/nested/path/deep-file.txt" > /dev/null`);
+                execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+            },
+        });
         tempDir = createTempDir('e2e-import-sha1');
     });
 

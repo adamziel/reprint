@@ -11,13 +11,24 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Permission Errors', () => {
     describe('chmod-denied', () => {
         const site = 'chmod-denied';
         let tempDir;
 
-        before(() => {
+        before(async () => {
+            await ensureSite(site, {
+                afterCreate: async (siteDir) => {
+                    const { execSync } = await import('node:child_process');
+                    execSync(`echo "secret content" | sudo tee "${siteDir}/test-data/unreadable.txt" > /dev/null`);
+                    execSync(`sudo chmod 000 "${siteDir}/test-data/unreadable.txt"`);
+                    execSync(`sudo mkdir -p "${siteDir}/test-data/unreadable-dir"`);
+                    execSync(`echo "inside" | sudo tee "${siteDir}/test-data/unreadable-dir/inside.txt" > /dev/null`);
+                    execSync(`sudo chmod 000 "${siteDir}/test-data/unreadable-dir"`);
+                },
+            });
             tempDir = createTempDir('e2e-import-chmod');
         });
 
@@ -54,7 +65,41 @@ describe('Import: Permission Errors', () => {
         const site = 'mysql-restricted';
         let tempDir;
 
-        before(() => {
+        before(async () => {
+            await ensureSite(site, {
+                db: 'custom',
+                wpConfig: {
+                    DB_USER: 'e2e_restricted',
+                    DB_PASSWORD: 'e2e_restricted_pw',
+                    DB_NAME: 'e2e_mysql_restricted',
+                },
+                customDb: async (dbName, conn) => {
+                    await conn.query(`
+CREATE TABLE wp_options (
+    option_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    option_name VARCHAR(191) NOT NULL,
+    option_value LONGTEXT NOT NULL,
+    autoload VARCHAR(20) NOT NULL DEFAULT 'yes',
+    UNIQUE KEY option_name (option_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO wp_options (option_name, option_value) VALUES ('siteurl', 'http://localhost');
+
+CREATE TABLE wp_secret_table (
+    id INT PRIMARY KEY,
+    secret_data TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO wp_secret_table VALUES (1, 'top secret');
+                    `);
+                },
+                afterCreate: async () => {
+                    const { execSync } = await import('node:child_process');
+                    execSync(
+                        `mysql -u e2e_admin -pe2e_password -h 127.0.0.1 -e "GRANT SELECT ON e2e_mysql_restricted.* TO 'e2e_restricted'@'localhost' IDENTIFIED BY 'e2e_restricted_pw'; FLUSH PRIVILEGES;" 2>/dev/null || true`
+                    );
+                },
+            });
             tempDir = createTempDir('e2e-import-mysql-restricted');
         });
 

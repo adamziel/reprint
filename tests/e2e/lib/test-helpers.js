@@ -10,41 +10,22 @@ import { tmpdir } from 'node:os';
 import { createConnection } from 'mysql2/promise';
 import { HmacClient } from './hmac-client.js';
 import { gunzipSync } from 'node:zlib';
+import { createRequire } from 'node:module';
 
-const SITE_ROOT = '/srv/e2e-sites';
+const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
+
+const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = join(PROJECT_ROOT, 'importer', 'import.php');
-const DB_HOST = '127.0.0.1';
-const DB_USER = 'e2e_admin';
-const DB_PASS = 'e2e_password';
+const DB_HOST = REGISTRY.dbHost;
+const DB_USER = REGISTRY.dbUser;
+const DB_PASS = REGISTRY.dbPass;
 
 /**
  * Get the base URL for a test site.
  */
 export function getSiteUrl(siteName, port = null) {
-    const ports = {
-        'basic': 8081,
-        'symlinks-outside': 8082,
-        'custom-wp-content': 8083,
-        'chmod-denied': 8084,
-        'mysql-restricted': 8085,
-        'circular-symlinks': 8086,
-        'file-changes': 8087,
-        'dir-deleted': 8088,
-        'volatile-file': 8089,
-        'emoji-paths': 8090,
-        'large-directory': 8091,
-        'hmac-errors': 8092,
-        'sha1-verify': 8093,
-        'http-errors': 8094,
-        'request-cutoff': 8095,
-        'gzip-corrupt': 8096,
-        'redirect-301': 8097,
-        'buffered': 8098,
-        'error-chunks': 8099,
-        'import-failures': 8100,
-    };
-    const p = port || ports[siteName];
+    const p = port || REGISTRY.sites[siteName]?.port;
     if (!p) throw new Error(`Unknown site: ${siteName}`);
     return `http://127.0.0.1:${p}/api.php`;
 }

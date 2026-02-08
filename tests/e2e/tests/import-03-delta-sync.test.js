@@ -13,13 +13,15 @@ import {
     hashDirectory, compareDirectoryHashes,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Delta Sync', () => {
     const site = 'file-changes';
     let tempDir;
     const addedFile = join(getSiteDir(site), 'test-data', 'delta-test-added.txt');
 
-    before(() => {
+    before(async () => {
+        await ensureSite(site);
         tempDir = createTempDir('e2e-import-delta');
         // Clean up any leftover test file
         try { execSync(`sudo rm -f ${JSON.stringify(addedFile)}`); } catch (e) {}

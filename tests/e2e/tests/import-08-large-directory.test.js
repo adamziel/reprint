@@ -12,12 +12,25 @@ import {
     hashDirectory,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Large Directory', () => {
     const site = 'large-directory';
     let tempDir;
 
-    before(() => {
+    before(async () => {
+        await ensureSite(site, {
+            files: 'none',
+            afterCreate: async (siteDir) => {
+                const { execSync } = await import('node:child_process');
+                execSync(`sudo mkdir -p "${siteDir}/test-data/many-files"`);
+                for (let i = 1; i <= 2000; i++) {
+                    const num = String(i).padStart(4, '0');
+                    execSync(`printf "content-${num}" | sudo tee "${siteDir}/test-data/many-files/file-${num}.txt" > /dev/null`);
+                }
+                execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+            },
+        });
         tempDir = createTempDir('e2e-import-large');
     });
 

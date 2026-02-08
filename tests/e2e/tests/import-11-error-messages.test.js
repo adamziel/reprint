@@ -8,11 +8,14 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Error Messages', () => {
     let tempDir;
 
-    before(() => {
+    before(async () => {
+        await ensureSite('hmac-errors');
+        await ensureSite('basic');
         tempDir = createTempDir('e2e-import-errors');
     });
 

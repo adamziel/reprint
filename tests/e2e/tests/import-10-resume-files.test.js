@@ -1,7 +1,7 @@
 /**
  * Test 10: File Resume via import.php
  * Tests that files-sync-initial can resume after a partial transfer.
- * Uses large-directory site (5000+ files) with --max-exec=3 to force short requests.
+ * Uses large-directory site (5000+ files) with --max-exec=5 to force short requests.
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,12 +13,25 @@ import {
     hashDirectory, compareDirectoryHashes,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Resume Files', { timeout: 180000 }, () => {
     const site = 'large-directory';
     let tempDir;
 
-    before(() => {
+    before(async () => {
+        await ensureSite(site, {
+            files: 'none',
+            afterCreate: async (siteDir) => {
+                const { execSync } = await import('node:child_process');
+                execSync(`sudo mkdir -p "${siteDir}/test-data/many-files"`);
+                for (let i = 1; i <= 2000; i++) {
+                    const num = String(i).padStart(4, '0');
+                    execSync(`printf "content-${num}" | sudo tee "${siteDir}/test-data/many-files/file-${num}.txt" > /dev/null`);
+                }
+                execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+            },
+        });
         tempDir = createTempDir('e2e-import-resume-files');
     });
 

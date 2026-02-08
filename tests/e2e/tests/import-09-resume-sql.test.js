@@ -12,6 +12,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Resume SQL', { timeout: 120000 }, () => {
     const site = 'basic';
@@ -19,6 +20,7 @@ describe('Import: Resume SQL', { timeout: 120000 }, () => {
     const importDb = 'e2e_basic_import_09';
 
     before(async () => {
+        await ensureSite(site);
         tempDir = createTempDir('e2e-import-resume-sql');
         const conn = await createMysqlConnection();
         await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);

@@ -12,13 +12,23 @@ import {
     hashDirectory,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Symlinks', () => {
     describe('symlinks-outside', () => {
         const site = 'symlinks-outside';
         let tempDir;
 
-        before(() => {
+        before(async () => {
+            await ensureSite(site, {
+                afterCreate: async (siteDir) => {
+                    const { execSync } = await import('node:child_process');
+                    execSync('sudo mkdir -p /tmp/e2e-external-data');
+                    execSync('echo "External file" | sudo tee /tmp/e2e-external-data/external.txt > /dev/null');
+                    execSync('sudo chown -R nginx:nginx /tmp/e2e-external-data');
+                    execSync(`sudo ln -sfn /tmp/e2e-external-data "${siteDir}/test-data/external-link"`);
+                },
+            });
             tempDir = createTempDir('e2e-import-symlinks');
         });
 
@@ -63,7 +73,16 @@ describe('Import: Symlinks', () => {
         const site = 'circular-symlinks';
         let tempDir;
 
-        before(() => {
+        before(async () => {
+            await ensureSite(site, {
+                afterCreate: async (siteDir) => {
+                    const { execSync } = await import('node:child_process');
+                    execSync(`sudo ln -sfn "${siteDir}/test-data/link-b" "${siteDir}/test-data/link-a"`);
+                    execSync(`sudo ln -sfn "${siteDir}/test-data/link-a" "${siteDir}/test-data/link-b"`);
+                    execSync(`sudo ln -sfn "${siteDir}/test-data/self-link" "${siteDir}/test-data/self-link"`);
+                    execSync(`sudo chown -R nginx:nginx "${siteDir}" 2>/dev/null || true`);
+                },
+            });
             tempDir = createTempDir('e2e-import-circular');
         });
 

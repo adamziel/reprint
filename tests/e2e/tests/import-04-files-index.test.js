@@ -11,12 +11,14 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     countJsonlLines,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Files Index', () => {
     const site = 'basic';
     let tempDir;
 
-    before(() => {
+    before(async () => {
+        await ensureSite(site);
         tempDir = createTempDir('e2e-import-files-index');
     });
 

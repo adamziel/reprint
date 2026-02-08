@@ -12,12 +12,25 @@ import {
     hashDirectory, compareDirectoryHashes,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Custom WP Content', () => {
     const site = 'custom-wp-content';
     let tempDir;
 
-    before(() => {
+    before(async () => {
+        await ensureSite(site, {
+            afterCreate: async (siteDir) => {
+                const { execSync } = await import('node:child_process');
+                const pluginSrc = `${siteDir}/../../..`;
+                // Set up custom-content directory with plugin files
+                execSync(`sudo mkdir -p "${siteDir}/custom-content/plugins/site-export/generic"`);
+                execSync(`sudo cp "${siteDir}/wp-content/plugins/site-export/api.php" "${siteDir}/custom-content/plugins/site-export/api.php"`);
+                execSync(`sudo cp "${siteDir}/wp-content/plugins/site-export/generic/"*.php "${siteDir}/custom-content/plugins/site-export/generic/"`);
+                execSync(`sudo cp "${siteDir}/wp-content/plugins/site-export/secret.php" "${siteDir}/custom-content/plugins/site-export/secret.php"`);
+                execSync(`sudo chown -R nginx:nginx "${siteDir}"`);
+            },
+        });
         tempDir = createTempDir('e2e-import-custom-wp');
     });
 

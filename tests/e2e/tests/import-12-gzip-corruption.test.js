@@ -13,8 +13,13 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Error Resilience', () => {
+    before(async () => {
+        await ensureSite('gzip-corrupt');
+    });
+
     it('sql-sync on gzip-corrupt site completes', () => {
         const site = 'gzip-corrupt';
         const tempDir = createTempDir('e2e-import-gzip');

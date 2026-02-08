@@ -13,12 +13,14 @@ import {
     hashDirectory, compareDirectoryHashes,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Basic File Sync', () => {
     const site = 'basic';
     let tempDir;
 
-    before(() => {
+    before(async () => {
+        await ensureSite(site);
         tempDir = createTempDir('e2e-import-basic-files');
     });
 
