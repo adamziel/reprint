@@ -77,7 +77,6 @@ describe('Import: Permission Errors', () => {
 
         beforeAll(async () => {
             await ensureSite(site, {
-                db: 'custom',
                 wpConfig: {
                     DB_USER: 'e2e_restricted',
                     DB_PASSWORD: 'e2e_restricted_pw',
@@ -85,16 +84,6 @@ describe('Import: Permission Errors', () => {
                 },
                 customDb: async (dbName, conn) => {
                     await conn.query(`
-CREATE TABLE wp_options (
-    option_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    option_name VARCHAR(191) NOT NULL,
-    option_value LONGTEXT NOT NULL,
-    autoload VARCHAR(20) NOT NULL DEFAULT 'yes',
-    UNIQUE KEY option_name (option_name)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-INSERT INTO wp_options (option_name, option_value) VALUES ('siteurl', 'http://localhost');
-
 CREATE TABLE wp_secret_table (
     id INT PRIMARY KEY,
     secret_data TEXT

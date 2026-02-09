@@ -3,7 +3,7 @@
  *
  * Uses Node fs APIs for file operations wherever possible, falling back to
  * execSync only for privileged operations (sudo chown/chmod) and external
- * tools (curl, tar, mysql).
+ * tools (curl, tar, mysql, wp-cli).
  */
 import {
     existsSync, writeFileSync, mkdirSync, readdirSync,
@@ -47,6 +47,7 @@ const WP_TARBALL = `/tmp/wordpress-${WP_VERSION}.tar.gz`;
 const WP_TEMPLATE = '/tmp/wordpress-template';
 const WP_READY = '/tmp/wordpress-template/.wp-ready';
 const WP_LOCK = '/tmp/wordpress-template-downloading.lock';
+const WP_CLI_PATH = '/tmp/wp-cli.phar';
 const MARKER = '.e2e-provisioned';
 
 /**
@@ -96,70 +97,62 @@ export async function ensureWpTemplate() {
 }
 
 /**
- * Create the standard sample database tables.
+ * Write a full wp-config.php that WordPress/WP-CLI can load.
+ * Includes wp-settings.php — required by wp core install.
  */
-export async function createSampleDb(dbName, siteName = 'unknown') {
-    const conn = await createConnection({
-        host: DB_HOST,
-        user: DB_USER,
-        password: DB_PASS,
-        database: dbName,
-        multipleStatements: true,
-    });
+function writeFullWpConfig(siteDir, dbHost, dbName, dbUser, dbPass) {
+    writeFileSync(join(siteDir, 'wp-config.php'), `<?php
+define('DB_HOST', '${dbHost}');
+define('DB_NAME', '${dbName}');
+define('DB_USER', '${dbUser}');
+define('DB_PASSWORD', '${dbPass}');
+define('DB_CHARSET', 'utf8mb4');
+define('DB_COLLATE', '');
+define('AUTH_KEY',         'e2e-test-key-1');
+define('SECURE_AUTH_KEY',  'e2e-test-key-2');
+define('LOGGED_IN_KEY',    'e2e-test-key-3');
+define('NONCE_KEY',        'e2e-test-key-4');
+define('AUTH_SALT',        'e2e-test-salt-1');
+define('SECURE_AUTH_SALT', 'e2e-test-salt-2');
+define('LOGGED_IN_SALT',   'e2e-test-salt-3');
+define('NONCE_SALT',       'e2e-test-salt-4');
+$table_prefix = 'wp_';
+if ( ! defined( 'ABSPATH' ) ) {
+    define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once ABSPATH . 'wp-settings.php';
+`);
+}
 
-    await conn.query(`
-CREATE TABLE IF NOT EXISTS wp_options (
-    option_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    option_name VARCHAR(191) NOT NULL DEFAULT '',
-    option_value LONGTEXT NOT NULL,
-    autoload VARCHAR(20) NOT NULL DEFAULT 'yes',
-    UNIQUE KEY option_name (option_name)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/**
+ * Write the minimal wp-config.php used by the export plugin.
+ * Does NOT load wp-settings.php — the plugin reads DB creds directly.
+ */
+function writeMinimalWpConfig(siteDir, dbHost, dbName, dbUser, dbPass) {
+    writeFileSync(join(siteDir, 'wp-config.php'), `<?php
+define('DB_HOST', '${dbHost}');
+define('DB_NAME', '${dbName}');
+define('DB_USER', '${dbUser}');
+define('DB_PASSWORD', '${dbPass}');
+$table_prefix = 'wp_';
+`);
+}
 
-INSERT INTO wp_options (option_name, option_value, autoload) VALUES
-    ('siteurl', 'http://localhost', 'yes'),
-    ('home', 'http://localhost', 'yes'),
-    ('blogname', 'E2E: ${siteName}', 'yes'),
-    ('blogdescription', 'Just another test site', 'yes'),
-    ('active_plugins', 'a:0:{}', 'yes');
-
-CREATE TABLE IF NOT EXISTS wp_posts (
-    ID BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    post_author BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    post_date DATETIME NOT NULL DEFAULT '0000-00-00 00:00:00',
-    post_date_gmt DATETIME NOT NULL DEFAULT '0000-00-00 00:00:00',
-    post_content LONGTEXT NOT NULL,
-    post_title TEXT NOT NULL,
-    post_excerpt TEXT NOT NULL,
-    post_status VARCHAR(20) NOT NULL DEFAULT 'publish',
-    post_name VARCHAR(200) NOT NULL DEFAULT '',
-    post_type VARCHAR(20) NOT NULL DEFAULT 'post',
-    KEY post_name (post_name(191)),
-    KEY post_type_status (post_type, post_status, post_date, ID)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-INSERT INTO wp_posts (post_author, post_date, post_date_gmt, post_content, post_title, post_excerpt, post_status, post_name, post_type) VALUES
-    (1, NOW(), UTC_TIMESTAMP(), 'Hello World content with <b>HTML</b> and special chars: &amp; "quotes" ''apostrophes''', 'Hello World', '', 'publish', 'hello-world', 'post'),
-    (1, NOW(), UTC_TIMESTAMP(), 'Second post with unicode: \u00e9\u00e0\u00fc \u2713 \ud83d\ude00', 'Unicode Post', '', 'publish', 'unicode-post', 'post'),
-    (1, NOW(), UTC_TIMESTAMP(), CONCAT('Binary test: ', CHAR(0 USING binary), CHAR(1 USING binary)), 'Binary Post', '', 'draft', 'binary-post', 'post');
-
-CREATE TABLE IF NOT EXISTS wp_usermeta (
-    umeta_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    meta_key VARCHAR(255) DEFAULT NULL,
-    meta_value LONGTEXT,
-    KEY user_id (user_id),
-    KEY meta_key (meta_key(191))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES
-    (1, 'nickname', 'admin'),
-    (1, 'first_name', 'Test'),
-    (1, 'last_name', 'User'),
-    (1, 'wp_capabilities', 'a:1:{s:13:"administrator";b:1;}');
-    `);
-
-    await conn.end();
+/**
+ * Run wp core install to create all real WordPress tables.
+ */
+function wpCoreInstall(siteDir, siteUrl, siteName) {
+    execSync(
+        `php ${WP_CLI_PATH} core install` +
+        ` --path=${JSON.stringify(siteDir)}` +
+        ` --url=${JSON.stringify(siteUrl)}` +
+        ` --title=${JSON.stringify('E2E: ' + siteName)}` +
+        ` --admin_user=admin` +
+        ` --admin_password=password` +
+        ` --admin_email=admin@example.com` +
+        ` --skip-email`,
+        { timeout: 60000, stdio: 'pipe' }
+    );
 }
 
 /**
@@ -177,13 +170,13 @@ export function createSampleFiles(siteDir) {
 }
 
 /**
- * Idempotent site creation. Creates WP files, DB, plugin files.
+ * Idempotent site creation. Creates WP files, DB via wp core install, plugin files.
  *
  * Options:
- *   db: 'sample' (default) | 'none' | 'custom'
+ *   db: 'standard' (default) | 'none' | 'custom'
  *   files: 'sample' (default) | 'none'
- *   customDb: async (dbName, conn) => {} — for custom DB setup
- *   wpConfig: { DB_USER: '...', ... } — override wp-config.php fields
+ *   customDb: async (dbName, conn) => {} — adds extra tables on top of real WP tables
+ *   wpConfig: { DB_USER: '...', ... } — override wp-config.php creds AFTER install
  *   afterCreate: async (siteDir, dbName) => {} — post-creation hook (dir is writable)
  *   afterPermissions: async (siteDir) => {} — runs after final chown/chmod (for chmod 000 etc.)
  */
@@ -197,8 +190,10 @@ export async function ensureSite(name, options = {}) {
 
     const dbName = `e2e_${name.replace(/-/g, '_')}`;
     const secret = `test-secret-${name}`;
-    const dbOpt = options.db || 'sample';
+    const dbOpt = options.db || 'standard';
     const filesOpt = options.files || 'sample';
+    const port = REGISTRY.sites[name]?.port;
+    const siteUrl = port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1';
 
     console.log(`  Setting up site: ${name} (db: ${dbName})`);
 
@@ -214,18 +209,8 @@ export async function ensureSite(name, options = {}) {
     mkdirSync(join(siteDir, 'wp-content', 'plugins', 'site-export', 'generic'), { recursive: true });
     mkdirSync(join(siteDir, 'test-data'), { recursive: true });
 
-    // Write wp-config.php
-    const wpDbUser = options.wpConfig?.DB_USER || DB_USER;
-    const wpDbPass = options.wpConfig?.DB_PASSWORD || DB_PASS;
-    const wpDbName = options.wpConfig?.DB_NAME || dbName;
-    const wpDbHost = options.wpConfig?.DB_HOST || DB_HOST;
-    writeFileSync(join(siteDir, 'wp-config.php'), `<?php
-define('DB_HOST', '${wpDbHost}');
-define('DB_NAME', '${wpDbName}');
-define('DB_USER', '${wpDbUser}');
-define('DB_PASSWORD', '${wpDbPass}');
-$table_prefix = 'wp_';
-`);
+    // Write full wp-config.php with admin creds (needed for wp core install)
+    writeFullWpConfig(siteDir, DB_HOST, dbName, DB_USER, DB_PASS);
 
     // Write secret.php
     writeFileSync(
@@ -245,23 +230,38 @@ $table_prefix = 'wp_';
         );
     }
 
-    // Create database using mysql2 (no exec needed)
-    const adminConn = await createConnection({
-        host: DB_HOST, user: DB_USER, password: DB_PASS, multipleStatements: true,
-    });
-    await adminConn.query(`DROP DATABASE IF EXISTS \`${dbName}\`; CREATE DATABASE \`${dbName}\``);
-    await adminConn.end();
-
-    // Populate database
-    if (dbOpt === 'sample') {
-        await createSampleDb(dbName, name);
-    } else if (dbOpt === 'custom' && options.customDb) {
-        const conn = await createConnection({
-            host: DB_HOST, user: DB_USER, password: DB_PASS,
-            database: dbName, multipleStatements: true,
+    // Create database and run wp core install
+    if (dbOpt !== 'none') {
+        const adminConn = await createConnection({
+            host: DB_HOST, user: DB_USER, password: DB_PASS, multipleStatements: true,
         });
-        await options.customDb(dbName, conn);
-        await conn.end();
+        await adminConn.query(`DROP DATABASE IF EXISTS \`${dbName}\`; CREATE DATABASE \`${dbName}\``);
+        await adminConn.end();
+
+        // wp core install creates all real WP tables (wp_options, wp_posts, etc.)
+        wpCoreInstall(siteDir, siteUrl, name);
+
+        // Run customDb hook to add extra tables on top of real WP
+        if (options.customDb) {
+            const conn = await createConnection({
+                host: DB_HOST, user: DB_USER, password: DB_PASS,
+                database: dbName, multipleStatements: true,
+            });
+            await options.customDb(dbName, conn);
+            await conn.end();
+        }
+    }
+
+    // Rewrite wp-config.php: minimal version for the export plugin
+    // (the full config was only needed for wp core install above)
+    if (options.wpConfig) {
+        const wpDbUser = options.wpConfig.DB_USER || DB_USER;
+        const wpDbPass = options.wpConfig.DB_PASSWORD || DB_PASS;
+        const wpDbName = options.wpConfig.DB_NAME || dbName;
+        const wpDbHost = options.wpConfig.DB_HOST || DB_HOST;
+        writeMinimalWpConfig(siteDir, wpDbHost, wpDbName, wpDbUser, wpDbPass);
+    } else {
+        writeMinimalWpConfig(siteDir, DB_HOST, dbName, DB_USER, DB_PASS);
     }
 
     // Create sample files (pure Node fs)

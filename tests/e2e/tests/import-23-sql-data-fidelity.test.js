@@ -23,21 +23,8 @@ describe('Import: SQL Data Fidelity', () => {
 
     beforeAll(async () => {
         await ensureSite(site, {
-            db: 'custom',
             customDb: async (dbName, conn) => {
                 await conn.query(`
-CREATE TABLE wp_options (
-    option_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    option_name VARCHAR(191) NOT NULL DEFAULT '',
-    option_value LONGTEXT NOT NULL,
-    autoload VARCHAR(20) NOT NULL DEFAULT 'yes',
-    UNIQUE KEY option_name (option_name)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-INSERT INTO wp_options (option_name, option_value) VALUES
-    ('siteurl', 'http://localhost'),
-    ('blogname', 'E2E: http-errors');
-
 CREATE TABLE wp_edge_cases (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
