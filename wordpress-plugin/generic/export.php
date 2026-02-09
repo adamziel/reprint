@@ -2156,6 +2156,7 @@ function stream_file_producer(
     int $max_execution_time,
     int $max_memory,
     float $memory_threshold,
+    array $config = [],
 ): array {
     global $streaming_context;
     prepare_streaming_response();
@@ -2171,6 +2172,7 @@ function stream_file_producer(
 
     // E2E test hook: after gzip stream initialization (file producer)
     if (getenv('SITE_EXPORT_TEST_MODE')) {
+        _e2e_load_test_hooks_if_needed($config);
         $hook_args = [$gz, $boundary];
         _e2e_call_hook('test_hook_after_gzip_init', $hook_args);
     }
@@ -3074,6 +3076,7 @@ function endpoint_file_fetch(
         $max_execution_time,
         $max_memory,
         $memory_threshold,
+        $config,
     );
 }
 

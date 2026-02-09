@@ -1,6 +1,7 @@
 /**
  * E2E test helpers for the streaming site migration system.
  */
+import assert from 'node:assert/strict';
 import { execSync, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, unlinkSync, lstatSync } from 'node:fs';
@@ -9,41 +10,22 @@ import { tmpdir } from 'node:os';
 import { createConnection } from 'mysql2/promise';
 import { HmacClient } from './hmac-client.js';
 import { gunzipSync } from 'node:zlib';
+import { createRequire } from 'node:module';
 
-const SITE_ROOT = '/srv/e2e-sites';
-const PROJECT_ROOT = join(import.meta.dirname, '..', '..');
+const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
+
+const SITE_ROOT = REGISTRY.siteRoot;
+const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = join(PROJECT_ROOT, 'importer', 'import.php');
-const DB_HOST = '127.0.0.1';
-const DB_USER = 'e2e_admin';
-const DB_PASS = 'e2e_password';
+const DB_HOST = REGISTRY.dbHost;
+const DB_USER = REGISTRY.dbUser;
+const DB_PASS = REGISTRY.dbPass;
 
 /**
  * Get the base URL for a test site.
  */
 export function getSiteUrl(siteName, port = null) {
-    const ports = {
-        'basic': 8081,
-        'symlinks-outside': 8082,
-        'custom-wp-content': 8083,
-        'chmod-denied': 8084,
-        'mysql-restricted': 8085,
-        'circular-symlinks': 8086,
-        'file-changes': 8087,
-        'dir-deleted': 8088,
-        'volatile-file': 8089,
-        'emoji-paths': 8090,
-        'large-directory': 8091,
-        'hmac-errors': 8092,
-        'sha1-verify': 8093,
-        'http-errors': 8094,
-        'request-cutoff': 8095,
-        'gzip-corrupt': 8096,
-        'redirect-301': 8097,
-        'buffered': 8098,
-        'error-chunks': 8099,
-        'import-failures': 8100,
-    };
-    const p = port || ports[siteName];
+    const p = port || REGISTRY.sites[siteName]?.port;
     if (!p) throw new Error(`Unknown site: ${siteName}`);
     return `http://127.0.0.1:${p}/api.php`;
 }
@@ -245,7 +227,7 @@ export function runImporter(url, outputDir, command, options = {}) {
         command,
     ];
     if (secret) {
-        args.push('--secret', secret);
+        args.push(`--secret=${secret}`);
     }
     if (options.extraArgs) {
         args.push(...options.extraArgs);
@@ -462,19 +444,28 @@ export function removeTestHooks(siteName) {
 }
 
 /**
+ * Get hook state file path.
+ * Uses /srv/e2e-sites/ instead of /tmp because PHP-FPM has PrivateTmp=yes,
+ * so PHP and Node.js see different /tmp directories.
+ */
+function hookStatePath(siteName) {
+    return `${SITE_ROOT}/.e2e-hook-state-${siteName}`;
+}
+
+/**
  * Write a state file that test hooks can read/write.
  */
 export function writeHookState(siteName, data) {
-    const statePath = `/tmp/e2e-hook-state-${siteName}`;
-    writeFileSync(statePath, JSON.stringify(data));
-    execSync(`chmod 666 ${statePath}`);
+    const statePath = hookStatePath(siteName);
+    execSync(`sudo tee ${JSON.stringify(statePath)} > /dev/null <<'STATEEOF'\n${JSON.stringify(data)}\nSTATEEOF`);
+    execSync(`sudo chmod 666 ${JSON.stringify(statePath)}`);
 }
 
 /**
  * Read a state file written by test hooks.
  */
 export function readHookState(siteName) {
-    const statePath = `/tmp/e2e-hook-state-${siteName}`;
+    const statePath = hookStatePath(siteName);
     try {
         return JSON.parse(readFileSync(statePath, 'utf-8'));
     } catch (e) {
@@ -486,9 +477,9 @@ export function readHookState(siteName) {
  * Clear hook state file.
  */
 export function clearHookState(siteName) {
-    const statePath = `/tmp/e2e-hook-state-${siteName}`;
+    const statePath = hookStatePath(siteName);
     try {
-        unlinkSync(statePath);
+        execSync(`sudo rm -f ${JSON.stringify(statePath)}`);
     } catch (e) {
         // Ignore
     }
@@ -565,6 +556,93 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
         text: await response.text(),
         headers: Object.fromEntries(response.headers.entries()),
     };
+}
+
+/**
+ * Count non-empty lines in a JSONL file.
+ */
+export function countJsonlLines(filePath) {
+    if (!existsSync(filePath)) return 0;
+    const content = readFileSync(filePath, 'utf-8');
+    return content.split('\n').filter(l => l.trim()).length;
+}
+
+/**
+ * Read the audit log as a string.
+ */
+export function readAuditLog(outputDir) {
+    const logPath = join(outputDir, '.import-audit.log');
+    if (!existsSync(logPath)) return '';
+    return readFileSync(logPath, 'utf-8');
+}
+
+/**
+ * Assert that the import indexed at least minCount files.
+ * Checks .import-index.jsonl line count.
+ */
+export function assertFileCount(outputDir, minCount = 3000) {
+    const indexPath = join(outputDir, '.import-index.jsonl');
+    assert.ok(existsSync(indexPath), `Expected ${indexPath} to exist`);
+    const count = countJsonlLines(indexPath);
+    assert.ok(count >= minCount,
+        `Expected at least ${minCount} files in index, got ${count}`);
+}
+
+/**
+ * Assert that the imported site root looks like a real WordPress installation.
+ * Checks for key WP paths.
+ */
+export function assertSiteMirror(importedSiteRoot) {
+    const requiredPaths = [
+        'wp-includes/version.php',
+        'wp-admin/index.php',
+        'wp-content/themes',
+        'index.php',
+        'wp-load.php',
+    ];
+    for (const p of requiredPaths) {
+        const fullPath = join(importedSiteRoot, p);
+        assert.ok(existsSync(fullPath),
+            `Expected WordPress path to exist: ${p} (checked ${fullPath})`);
+    }
+}
+
+/**
+ * Assert that two directory trees are identical: no missing, no extra, no different files.
+ * Symlinks and unreadable files are skipped on both sides (by hashDirectory).
+ * @param {string} sourceDir - Source directory path
+ * @param {string} importedDir - Imported directory path
+ * @param {Object} options
+ * @param {string[]} options.exclude - Substrings to exclude from comparison (e.g. ['large-volatile.bin'])
+ * @param {boolean} options.allowMissing - If true, allow files present in source but missing from import (for tests where hooks cause incomplete syncs)
+ */
+export function assertTreesMatch(sourceDir, importedDir, options = {}) {
+    const exclude = options.exclude || [];
+    const sourceHashes = hashDirectory(sourceDir);
+    const importedHashes = hashDirectory(importedDir);
+
+    // Remove excluded paths from both maps
+    for (const substr of exclude) {
+        for (const path of sourceHashes.keys()) {
+            if (path.includes(substr)) sourceHashes.delete(path);
+        }
+        for (const path of importedHashes.keys()) {
+            if (path.includes(substr)) importedHashes.delete(path);
+        }
+    }
+
+    const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
+    const problems = [];
+    if (!options.allowMissing && comparison.missing.length > 0) {
+        problems.push(`missing=${comparison.missing.length} (${comparison.missing.slice(0, 5).join(', ')})`);
+    }
+    if (comparison.extra.length > 0) {
+        problems.push(`extra=${comparison.extra.length} (${comparison.extra.slice(0, 5).join(', ')})`);
+    }
+    if (comparison.different.length > 0) {
+        problems.push(`different=${comparison.different.length} (${comparison.different.slice(0, 5).map(d => d.path).join(', ')})`);
+    }
+    assert.equal(problems.length, 0, `Trees differ: ${problems.join('; ')}`);
 }
 
 // Re-export constants

@@ -1,0 +1,51 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+    branches: [trunk]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup infrastructure
+        run: tests/e2e/ci/setup-infrastructure.sh
+
+      - name: Setup test sites
+        run: tests/e2e/setup.sh
+
+      - name: Install dependencies
+        working-directory: tests/e2e
+        run: npm install
+
+      - name: Run E2E tests
+        working-directory: tests/e2e
+        run: npx vitest run
+
+      - name: Debug logs on failure
+        if: failure()
+        run: |
+          echo "--- Listening ports ---"
+          sudo ss -tlnp 2>/dev/null || true
+          echo "--- PHP-FPM error log ---"
+          sudo cat /tmp/php-e2e-errors.log 2>/dev/null || echo "(empty)"
+          echo "--- Nginx error log ---"
+          sudo tail -100 /var/log/nginx/error.log 2>/dev/null || echo "(empty)"
+          echo "--- Nginx config test ---"
+          sudo nginx -t 2>&1 || true
+          echo "--- PHP-FPM journal ---"
+          sudo journalctl -u php8.2-fpm --no-pager -n 30 2>/dev/null || true
+          echo "--- Nginx journal ---"
+          sudo journalctl -u nginx --no-pager -n 30 2>/dev/null || true
+          echo "--- MariaDB journal ---"
+          sudo journalctl -u mariadb --no-pager -n 30 2>/dev/null || true

@@ -1,0 +1,29 @@
+{
+  "siteRoot": "/srv/e2e-sites",
+  "dbUser": "e2e_admin",
+  "dbPass": "e2e_password",
+  "dbHost": "127.0.0.1",
+  "wpVersion": "6.7",
+  "sites": {
+    "basic":             { "port": 8081 },
+    "symlinks-outside":  { "port": 8082 },
+    "custom-wp-content": { "port": 8083 },
+    "chmod-denied":      { "port": 8084 },
+    "mysql-restricted":  { "port": 8085 },
+    "circular-symlinks": { "port": 8086 },
+    "file-changes":      { "port": 8087 },
+    "dir-deleted":       { "port": 8088 },
+    "volatile-file":     { "port": 8089 },
+    "emoji-paths":       { "port": 8090 },
+    "large-directory":   { "port": 8091 },
+    "hmac-errors":       { "port": 8092 },
+    "sha1-verify":       { "port": 8093 },
+    "http-errors":       { "port": 8094 },
+    "request-cutoff":    { "port": 8095 },
+    "gzip-corrupt":      { "port": 8096 },
+    "redirect-301":      { "port": 8097, "nginx": "redirect", "redirectTo": 8081 },
+    "buffered":          { "port": 8098, "nginx": "buffered" },
+    "error-chunks":      { "port": 8099 },
+    "import-failures":   { "port": 8100 }
+  }
+}
