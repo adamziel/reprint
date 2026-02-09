@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes,
+    hashDirectory, assertTreesMatch,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -61,11 +61,7 @@ describe('Import: Delta Sync with Deletions', () => {
 
     it('initial sync hashes match source', () => {
         const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-        const sourceHashes = hashDirectory(getSiteDir(site));
-        const importedHashes = hashDirectory(importedRoot);
-        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-        assert.ok(comparison.match,
-            `Initial sync mismatch: missing=${comparison.missing.length}, different=${comparison.different.length}`);
+        assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
     it('delete files on source, then delta sync picks up the change', () => {

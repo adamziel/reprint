@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory,
+    assertTreesMatch,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -51,10 +51,9 @@ describe('Import: Symlinks', () => {
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('regular files are downloaded', () => {
+        it('regular files are downloaded and match source', () => {
             const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-            const hashes = hashDirectory(importedRoot);
-            assert.ok(hashes.size > 0, 'Expected at least one regular file');
+            assertTreesMatch(getSiteDir(site), importedRoot);
         });
 
         it('indexed at least 3000 files from remote', () => {
@@ -105,10 +104,9 @@ describe('Import: Symlinks', () => {
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('regular files are downloaded', () => {
+        it('regular files are downloaded and match source', () => {
             const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-            const hashes = hashDirectory(importedRoot);
-            assert.ok(hashes.size > 0, 'Expected at least one regular file');
+            assertTreesMatch(getSiteDir(site), importedRoot);
         });
     });
 });

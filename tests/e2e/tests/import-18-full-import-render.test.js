@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes,
+    assertTreesMatch,
     assertSiteMirror, createMysqlConnection,
     compareDatabases, getDbName,
 } from '../lib/test-helpers.js';
@@ -78,16 +78,7 @@ describe('Import: Full Round-Trip', () => {
 
     it('imported files match source site', () => {
         const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-        const sourceHashes = hashDirectory(getSiteDir(site));
-        const importedHashes = hashDirectory(importedRoot);
-        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-
-        assert.ok(
-            comparison.match,
-            `File mismatch:\n` +
-            `  missing: ${comparison.missing.length} (${comparison.missing.slice(0, 5).join(', ')})\n` +
-            `  different: ${comparison.different.length} (${comparison.different.slice(0, 5).map(d => d.path).join(', ')})`
-        );
+        assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
     it('SQL dump loads into a fresh database', async () => {

@@ -10,7 +10,7 @@ import { randomBytes } from 'node:crypto';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes, sha1File,
+    hashDirectory, assertTreesMatch, sha1File,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -52,14 +52,7 @@ describe('Import: SHA1 Integrity', () => {
 
     it('all file hashes match source', () => {
         const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-        const sourceHashes = hashDirectory(getSiteDir(site));
-        const importedHashes = hashDirectory(importedRoot);
-
-        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-        assert.ok(comparison.match,
-            `File mismatch: missing=${comparison.missing.length}, different=${comparison.different.length}\n` +
-            `missing: ${JSON.stringify(comparison.missing.slice(0, 5))}\n` +
-            `different: ${JSON.stringify(comparison.different.slice(0, 5))}`);
+        assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
     it('indexed at least 3000 files from remote', () => {

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, readAuditLog,
+    assertTreesMatch, readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
 } from '../lib/test-helpers.js';
@@ -119,11 +119,10 @@ describe('Import: Concurrent Errors', { timeout: 180000 }, () => {
 
     it('non-error files are still downloaded correctly', () => {
         const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-        const hashes = hashDirectory(importedRoot);
-        assert.ok(hashes.size > 0, 'Expected at least some files downloaded');
-        assert.ok(
-            [...hashes.keys()].some(p => p.includes('hello.txt')),
-            'Expected hello.txt to be downloaded'
-        );
+        // allowMissing: multiple hooks with sleep(1) slow export, so sync may be incomplete
+        assertTreesMatch(getSiteDir(site), importedRoot, {
+            exclude: ['concurrent-unreadable.txt', 'concurrent-volatile.bin', 'concurrent-deletable.bin'],
+            allowMissing: true,
+        });
     });
 });

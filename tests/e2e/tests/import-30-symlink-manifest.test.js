@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, readAuditLog,
+    assertTreesMatch, readAuditLog,
     assertSiteMirror,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -56,14 +56,7 @@ describe('Import: Symlink Handling', () => {
 
     it('regular files are still downloaded correctly', () => {
         const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-        const hashes = hashDirectory(importedRoot);
-        assert.ok(hashes.size > 0, 'Expected regular files to be downloaded');
-
-        // hello.txt should be present
-        assert.ok(
-            [...hashes.keys()].some(p => p.includes('hello.txt')),
-            'Expected hello.txt in import'
-        );
+        assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
     it('audit log records symlink entries', () => {

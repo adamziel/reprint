@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes,
+    assertTreesMatch,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -52,15 +52,7 @@ describe('Import: Basic File Sync', () => {
         const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
         assert.ok(existsSync(importedRoot), `Expected ${importedRoot} to exist`);
 
-        const sourceHashes = hashDirectory(getSiteDir(site));
-        const importedHashes = hashDirectory(importedRoot);
-
-        assert.ok(importedHashes.size > 0, 'Expected at least one imported file');
-
-        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-        assert.ok(comparison.match,
-            `File mismatch: missing=${JSON.stringify(comparison.missing.slice(0, 5))}, ` +
-            `different=${JSON.stringify(comparison.different.slice(0, 5))}`);
+        assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
     it('.import-index.jsonl has entries', () => {

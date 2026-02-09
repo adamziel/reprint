@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes, readAuditLog,
+    hashDirectory, assertTreesMatch, readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
 } from '../lib/test-helpers.js';
@@ -84,19 +84,8 @@ describe('Import: Volatile Files', () => {
         it('downloaded files have correct hashes (no corruption)', () => {
             const siteDir = getSiteDir(site);
             const importedRoot = join(tempDir, 'filesystem-root', siteDir);
-            const sourceHashes = hashDirectory(siteDir);
-            const importedHashes = hashDirectory(importedRoot);
-            // Exclude large-volatile.bin since it was modified mid-stream
-            for (const [path] of importedHashes) {
-                if (path.includes('large-volatile.bin')) importedHashes.delete(path);
-            }
-            // Verify no file corruption: every imported file must match source.
-            // Sync may be partial (sleep(1) in hook slows server), so we check
-            // only that downloaded files are correct, not that all files are present.
-            const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-            assert.equal(comparison.different.length, 0,
-                `File corruption detected: ${JSON.stringify(comparison.different.slice(0, 5))}`);
-            assert.ok(importedHashes.size > 100, `Expected substantial file download, got ${importedHashes.size}`);
+            // allowMissing: hook's sleep(1) slows export, so sync may be incomplete
+            assertTreesMatch(siteDir, importedRoot, { exclude: ['large-volatile.bin'], allowMissing: true });
         });
 
         it('hook fired during export', () => {

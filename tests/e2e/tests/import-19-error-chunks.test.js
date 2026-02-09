@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes,
+    assertTreesMatch,
     readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
@@ -65,13 +65,7 @@ describe('Import: Error Chunks', () => {
         it('downloaded files have correct hashes (no corruption)', () => {
             const siteDir = getSiteDir(site);
             const importedRoot = join(tempDir, 'filesystem-root', siteDir);
-            const sourceHashes = hashDirectory(siteDir);
-            const importedHashes = hashDirectory(importedRoot);
-            // Verify no file corruption: every imported file must match source
-            const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-            assert.equal(comparison.different.length, 0,
-                `File corruption detected: ${JSON.stringify(comparison.different.slice(0, 5))}`);
-            assert.ok(importedHashes.size > 100, `Expected substantial file download, got ${importedHashes.size}`);
+            assertTreesMatch(siteDir, importedRoot);
         });
     });
 
@@ -144,15 +138,8 @@ describe('Import: Error Chunks', () => {
         it('downloaded files have correct hashes (no corruption)', () => {
             const siteDir = getSiteDir(site);
             const importedRoot = join(tempDir, 'filesystem-root', siteDir);
-            const sourceHashes = hashDirectory(siteDir);
-            const importedHashes = hashDirectory(importedRoot);
-            for (const [path] of importedHashes) {
-                if (path.includes('large-volatile.bin')) importedHashes.delete(path);
-            }
-            const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-            assert.equal(comparison.different.length, 0,
-                `File corruption detected: ${JSON.stringify(comparison.different.slice(0, 5))}`);
-            assert.ok(importedHashes.size > 100, `Expected substantial file download, got ${importedHashes.size}`);
+            // allowMissing: hook's sleep(1) slows export, so sync may be incomplete
+            assertTreesMatch(siteDir, importedRoot, { exclude: ['large-volatile.bin'], allowMissing: true });
         });
     });
 
@@ -221,15 +208,8 @@ describe('Import: Error Chunks', () => {
         it('downloaded files have correct hashes (no corruption)', () => {
             const siteDir = getSiteDir(site);
             const importedRoot = join(tempDir, 'filesystem-root', siteDir);
-            const sourceHashes = hashDirectory(siteDir);
-            const importedHashes = hashDirectory(importedRoot);
-            for (const [path] of importedHashes) {
-                if (path.includes('large-deletable.bin')) importedHashes.delete(path);
-            }
-            const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-            assert.equal(comparison.different.length, 0,
-                `File corruption detected: ${JSON.stringify(comparison.different.slice(0, 5))}`);
-            assert.ok(importedHashes.size > 100, `Expected substantial file download, got ${importedHashes.size}`);
+            // allowMissing: hook deletes file mid-stream, which can cause incomplete sync
+            assertTreesMatch(siteDir, importedRoot, { exclude: ['large-deletable.bin'], allowMissing: true });
         });
     });
 });

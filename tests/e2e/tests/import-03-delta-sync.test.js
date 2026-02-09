@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes,
+    assertTreesMatch,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -58,10 +58,7 @@ describe('Import: Delta Sync', () => {
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
         // Hashes should still match
-        const sourceHashes = hashDirectory(getSiteDir(site));
-        const importedHashes = hashDirectory(join(tempDir, 'filesystem-root', getSiteDir(site)));
-        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-        assert.ok(comparison.match, `Files should still match after no-change delta`);
+        assertTreesMatch(getSiteDir(site), join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
     it('files-sync-delta picks up new file after --restart', () => {

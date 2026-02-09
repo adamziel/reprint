@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes, readAuditLog,
+    assertTreesMatch, readAuditLog,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -66,11 +66,7 @@ describe('Import: State Corruption', () => {
 
         it('files match source after recovery', () => {
             const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-            const sourceHashes = hashDirectory(getSiteDir(site));
-            const importedHashes = hashDirectory(importedRoot);
-            const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-            assert.ok(comparison.match,
-                `File mismatch after recovery: missing=${comparison.missing.length}, different=${comparison.different.length}`);
+            assertTreesMatch(getSiteDir(site), importedRoot);
         });
     });
 
@@ -135,11 +131,7 @@ describe('Import: State Corruption', () => {
 
         it('files match source after restart', () => {
             const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-            const sourceHashes = hashDirectory(getSiteDir(site));
-            const importedHashes = hashDirectory(importedRoot);
-            const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-            assert.ok(comparison.match,
-                `File mismatch after restart: missing=${comparison.missing.length}, different=${comparison.different.length}`);
+            assertTreesMatch(getSiteDir(site), importedRoot);
         });
     });
 });

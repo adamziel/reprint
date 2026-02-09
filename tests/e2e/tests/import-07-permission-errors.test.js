@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, readAuditLog,
+    assertTreesMatch, readAuditLog,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -51,16 +51,11 @@ describe('Import: Permission Errors', () => {
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('readable files are downloaded', () => {
+        it('readable files are downloaded and match source', () => {
+            // hashDirectory skips unreadable files on both sides,
+            // so this verifies all readable files match exactly
             const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-            const hashes = hashDirectory(importedRoot);
-            assert.ok(hashes.size > 0, 'Expected at least one readable file downloaded');
-
-            // hello.txt should be present (it's readable)
-            assert.ok(
-                [...hashes.keys()].some(p => p.includes('hello.txt')),
-                'Expected hello.txt to be downloaded'
-            );
+            assertTreesMatch(getSiteDir(site), importedRoot);
         });
 
         it('audit log records error for unreadable files', () => {

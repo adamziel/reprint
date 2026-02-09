@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes,
+    assertTreesMatch,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -53,13 +53,7 @@ describe('Import: Custom WP Content', () => {
         const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
         assert.ok(existsSync(importedRoot), `Expected ${importedRoot} to exist`);
 
-        const sourceHashes = hashDirectory(getSiteDir(site));
-        const importedHashes = hashDirectory(importedRoot);
-
-        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-        assert.ok(comparison.match,
-            `File mismatch: missing=${JSON.stringify(comparison.missing.slice(0, 5))}, ` +
-            `different=${JSON.stringify(comparison.different.slice(0, 5))}`);
+        assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
     it('indexed at least 3000 files from remote', () => {

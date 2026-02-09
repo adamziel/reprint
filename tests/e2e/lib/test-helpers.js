@@ -607,5 +607,43 @@ export function assertSiteMirror(importedSiteRoot) {
     }
 }
 
+/**
+ * Assert that two directory trees are identical: no missing, no extra, no different files.
+ * Symlinks and unreadable files are skipped on both sides (by hashDirectory).
+ * @param {string} sourceDir - Source directory path
+ * @param {string} importedDir - Imported directory path
+ * @param {Object} options
+ * @param {string[]} options.exclude - Substrings to exclude from comparison (e.g. ['large-volatile.bin'])
+ * @param {boolean} options.allowMissing - If true, allow files present in source but missing from import (for tests where hooks cause incomplete syncs)
+ */
+export function assertTreesMatch(sourceDir, importedDir, options = {}) {
+    const exclude = options.exclude || [];
+    const sourceHashes = hashDirectory(sourceDir);
+    const importedHashes = hashDirectory(importedDir);
+
+    // Remove excluded paths from both maps
+    for (const substr of exclude) {
+        for (const path of sourceHashes.keys()) {
+            if (path.includes(substr)) sourceHashes.delete(path);
+        }
+        for (const path of importedHashes.keys()) {
+            if (path.includes(substr)) importedHashes.delete(path);
+        }
+    }
+
+    const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
+    const problems = [];
+    if (!options.allowMissing && comparison.missing.length > 0) {
+        problems.push(`missing=${comparison.missing.length} (${comparison.missing.slice(0, 5).join(', ')})`);
+    }
+    if (comparison.extra.length > 0) {
+        problems.push(`extra=${comparison.extra.length} (${comparison.extra.slice(0, 5).join(', ')})`);
+    }
+    if (comparison.different.length > 0) {
+        problems.push(`different=${comparison.different.length} (${comparison.different.slice(0, 5).map(d => d.path).join(', ')})`);
+    }
+    assert.equal(problems.length, 0, `Trees differ: ${problems.join('; ')}`);
+}
+
 // Re-export constants
 export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, DB_HOST, DB_USER, DB_PASS };

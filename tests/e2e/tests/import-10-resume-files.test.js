@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, compareDirectoryHashes,
+    assertTreesMatch,
     assertFileCount, assertSiteMirror,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -72,13 +72,6 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
 
     it('all files present and correct after multi-request sync', () => {
         const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
-        const sourceHashes = hashDirectory(getSiteDir(site));
-        const importedHashes = hashDirectory(importedRoot);
-
-        const comparison = compareDirectoryHashes(sourceHashes, importedHashes);
-        assert.ok(comparison.match,
-            `File mismatch: missing=${comparison.missing.length}, ` +
-            `different=${comparison.different.length}\n` +
-            `missing: ${JSON.stringify(comparison.missing.slice(0, 5))}`);
+        assertTreesMatch(getSiteDir(site), importedRoot);
     });
 });
