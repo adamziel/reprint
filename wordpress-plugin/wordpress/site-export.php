@@ -25,28 +25,46 @@ class Site_Export_Plugin {
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'handle_settings_save']);
         add_filter('plugin_action_links_' . plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'), [$this, 'add_settings_link']);
+        add_action('admin_bar_menu', [$this, 'add_admin_bar_node'], 100);
     }
 
     /**
      * Add "Settings" link to the plugin row on the Plugins page.
      */
     public function add_settings_link(array $links): array {
-        $url = admin_url('tools.php?page=site-export');
+        $url = admin_url('admin.php?page=site-export');
         array_unshift($links, '<a href="' . esc_url($url) . '">Settings</a>');
         return $links;
     }
 
     /**
-     * Add admin menu page under Tools.
+     * Add top-level admin menu page.
      */
     public function add_admin_menu() {
-        add_management_page(
+        add_menu_page(
             'Site Export',
             'Site Export',
             'manage_options',
             'site-export',
-            [$this, 'render_admin_page']
+            [$this, 'render_admin_page'],
+            'dashicons-cloud-upload'
         );
+    }
+
+    /**
+     * Add "Site Export" link to the admin bar.
+     */
+    public function add_admin_bar_node($wp_admin_bar) {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        $wp_admin_bar->add_node([
+            'id'    => 'site-export',
+            'title' => 'Site Export',
+            'href'  => admin_url('admin.php?page=site-export'),
+            'meta'  => ['title' => 'Site Export'],
+        ]);
     }
 
     /**
@@ -362,7 +380,7 @@ add_action('admin_init', function() {
     if (get_transient('site_export_activated')) {
         delete_transient('site_export_activated');
         if (!isset($_GET['activate-multi'])) {
-            wp_safe_redirect(admin_url('tools.php?page=site-export'));
+            wp_safe_redirect(admin_url('admin.php?page=site-export'));
             exit;
         }
     }
