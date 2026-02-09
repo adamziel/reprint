@@ -34,5 +34,6 @@ rm -rf /tmp/e2e-import-* 2>/dev/null || true
 
 # Clean up test hook state files
 rm -f /tmp/e2e-hook-state-* 2>/dev/null || true
+sudo rm -f "$SITE_ROOT"/.e2e-hook-state-* 2>/dev/null || true
 
 echo "=== Teardown complete ==="

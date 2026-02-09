@@ -7,7 +7,7 @@
  */
 import {
     existsSync, writeFileSync, mkdirSync, readdirSync,
-    copyFileSync, symlinkSync, chmodSync,
+    copyFileSync, symlinkSync, chmodSync, readFileSync,
     openSync, closeSync, unlinkSync, constants,
 } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -18,6 +18,23 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { randomBytes } from 'node:crypto';
 
 const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
+
+/**
+ * Copy a file, falling back to read+write if copyFileSync fails with EPERM.
+ * Node's copyFileSync uses copy_file_range/sendfile which can fail on some
+ * filesystem/ownership combinations even when the destination is writable.
+ */
+export function safeCopyFile(src, dest) {
+    try {
+        copyFileSync(src, dest);
+    } catch (e) {
+        if (e.code === 'EPERM') {
+            writeFileSync(dest, readFileSync(src));
+        } else {
+            throw e;
+        }
+    }
+}
 
 export const SITE_ROOT = REGISTRY.siteRoot;
 const DB_HOST = REGISTRY.dbHost;
@@ -81,7 +98,7 @@ export async function ensureWpTemplate() {
 /**
  * Create the standard sample database tables.
  */
-export async function createSampleDb(dbName) {
+export async function createSampleDb(dbName, siteName = 'unknown') {
     const conn = await createConnection({
         host: DB_HOST,
         user: DB_USER,
@@ -102,7 +119,7 @@ CREATE TABLE IF NOT EXISTS wp_options (
 INSERT INTO wp_options (option_name, option_value, autoload) VALUES
     ('siteurl', 'http://localhost', 'yes'),
     ('home', 'http://localhost', 'yes'),
-    ('blogname', 'E2E Test Site', 'yes'),
+    ('blogname', 'E2E: ${siteName}', 'yes'),
     ('blogdescription', 'Just another test site', 'yes'),
     ('active_plugins', 'a:0:{}', 'yes');
 
@@ -187,7 +204,8 @@ export async function ensureSite(name, options = {}) {
 
     await ensureWpTemplate();
 
-    // Create site dir, copy WP template, make writable for Node fs operations
+    // Remove old site dir (clean slate), create fresh, copy WP template
+    execSync(`sudo rm -rf "${siteDir}"`);
     execSync(`sudo mkdir -p "${SITE_ROOT}" && sudo mkdir -p "${siteDir}"`);
     execSync(`sudo cp -a "${WP_TEMPLATE}/." "${siteDir}/"`);
     execSync(`sudo chmod -R 777 "${siteDir}"`);
@@ -216,12 +234,12 @@ $table_prefix = 'wp_';
     );
 
     // Copy plugin source files
-    copyFileSync(
+    safeCopyFile(
         join(PLUGIN_SRC, 'api.php'),
         join(siteDir, 'wp-content', 'plugins', 'site-export', 'api.php')
     );
     for (const f of readdirSync(join(PLUGIN_SRC, 'generic')).filter(f => f.endsWith('.php'))) {
-        copyFileSync(
+        safeCopyFile(
             join(PLUGIN_SRC, 'generic', f),
             join(siteDir, 'wp-content', 'plugins', 'site-export', 'generic', f)
         );
@@ -236,7 +254,7 @@ $table_prefix = 'wp_';
 
     // Populate database
     if (dbOpt === 'sample') {
-        await createSampleDb(dbName);
+        await createSampleDb(dbName, name);
     } else if (dbOpt === 'custom' && options.customDb) {
         const conn = await createConnection({
             host: DB_HOST, user: DB_USER, password: DB_PASS,

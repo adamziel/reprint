@@ -8,7 +8,7 @@
  *
  * Usage:  node lib/provision-all.js
  */
-import { ensureSite, SITE_ROOT } from './site-setup.js';
+import { ensureSite, SITE_ROOT, safeCopyFile } from './site-setup.js';
 import { writeFileSync, mkdirSync, copyFileSync, readdirSync, symlinkSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -17,11 +17,68 @@ import { randomBytes } from 'node:crypto';
 // Standard sites (default sample DB + files)
 for (const name of [
     'basic', 'file-changes', 'dir-deleted', 'volatile-file',
-    'hmac-errors', 'http-errors', 'request-cutoff', 'gzip-corrupt',
+    'hmac-errors', 'request-cutoff', 'gzip-corrupt',
     'buffered', 'error-chunks', 'import-failures',
 ]) {
     await ensureSite(name);
 }
+
+// http-errors: custom DB with edge-case data types for SQL fidelity testing
+await ensureSite('http-errors', {
+    db: 'custom',
+    customDb: async (dbName, conn) => {
+        await conn.query(`
+CREATE TABLE wp_options (
+    option_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    option_name VARCHAR(191) NOT NULL DEFAULT '',
+    option_value LONGTEXT NOT NULL,
+    autoload VARCHAR(20) NOT NULL DEFAULT 'yes',
+    UNIQUE KEY option_name (option_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO wp_options (option_name, option_value) VALUES
+    ('siteurl', 'http://localhost'),
+    ('blogname', 'E2E: http-errors');
+
+CREATE TABLE wp_edge_cases (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    text_val TEXT,
+    int_val BIGINT,
+    float_val DOUBLE,
+    blob_val BLOB,
+    date_val DATETIME,
+    ts_val TIMESTAMP NULL DEFAULT NULL,
+    enum_val ENUM('a','b','c') DEFAULT NULL,
+    set_val SET('x','y','z') DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+
+        await conn.query(
+            `INSERT INTO wp_edge_cases (name, text_val, int_val, float_val, blob_val, date_val, ts_val, enum_val, set_val) VALUES
+            ('null_text', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+            ('empty_string', '', 0, 0.0, '', '0000-00-00 00:00:00', NULL, 'a', 'x'),
+            ('max_int', 'max', 9223372036854775807, 1.7976931348623157e+308, X'DEADBEEF', '9999-12-31 23:59:59', '2038-01-19 03:14:07', 'c', 'x,y,z'),
+            ('negative', 'neg', -9223372036854775808, -1.7976931348623157e+308, X'00FF00FF', '2000-01-01 00:00:01', '2000-01-01 00:00:01', 'b', 'y'),
+            ('unicode', 'Héllo Wörld 中文 🎉🚀', 42, 3.14, X'CAFEBABE', NOW(), NOW(), 'a', 'x,z'),
+            ('backslash', 'path\\\\to\\\\file', 1, 1.0, X'5C5C', NOW(), NOW(), NULL, NULL),
+            ('quotes', 'it''s a "test"', 2, 2.0, X'2227', NOW(), NOW(), NULL, NULL),
+            ('newlines', 'line1\\nline2\\rline3\\r\\nline4', 3, 3.0, X'0A0D0A', NOW(), NOW(), NULL, NULL)`
+        );
+
+        const longText = 'A'.repeat(65000);
+        await conn.query(
+            'INSERT INTO wp_edge_cases (name, text_val) VALUES (?, ?)',
+            ['long_text', longText]
+        );
+
+        const binaryData = Buffer.from([0x00, 0x01, 0x02, 0xFF, 0xFE, 0x00, 0x00, 0xFF]);
+        await conn.query(
+            'INSERT INTO wp_edge_cases (name, blob_val) VALUES (?, ?)',
+            ['nul_bytes', binaryData]
+        );
+    },
+});
 
 // symlinks-outside: create external symlink
 await ensureSite('symlinks-outside', {
@@ -43,11 +100,11 @@ await ensureSite('custom-wp-content', {
         const customPlugin = join(siteDir, 'custom-content', 'plugins', 'site-export', 'generic');
         const srcPlugin = join(siteDir, 'wp-content', 'plugins', 'site-export');
         mkdirSync(customPlugin, { recursive: true });
-        copyFileSync(join(srcPlugin, 'api.php'), join(customPlugin, '..', 'api.php'));
+        safeCopyFile(join(srcPlugin, 'api.php'), join(customPlugin, '..', 'api.php'));
         for (const f of readdirSync(join(srcPlugin, 'generic')).filter(f => f.endsWith('.php'))) {
-            copyFileSync(join(srcPlugin, 'generic', f), join(customPlugin, f));
+            safeCopyFile(join(srcPlugin, 'generic', f), join(customPlugin, f));
         }
-        copyFileSync(join(srcPlugin, 'secret.php'), join(customPlugin, '..', 'secret.php'));
+        safeCopyFile(join(srcPlugin, 'secret.php'), join(customPlugin, '..', 'secret.php'));
     },
 });
 

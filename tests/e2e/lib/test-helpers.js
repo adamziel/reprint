@@ -444,19 +444,28 @@ export function removeTestHooks(siteName) {
 }
 
 /**
+ * Get hook state file path.
+ * Uses /srv/e2e-sites/ instead of /tmp because PHP-FPM has PrivateTmp=yes,
+ * so PHP and Node.js see different /tmp directories.
+ */
+function hookStatePath(siteName) {
+    return `${SITE_ROOT}/.e2e-hook-state-${siteName}`;
+}
+
+/**
  * Write a state file that test hooks can read/write.
  */
 export function writeHookState(siteName, data) {
-    const statePath = `/tmp/e2e-hook-state-${siteName}`;
-    writeFileSync(statePath, JSON.stringify(data));
-    execSync(`chmod 666 ${statePath}`);
+    const statePath = hookStatePath(siteName);
+    execSync(`sudo tee ${JSON.stringify(statePath)} > /dev/null <<'STATEEOF'\n${JSON.stringify(data)}\nSTATEEOF`);
+    execSync(`sudo chmod 666 ${JSON.stringify(statePath)}`);
 }
 
 /**
  * Read a state file written by test hooks.
  */
 export function readHookState(siteName) {
-    const statePath = `/tmp/e2e-hook-state-${siteName}`;
+    const statePath = hookStatePath(siteName);
     try {
         return JSON.parse(readFileSync(statePath, 'utf-8'));
     } catch (e) {
@@ -468,9 +477,9 @@ export function readHookState(siteName) {
  * Clear hook state file.
  */
 export function clearHookState(siteName) {
-    const statePath = `/tmp/e2e-hook-state-${siteName}`;
+    const statePath = hookStatePath(siteName);
     try {
-        unlinkSync(statePath);
+        execSync(`sudo rm -f ${JSON.stringify(statePath)}`);
     } catch (e) {
         // Ignore
     }

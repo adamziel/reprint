@@ -388,6 +388,7 @@ class FileTreeProducer
         if ($this->streaming_file_handle === null) {
             $this->streaming_file_handle = @fopen($file["path"], "r");
             if (!$this->streaming_file_handle) {
+                $this->streaming_file_handle = null;
                 $this->current_file_meta = null;
                 $this->current_chunk = [
                     "type" => "error",

@@ -1,6 +1,7 @@
 /**
  * Test 07: Permission Errors via import.php
- * Tests chmod-denied and mysql-restricted sites complete gracefully.
+ * Tests chmod-denied and mysql-restricted sites complete gracefully
+ * and produce appropriate error chunks in the audit log.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -10,7 +11,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory,
+    hashDirectory, readAuditLog,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -62,6 +63,12 @@ describe('Import: Permission Errors', () => {
             );
         });
 
+        it('audit log records error for unreadable files', () => {
+            const audit = readAuditLog(tempDir);
+            assert.ok(audit.includes('REMOTE ERROR'), 'Expected REMOTE ERROR in audit log');
+            assert.ok(audit.includes('type=file_open'), 'Expected type=file_open in audit log');
+            assert.ok(audit.includes('unreadable.txt'), 'Expected unreadable.txt mentioned in audit log');
+        });
     });
 
     describe('mysql-restricted', () => {
@@ -127,6 +134,13 @@ INSERT INTO wp_secret_table VALUES (1, 'top secret');
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.status, 'complete');
+        });
+
+        it('SQL dump contains both tables', () => {
+            const sqlFile = join(tempDir, 'db.sql');
+            const sql = readFileSync(sqlFile, 'utf-8');
+            assert.ok(sql.includes('wp_options'), 'Expected wp_options table in SQL dump');
+            assert.ok(sql.includes('wp_secret_table'), 'Expected wp_secret_table in SQL dump');
         });
     });
 });
