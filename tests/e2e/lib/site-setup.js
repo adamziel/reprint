@@ -188,6 +188,37 @@ export async function ensureSite(name, options = {}) {
         return;
     }
 
+    // Lock to prevent parallel forks from provisioning the same site simultaneously.
+    // Uses the same O_EXCL pattern as ensureWpTemplate().
+    const lockPath = `/tmp/e2e-site-${name}.lock`;
+    let acquired = false;
+    try {
+        const fd = openSync(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+        closeSync(fd);
+        acquired = true;
+    } catch (e) {
+        // Another process holds the lock — wait for marker
+    }
+
+    if (!acquired) {
+        const deadline = Date.now() + 300000;
+        while (!existsSync(markerPath)) {
+            if (Date.now() > deadline) {
+                throw new Error(`Timed out waiting for site ${name} to be provisioned by another process`);
+            }
+            await sleep(500);
+        }
+        return;
+    }
+
+    // Double-check after acquiring lock (another process may have finished first)
+    if (existsSync(markerPath)) {
+        try { unlinkSync(lockPath); } catch (e) {}
+        return;
+    }
+
+    try {
+
     const dbName = `e2e_${name.replace(/-/g, '_')}`;
     const secret = `test-secret-${name}`;
     const dbOpt = options.db || 'standard';
@@ -285,4 +316,8 @@ export async function ensureSite(name, options = {}) {
 
     // Write marker
     execSync(`sudo touch "${markerPath}"`);
+
+    } finally {
+        try { unlinkSync(lockPath); } catch (e) {}
+    }
 }
