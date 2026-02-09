@@ -1642,6 +1642,37 @@ class ImportClient
             "PREFLIGHT RESULT | " . json_encode($entry),
             false,
         );
+
+        // Log non-standard WordPress directory layouts for awareness
+        $paths = $payload["database"]["wp"]["paths_urls"] ?? null;
+        if (is_array($paths)) {
+            $abspath = rtrim($paths["abspath"] ?? "", "/");
+            $content_dir = rtrim($paths["content_dir"] ?? "", "/");
+            $uploads_basedir = rtrim(
+                $paths["uploads"]["basedir"] ?? "",
+                "/",
+            );
+            if (
+                $abspath !== "" &&
+                $content_dir !== "" &&
+                $content_dir !== $abspath . "/wp-content"
+            ) {
+                $this->audit_log(
+                    "NON-STANDARD LAYOUT | wp-content is at {$content_dir} " .
+                        "(expected {$abspath}/wp-content)",
+                );
+            }
+            if (
+                $content_dir !== "" &&
+                $uploads_basedir !== "" &&
+                strpos($uploads_basedir, $content_dir) !== 0
+            ) {
+                $this->audit_log(
+                    "NON-STANDARD LAYOUT | uploads at {$uploads_basedir} " .
+                        "is outside wp-content ({$content_dir})",
+                );
+            }
+        }
     }
 
     /**
@@ -2712,9 +2743,12 @@ class ImportClient
 
         $roots = $this->get_root_directories_from_url();
         if (empty($roots)) {
+            $roots = $this->get_root_directories_from_preflight();
+        }
+        if (empty($roots)) {
             throw new RuntimeException(
-                "No root directories found in remote URL. " .
-                    "Provide directory=... in the export URL.",
+                "No root directories found. Either add directory[]=... to the " .
+                    "export URL, or run preflight first so directories can be auto-detected.",
             );
         }
 
@@ -4466,6 +4500,33 @@ class ImportClient
     /**
      * Extract root directories from the remote URL query.
      */
+    /**
+     * Extract root directories from preflight wp_detect data.
+     * Falls back to this when the URL doesn't contain directory[] params.
+     */
+    private function get_root_directories_from_preflight(): array
+    {
+        $roots = $this->state["preflight"]["data"]["wp_detect"]["roots"] ?? [];
+        if (!is_array($roots) || empty($roots)) {
+            return [];
+        }
+        $dirs = [];
+        foreach ($roots as $root) {
+            $path = $root["path"] ?? null;
+            if (is_string($path) && $path !== "") {
+                $dirs[] = rtrim($path, "/");
+            }
+        }
+        $dirs = array_values(array_unique($dirs));
+        if (!empty($dirs)) {
+            $this->audit_log(
+                "DIRECTORY AUTO-DETECT | from preflight wp_detect.roots: " .
+                    implode(", ", $dirs),
+            );
+        }
+        return $dirs;
+    }
+
     private function get_root_directories_from_url(): array
     {
         $parts = parse_url($this->remote_url);
