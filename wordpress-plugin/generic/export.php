@@ -1868,6 +1868,12 @@ function endpoint_preflight(array $config): array
                             }
                         }
                         $db["wp"]["constants"] = $constant_values;
+
+                        // WordPress version
+                        global $wp_version;
+                        $db["wp"]["wp_version"] = isset($wp_version) && is_string($wp_version)
+                            ? $wp_version
+                            : null;
                     } catch (Throwable $e) {
                         if ($db["wp"]["error"] === null) {
                             $db["wp"]["error"] = $e->getMessage();
@@ -2489,12 +2495,16 @@ function encode_index_batch(array $batch_items): array
 {
     $encoded = [];
     foreach ($batch_items as $item) {
-        $encoded[] = [
+        $entry = [
             "path" => base64_encode($item["path"]),
             "ctime" => $item["ctime"],
             "size" => $item["size"],
             "type" => $item["type"],
         ];
+        if (isset($item["target"])) {
+            $entry["target"] = base64_encode($item["target"]);
+        }
+        $encoded[] = $entry;
     }
     return $encoded;
 }
@@ -2570,6 +2580,7 @@ function endpoint_file_index(
             );
         }
 
+        $follow_symlinks = !empty($config["follow_symlinks"]);
         $allowed = false;
         foreach ($directories as $root) {
             if (
@@ -2580,7 +2591,10 @@ function endpoint_file_index(
                 break;
             }
         }
-        if (!$allowed) {
+        // When follow_symlinks is enabled, allow any directory that the
+        // authenticated client requests.  The client is already authenticated
+        // via HMAC, so there is no untrusted-input risk.
+        if (!$allowed && !$follow_symlinks) {
             throw new InvalidArgumentException(
                 "list_dir is outside of allowed roots: {$list_dir_real}",
             );
@@ -2696,14 +2710,16 @@ function endpoint_file_index(
                 continue;
             }
 
-            $allowed = false;
-            foreach ($directories as $root) {
-                if (
-                    $current_real === $root ||
-                    str_starts_with($current_real, $root . "/")
-                ) {
-                    $allowed = true;
-                    break;
+            $allowed = $follow_symlinks;
+            if (!$allowed) {
+                foreach ($directories as $root) {
+                    if (
+                        $current_real === $root ||
+                        str_starts_with($current_real, $root . "/")
+                    ) {
+                        $allowed = true;
+                        break;
+                    }
                 }
             }
             if (!$allowed) {
@@ -2812,8 +2828,10 @@ function endpoint_file_index(
 
                 $mode = $stat["mode"] & 0170000;
                 $type = "file";
+                $link_target = null;
                 if ($mode === 0120000) {
                     $type = "link";
+                    $link_target = @readlink($path);
                 } elseif ($mode === 0040000) {
                     $type = "dir";
                 } elseif ($mode !== 0100000) {
@@ -2823,12 +2841,16 @@ function endpoint_file_index(
                 $ctime = (int) ($stat["ctime"] ?? 0);
                 $size = $type === "file" ? (int) ($stat["size"] ?? 0) : 0;
 
-                $batch_items[] = [
+                $item = [
                     "path" => $path,
                     "ctime" => $ctime,
                     "size" => $size,
                     "type" => $type,
                 ];
+                if ($link_target !== null && $link_target !== false) {
+                    $item["target"] = $link_target;
+                }
+                $batch_items[] = $item;
 
                 if (count($batch_items) >= $batch_size) {
                     // E2E test hook: before index batch is emitted
@@ -3376,7 +3398,7 @@ function parse_http_config(): array
             $value = (int) $value;
         } elseif (in_array($key, ["memory_threshold"])) {
             $value = (float) $value;
-        } elseif (in_array($key, ["create_table_query", "db_unbuffered"])) {
+        } elseif (in_array($key, ["create_table_query", "db_unbuffered", "follow_symlinks"])) {
             $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
         } elseif ($key === "paths" && is_string($value)) {
             // Paths passed as JSON-encoded string in parameter

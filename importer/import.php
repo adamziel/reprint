@@ -1247,6 +1247,7 @@ class ImportClient
     private $state; // Current import state
     private $chunks_since_save = 0; // Track chunks for periodic saves
     private $shutdown_requested = false; // Flag for graceful shutdown
+    private $follow_symlinks = false; // Whether to follow symlinks outside root
     private $current_curl_handle = null; // Active curl handle for abort
     private $tuner = null; // AdaptiveTuner instance or null
     private $hmac_client = null; // Site_Export_HMAC_Client instance or null
@@ -1522,6 +1523,7 @@ class ImportClient
     public function run(array $options = []): void
     {
         $this->verbose_mode = $options["verbose"] ?? false;
+        $this->follow_symlinks = $options["follow_symlinks"] ?? false;
         $command = $options["command"] ?? null;
         $restart = $options["restart"] ?? false;
 
@@ -1546,6 +1548,16 @@ class ImportClient
         }
 
         $this->state = $this->load_state();
+
+        // Persist follow_symlinks in state so it survives across invocations.
+        // If passed on CLI, store it.  Otherwise, restore from persisted state.
+        if ($this->follow_symlinks) {
+            $this->state["follow_symlinks"] = true;
+            $this->save_state($this->state);
+        } elseif ($this->state["follow_symlinks"] ?? false) {
+            $this->follow_symlinks = true;
+        }
+
         $this->initialize_tuner($options);
 
         // Initialize HMAC authentication if a shared secret was provided.
@@ -1636,6 +1648,13 @@ class ImportClient
         ];
 
         $this->state["preflight"] = $entry;
+
+        // Store WordPress version at the top level for easy access
+        $wp_version = $payload["database"]["wp"]["wp_version"] ?? null;
+        if (is_string($wp_version) && $wp_version !== "") {
+            $this->state["version"] = $wp_version;
+        }
+
         $this->save_state($this->state);
 
         $this->audit_log(
@@ -1872,7 +1891,7 @@ class ImportClient
                 "RESTART | Clearing files-sync-initial state and starting fresh",
                 true,
             );
-            $this->state = $this->default_state();
+            $this->reset_state();
 
             if (file_exists($this->index_file)) {
                 @unlink($this->index_file);
@@ -1974,6 +1993,14 @@ class ImportClient
                 $this->save_state($this->state);
                 return;
             }
+            if ($this->follow_symlinks) {
+                $this->discover_symlink_targets();
+                if ($this->shutdown_requested) {
+                    $this->state["status"] = "partial";
+                    $this->save_state($this->state);
+                    return;
+                }
+            }
             $this->sort_index_file($this->remote_index_file);
             $this->state["stage"] = "diff";
             $this->state["diff"] = $this->default_state()["diff"];
@@ -2074,7 +2101,7 @@ class ImportClient
                 "RESTART | Clearing files-sync-delta state and starting fresh",
                 true,
             );
-            $this->state = $this->default_state();
+            $this->reset_state();
             if (file_exists($this->remote_index_file)) {
                 @unlink($this->remote_index_file);
                 $this->audit_log("FILE DELETE | {$this->remote_index_file}");
@@ -2152,6 +2179,15 @@ class ImportClient
                 $this->state["status"] = "partial";
                 $this->save_state($this->state);
                 return;
+            }
+
+            if ($this->follow_symlinks) {
+                $this->discover_symlink_targets();
+                if ($this->shutdown_requested) {
+                    $this->state["status"] = "partial";
+                    $this->save_state($this->state);
+                    return;
+                }
             }
 
             $this->sort_index_file($this->remote_index_file);
@@ -2324,6 +2360,13 @@ class ImportClient
             }
         }
 
+        // Follow symlinks: discover symlink targets outside known roots and
+        // index them as additional directories.  Repeats until no new targets
+        // are found, with cycle detection via realpath.
+        if ($this->follow_symlinks) {
+            $this->discover_symlink_targets();
+        }
+
         $this->sort_index_file($this->remote_index_file);
         $this->state["status"] = "complete";
         $this->state["stage"] = null;
@@ -2349,6 +2392,228 @@ class ImportClient
             echo "Remote index: {$this->remote_index_file}\n";
             echo "Audit log: {$this->audit_log}\n";
         }
+    }
+
+    /**
+     * Discover directories that need indexing beyond the primary export roots.
+     *
+     * Scans the remote index for symlink entries with a "target" field,
+     * resolves relative targets to absolute paths, and indexes each target
+     * directory.  Repeats until the queue is drained, with cycle detection.
+     */
+    private function discover_symlink_targets(): void
+    {
+        $roots = $this->get_root_directories_from_url();
+        if (empty($roots)) {
+            $roots = $this->get_root_directories_from_preflight();
+        }
+
+        // Collect all indexed directory real paths for containment checks
+        $visited = [];
+        foreach ($roots as $root) {
+            $visited[$root] = true;
+        }
+
+        $queue = $this->extract_symlink_dirs_from_index($visited);
+
+        while (!empty($queue)) {
+            $dir = array_shift($queue);
+            if (isset($visited[$dir])) {
+                continue;
+            }
+            // Skip if this directory is a subdirectory of an already-visited path,
+            // since those files were already included in the parent's index.
+            $already_covered = false;
+            foreach ($visited as $v => $_) {
+                if (str_starts_with($dir, $v . "/")) {
+                    $already_covered = true;
+                    break;
+                }
+            }
+            if ($already_covered) {
+                $this->audit_log(
+                    "FOLLOW SYMLINK SKIP | {$dir} already covered by a visited parent",
+                    true,
+                );
+                continue;
+            }
+            $visited[$dir] = true;
+
+            $this->audit_log(
+                "FOLLOW SYMLINK | indexing target directory: {$dir}",
+                true,
+            );
+            if (!$this->verbose_mode) {
+                echo "Following symlink target: {$dir}\n";
+            }
+
+            // Reset the index cursor so download_remote_index starts fresh
+            // for this directory, but appends to the existing index file.
+            $this->state["index"]["cursor"] = null;
+            $this->save_state($this->state);
+
+            // The server may reject this directory (e.g. if the updated plugin
+            // isn't deployed yet and list_dir validation fails).  In that case,
+            // log a warning and skip to the next directory instead of crashing.
+            $attempts = 0;
+            $last_cursor = null;
+            $skipped = false;
+            while (true) {
+                try {
+                    $complete = $this->download_remote_index($dir);
+                } catch (RuntimeException $e) {
+                    $msg = $e->getMessage();
+                    if (
+                        strpos($msg, "HTTP error 4") !== false ||
+                        strpos($msg, "dir_outside_root") !== false ||
+                        strpos($msg, "outside of allowed roots") !== false
+                    ) {
+                        $this->audit_log(
+                            "FOLLOW SYMLINK SKIP | server rejected {$dir}: " .
+                                substr($msg, 0, 200),
+                            true,
+                        );
+                        if (!$this->verbose_mode) {
+                            echo "  Skipped (server rejected): {$dir}\n";
+                        }
+                        $skipped = true;
+                        break;
+                    }
+                    throw $e;
+                }
+                if ($complete) {
+                    break;
+                }
+
+                if ($this->shutdown_requested) {
+                    return;
+                }
+
+                $current_cursor = $this->state["index"]["cursor"] ?? null;
+                if ($current_cursor === $last_cursor) {
+                    throw new RuntimeException(
+                        "files-index (symlink follow) made no progress (cursor unchanged)",
+                    );
+                }
+                $last_cursor = $current_cursor;
+
+                $attempts++;
+                if ($attempts > 100000) {
+                    throw new RuntimeException(
+                        "files-index (symlink follow) exceeded maximum attempts",
+                    );
+                }
+            }
+            if ($skipped) {
+                continue;
+            }
+
+            // Scan newly added entries for more symlink targets
+            $new_targets = $this->extract_symlink_dirs_from_index($visited);
+            foreach ($new_targets as $target) {
+                if (!isset($visited[$target])) {
+                    $queue[] = $target;
+                }
+            }
+        }
+    }
+
+    /**
+     * Scan the remote index file for symlink entries whose targets are
+     * directories not already in $visited.  Returns an array of real paths.
+     */
+    private function extract_symlink_dirs_from_index(array $visited): array
+    {
+        $targets = [];
+        if (!file_exists($this->remote_index_file)) {
+            return $targets;
+        }
+
+        $h = fopen($this->remote_index_file, "r");
+        if (!$h) {
+            return $targets;
+        }
+
+        while (($line = fgets($h)) !== false) {
+            $entry = json_decode($line, true);
+            if (!is_array($entry)) {
+                continue;
+            }
+            if (($entry["type"] ?? "") !== "link") {
+                continue;
+            }
+            $target_encoded = $entry["target"] ?? null;
+            if (!is_string($target_encoded) || $target_encoded === "") {
+                continue;
+            }
+            $target = base64_decode($target_encoded);
+            if ($target === false || $target === "") {
+                continue;
+            }
+
+            // Resolve relative targets against the symlink's parent directory
+            if ($target[0] !== "/") {
+                $path_encoded = $entry["path"] ?? null;
+                if (!is_string($path_encoded) || $path_encoded === "") {
+                    continue;
+                }
+                $symlink_path = base64_decode($path_encoded);
+                if ($symlink_path === false || $symlink_path === "") {
+                    continue;
+                }
+                $parent = dirname($symlink_path);
+                // Normalize "/../" sequences to produce an absolute path
+                $parts = explode("/", $parent . "/" . $target);
+                $resolved = [];
+                foreach ($parts as $part) {
+                    if ($part === "" || $part === ".") {
+                        if (empty($resolved)) {
+                            $resolved[] = "";
+                        }
+                        continue;
+                    }
+                    if ($part === "..") {
+                        if (count($resolved) > 1) {
+                            array_pop($resolved);
+                        }
+                        continue;
+                    }
+                    $resolved[] = $part;
+                }
+                $target = implode("/", $resolved);
+                if ($target === "" || $target[0] !== "/") {
+                    continue;
+                }
+            }
+
+            // Skip targets that look like files (have an extension in
+            // the last path segment).  We can only index directories.
+            $basename = basename($target);
+            if (strpos($basename, ".") !== false) {
+                continue;
+            }
+
+            if (isset($visited[$target])) {
+                continue;
+            }
+
+            // Check containment: skip if already under a visited root
+            $contained = false;
+            foreach ($visited as $root => $_) {
+                if (str_starts_with($target, $root . "/")) {
+                    $contained = true;
+                    break;
+                }
+            }
+            if ($contained) {
+                continue;
+            }
+
+            $targets[] = $target;
+        }
+        fclose($h);
+
+        return array_values(array_unique($targets));
     }
 
     /**
@@ -2380,7 +2645,7 @@ class ImportClient
                 "RESTART | Clearing sql-sync state and starting fresh",
                 true,
             );
-            $this->state = $this->default_state();
+            $this->reset_state();
             $this->save_state($this->state);
             $has_cursor = false;
             $current_status = null;
@@ -2485,7 +2750,7 @@ class ImportClient
                 "RESTART | Clearing sql-preflight state and starting fresh",
                 true,
             );
-            $this->state = $this->default_state();
+            $this->reset_state();
             $this->save_state($this->state);
             $has_cursor = false;
             $current_status = null;
@@ -2736,7 +3001,7 @@ class ImportClient
     /**
      * Download the remote index stream and write to disk.
      */
-    private function download_remote_index(): bool
+    private function download_remote_index(?string $list_dir_override = null): bool
     {
         $index_state = $this->state["index"] ?? $this->default_state()["index"];
         $cursor = $index_state["cursor"] ?? null;
@@ -2771,7 +3036,10 @@ class ImportClient
         $this->chunks_since_save = 0;
         $params = $this->get_tuned_params("file_index");
         if ($cursor === null) {
-            $params["list_dir"] = $roots[0];
+            $params["list_dir"] = $list_dir_override ?? $roots[0];
+        }
+        if ($this->follow_symlinks) {
+            $params["follow_symlinks"] = "1";
         }
         $url = $this->build_url("file_index", $cursor, $params, null);
         $context = new StreamingContext();
@@ -2832,13 +3100,17 @@ class ImportClient
                     $size = (int) ($item["size"] ?? 0);
                     $type = (string) ($item["type"] ?? "file");
 
+                    $entry = [
+                        "path" => base64_encode($path),
+                        "ctime" => $ctime,
+                        "size" => $size,
+                        "type" => $type,
+                    ];
+                    if (isset($item["target"]) && is_string($item["target"]) && $item["target"] !== "") {
+                        $entry["target"] = $item["target"]; // already base64-encoded
+                    }
                     $line = json_encode(
-                        [
-                            "path" => base64_encode($path),
-                            "ctime" => $ctime,
-                            "size" => $size,
-                            "type" => $type,
-                        ],
+                        $entry,
                         JSON_UNESCAPED_SLASHES,
                     );
                     if ($line === false) {
@@ -4638,15 +4910,23 @@ class ImportClient
                 @unlink($sorted_keyed);
                 throw new RuntimeException("Failed to finalize sorted index file");
             }
+            $prev_key = null;
             while (($line = fgets($sorted_in)) !== false) {
                 $pos = strpos($line, "\t");
                 if ($pos === false) {
                     continue;
                 }
+                $key = substr($line, 0, $pos);
                 $data = substr($line, $pos + 1);
                 if ($data === "") {
                     continue;
                 }
+                // Deduplicate: skip entries with the same path as the previous one.
+                // This handles overlapping symlink targets that index the same files.
+                if ($key === $prev_key) {
+                    continue;
+                }
+                $prev_key = $key;
                 fwrite($sorted_out, $data);
             }
             fclose($sorted_in);
@@ -4686,7 +4966,12 @@ class ImportClient
             return strcmp($a["path"], $b["path"]);
         });
         $lines = [];
+        $prev_path = null;
         foreach ($entries as $entry) {
+            if ($entry["path"] === $prev_path) {
+                continue;
+            }
+            $prev_path = $entry["path"];
             $lines[] = $entry["line"];
         }
         $data = implode("\n", $lines) . "\n";
@@ -5247,6 +5532,21 @@ class ImportClient
     /**
      * Return the default compact state structure.
      */
+    /**
+     * Reset state to defaults while preserving cross-command data like
+     * preflight results, version, and follow_symlinks.
+     */
+    private function reset_state(): void
+    {
+        $preflight = $this->state["preflight"] ?? null;
+        $version = $this->state["version"] ?? null;
+        $follow = $this->state["follow_symlinks"] ?? false;
+        $this->state = $this->default_state();
+        $this->state["preflight"] = $preflight;
+        $this->state["version"] = $version;
+        $this->state["follow_symlinks"] = $follow;
+    }
+
     private function default_state(): array
     {
         return [
@@ -5614,6 +5914,7 @@ if (
         echo "Options:\n";
         echo "  --secret=TOKEN   HMAC shared secret for api.php authentication\n";
         echo "  --restart        Force restart of completed command (clears state)\n";
+        echo "  --follow-symlinks Follow symlinks pointing outside root directories\n";
         echo "  --verbose, -v    Show detailed logs (default: show progress only)\n";
         echo "  --adaptive       Enable adaptive tuning (default)\n";
         echo "  --no-adaptive    Disable adaptive tuning\n";
@@ -5709,6 +6010,8 @@ if (
             $options["restart"] = true;
         } elseif ($argv[$i] === "--verbose" || $argv[$i] === "-v") {
             $options["verbose"] = true;
+        } elseif ($argv[$i] === "--follow-symlinks") {
+            $options["follow_symlinks"] = true;
         } elseif (strpos($argv[$i], "--duty=") === 0) {
             $options["tuning_config"]["duty"] = (float) substr(
                 $argv[$i],
