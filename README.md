@@ -12,7 +12,7 @@
 
 On the **migration source** side:
 
- – PHP 7.4+
+ - PHP 7.4+
  - ext-pdo + ext-pdo_mysql — database access (already in composer.json)
  - ext-json — JSON encoding/decoding
  - ext-hash — hash_hmac, hash_equals
@@ -21,6 +21,7 @@ On the **migration source** side:
 
 On the **migration target** side:
 
+ - PHP 8.1+ (we'll get down to 7.4 if needed)
  – ext-curl
 
 
