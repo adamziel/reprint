@@ -35,6 +35,32 @@ register_shutdown_function(function () {
 });
 
 /**
+ * Parse a human-readable size string (e.g. "16M", "1G", "512K") into bytes.
+ * Accepts plain integers as well.
+ */
+function parse_size(string $value): int
+{
+    $value = trim($value);
+    if (!preg_match('/^(\d+(?:\.\d+)?)\s*([KMGkmg])?[Bb]?$/', $value, $m)) {
+        throw new InvalidArgumentException(
+            "Invalid size value: '{$value}'. Use a number optionally followed by K, M, or G (e.g. 64M).",
+        );
+    }
+    $num = (float) $m[1];
+    $suffix = strtoupper($m[2] ?? "");
+    switch ($suffix) {
+        case "K":
+            return (int) ($num * 1024);
+        case "M":
+            return (int) ($num * 1024 * 1024);
+        case "G":
+            return (int) ($num * 1024 * 1024 * 1024);
+        default:
+            return (int) $num;
+    }
+}
+
+/**
  * Streaming multipart parser.
  * Parses multipart/mixed responses incrementally without buffering entire response.
  */
@@ -1251,6 +1277,7 @@ class ImportClient
     private $current_curl_handle = null; // Active curl handle for abort
     private $tuner = null; // AdaptiveTuner instance or null
     private $hmac_client = null; // Site_Export_HMAC_Client instance or null
+    private $max_allowed_packet = null; // Client's max_allowed_packet for SQL statements
     private $last_http_code = null;
     private $last_curl_errno = null;
     private $last_curl_timeout = false;
@@ -1558,6 +1585,17 @@ class ImportClient
             $this->follow_symlinks = true;
         }
 
+        // Persist max_allowed_packet in state so it survives across invocations.
+        // The client sends this to the server so SQL statements are capped to a
+        // size the client's MySQL instance can actually import.
+        if (isset($options["max_allowed_packet"])) {
+            $this->max_allowed_packet = (int) $options["max_allowed_packet"];
+            $this->state["max_allowed_packet"] = $this->max_allowed_packet;
+            $this->save_state($this->state);
+        } elseif (isset($this->state["max_allowed_packet"])) {
+            $this->max_allowed_packet = (int) $this->state["max_allowed_packet"];
+        }
+
         $this->initialize_tuner($options);
 
         // Initialize HMAC authentication if a shared secret was provided.
@@ -1703,6 +1741,11 @@ class ImportClient
             return [];
         }
         $params = $this->tuner->get_request_params($endpoint);
+        // Tell the server about the client's max_allowed_packet so it can
+        // cap SQL statements to a size the client can actually import.
+        if ($endpoint === "sql_chunk" && $this->max_allowed_packet !== null) {
+            $params["max_allowed_packet"] = $this->max_allowed_packet;
+        }
         if (!empty($params)) {
             $this->audit_log(
                 "TUNER REQUEST | endpoint={$endpoint} | params=" .
@@ -6081,6 +6124,7 @@ if (
         echo "  --sql-fragments-max=N   Maximum SQL fragments per request\n";
         echo "  --db-unbuffered         Use unbuffered MySQL queries on export\n";
         echo "  --db-query-time-limit=N MySQL MAX_EXECUTION_TIME (ms) for SELECT\n";
+        echo "  --max-allowed-packet=SIZE Client max_allowed_packet (e.g. 16M, 64M)\n";
         echo "\n";
         echo "State Management:\n";
         echo "  - Each command tracks its own state (stage/cursor/status)\n";
@@ -6304,6 +6348,10 @@ if (
             $options["tuning_config"]["db_query_time_limit"] = (int) substr(
                 $argv[$i],
                 strlen("--db-query-time-limit="),
+            );
+        } elseif (strpos($argv[$i], "--max-allowed-packet=") === 0) {
+            $options["max_allowed_packet"] = parse_size(
+                substr($argv[$i], strlen("--max-allowed-packet=")),
             );
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");

@@ -784,6 +784,39 @@ function endpoint_sql_chunk(
         "create_table_query" => $config["create_table_query"] ?? true,
         "string_encoding" => $config["string_encoding"] ?? "base64",
     ];
+
+    // If the client sent its max_allowed_packet, cap the producer's
+    // max_statement_size so the dump stays importable on the client.
+    // We query the server's own max_allowed_packet too and use the
+    // smaller of the two (both scaled to 80% for protocol headroom).
+    if (!empty($config["max_allowed_packet"])) {
+        $client_max = (int) $config["max_allowed_packet"];
+        // Validate: 1MB – 1GB
+        if ($client_max >= 1048576 && $client_max <= 1073741824) {
+            $client_statement_size = (int) ($client_max * 0.8);
+            // Query the server's max_allowed_packet for comparison
+            $server_statement_size = null;
+            try {
+                $row = $mysql
+                    ->query("SELECT @@max_allowed_packet AS v")
+                    ->fetch(PDO::FETCH_ASSOC);
+                if ($row && isset($row["v"])) {
+                    $server_statement_size = (int) ((int) $row["v"] * 0.8);
+                }
+            } catch (Exception $e) {
+                // Ignore — producer will auto-detect
+            }
+            if ($server_statement_size !== null) {
+                $producer_options["max_statement_size"] = min(
+                    $client_statement_size,
+                    $server_statement_size,
+                );
+            } else {
+                $producer_options["max_statement_size"] = $client_statement_size;
+            }
+        }
+    }
+
     if (!empty($config["db_query_time_limit"])) {
         $query_time_limit = require_int_range(
             "db_query_time_limit",

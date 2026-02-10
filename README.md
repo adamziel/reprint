@@ -164,8 +164,8 @@ What we **don't** do:
 * More tests, in particular for:
   * large files
   * large databases
-  * importing wp.com-like symlink structures
-* Fetch MySQL data using some kind of serialization, chunk locally to match our `max_allowed_packed` and `current_statement_size`.
+  * ✅ importing wp.com-like symlink structures
+* ✅ Fetch MySQL data using some kind of serialization, chunk locally to match our `max_allowed_packed` and `current_statement_size`.
 * Add a runner script to easily run those downloaded sites locally while providing them with the right Host header and
   rewriting all the URLs on the fly
 * ✅ Add a "follow symlinks" option for the client. When active, the indexing stage will look for symlinks
@@ -210,6 +210,8 @@ What we **don't** do:
   * Account for the disk space limits for files and for MySQL data on the migration target.
   * we can be reactive – detect out of disk space errors when it happens. we won't know the storage quota
      upfront anyway in most shared hosting environments.
+* Symlink handling – use a single bulk requests to index all the symlink targets instead of one request
+  per symlink.
 
 **Out of scope for this initial version**
 
@@ -217,8 +219,9 @@ What we **don't** do:
 * Support for directories with more files than we can sort in memory at once. A million files with 64 byte names require around 100MB of memory to sort.
   If you have so many files, you better have that much memory available. If it turns out people tend to have more files without the available memory,
   we can trade CPU cycles and use streaming sorting. We'd also need to use a temporary file to store the sorted list.
-* When we're starting the import and we have access to local MySQL, detect our local `current_statement_size` and `max_allowed_packet` and send that
-  over to the remote host to get an appropriately-chunked dump. Alternatively, if we ever need to store the dump now and execute it later, we could
+* ~~When we're starting the import and we have access to local MySQL, detect our local `current_statement_size` and `max_allowed_packet` and send that
+  over to the remote host to get an appropriately-chunked dump.~~ **Done** – the client now accepts `--max-allowed-packet=SIZE` and sends it to the server,
+  which caps SQL statements to `min(client, server) * 0.8`. Alternatively, if we ever need to store the dump now and execute it later, we could
   bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and
   turn it into SQL statements locally. Let's not start there, though, as that would add complexity and make the REST endpoints harder to debug.
 * Rewrite URLs in the incoming files. We have the tools to do it, but version 1 is about migrating between hosting
