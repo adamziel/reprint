@@ -112,8 +112,13 @@ if (!fs.existsSync(fsRoot)) {
 	process.exit(1);
 }
 
+// Detect layout: standard WP (wp-config.php in a normal dir) vs wp.com
+// (__wp__ contains core, wp-config.php lives in the parent htdocs dir).
+// Check for standard layout first — a standard WP install might contain
+// a stray __wp__ directory inside a plugin or cache.
+const wpConfigFile = findFile(fsRoot, 'wp-config.php');
 const wpCoreDir = findDir(fsRoot, '__wp__');
-const isWpcom = !!wpCoreDir;
+const isWpcom = !!wpCoreDir && (!wpConfigFile || path.dirname(wpConfigFile) === path.dirname(wpCoreDir));
 
 let wpRoot;     // standard: dir containing wp-config.php; wpcom: __wp__ dir
 let wpHtdocs;   // wpcom only: parent of __wp__ (contains wp-config.php, wp-content)
@@ -126,16 +131,15 @@ if (isWpcom) {
 	console.log('Detected wp.com layout (__wp__ directory found)');
 	console.log(`  htdocs: ${wpHtdocs}`);
 	console.log(`  core:   ${wpCoreDir}`);
-} else {
-	const wpConfig = findFile(fsRoot, 'wp-config.php');
-	if (!wpConfig) {
-		console.error(`Error: wp-config.php not found under ${fsRoot}`);
-		process.exit(1);
-	}
-	wpRoot = path.dirname(wpConfig);
+} else if (wpConfigFile) {
+	wpRoot = path.dirname(wpConfigFile);
 	wpCliPath = wpRoot;
 	console.log('Detected standard WordPress layout');
 	console.log(`  root: ${wpRoot}`);
+} else {
+	console.error(`Error: Could not detect WordPress layout under ${fsRoot}`);
+	console.error('  No wp-config.php or __wp__ directory found.');
+	process.exit(1);
 }
 
 // ── 1. Create database ─────────────────────────────────────────────
@@ -159,11 +163,23 @@ execFileSync('mysql', ['-h', DB_HOST, '-u', DB_USER, `-p${DB_PASS}`, `-D${dbName
 });
 
 // ── 3. Read original URL ────────────────────────────────────────────
+// Detect the table prefix — not always "wp_". Find the *_options table.
+
+const optionsTable = mysqlQuery(
+	"SHOW TABLES LIKE '%_options';",
+	dbName
+);
+if (!optionsTable) {
+	console.error('Error: No *_options table found in the imported database.');
+	process.exit(1);
+}
+const tablePrefix = optionsTable.replace(/_options$/, '_');
+console.log(`Table prefix: ${tablePrefix}`);
 
 let originalUrl = urlOverride;
 if (!originalUrl) {
 	originalUrl = mysqlQuery(
-		"SELECT option_value FROM wp_options WHERE option_name = 'siteurl' LIMIT 1;",
+		`SELECT option_value FROM ${optionsTable} WHERE option_name = 'siteurl' LIMIT 1;`,
 		dbName
 	);
 }
