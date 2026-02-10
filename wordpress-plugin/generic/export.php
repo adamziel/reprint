@@ -707,7 +707,7 @@ function endpoint_sql_chunk(
     float $script_start,
     int $max_execution_time,
     int $max_memory,
-    float $memory_threshold,
+    float $memory_threshold
 ): array {
     global $streaming_context;
     prepare_streaming_response();
@@ -1023,7 +1023,7 @@ function endpoint_sql_preflight(
     float $script_start,
     int $max_execution_time,
     int $max_memory,
-    float $memory_threshold,
+    float $memory_threshold
 ): array {
     global $streaming_context;
     prepare_streaming_response();
@@ -2207,7 +2207,7 @@ function stream_file_producer(
     int $max_execution_time,
     int $max_memory,
     float $memory_threshold,
-    array $config = [],
+    array $config = []
 ): array {
     global $streaming_context;
     prepare_streaming_response();
@@ -2618,7 +2618,7 @@ function endpoint_file_index(
     float $script_start,
     int $max_execution_time,
     int $max_memory,
-    float $memory_threshold,
+    float $memory_threshold
 ): array {
     global $streaming_context;
     $directories = resolve_directories($config);
@@ -3205,7 +3205,7 @@ function endpoint_file_fetch(
     float $script_start,
     int $max_execution_time,
     int $max_memory,
-    float $memory_threshold,
+    float $memory_threshold
 ): array {
     $directories = resolve_directories($config);
 
@@ -3301,7 +3301,7 @@ function require_int_range(
     string $name,
     int $value,
     int $min,
-    int $max,
+    int $max
 ): int {
     if ($value < $min || $value > $max) {
         throw new InvalidArgumentException(
@@ -3318,7 +3318,7 @@ function require_float_range(
     string $name,
     float $value,
     float $min,
-    float $max,
+    float $max
 ): float {
     if ($value < $min || $value > $max) {
         throw new InvalidArgumentException(
@@ -3335,7 +3335,7 @@ function should_continue(
     float $start_time,
     int $max_time,
     int $max_mem,
-    float $threshold,
+    float $threshold
 ): bool {
     // Check execution time
     if (microtime(true) - $start_time >= $max_time) {
