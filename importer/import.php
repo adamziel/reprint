@@ -13,6 +13,13 @@ error_reporting(E_ALL);
 ini_set("display_errors", "stderr");
 ini_set("display_startup_errors", 1);
 
+// Polyfill for PHP 7.4 which lacks str_starts_with().
+if (!function_exists('str_starts_with')) {
+    function str_starts_with(string $haystack, string $needle): bool {
+        return $needle === '' || strncmp($haystack, $needle, strlen($needle)) === 0;
+    }
+}
+
 register_shutdown_function(function () {
     $error = error_get_last();
     if ($error === null) {

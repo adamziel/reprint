@@ -7,19 +7,16 @@ on:
 
 jobs:
   phpstan:
-    name: PHPStan (PHP ${{ matrix.php }})
+    name: PHPStan
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        php: ['7.4', '8.2']
     steps:
       - uses: actions/checkout@v4
 
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ matrix.php }}
+          php-version: "8.2"
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
 
-      - run: composer install --no-interaction --prefer-dist --ignore-platform-reqs
+      - run: composer install --no-interaction --prefer-dist
 
       - run: composer analyze

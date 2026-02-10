@@ -38,7 +38,7 @@ describe('Import: Preflight Endpoint', () => {
     it('reports PHP version and extensions', () => {
         assert.ok(preflight.php, 'Expected php section');
         assert.ok(preflight.php.version, 'Expected PHP version');
-        assert.ok(preflight.php.version.startsWith('8'), `Expected PHP 8.x, got ${preflight.php.version}`);
+        assert.match(preflight.php.version, /^[78]\./, `Expected PHP 7.x or 8.x, got ${preflight.php.version}`);
         assert.ok(Array.isArray(preflight.php.extensions), 'Expected extensions array');
         assert.ok(preflight.php.extensions.includes('pdo_mysql'), 'Expected pdo_mysql extension');
         assert.ok(preflight.php.extensions.includes('zlib'), 'Expected zlib extension');
