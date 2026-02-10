@@ -1358,7 +1358,7 @@ class ImportClient
         string $path,
         int $ctime,
         int $size,
-        string $type,
+        string $type
     ): void {
         $this->record_index_update_file($path, $ctime, $size, $type);
     }
@@ -1798,7 +1798,7 @@ class ImportClient
     private function finalize_tuned_request(
         string $endpoint,
         float $wall_time,
-        array $response_stats,
+        array $response_stats
     ): void {
         if (!$this->tuner instanceof AdaptiveTuner) {
             return;
@@ -3014,7 +3014,7 @@ class ImportClient
      */
     private function download_file_fetch(
         ?array $post_data,
-        ?string $cursor,
+        ?string $cursor
     ): bool {
         $cursor = $cursor ?? ($this->state["fetch"]["cursor"] ?? null);
         $complete = false;
@@ -3058,7 +3058,7 @@ class ImportClient
         $context->on_chunk = function ($chunk) use (
             &$cursor,
             &$complete,
-            $context,
+            $context
         ) {
             if ($this->shutdown_requested) {
                 throw new RuntimeException("Shutdown requested");
@@ -3226,7 +3226,7 @@ class ImportClient
             &$cursor,
             &$complete,
             $handle,
-            $context,
+            $context
         ) {
             if ($this->shutdown_requested) {
                 throw new RuntimeException("Shutdown requested");
@@ -3794,7 +3794,7 @@ class ImportClient
         string $path,
         int $ctime,
         int $size,
-        string $type,
+        string $type
     ): void {
         if (!$this->index_updates_handle) {
             $this->begin_index_updates();
@@ -4158,7 +4158,7 @@ class ImportClient
                     &$complete,
                     &$sql_bytes_written,
                     $sql_handle,
-                    $context,
+                    $context
                 ) {
                     // Check if shutdown was requested
                     if ($this->shutdown_requested) {
@@ -4312,7 +4312,7 @@ class ImportClient
                     &$rows_estimated,
                     &$bytes_written,
                     $handle,
-                    $context,
+                    $context
                 ) {
                     if ($this->shutdown_requested) {
                         throw new RuntimeException("Shutdown requested");
@@ -4429,7 +4429,7 @@ class ImportClient
      */
     private function handle_metadata_chunk(
         array $chunk,
-        StreamingContext $context,
+        StreamingContext $context
     ): void {
         $headers = $chunk["headers"];
         $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "");
@@ -4445,7 +4445,7 @@ class ImportClient
      */
     private function handle_file_chunk(
         array $chunk,
-        StreamingContext $context,
+        StreamingContext $context
     ): void {
         $headers = $chunk["headers"];
         $raw_header = $headers["x-file-path"] ?? "";
@@ -4846,7 +4846,7 @@ class ImportClient
     private function handle_error_chunk(
         array $chunk,
         string $phase,
-        StreamingContext $context,
+        StreamingContext $context
     ): void {
         $body = $chunk["body"] ?? "";
         $data = json_decode($body, true);
@@ -4929,7 +4929,7 @@ class ImportClient
         string $endpoint,
         ?string $cursor,
         array $params = [],
-        ?string $session_id = null,
+        ?string $session_id = null
     ): string {
         $url = $this->remote_url;
         $separator = strpos($url, "?") === false ? "?" : "&";
@@ -5291,7 +5291,7 @@ class ImportClient
         ?string $cursor,
         StreamingContext $context,
         ?array $post_data = null,
-        ?string $endpoint = null,
+        ?string $endpoint = null
     ): void {
         $this->last_http_code = null;
         $this->last_curl_errno = null;
@@ -5392,7 +5392,7 @@ class ImportClient
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
                 &$parser,
                 $context,
-                &$current_chunk,
+                &$current_chunk
             ) {
                 $len = strlen($header_line);
 
@@ -5434,7 +5434,7 @@ class ImportClient
                                 $boundary_value,
                                 function ($event) use (
                                     $context,
-                                    &$current_chunk,
+                                    &$current_chunk
                                 ) {
                                     if ($event["type"] === "body") {
                                         // Accumulate body data in current chunk
@@ -5484,7 +5484,7 @@ class ImportClient
                 &$last_heartbeat,
                 &$last_progress_check,
                 &$last_bytes_received,
-                &$error_body,
+                &$error_body
             ) {
                 // If no parser yet, we might be receiving an error response
                 if (!$parser) {
