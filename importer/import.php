@@ -328,7 +328,8 @@ class MultipartStreamParser
      * Find line end position (\r\n or \n) starting from offset.
      * Returns position after line ending, or false if not found.
      */
-    private function find_line_end(int $offset): int|false
+    /** @return int|false */
+    private function find_line_end(int $offset)
     {
         $len = strlen($this->buffer);
 
