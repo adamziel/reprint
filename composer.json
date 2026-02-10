@@ -9,7 +9,8 @@
         "ext-pdo_mysql": "*"
     },
     "require-dev": {
-        "phpunit/phpunit": "^10.0"
+        "phpunit/phpunit": "^10.0",
+        "phpstan/phpstan": "^1.0"
     },
     "autoload": {
         "psr-4": {
@@ -20,6 +21,7 @@
         "test": "cd tests && phpunit --testdox --colors",
         "test:fast": "cd tests && ./run-tests.sh fast",
         "test:large": "cd tests && ./run-tests.sh large",
-        "test:coverage": "cd tests && ./run-tests.sh coverage"
+        "test:coverage": "cd tests && ./run-tests.sh coverage",
+        "analyze": "phpstan analyze"
     }
 }

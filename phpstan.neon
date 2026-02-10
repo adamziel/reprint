@@ -1,0 +1,15 @@
+includes:
+    - phpstan-baseline.neon
+
+parameters:
+    phpVersion: 70400
+    level: 5
+    paths:
+        - wordpress-plugin
+    excludePaths:
+        - wordpress-plugin/generic/secrets.php
+        - wordpress-plugin/wordpress/
+        - wordpress-plugin/index.php
+    treatPhpDocTypesAsCertain: false
+    scanDirectories:
+        - wordpress-plugin/generic

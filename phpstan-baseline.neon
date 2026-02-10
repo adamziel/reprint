@@ -1,0 +1,61 @@
+parameters:
+	ignoreErrors:
+		-
+			message: "#^Unreachable statement \\- code above always terminates\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/class-mysql-dump-producer.php
+
+		-
+			message: "#^Function get_option not found\\.$#"
+			count: 5
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^If condition is always false\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Negated boolean expression is always false\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Negated boolean expression is always true\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Parameter \\#1 \\$flag of function ob_implicit_flush expects int, true given\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Parameter \\#2 \\$newvalue of function ini_set expects string, int given\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Property GzipOutputStream\\:\\:\\$header_sent is never read, only written\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Strict comparison using \\=\\=\\= between mixed and null will always evaluate to false\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Variable \\$directories in empty\\(\\) always exists and is not falsy\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Variable \\$filesystem_root on left side of \\?\\? always exists and is not nullable\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Strict comparison using \\!\\=\\= between null and null will always evaluate to false\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/file-sync.php

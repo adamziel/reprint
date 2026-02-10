@@ -51,7 +51,7 @@ class FileTreeProducer
      *   - cursor: JSON cursor string for resumption
      *   - paths: array of specific paths to stream (required)
      */
-    public function __construct(string|array $directories, array $options = [])
+    public function __construct($directories, array $options = [])
     {
         $this->directories = $this->normalize_directories($directories);
         $this->chunk_size = $options["chunk_size"] ?? 5 * 1024 * 1024;
@@ -165,7 +165,11 @@ class FileTreeProducer
     /**
      * Normalize directories input into an array of trimmed paths.
      */
-    private function normalize_directories(string|array $directories): array
+    /**
+     * @param string|array $directories
+     * @return array
+     */
+    private function normalize_directories($directories): array
     {
         if (is_string($directories)) {
             return [rtrim($directories, "/")];

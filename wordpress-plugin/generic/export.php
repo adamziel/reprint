@@ -28,6 +28,13 @@ if (!ob_get_level()) {
  */
 $streaming_context = null;
 
+// Polyfill for PHP 7.4 which lacks str_starts_with().
+if (!function_exists('str_starts_with')) {
+    function str_starts_with(string $haystack, string $needle): bool {
+        return strncmp($haystack, $needle, strlen($needle)) === 0;
+    }
+}
+
 /**
  * Emit a well-formed error chunk into a gzip multipart stream.
  * Used by error/exception/shutdown handlers and by streaming try-catch blocks.
