@@ -362,12 +362,9 @@ add_action('plugins_loaded', function() {
     Site_Export_Plugin::get_instance();
 });
 
-// On activation: set a transient so we can redirect on the next admin page load.
+// On activation: flag so we can redirect on the next admin page load.
 register_activation_hook(SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
-    // Only redirect when activated through the admin UI (not via WP-CLI or bulk).
-    if (!wp_doing_ajax() && is_admin()) {
-        set_transient('site_export_activated', 1, 30);
-    }
+    update_option('site_export_activated', 1);
 
     $gitignore = SITE_EXPORT_PLUGIN_DIR . '.gitignore';
     if (!file_exists($gitignore)) {
@@ -377,8 +374,8 @@ register_activation_hook(SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
 
 // Redirect to settings page after activation.
 add_action('admin_init', function() {
-    if (get_transient('site_export_activated')) {
-        delete_transient('site_export_activated');
+    if (get_option('site_export_activated')) {
+        delete_option('site_export_activated');
         if (!isset($_GET['activate-multi'])) {
             wp_safe_redirect(admin_url('admin.php?page=site-export'));
             exit;
