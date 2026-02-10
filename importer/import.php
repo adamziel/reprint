@@ -2640,8 +2640,13 @@ class ImportClient
      * component and emits index entries for any intermediate symlinks it finds.
      * For example, if /srv/wordpress is a symlink to /wordpress, the server
      * emits an index entry with path=/srv/wordpress, target=/wordpress,
-     * type=link.  This method scans the remote index for such entries and
-     * recreates the symlinks locally under filesystem-root/.
+     * type=link, intermediate=true.
+     *
+     * Since the server indexes everything under realpath()-resolved paths,
+     * the files are already downloaded to the target location (e.g.
+     * filesystem-root/wordpress/...).  We just need to create the symlink
+     * (e.g. filesystem-root/srv/wordpress -> /wordpress) so the directory
+     * layout matches the server.
      */
     private function recreate_intermediate_symlinks(): void
     {
@@ -2668,6 +2673,9 @@ class ImportClient
             if (($entry["type"] ?? "") !== "link") {
                 continue;
             }
+            if (empty($entry["intermediate"])) {
+                continue;
+            }
             $target_encoded = $entry["target"] ?? null;
             if (!is_string($target_encoded) || $target_encoded === "") {
                 continue;
@@ -2683,66 +2691,35 @@ class ImportClient
                 continue;
             }
 
-            // Only recreate symlinks whose path is a single component that
-            // could be an intermediate path symlink (e.g. /srv/wordpress).
-            // Regular file/dir symlinks inside the site are already handled
-            // by handle_symlink_chunk() during streaming.
-            //
-            // We identify intermediate symlinks by checking whether the local
-            // path already exists as a real directory (the target contents were
-            // downloaded there by realpath-based indexing).  If so, we need to
-            // restructure: move the directory aside, create the symlink, and
-            // move the contents to the symlink target location.
             $local_path = $fs_root . $path;
-            $local_target_path = $fs_root . $target;
 
-            // If the symlink already exists and points to the right place, skip
-            if (is_link($local_path)) {
-                $existing = readlink($local_path);
-                if ($existing === $target) {
-                    continue;
-                }
+            // Already correct — skip
+            if (is_link($local_path) && readlink($local_path) === $target) {
+                continue;
             }
 
-            // If the local path is a real directory (created because realpath()
-            // resolved through this symlink), we need to:
-            // 1. Ensure the target directory exists
-            // 2. Move contents from local_path to local_target_path
-            // 3. Remove local_path directory
-            // 4. Create symlink at local_path -> target
-            if (is_dir($local_path) && !is_link($local_path)) {
-                // Ensure target parent exists
-                $target_parent = dirname($local_target_path);
-                if (!is_dir($target_parent)) {
-                    @mkdir($target_parent, 0755, true);
-                }
-
-                // If target dir doesn't exist yet, just rename
-                if (!file_exists($local_target_path)) {
-                    @rename($local_path, $local_target_path);
-                } else {
-                    // Target exists too — merge by copying, then remove source
-                    $this->merge_directory($local_path, $local_target_path);
-                    $this->remove_directory($local_path);
-                }
-            }
-
-            // Create parent directory for the symlink
+            // Create parent directory
             $parent = dirname($local_path);
             if (!is_dir($parent)) {
                 @mkdir($parent, 0755, true);
             }
 
-            // Remove anything at local_path (file, broken symlink, etc.)
-            if (file_exists($local_path) || is_link($local_path)) {
-                if (is_dir($local_path) && !is_link($local_path)) {
-                    $this->remove_directory($local_path);
-                } else {
-                    @unlink($local_path);
-                }
+            // Remove stale symlink if present
+            if (is_link($local_path)) {
+                @unlink($local_path);
             }
 
-            // Create the symlink
+            // Don't overwrite a real directory — that shouldn't exist for
+            // an intermediate symlink path, and if it does something else
+            // is wrong.
+            if (file_exists($local_path)) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: {$path} already exists as a real file/dir",
+                    true,
+                );
+                continue;
+            }
+
             if (@symlink($target, $local_path)) {
                 $created++;
                 $this->audit_log(
@@ -2764,59 +2741,6 @@ class ImportClient
                 false,
             );
         }
-    }
-
-    /**
-     * Recursively merge $src directory into $dst, overwriting files.
-     */
-    private function merge_directory(string $src, string $dst): void
-    {
-        $dir = opendir($src);
-        if (!$dir) {
-            return;
-        }
-        if (!is_dir($dst)) {
-            @mkdir($dst, 0755, true);
-        }
-        while (($entry = readdir($dir)) !== false) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
-            $s = $src . "/" . $entry;
-            $d = $dst . "/" . $entry;
-            if (is_dir($s) && !is_link($s)) {
-                $this->merge_directory($s, $d);
-            } else {
-                @rename($s, $d);
-            }
-        }
-        closedir($dir);
-    }
-
-    /**
-     * Recursively remove a directory and its contents.
-     */
-    private function remove_directory(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-        $entries = scandir($dir);
-        if ($entries === false) {
-            return;
-        }
-        foreach ($entries as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
-            $path = $dir . "/" . $entry;
-            if (is_dir($path) && !is_link($path)) {
-                $this->remove_directory($path);
-            } else {
-                @unlink($path);
-            }
-        }
-        @rmdir($dir);
     }
 
     /**
