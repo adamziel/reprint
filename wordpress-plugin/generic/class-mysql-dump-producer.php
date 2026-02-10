@@ -912,7 +912,7 @@ class MySQLDumpProducer
 
         $encoded = [];
         foreach ($row as $col => $value) {
-            if ($value !== null && !mb_check_encoding($value, 'UTF-8')) {
+            if ($value !== null && is_string($value)) {
                 // Binary data - base64 encode with marker
                 $encoded[$col] = ['__binary__' => base64_encode($value)];
             } else {

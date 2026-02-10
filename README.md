@@ -17,7 +17,6 @@ On the **migration source** side:
  - ext-json — JSON encoding/decoding
  - ext-hash — hash_hmac, hash_equals
  - ext-zlib — deflate_init/deflate_add for gzip streaming
- - ext-mbstring — mb_check_encoding for binary detection
 
 On the **migration target** side:
 
@@ -172,12 +171,10 @@ What we **don't** do:
 * Some kind of `preflight assert` command that will exit with either 0 or 1 depending on whether we think we can do the migration.
 * Rename `sql-preflight` to `index-database`
 * Blue/green strategy of writing to JSON files, especially for status updates
-* Make sure we can kill the process without hanging if we don't have pcntl and posix extensions
-* Unit tests?
-* Export.php: compat with bare PHP installation with no extensions available. CI test with a PHP installation that has no extensions available.
-* PHP 7.4+ compat (or PHP 7.2+ even) with CI tests
-* A runner script to easily run those downloaded sites locally while providing them with the right `Host` header and
+* ✅ A runner script to easily run those downloaded sites locally while providing them with the right `Host` header and
   rewriting all the URLs on the fly (with the HTML API?)
+* ✅ PHP 7.4+ compat (or PHP 7.2+ even) with CI tests
+* ✅ Export.php: compat with mostly bare PHP installation with just core extensions available.
 * More tests, in particular for:
   * large files
   * large databases
@@ -227,6 +224,8 @@ What we **don't** do:
      upfront anyway in most shared hosting environments.
 * Symlink handling – use a single bulk requests to index all the symlink targets instead of one request
   per symlink.
+* Make sure we can ctrl+c the process without hanging if we don't have pcntl and posix extensions
+* Unit tests. They're just "nice to have" because we have E2E tests.
 
 **Out of scope for this initial version**
 
