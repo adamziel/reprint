@@ -2056,6 +2056,13 @@ class ImportClient
             }
         }
 
+        // Recreate intermediate path symlinks so the full symlink chain
+        // works locally.  The server discovers these (e.g. /srv/wordpress
+        // -> /wordpress) and includes them in the remote index.
+        if ($this->follow_symlinks) {
+            $this->recreate_intermediate_symlinks();
+        }
+
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
@@ -2245,6 +2252,10 @@ class ImportClient
                     "FILE DELETE | {$this->download_list_file} | fetch complete",
                 );
             }
+        }
+
+        if ($this->follow_symlinks) {
+            $this->recreate_intermediate_symlinks();
         }
 
         $this->state["status"] = "complete";
@@ -2521,6 +2532,10 @@ class ImportClient
     /**
      * Scan the remote index file for symlink entries whose targets are
      * directories not already in $visited.  Returns an array of real paths.
+     *
+     * Skips entries marked as "intermediate" — those are path-component
+     * symlinks (e.g. /srv/wordpress -> /wordpress) emitted by the server's
+     * discover_path_symlinks() for local recreation only, not for indexing.
      */
     private function extract_symlink_dirs_from_index(array $visited): array
     {
@@ -2542,6 +2557,9 @@ class ImportClient
             if (($entry["type"] ?? "") !== "link") {
                 continue;
             }
+            if (!empty($entry["intermediate"])) {
+                continue;
+            }
             $target_encoded = $entry["target"] ?? null;
             if (!is_string($target_encoded) || $target_encoded === "") {
                 continue;
@@ -2551,7 +2569,9 @@ class ImportClient
                 continue;
             }
 
-            // Resolve relative targets against the symlink's parent directory
+            // The server resolves symlink targets via realpath(), so they
+            // should always be absolute.  This fallback handles older server
+            // versions that may still send raw readlink() output.
             if ($target[0] !== "/") {
                 $path_encoded = $entry["path"] ?? null;
                 if (!is_string($path_encoded) || $path_encoded === "") {
@@ -2586,12 +2606,8 @@ class ImportClient
                 }
             }
 
-            // Skip targets that look like files (have an extension in
-            // the last path segment).  We can only index directories.
-            $basename = basename($target);
-            if (strpos($basename, ".") !== false) {
-                continue;
-            }
+            // The server only emits targets for directory symlinks, so no
+            // need to filter out file targets here.
 
             if (isset($visited[$target])) {
                 continue;
@@ -2614,6 +2630,193 @@ class ImportClient
         fclose($h);
 
         return array_values(array_unique($targets));
+    }
+
+    /**
+     * Recreate intermediate symlinks discovered by the server's
+     * discover_path_symlinks() function.
+     *
+     * When following symlinks, the server walks each target path component by
+     * component and emits index entries for any intermediate symlinks it finds.
+     * For example, if /srv/wordpress is a symlink to /wordpress, the server
+     * emits an index entry with path=/srv/wordpress, target=/wordpress,
+     * type=link.  This method scans the remote index for such entries and
+     * recreates the symlinks locally under filesystem-root/.
+     */
+    private function recreate_intermediate_symlinks(): void
+    {
+        if (!file_exists($this->remote_index_file)) {
+            return;
+        }
+
+        $fs_root = realpath($this->local_path . "/filesystem-root");
+        if ($fs_root === false) {
+            return;
+        }
+
+        $h = fopen($this->remote_index_file, "r");
+        if (!$h) {
+            return;
+        }
+
+        $created = 0;
+        while (($line = fgets($h)) !== false) {
+            $entry = json_decode($line, true);
+            if (!is_array($entry)) {
+                continue;
+            }
+            if (($entry["type"] ?? "") !== "link") {
+                continue;
+            }
+            $target_encoded = $entry["target"] ?? null;
+            if (!is_string($target_encoded) || $target_encoded === "") {
+                continue;
+            }
+            $path_encoded = $entry["path"] ?? null;
+            if (!is_string($path_encoded) || $path_encoded === "") {
+                continue;
+            }
+
+            $path = base64_decode($path_encoded);
+            $target = base64_decode($target_encoded);
+            if ($path === false || $path === "" || $target === false || $target === "") {
+                continue;
+            }
+
+            // Only recreate symlinks whose path is a single component that
+            // could be an intermediate path symlink (e.g. /srv/wordpress).
+            // Regular file/dir symlinks inside the site are already handled
+            // by handle_symlink_chunk() during streaming.
+            //
+            // We identify intermediate symlinks by checking whether the local
+            // path already exists as a real directory (the target contents were
+            // downloaded there by realpath-based indexing).  If so, we need to
+            // restructure: move the directory aside, create the symlink, and
+            // move the contents to the symlink target location.
+            $local_path = $fs_root . $path;
+            $local_target_path = $fs_root . $target;
+
+            // If the symlink already exists and points to the right place, skip
+            if (is_link($local_path)) {
+                $existing = readlink($local_path);
+                if ($existing === $target) {
+                    continue;
+                }
+            }
+
+            // If the local path is a real directory (created because realpath()
+            // resolved through this symlink), we need to:
+            // 1. Ensure the target directory exists
+            // 2. Move contents from local_path to local_target_path
+            // 3. Remove local_path directory
+            // 4. Create symlink at local_path -> target
+            if (is_dir($local_path) && !is_link($local_path)) {
+                // Ensure target parent exists
+                $target_parent = dirname($local_target_path);
+                if (!is_dir($target_parent)) {
+                    @mkdir($target_parent, 0755, true);
+                }
+
+                // If target dir doesn't exist yet, just rename
+                if (!file_exists($local_target_path)) {
+                    @rename($local_path, $local_target_path);
+                } else {
+                    // Target exists too — merge by copying, then remove source
+                    $this->merge_directory($local_path, $local_target_path);
+                    $this->remove_directory($local_path);
+                }
+            }
+
+            // Create parent directory for the symlink
+            $parent = dirname($local_path);
+            if (!is_dir($parent)) {
+                @mkdir($parent, 0755, true);
+            }
+
+            // Remove anything at local_path (file, broken symlink, etc.)
+            if (file_exists($local_path) || is_link($local_path)) {
+                if (is_dir($local_path) && !is_link($local_path)) {
+                    $this->remove_directory($local_path);
+                } else {
+                    @unlink($local_path);
+                }
+            }
+
+            // Create the symlink
+            if (@symlink($target, $local_path)) {
+                $created++;
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK: {$path} -> {$target}",
+                    false,
+                );
+            } else {
+                $this->audit_log(
+                    "Failed to create intermediate symlink: {$path} -> {$target}",
+                    true,
+                );
+            }
+        }
+        fclose($h);
+
+        if ($created > 0) {
+            $this->audit_log(
+                "Recreated {$created} intermediate symlink(s)",
+                false,
+            );
+        }
+    }
+
+    /**
+     * Recursively merge $src directory into $dst, overwriting files.
+     */
+    private function merge_directory(string $src, string $dst): void
+    {
+        $dir = opendir($src);
+        if (!$dir) {
+            return;
+        }
+        if (!is_dir($dst)) {
+            @mkdir($dst, 0755, true);
+        }
+        while (($entry = readdir($dir)) !== false) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $s = $src . "/" . $entry;
+            $d = $dst . "/" . $entry;
+            if (is_dir($s) && !is_link($s)) {
+                $this->merge_directory($s, $d);
+            } else {
+                @rename($s, $d);
+            }
+        }
+        closedir($dir);
+    }
+
+    /**
+     * Recursively remove a directory and its contents.
+     */
+    private function remove_directory(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        $entries = scandir($dir);
+        if ($entries === false) {
+            return;
+        }
+        foreach ($entries as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $path = $dir . "/" . $entry;
+            if (is_dir($path) && !is_link($path)) {
+                $this->remove_directory($path);
+            } else {
+                @unlink($path);
+            }
+        }
+        @rmdir($dir);
     }
 
     /**
@@ -3108,6 +3311,9 @@ class ImportClient
                     ];
                     if (isset($item["target"]) && is_string($item["target"]) && $item["target"] !== "") {
                         $entry["target"] = $item["target"]; // already base64-encoded
+                    }
+                    if (!empty($item["intermediate"])) {
+                        $entry["intermediate"] = true;
                     }
                     $line = json_encode(
                         $entry,

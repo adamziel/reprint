@@ -161,8 +161,16 @@ What we **don't** do:
 
 ### Todos
 
-<<<<<<< Updated upstream
-* Automated test suite to cover all the usual corner cases we are trying to account for
+* More tests, in particular for:
+  * large files
+  * large databases
+  * importing wp.com-like symlink structures
+* Fetch MySQL data using some kind of serialization, chunk locally to match our `max_allowed_packed` and `current_statement_size`.
+* Add a runner script to easily run those downloaded sites locally while providing them with the right Host header and
+  rewriting all the URLs on the fly
+* ✅ Add a "follow symlinks" option for the client. When active, the indexing stage will look for symlinks
+  pointing outside of the site root and add them to the top-level directory list.
+* ✅ Automated test suite to cover all the usual corner cases we are trying to account for
 * ✅ Turn it into a WordPress plugin 
  * ✅ HMAC signatures per request with a shared secret + random number + microtime
 * ✅ Handle every single possible error case, e.g. fread() returning false prematurely etc.
@@ -195,45 +203,6 @@ What we **don't** do:
 * ✅ Double check we're generating a useful, append-only audit log for every export call
 * ❌ Directory tree snapshots – store root-relative path. Don't store the entire absolut  e path, it inflates the snapshot size.
   * ^ this is okay, repetitive paths gzip exceptionally well.
-=======
-* Add a "follow symlinks" option for the client. When active, the indexing stage will look for symlinks
-  pointing outside of the site root and add them to the top-level directory list.
-* More tests, in particular for large files and large databases
-* Fetch MySQL data using some kind of serialization, chunk locally to match our `max_allowed_packed` and `current_statement_size`.
-✅ Automated test suite to cover all the usual corner cases we are trying to account for
-✅ Turn it into a WordPress plugin 
-  ✅ HMAC signatures per request with a shared secret + random number + microtime
-✅ Handle every single possible error case, e.g. fread() returning false prematurely etc.
-✅ Take note of any files modified while they were streamed, re-request them later on.
-   ✅ Tell the user when a file is too volatile to be synchronized
-✅ Support paths with "\n" in them – they're valid paths
-✅ Account for 3xx errors – just treat them as errors. Anything non-200 is an error.
-✅ If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
-✅ In export.php, require `wp-load.php` if we cannot cheaply connect to MySQL using the database credentials from the wp-config.php file.
-✅ Pre-flight request to
-  ✅ Confirm the host is able to export the site
-  ✅ Get runtime details so the importing side may decide if it's capable of importing the site.
-✅ Auto-constraining resource usage
-✅ Handle 4xx and 5xx errors, support backoff strategies.
-    How do we choose resource budgets for each host / runtime?
-    start = microtime(); do_thing(); took = microtime() - start; usleep( max( 0.5, (2 * took ) ) );
-    you can also if bite_size = default; ……. while ….. if ( took > threshold ) { bite_size = bite_size / 2 } else if ( took < other threshold ) { bite_size++ }
-    for things like number of rows and or files or bytes or whatever transferred at a time
-    [7:52 PM]so if performance gets poor it backs off hard. if performance is good it bumps up slow (edited) 
-    [7:53 PM]you can also threshold… like if took > a then sleep 2x; if took > b then sleep 4x; if took > c then sleep 8x
-    [7:53 PM]you should be able to make some combination of things that backs off as necessary (edited) 
-    [7:54 PM]not simple. but if you get someone deactivated and banned .25 though a migration you’re gonna have a bad time
-✅ When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
-   what it was doing when we've killed it (e.g. appending a partial state to the local file). So, if we wrote some bytes
-   to the file but did not update the cursor yet, make sure the next run will know we're only expected to have so many
-   bytes and will truncate the excess bytes beyond that expected size.
-✅ Display nice progress information in the terminal (since that will also allow us to display it on the web)
-✅ Support directories with more files than can be stored in memory at once.
-✅ Multipart handling – do we need to check for boundary presence in our chunk when Content-Length is also present?
-✅ Double check we're generating a useful, append-only audit log for every export call
-❌ Directory tree snapshots – store root-relative path. Don't store the entire absolute path, it inflates the snapshot size.
-  ^ this is okay, repetitive paths gzip exceptionally well.
->>>>>>> Stashed changes
 
 **Nice to haves**
 

@@ -24,6 +24,7 @@
     "redirect-301":      { "port": 8097, "nginx": "redirect", "redirectTo": 8081 },
     "buffered":          { "port": 8098, "nginx": "buffered" },
     "error-chunks":      { "port": 8099 },
-    "import-failures":   { "port": 8100 }
+    "import-failures":   { "port": 8100 },
+    "follow-symlinks":   { "port": 8101 }
   }
 }

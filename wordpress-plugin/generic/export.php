@@ -2493,6 +2493,52 @@ function encode_index_stack(array $stack): array
 }
 
 /**
+ * Walk a path component by component and return symlink entries for any
+ * intermediate symlinks found along the way.
+ *
+ * For example, given "/srv/wordpress/plugins/akismet/latest" where
+ * /srv/wordpress is a symlink to /wordpress and "latest" is a symlink
+ * to "5.0.1", this returns entries for both intermediate symlinks.
+ *
+ * The caller can inject these into the index batch so the client knows
+ * about every symlink in the chain and can recreate them locally.
+ */
+function discover_path_symlinks(string $path): array
+{
+    $entries = [];
+    $parts = explode("/", $path);
+    $current = "";
+    foreach ($parts as $part) {
+        if ($part === "") {
+            $current = "/";
+            continue;
+        }
+        $current = rtrim($current, "/") . "/" . $part;
+        if (@is_link($current)) {
+            $target = @readlink($current);
+            if ($target !== false && $target !== "") {
+                $stat = @lstat($current);
+                $entries[] = [
+                    "path" => $current,
+                    "ctime" => (int) ($stat["ctime"] ?? 0),
+                    "size" => 0,
+                    "type" => "link",
+                    "target" => $target,
+                    "intermediate" => true,
+                ];
+            }
+            // Continue walking through the resolved path so subsequent
+            // components are checked against the real filesystem.
+            $real = @realpath($current);
+            if ($real !== false) {
+                $current = $real;
+            }
+        }
+    }
+    return $entries;
+}
+
+/**
  * Encode file_index batch items for safe JSON serialization.
  * Paths are base64-encoded to handle non-UTF8 bytes.
  */
@@ -2508,6 +2554,9 @@ function encode_index_batch(array $batch_items): array
         ];
         if (isset($item["target"])) {
             $entry["target"] = base64_encode($item["target"]);
+        }
+        if (!empty($item["intermediate"])) {
+            $entry["intermediate"] = true;
         }
         $encoded[] = $entry;
     }
@@ -2544,6 +2593,8 @@ function endpoint_file_index(
     $list_dir = $config["list_dir"] ?? null;
     $list_dir_real = null;
     $stack = [];
+    $ordered = [];
+    $follow_symlinks = !empty($config["follow_symlinks"]);
     $cursor_provided = isset($config["cursor"]);
 
     if ($cursor_provided) {
@@ -2585,7 +2636,6 @@ function endpoint_file_index(
             );
         }
 
-        $follow_symlinks = !empty($config["follow_symlinks"]);
         $allowed = false;
         foreach ($directories as $root) {
             if (
@@ -2605,10 +2655,10 @@ function endpoint_file_index(
             );
         }
 
-        $ordered = [$list_dir];
+        $ordered = [$list_dir_real];
         $extra_roots = [];
         foreach ($directories as $root) {
-            if ($root === $list_dir_real || $root === $list_dir) {
+            if ($root === $list_dir_real) {
                 continue;
             }
             $extra_roots[] = $root;
@@ -2654,6 +2704,20 @@ function endpoint_file_index(
     $status = "partial";
     $aborted = false;
     $abort_payload = null;
+
+    // When following symlinks, discover intermediate symlinks along each
+    // directory path being traversed.  For example, if list_dir is
+    // /srv/wordpress/plugins/akismet/latest and /srv/wordpress is itself
+    // a symlink to /wordpress, emit that intermediate symlink so the
+    // client can recreate the full chain locally.
+    if (!$cursor_provided && $follow_symlinks) {
+        foreach ($ordered as $dir) {
+            $path_symlinks = discover_path_symlinks($dir);
+            foreach ($path_symlinks as $entry) {
+                $batch_items[] = $entry;
+            }
+        }
+    }
 
     $current_dir = $list_dir_real;
 
@@ -2754,17 +2818,13 @@ function endpoint_file_index(
                 continue;
             }
 
-            // Keep the original $current_dir for building child paths so that
-            // paths stay in the same mount namespace.  Only use $current_real
-            // for validation checks and scandir (which needs the resolved path
-            // to actually open the directory).
-            //
-            // Example: on wp.com the symlink /srv/htdocs/__wp__ points to
-            // ../wordpress/core/latest.  The original path is /srv/wordpress/
-            // core/latest, but realpath() resolves through the mount and returns
-            // /wordpress/core/6.9.1.  If we replaced $current_dir with
-            // $current_real, all children would be reported under /wordpress/
-            // instead of /srv/wordpress/, breaking the directory layout.
+            // Use realpath() consistently for all paths. On hosts like wp.com,
+            // /srv is a symlink to / and /srv/wordpress is a symlink to
+            // /wordpress, so realpath() canonicalizes everything into one
+            // namespace: /srv/htdocs → /htdocs, /srv/wordpress/... → /wordpress/...
+            // This keeps root dirs and symlink-followed dirs consistent.
+            $stack[$frame_index]["dir"] = $current_real;
+            $current_dir = $current_real;
             $entries = @scandir($current_real, SCANDIR_SORT_ASCENDING);
             if ($entries === false) {
                 $abort_payload = [
@@ -2822,14 +2882,8 @@ function endpoint_file_index(
                 $position++;
 
                 $stack[$frame_index]["after"] = $entry;
-                // $path uses the original directory for consistent path reporting;
-                // $real_path uses the realpath for actual filesystem operations.
-                // E.g. for entry "style.css" inside /srv/wordpress/themes/iotix:
-                //   $path      = /srv/wordpress/themes/iotix/style.css  (reported)
-                //   $real_path = /wordpress/themes/iotix/style.css      (for lstat/readlink)
                 $path = $current_dir . "/" . $entry;
-                $real_path = $current_real . "/" . $entry;
-                $stat = @lstat($real_path);
+                $stat = @lstat($path);
                 if ($stat === false) {
                     if (
                         !should_continue(
@@ -2851,40 +2905,24 @@ function endpoint_file_index(
                 $link_target = null;
                 if ($mode === 0120000) {
                     $type = "link";
-                    $raw_target = @readlink($real_path);
-                    if ($raw_target !== false && $raw_target !== "") {
-                        if ($raw_target[0] === "/") {
-                            // Absolute target — use as-is
-                            $link_target = $raw_target;
-                        } else {
-                            // Relative target — resolve against the symlink's
-                            // parent directory so the path stays in the same
-                            // mount namespace (realpath would resolve through
-                            // mounts and return a different prefix).
-                            // E.g. symlink /srv/htdocs/__wp__ with readlink
-                            // target "../wordpress/core/latest" resolves to
-                            // /srv/wordpress/core/latest (preserving /srv/),
-                            // whereas realpath() would return /wordpress/core/6.9.1.
-                            $parent = dirname($path);
-                            $parts = explode("/", $parent . "/" . $raw_target);
-                            $resolved = [];
-                            foreach ($parts as $part) {
-                                if ($part === "" || $part === ".") {
-                                    if (empty($resolved)) {
-                                        $resolved[] = "";
-                                    }
-                                    continue;
-                                }
-                                if ($part === "..") {
-                                    if (count($resolved) > 1) {
-                                        array_pop($resolved);
-                                    }
-                                    continue;
-                                }
-                                $resolved[] = $part;
-                            }
-                            $link_target = implode("/", $resolved);
-                        }
+                    // Use realpath() to resolve the symlink target into the
+                    // canonical path.  On hosts like wp.com, /srv is a symlink
+                    // to / and /srv/wordpress is a symlink to /wordpress, so
+                    // readlink() returns relative paths like "../wordpress/core/
+                    // latest" that contain intermediate symlinks.  realpath()
+                    // resolves everything consistently: /srv/htdocs → /htdocs,
+                    // /srv/wordpress/themes/iotix → /wordpress/themes/iotix.
+                    //
+                    // Only record the target for directory symlinks — the client
+                    // uses targets to discover additional directories to index,
+                    // so file symlink targets are not useful.
+                    $resolved_target = @realpath($path);
+                    if (
+                        $resolved_target !== false &&
+                        $resolved_target !== $path &&
+                        is_dir($resolved_target)
+                    ) {
+                        $link_target = $resolved_target;
                     }
                 } elseif ($mode === 0040000) {
                     $type = "dir";
@@ -2903,6 +2941,45 @@ function endpoint_file_index(
                 ];
                 if ($link_target !== null && $link_target !== false) {
                     $item["target"] = $link_target;
+
+                    // Discover intermediate symlinks along the raw readlink()
+                    // path.  For example, readlink() may return a relative path
+                    // like "../../../wordpress/plugins/akismet/latest" which
+                    // resolves to /srv/wordpress/plugins/akismet/latest.  The
+                    // /srv/wordpress component is itself a symlink to /wordpress.
+                    // realpath() jumps straight to /wordpress/..., so we'd never
+                    // record the /srv/wordpress intermediate symlink.  By walking
+                    // the raw readlink path, discover_path_symlinks() finds it.
+                    if ($follow_symlinks) {
+                        $raw_target = @readlink($path);
+                        if ($raw_target !== false && $raw_target !== "") {
+                            // Resolve relative readlink to absolute path
+                            if ($raw_target[0] !== "/") {
+                                $raw_target = dirname($path) . "/" . $raw_target;
+                            }
+                            // Normalize /../ sequences
+                            $parts = explode("/", $raw_target);
+                            $normalized = [];
+                            foreach ($parts as $p) {
+                                if ($p === "" || $p === ".") {
+                                    if (empty($normalized)) $normalized[] = "";
+                                    continue;
+                                }
+                                if ($p === "..") {
+                                    if (count($normalized) > 1) array_pop($normalized);
+                                    continue;
+                                }
+                                $normalized[] = $p;
+                            }
+                            $abs_raw = implode("/", $normalized);
+                            if ($abs_raw !== "" && $abs_raw[0] === "/" && $abs_raw !== $link_target) {
+                                $intermediates = discover_path_symlinks($abs_raw);
+                                foreach ($intermediates as $intermediate) {
+                                    $batch_items[] = $intermediate;
+                                }
+                            }
+                        }
+                    }
                 }
                 $batch_items[] = $item;
 
