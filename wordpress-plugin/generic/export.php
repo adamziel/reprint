@@ -1264,16 +1264,18 @@ function endpoint_preflight(array $config): array
     if (!empty($directories)) {
         $search_roots = $directories;
     } else {
-        $search_roots = normalize_path_list(
-            array_filter(
-                [
-                    getcwd() ?: null,
-                    __DIR__,
-                    $_SERVER["DOCUMENT_ROOT"] ?? null,
-                ],
-                fn($value) => $value !== null && $value !== "",
-            ),
+        $filtered = array_filter(
+            [
+                getcwd() ?: null,
+                $_SERVER["DOCUMENT_ROOT"] ?? null,
+                isset($_SERVER["SCRIPT_FILENAME"])
+                    ? dirname($_SERVER["SCRIPT_FILENAME"])
+                    : null,
+                __DIR__,
+            ],
+            fn($value) => $value !== null && $value !== "",
         );
+        $search_roots = normalize_path_list($filtered);
     }
 
     $wp_detect = detect_wp_roots($search_roots);
@@ -2125,6 +2127,9 @@ function endpoint_preflight(array $config): array
                 ? (php_ini_loaded_file() ?: null)
                 : null,
             "temp_dir" => sys_get_temp_dir(),
+            "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
+            "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,
+            "cwd" => getcwd() ?: null,
         ],
         "filesystem" => [
             "directories" => $dir_checks,
@@ -2600,10 +2605,10 @@ function endpoint_file_index(
             );
         }
 
-        $ordered = [$list_dir_real];
+        $ordered = [$list_dir];
         $extra_roots = [];
         foreach ($directories as $root) {
-            if ($root === $list_dir_real) {
+            if ($root === $list_dir_real || $root === $list_dir) {
                 continue;
             }
             $extra_roots[] = $root;
@@ -2749,8 +2754,17 @@ function endpoint_file_index(
                 continue;
             }
 
-            $stack[$frame_index]["dir"] = $current_real;
-            $current_dir = $current_real;
+            // Keep the original $current_dir for building child paths so that
+            // paths stay in the same mount namespace.  Only use $current_real
+            // for validation checks and scandir (which needs the resolved path
+            // to actually open the directory).
+            //
+            // Example: on wp.com the symlink /srv/htdocs/__wp__ points to
+            // ../wordpress/core/latest.  The original path is /srv/wordpress/
+            // core/latest, but realpath() resolves through the mount and returns
+            // /wordpress/core/6.9.1.  If we replaced $current_dir with
+            // $current_real, all children would be reported under /wordpress/
+            // instead of /srv/wordpress/, breaking the directory layout.
             $entries = @scandir($current_real, SCANDIR_SORT_ASCENDING);
             if ($entries === false) {
                 $abort_payload = [
@@ -2808,8 +2822,14 @@ function endpoint_file_index(
                 $position++;
 
                 $stack[$frame_index]["after"] = $entry;
-                $path = $current_real . "/" . $entry;
-                $stat = @lstat($path);
+                // $path uses the original directory for consistent path reporting;
+                // $real_path uses the realpath for actual filesystem operations.
+                // E.g. for entry "style.css" inside /srv/wordpress/themes/iotix:
+                //   $path      = /srv/wordpress/themes/iotix/style.css  (reported)
+                //   $real_path = /wordpress/themes/iotix/style.css      (for lstat/readlink)
+                $path = $current_dir . "/" . $entry;
+                $real_path = $current_real . "/" . $entry;
+                $stat = @lstat($real_path);
                 if ($stat === false) {
                     if (
                         !should_continue(
@@ -2831,7 +2851,41 @@ function endpoint_file_index(
                 $link_target = null;
                 if ($mode === 0120000) {
                     $type = "link";
-                    $link_target = @readlink($path);
+                    $raw_target = @readlink($real_path);
+                    if ($raw_target !== false && $raw_target !== "") {
+                        if ($raw_target[0] === "/") {
+                            // Absolute target — use as-is
+                            $link_target = $raw_target;
+                        } else {
+                            // Relative target — resolve against the symlink's
+                            // parent directory so the path stays in the same
+                            // mount namespace (realpath would resolve through
+                            // mounts and return a different prefix).
+                            // E.g. symlink /srv/htdocs/__wp__ with readlink
+                            // target "../wordpress/core/latest" resolves to
+                            // /srv/wordpress/core/latest (preserving /srv/),
+                            // whereas realpath() would return /wordpress/core/6.9.1.
+                            $parent = dirname($path);
+                            $parts = explode("/", $parent . "/" . $raw_target);
+                            $resolved = [];
+                            foreach ($parts as $part) {
+                                if ($part === "" || $part === ".") {
+                                    if (empty($resolved)) {
+                                        $resolved[] = "";
+                                    }
+                                    continue;
+                                }
+                                if ($part === "..") {
+                                    if (count($resolved) > 1) {
+                                        array_pop($resolved);
+                                    }
+                                    continue;
+                                }
+                                $resolved[] = $part;
+                            }
+                            $link_target = implode("/", $resolved);
+                        }
+                    }
                 } elseif ($mode === 0040000) {
                     $type = "dir";
                 } elseif ($mode !== 0100000) {
