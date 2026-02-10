@@ -20,6 +20,6 @@ jobs:
           php-version: ${{ matrix.php }}
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
 
-      - run: composer install --no-interaction --prefer-dist
+      - run: composer install --no-interaction --prefer-dist --ignore-platform-reqs
 
       - run: composer analyze

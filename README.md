@@ -178,6 +178,8 @@ What we **don't** do:
 
 ### Todos
 
+* Some kind of `preflight assert` command that will exit with either 0 or 1 depending on whether we think we can do the migration.
+* Rename `sql-preflight` to `index-database`
 * Blue/green strategy of writing to JSON files, especially for status updates
 * Make sure we can kill the process without hanging if we don't have pcntl and posix extensions
 * Unit tests?

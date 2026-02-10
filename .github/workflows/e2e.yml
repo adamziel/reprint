@@ -8,8 +8,13 @@ on:
 
 jobs:
   e2e:
+    name: E2E (PHP ${{ matrix.php }})
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3']
 
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +24,7 @@ jobs:
           node-version: "20"
 
       - name: Setup infrastructure
-        run: tests/e2e/ci/setup-infrastructure.sh
+        run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.php }}"
 
       - name: Setup test sites
         run: tests/e2e/setup.sh
@@ -44,7 +49,7 @@ jobs:
           echo "--- Nginx config test ---"
           sudo nginx -t 2>&1 || true
           echo "--- PHP-FPM journal ---"
-          sudo journalctl -u php8.2-fpm --no-pager -n 30 2>/dev/null || true
+          sudo journalctl -u "php${{ matrix.php }}-fpm" --no-pager -n 30 2>/dev/null || true
           echo "--- Nginx journal ---"
           sudo journalctl -u nginx --no-pager -n 30 2>/dev/null || true
           echo "--- MariaDB journal ---"

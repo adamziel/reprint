@@ -1,20 +1,29 @@
 #!/usr/bin/env bash
 # CI infrastructure setup for E2E tests.
-# Installs and configures MariaDB, PHP 8.2 FPM, and Nginx on an Ubuntu runner.
+# Installs and configures MariaDB, PHP FPM, and Nginx on an Ubuntu runner.
+#
+# Usage: setup-infrastructure.sh [php-version]
+#   php-version defaults to 8.2 if not specified.
 set -euo pipefail
 
+PHP_VERSION="${1:-8.2}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REGISTRY="${SCRIPT_DIR}/../site-registry.json"
 SITE_ROOT=$(jq -r '.siteRoot' "$REGISTRY")
 FPM_SOCKET="/run/php/e2e.sock"
 
-# ---------- PHP 8.2 ----------
-echo "=== Installing PHP 8.2 ==="
+echo "=== Setting up infrastructure with PHP ${PHP_VERSION} ==="
+
+# ---------- PHP ----------
+echo "=== Installing PHP ${PHP_VERSION} ==="
 sudo add-apt-repository -y ppa:ondrej/php
 sudo apt-get update -qq
 sudo apt-get install -y \
-    php8.2-cli php8.2-fpm \
-    php8.2-mysql php8.2-mbstring php8.2-curl php8.2-xml php8.2-zip
+    "php${PHP_VERSION}-cli" "php${PHP_VERSION}-fpm" \
+    "php${PHP_VERSION}-mysql" "php${PHP_VERSION}-mbstring" "php${PHP_VERSION}-curl" "php${PHP_VERSION}-xml" "php${PHP_VERSION}-zip"
+
+# Make sure the 'php' CLI command uses the version we just installed
+sudo update-alternatives --set php "/usr/bin/php${PHP_VERSION}"
 
 # ---------- MariaDB ----------
 echo "=== Installing MariaDB ==="
@@ -49,9 +58,9 @@ sudo useradd -r -g nginx -s /usr/sbin/nologin nginx 2>/dev/null || true
 echo "=== Configuring PHP-FPM ==="
 sudo mkdir -p /run/php
 
-sudo rm -f /etc/php/8.2/fpm/pool.d/www.conf
+sudo rm -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
 
-cat <<EOF | sudo tee /etc/php/8.2/fpm/pool.d/e2e.conf >/dev/null
+cat <<EOF | sudo tee "/etc/php/${PHP_VERSION}/fpm/pool.d/e2e.conf" >/dev/null
 [e2e]
 user = nginx
 group = nginx
@@ -173,7 +182,7 @@ done
 
 # ---------- Start services ----------
 echo "=== Starting services ==="
-sudo systemctl restart php8.2-fpm
+sudo systemctl restart "php${PHP_VERSION}-fpm"
 
 # Kill anything lingering on our ports before starting Nginx
 for port in $(jq -r '.sites[].port' "$REGISTRY"); do
@@ -187,8 +196,8 @@ sudo systemctl start nginx
 
 # ---------- Verify ----------
 echo "=== Verifying services ==="
-sudo systemctl is-active --quiet php8.2-fpm && echo "php8.2-fpm: active" || { echo "php8.2-fpm: FAILED"; exit 1; }
+sudo systemctl is-active --quiet "php${PHP_VERSION}-fpm" && echo "php${PHP_VERSION}-fpm: active" || { echo "php${PHP_VERSION}-fpm: FAILED"; exit 1; }
 sudo systemctl is-active --quiet nginx        && echo "nginx: active"      || { echo "nginx: FAILED"; exit 1; }
 sudo systemctl is-active --quiet mariadb      && echo "mariadb: active"    || { echo "mariadb: FAILED"; exit 1; }
 
-echo "=== Infrastructure setup complete ==="
+echo "=== Infrastructure setup complete (PHP ${PHP_VERSION}) ==="

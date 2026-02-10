@@ -5714,10 +5714,12 @@ class ImportClient
         $preflight = $this->state["preflight"] ?? null;
         $version = $this->state["version"] ?? null;
         $follow = $this->state["follow_symlinks"] ?? false;
+        $max_packet = $this->state["max_allowed_packet"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
         $this->state["version"] = $version;
         $this->state["follow_symlinks"] = $follow;
+        $this->state["max_allowed_packet"] = $max_packet;
     }
 
     private function default_state(): array
@@ -5728,6 +5730,9 @@ class ImportClient
             "cursor" => null,
             "stage" => null,
             "preflight" => null,
+            "version" => null,
+            "follow_symlinks" => false,
+            "max_allowed_packet" => null,
             "sql_preflight" => [
                 "file" => null,
                 "tables" => 0,
