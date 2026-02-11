@@ -56,11 +56,11 @@ describe('Import: 301 Redirect', () => {
         }
     });
 
-    it('importer reports HTTP 301 error for sql-sync', () => {
+    it('importer reports HTTP 301 error for db-sync', () => {
         const tempDir = createTempDir('e2e-import-redirect-sql');
         try {
             const url = `${getSiteUrl('redirect-301')}?directory=/srv/e2e-sites/basic`;
-            const result = runImporter(url, tempDir, 'sql-sync', {
+            const result = runImporter(url, tempDir, 'db-sync', {
                 secret: getSiteSecret('redirect-301'),
                 timeout: 15000,
             });

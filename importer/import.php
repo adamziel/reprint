@@ -1551,7 +1551,7 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: files-sync-initial, files-sync-delta, files-index, sql-sync
+     *   - command: Required. One of: files-sync-initial, files-sync-delta, files-index, db-sync
      *   - restart: Optional. Force restart of completed command
      *   - verbose: Optional. Enable verbose output
      */
@@ -1564,7 +1564,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, index-database, preflight, preflight-assert",
+                "Command is required. Valid commands: files-sync-initial, files-sync-delta, files-index, db-sync, db-index, preflight, preflight-assert",
             );
         }
 
@@ -1573,14 +1573,14 @@ class ImportClient
                 "files-sync-initial",
                 "files-sync-delta",
                 "files-index",
-                "sql-sync",
-                "index-database",
+                "db-sync",
+                "db-index",
                 "preflight",
                 "preflight-assert",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, index-database, preflight, preflight-assert",
+                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, files-index, db-sync, db-index, preflight, preflight-assert",
             );
         }
 
@@ -1647,11 +1647,11 @@ class ImportClient
                     $this->run_files_index($restart);
                     break;
 
-                case "sql-sync":
-                    $this->run_sql_sync($restart);
+                case "db-sync":
+                    $this->run_db_sync($restart);
                     break;
-                case "index-database":
-                    $this->run_index_database($restart);
+                case "db-index":
+                    $this->run_db_index($restart);
                     break;
             }
 
@@ -2927,7 +2927,7 @@ class ImportClient
     }
 
     /**
-     * Command: sql-sync
+     * Command: db-sync
      *
      * Rules:
      * - Stream next portion of SQL from last saved cursor
@@ -2935,16 +2935,16 @@ class ImportClient
      * - If db.sql missing but state says complete: warn and require --restart flag
      * - Otherwise: error
      */
-    private function run_sql_sync(bool $restart): void
+    private function run_db_sync(bool $restart): void
     {
         $state_command = $this->state["command"] ?? null;
         $sql_file = $this->local_path . "/db.sql";
 
         $has_cursor =
-            $state_command === "sql-sync" &&
+            $state_command === "db-sync" &&
             !empty($this->state["cursor"] ?? null);
         $current_status =
-            $state_command === "sql-sync"
+            $state_command === "db-sync"
                 ? $this->state["status"] ?? null
                 : null;
         $sql_exists = file_exists($sql_file);
@@ -2952,7 +2952,7 @@ class ImportClient
         // Handle restart flag
         if ($restart) {
             $this->audit_log(
-                "RESTART | Clearing sql-sync state and starting fresh",
+                "RESTART | Clearing db-sync state and starting fresh",
                 true,
             );
             $this->reset_state();
@@ -2964,7 +2964,7 @@ class ImportClient
             if ($sql_exists) {
                 unlink($sql_file);
                 $this->audit_log(
-                    "FILE DELETE | {$sql_file} | restart sql-sync",
+                    "FILE DELETE | {$sql_file} | restart db-sync",
                 );
                 $sql_exists = false;
             }
@@ -2974,45 +2974,45 @@ class ImportClient
         if ($current_status === "complete") {
             if ($sql_exists && !$restart) {
                 throw new RuntimeException(
-                    "sql-sync already completed and db.sql exists. Use --restart flag to start over.",
+                    "db-sync already completed and db.sql exists. Use --restart flag to start over.",
                 );
             } elseif (!$sql_exists && !$restart) {
                 throw new RuntimeException(
-                    "sql-sync marked complete but db.sql is missing. Use --restart flag to re-sync.",
+                    "db-sync marked complete but db.sql is missing. Use --restart flag to re-sync.",
                 );
             }
         }
 
         // Starting fresh SQL sync
         if (!$has_cursor) {
-            $this->state["command"] = "sql-sync";
+            $this->state["command"] = "db-sync";
             $this->state["status"] = "in_progress";
             $this->state["cursor"] = null;
             $this->state["stage"] = null;
             $this->state["diff"] = $this->default_state()["diff"];
             $this->save_state($this->state);
 
-            $this->audit_log("START sql-sync", true);
+            $this->audit_log("START db-sync", true);
 
             if (!$this->verbose_mode) {
-                echo "Starting sql-sync\n";
+                echo "Starting db-sync\n";
             }
         } else {
             // Resuming SQL sync
             $this->audit_log(
                 sprintf(
-                    "RESUME sql-sync | cursor=%s",
+                    "RESUME db-sync | cursor=%s",
                     substr($this->state["cursor"], 0, 20) . "...",
                 ),
                 true,
             );
 
             if (!$this->verbose_mode) {
-                echo "Resuming sql-sync\n";
+                echo "Resuming db-sync\n";
             }
         }
 
-        $this->state["command"] = "sql-sync";
+        $this->state["command"] = "db-sync";
         $this->save_state($this->state);
 
         $this->output_progress([
@@ -3027,37 +3027,37 @@ class ImportClient
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
-        $this->audit_log("sql-sync complete", true);
+        $this->audit_log("db-sync complete", true);
 
         if (!$this->verbose_mode) {
-            echo "sql-sync complete\n";
+            echo "db-sync complete\n";
             echo "SQL file: {$sql_file}\n";
             echo "Audit log: {$this->audit_log}\n";
         }
     }
 
     /**
-     * Command: index-database
+     * Command: db-index
      *
      * Streams table metadata (name/rows/size) for planning and diagnostics.
      */
-    private function run_index_database(bool $restart): void
+    private function run_db_index(bool $restart): void
     {
         $state_command = $this->state["command"] ?? null;
         $tables_file = $this->local_path . "/db-tables.jsonl";
 
         $has_cursor =
-            $state_command === "index-database" &&
+            $state_command === "db-index" &&
             !empty($this->state["cursor"] ?? null);
         $current_status =
-            $state_command === "index-database"
+            $state_command === "db-index"
                 ? $this->state["status"] ?? null
                 : null;
         $tables_exists = file_exists($tables_file);
 
         if ($restart) {
             $this->audit_log(
-                "RESTART | Clearing index-database state and starting fresh",
+                "RESTART | Clearing db-index state and starting fresh",
                 true,
             );
             $this->reset_state();
@@ -3068,7 +3068,7 @@ class ImportClient
             if ($tables_exists) {
                 unlink($tables_file);
                 $this->audit_log(
-                    "FILE DELETE | {$tables_file} | restart index-database",
+                    "FILE DELETE | {$tables_file} | restart db-index",
                 );
                 $tables_exists = false;
             }
@@ -3077,62 +3077,62 @@ class ImportClient
         if ($current_status === "complete") {
             if ($tables_exists && !$restart) {
                 throw new RuntimeException(
-                    "index-database already completed and db-tables.jsonl exists. Use --restart flag to start over.",
+                    "db-index already completed and db-tables.jsonl exists. Use --restart flag to start over.",
                 );
             } elseif (!$tables_exists && !$restart) {
                 throw new RuntimeException(
-                    "index-database marked complete but db-tables.jsonl is missing. Use --restart flag to re-run.",
+                    "db-index marked complete but db-tables.jsonl is missing. Use --restart flag to re-run.",
                 );
             }
         }
 
         if (!$has_cursor) {
-            $this->state["command"] = "index-database";
+            $this->state["command"] = "db-index";
             $this->state["status"] = "in_progress";
             $this->state["cursor"] = null;
             $this->state["stage"] = null;
             $this->state["diff"] = $this->default_state()["diff"];
-            $this->state["index_database"] = $this->default_state()["index_database"];
+            $this->state["db_index"] = $this->default_state()["db_index"];
             $this->save_state($this->state);
 
-            $this->audit_log("START index-database", true);
+            $this->audit_log("START db-index", true);
             if (!$this->verbose_mode) {
-                echo "Starting index-database\n";
+                echo "Starting db-index\n";
             }
         } else {
             $this->audit_log(
                 sprintf(
-                    "RESUME index-database | cursor=%s",
+                    "RESUME db-index | cursor=%s",
                     substr($this->state["cursor"], 0, 20) . "...",
                 ),
                 true,
             );
             if (!$this->verbose_mode) {
-                echo "Resuming index-database\n";
+                echo "Resuming db-index\n";
             }
         }
 
-        $this->state["command"] = "index-database";
+        $this->state["command"] = "db-index";
         $this->save_state($this->state);
 
         $this->output_progress([
             "status" => "starting",
-            "phase" => "index-database",
+            "phase" => "db-index",
         ]);
 
-        $this->download_index_database();
+        $this->download_db_index();
 
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
-        $tables = (int) ($this->state["index_database"]["tables"] ?? 0);
+        $tables = (int) ($this->state["db_index"]["tables"] ?? 0);
         $this->audit_log(
-            sprintf("index-database complete: %d tables", $tables),
+            sprintf("db-index complete: %d tables", $tables),
             true,
         );
 
         if (!$this->verbose_mode) {
-            echo "index-database complete: {$tables} tables\n";
+            echo "db-index complete: {$tables} tables\n";
             echo "Table stats: {$tables_file}\n";
             echo "Audit log: {$this->audit_log}\n";
         }
@@ -4366,7 +4366,7 @@ class ImportClient
                             true,
                         );
                     } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "index-database", $context);
+                        $this->handle_error_chunk($chunk, "db-index", $context);
                     }
                 };
 
@@ -4392,15 +4392,15 @@ class ImportClient
     }
 
     /**
-     * Download table stats from the index_database endpoint.
+     * Download table stats from the db_index endpoint.
      */
-    private function download_index_database(): void
+    private function download_db_index(): void
     {
         $cursor = $this->state["cursor"] ?? null;
         $complete = false;
         $tables_file = $this->local_path . "/db-tables.jsonl";
 
-        $stats = $this->state["index_database"] ?? [];
+        $stats = $this->state["db_index"] ?? [];
         $tables_written = (int) ($stats["tables"] ?? 0);
         $rows_estimated = (int) ($stats["rows_estimated"] ?? 0);
         $bytes_written = (int) ($stats["bytes"] ?? 0);
@@ -4434,7 +4434,7 @@ class ImportClient
                 $params = [
                     "tables_per_batch" => 1000,
                 ];
-                $url = $this->build_url("index_database", $cursor, $params, null);
+                $url = $this->build_url("db_index", $cursor, $params, null);
 
                 $context = new StreamingContext();
                 $context->on_chunk = function ($chunk) use (
@@ -4479,7 +4479,7 @@ class ImportClient
                             }
                         }
                     } elseif ($chunk_type === "progress") {
-                        $this->handle_progress($chunk, "index-database");
+                        $this->handle_progress($chunk, "db-index");
                     } elseif ($chunk_type === "completion") {
                         $complete =
                             ($chunk["headers"]["x-status"] ?? "") ===
@@ -4510,7 +4510,7 @@ class ImportClient
                         ];
                         $this->output_progress(
                             [
-                                "phase" => "index-database",
+                                "phase" => "db-index",
                                 "status" =>
                                     $chunk["headers"]["x-status"] ?? "unknown",
                                 "tables_processed" =>
@@ -4531,18 +4531,18 @@ class ImportClient
                     $cursor,
                     $context,
                     null,
-                    "index_database",
+                    "db_index",
                 );
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
-                    "index_database",
+                    "db_index",
                     $wall_time,
                     $context->response_stats ?? [],
                 );
 
                 fflush($handle);
                 $this->state["cursor"] = $cursor;
-                $this->state["index_database"] = [
+                $this->state["db_index"] = [
                     "file" => $tables_file,
                     "tables" => $tables_written,
                     "rows_estimated" => $rows_estimated,
@@ -5873,7 +5873,7 @@ class ImportClient
             "version" => null,
             "follow_symlinks" => false,
             "max_allowed_packet" => null,
-            "index_database" => [
+            "db_index" => [
                 "file" => null,
                 "tables" => 0,
                 "rows_estimated" => 0,
@@ -5940,19 +5940,19 @@ class ImportClient
         $tuning = array_intersect_key($tuning, $defaults["tuning"]);
         $tuning = array_merge($defaults["tuning"], $tuning);
         $state["tuning"] = $tuning;
-        $index_db = $state["index_database"] ?? [];
+        $index_db = $state["db_index"] ?? [];
         if (!is_array($index_db)) {
             $index_db = [];
         }
         $index_db = array_intersect_key(
             $index_db,
-            $defaults["index_database"],
+            $defaults["db_index"],
         );
         $index_db = array_merge(
-            $defaults["index_database"],
+            $defaults["db_index"],
             $index_db,
         );
-        $state["index_database"] = $index_db;
+        $state["db_index"] = $index_db;
         return $state;
     }
 
@@ -6241,7 +6241,7 @@ if (
                 "  --secret=TOKEN   HMAC shared secret for api.php authentication\n" .
                 "  --verbose, -v    Show detailed request/response logs\n",
         ],
-        "sql-sync" => [
+        "db-sync" => [
             "short" => "Download the database as a SQL dump",
             "detail" =>
                 "Streams the full database dump into <local-path>/db.sql.\n" .
@@ -6256,7 +6256,7 @@ if (
                 "Output files:\n" .
                 "  db.sql                SQL dump\n",
         ],
-        "index-database" => [
+        "db-index" => [
             "short" => "Index database tables and their statistics",
             "detail" =>
                 "Streams table metadata (name, estimated rows, data size) into\n" .

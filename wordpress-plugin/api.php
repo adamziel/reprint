@@ -270,7 +270,7 @@ try {
     $endpoint = $config['endpoint'] ?? null;
     if (!$endpoint) {
         throw new InvalidArgumentException(
-            "endpoint parameter is required. Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'index_database', 'preflight'"
+            "endpoint parameter is required. Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'db_index', 'preflight'"
         );
     }
 
@@ -313,8 +313,8 @@ try {
             endpoint_sql_chunk($config, $script_start, $max_execution_time, $max_memory, $memory_threshold);
             break;
 
-        case 'index_database':
-            endpoint_index_database($config, $script_start, $max_execution_time, $max_memory, $memory_threshold);
+        case 'db_index':
+            endpoint_db_index($config, $script_start, $max_execution_time, $max_memory, $memory_threshold);
             break;
 
         case 'preflight':
@@ -323,7 +323,7 @@ try {
 
         default:
             throw new InvalidArgumentException(
-                "Invalid endpoint: '{$endpoint}'. Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'index_database', 'preflight'"
+                "Invalid endpoint: '{$endpoint}'. Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'db_index', 'preflight'"
             );
     }
 } catch (Exception $e) {

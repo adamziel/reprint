@@ -64,10 +64,10 @@ describe('Import: Custom WP Content', () => {
         assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
-    it('sql-sync completes with valid dump', () => {
+    it('db-sync completes with valid dump', () => {
         const sqlDir = createTempDir('e2e-import-custom-wp-sql');
         try {
-            const result = runImporter(importUrl(), sqlDir, 'sql-sync', {
+            const result = runImporter(importUrl(), sqlDir, 'db-sync', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}`);

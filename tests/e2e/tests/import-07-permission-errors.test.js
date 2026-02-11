@@ -104,8 +104,8 @@ INSERT INTO wp_secret_table VALUES (1, 'top secret');
             return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
         }
 
-        it('sql-sync completes', () => {
-            const result = runImporter(importUrl(), tempDir, 'sql-sync', {
+        it('db-sync completes', () => {
+            const result = runImporter(importUrl(), tempDir, 'db-sync', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

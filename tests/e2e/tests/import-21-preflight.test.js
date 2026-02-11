@@ -87,8 +87,8 @@ describe('Import: Preflight Endpoint', () => {
         }
     });
 
-    it('index_database returns table list', async () => {
-        const response = await apiRequest(site, 'index_database', {
+    it('db_index returns table list', async () => {
+        const response = await apiRequest(site, 'db_index', {
             directory: getSiteDir(site),
         });
         assert.equal(response.status, 200, `Expected 200, got ${response.status}`);

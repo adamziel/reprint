@@ -51,10 +51,10 @@ describe('Import: Buffered Response', () => {
         assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
-    it('sql-sync through buffered proxy completes', () => {
+    it('db-sync through buffered proxy completes', () => {
         const sqlDir = createTempDir('e2e-import-buffered-sql');
         try {
-            const result = runImporter(importUrl(), sqlDir, 'sql-sync', {
+            const result = runImporter(importUrl(), sqlDir, 'db-sync', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}`);

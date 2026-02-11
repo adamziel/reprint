@@ -77,7 +77,7 @@ describe('Import: State Corruption', () => {
             tempDir = createTempDir('e2e-state-wrong-cmd');
             // Write valid state but for a different command
             writeFileSync(join(tempDir, '.import-state.json'), JSON.stringify({
-                command: 'sql-sync',
+                command: 'db-sync',
                 status: 'complete',
             }));
         });

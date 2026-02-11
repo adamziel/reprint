@@ -1,6 +1,6 @@
 /**
  * Test 02: SQL Sync via import.php
- * Tests sql-sync and index-database commands produce correct output.
+ * Tests db-sync and db-index commands produce correct output.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -39,8 +39,8 @@ describe('Import: SQL Sync', () => {
         return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
     }
 
-    it('sql-sync completes and produces db.sql', () => {
-        const result = runImporter(importUrl(), tempDir, 'sql-sync', {
+    it('db-sync completes and produces db.sql', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-sync', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -70,10 +70,10 @@ describe('Import: SQL Sync', () => {
             `counts=${JSON.stringify(comparison.rowCounts)}`);
     });
 
-    it('index-database produces db-tables.jsonl with table names', () => {
+    it('db-index produces db-tables.jsonl with table names', () => {
         const pfDir = createTempDir('e2e-import-sqlpf');
         try {
-            const result = runImporter(importUrl(), pfDir, 'index-database', {
+            const result = runImporter(importUrl(), pfDir, 'db-index', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}`);
@@ -93,8 +93,8 @@ describe('Import: SQL Sync', () => {
         }
     });
 
-    it('re-running sql-sync without --restart fails with useful message', () => {
-        const result = runImporter(importUrl(), tempDir, 'sql-sync', {
+    it('re-running db-sync without --restart fails with useful message', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-sync', {
             secret: getSiteSecret(site),
         });
         assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code');

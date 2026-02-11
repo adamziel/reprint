@@ -35,11 +35,11 @@ describe('Import: Gzip Corruption', () => {
         removeTestHooks(site);
     });
 
-    it('sql-sync detects gzip corruption and fails gracefully', () => {
+    it('db-sync detects gzip corruption and fails gracefully', () => {
         const tempDir = createTempDir('e2e-import-gzip-sql');
         try {
             const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
-            const result = runImporter(url, tempDir, 'sql-sync', {
+            const result = runImporter(url, tempDir, 'db-sync', {
                 secret: getSiteSecret(site),
                 timeout: 30000,
             });

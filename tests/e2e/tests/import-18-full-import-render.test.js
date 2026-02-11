@@ -57,9 +57,9 @@ describe('Import: Full Round-Trip', () => {
         assert.equal(state.status, 'complete');
     });
 
-    it('sql-sync completes', () => {
+    it('db-sync completes', () => {
         const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
-        const result = runImporter(url, tempDir, 'sql-sync', {
+        const result = runImporter(url, tempDir, 'db-sync', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

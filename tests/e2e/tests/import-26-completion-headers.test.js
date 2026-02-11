@@ -122,11 +122,11 @@ describe('Import: Completion Headers', () => {
         });
     });
 
-    describe('index_database endpoint', () => {
+    describe('db_index endpoint', () => {
         let completion;
 
         beforeAll(async () => {
-            const response = await apiRequest(site, 'index_database', {
+            const response = await apiRequest(site, 'db_index', {
                 directory: getSiteDir(site),
             });
             assert.equal(response.status, 200);

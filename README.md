@@ -31,8 +31,8 @@ php import.php <command> <URL> <local-path> [options]
 * `files-sync-initial` — Full file sync. Downloads the complete directory tree from the remote server.
 * `files-sync-delta` — Incremental file sync. Only downloads files that changed since the last sync.
 * `files-index` — Downloads the full remote file index without fetching file contents.
-* `sql-sync` — Downloads the database as a SQL dump to `db.sql`.
-* `index-database` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
+* `db-sync` — Downloads the database as a SQL dump to `db.sql`.
+* `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 
 All commands except `preflight-assert` support `--restart` to clear state and start over. Interrupted commands automatically resume from the last saved cursor.
 
@@ -210,7 +210,7 @@ What we **don't** do:
 
 * Possibly run more checks in `preflight-assert`. What would they be?
 * ✅ `preflight-assert` command that exits 0/1 depending on migration feasibility
-* ✅ Renamed `sql-preflight` to `index-database`
+* ✅ Renamed `sql-preflight` to `db-index`
 * ✅ A runner script to easily run those downloaded sites locally while providing them with the right `Host` header and
   rewriting all the URLs on the fly (with the HTML API?)
 * ✅ PHP 7.4+ compat (or PHP 7.2+ even) with CI tests
