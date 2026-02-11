@@ -1289,6 +1289,7 @@ class ImportClient
     private $last_http_code = null;
     private $last_curl_errno = null;
     private $last_curl_timeout = false;
+    public $exit_code = 0; // Exit code: 0 = complete, 2 = partial (call again)
 
     public function __construct(string $remote_url, string $local_path)
     {
@@ -1658,7 +1659,14 @@ class ImportClient
                     break;
             }
 
-            $this->output_progress(["status" => "complete"]);
+            $final_status = $this->state["status"] ?? "complete";
+            $this->output_progress(["status" => $final_status]);
+
+            // Exit code 2 signals "partial progress, call me again" so
+            // runner scripts can loop on $? without reading the state file.
+            if ($final_status === "partial") {
+                $this->exit_code = 2;
+            }
         } catch (Exception $e) {
             $this->output_progress([
                 "status" => "error",
@@ -6218,6 +6226,11 @@ if (
         echo "  --verbose, -v        Show detailed request/response logs\n";
         echo "  --no-adaptive        Disable adaptive request tuning\n";
         echo "\n";
+        echo "Exit codes:\n";
+        echo "  0  Command completed successfully\n";
+        echo "  2  Partial progress — run the same command again to continue\n";
+        echo "  1  Error\n";
+        echo "\n";
         echo "State is stored in <local-path>/.import-state.json. Interrupted\n";
         echo "commands automatically resume. Use --abort to abort the current\n";
         echo "sync and exit — downloaded files are preserved.\n";
@@ -6447,7 +6460,7 @@ if (
     try {
         $client = new ImportClient($remote_url, $local_path);
         $client->run($options);
-        exit(0);
+        exit($client->exit_code);
     } catch (\Throwable $e) {
         $error = [
             "error" => $e->getMessage(),
