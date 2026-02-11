@@ -342,6 +342,7 @@ class BreakingEdgeCasesTest extends MySQLDumpProducerTestBase
         }
 
         $sql = implode("\n", $allFragments);
+        var_dump($sql);
         $importPdo = $this->executeDumpInNewDatabase($sql);
 
         $rows = $importPdo->query("SELECT data FROM t ORDER BY id")->fetchAll(PDO::FETCH_COLUMN);

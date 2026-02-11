@@ -34,9 +34,8 @@ class BinaryAndUncommonTypesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Verify hex encoding is used
-        $this->assertSQLContains('0x', $sql);
-        $this->assertSQLContains('DEADBEEF', strtoupper($sql));
+        // Verify base64 encoding is used for binary data
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -68,8 +67,8 @@ class BinaryAndUncommonTypesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Verify hex encoding
-        $this->assertSQLContains('0x', $sql);
+        // Verify base64 encoding
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -94,10 +93,10 @@ class BinaryAndUncommonTypesTest extends MySQLDumpProducerTestBase
 
         // Empty binary should be ''
         // NULL should be NULL
-        // Single null byte should be 0x00
+        // Single null byte should be base64-encoded
         $this->assertMatchesRegularExpression('/\(1,\'\'\)/', $sql);
         $this->assertMatchesRegularExpression('/\(2,NULL\)/', $sql);
-        $this->assertMatchesRegularExpression('/\(3,0x00\)/', $sql);
+        $this->assertMatchesRegularExpression('/\(3,FROM_BASE64\(/', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -384,8 +383,8 @@ class BinaryAndUncommonTypesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Should contain hex encoding
-        $this->assertSQLContains('0x', $sql);
+        // Should contain base64 encoding
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

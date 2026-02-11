@@ -224,8 +224,8 @@ class EncodingAndInvalidCharsTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Since it's VARBINARY, should use hex encoding
-        $this->assertSQLContains("0x", $sql);
+        // VARBINARY data is base64-encoded
+        $this->assertSQLContains("FROM_BASE64", $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

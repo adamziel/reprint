@@ -208,12 +208,12 @@ class MySQLDumpProducer
     {
         $this->db = $db;
         $this->tables_to_process = $options["tables_to_process"] ?? null;
-        $this->batch_size = $options["batch_size"] ?? 250;
+        $this->batch_size = (int)($options["batch_size"] ?? 250);
         $this->emit_create_table = $options["create_table_query"] ?? true;
 
         // Maximum statement size - auto-detect from MySQL's max_allowed_packet if not specified
         if (isset($options["max_statement_size"])) {
-            $this->max_statement_size = $options["max_statement_size"];
+            $this->max_statement_size = (int)$options["max_statement_size"];
         } else {
             $this->max_statement_size = $this->detect_max_statement_size();
         }
@@ -632,7 +632,6 @@ class MySQLDumpProducer
                 ") */";
         }
 
-        // Fetch all non-numeric, non-binary columns as binary to get raw bytes for base64 encoding
         if ($this->current_column_types) {
             $select_parts = [];
             foreach ($this->current_column_types as $col_name => $col_info) {
@@ -1146,11 +1145,6 @@ class MySQLDumpProducer
             return (string) $value;
         }
 
-        // Binary types - always use hex encoding
-        if ($this->is_binary_type($data_type)) {
-            return $this->format_binary($value);
-        }
-
         // JSON columns cannot accept binary charset values, so we wrap with CONVERT
         if (strtoupper($data_type) === "JSON") {
             if ($value === "") {
@@ -1160,7 +1154,7 @@ class MySQLDumpProducer
             return "CONVERT(FROM_BASE64('" . $base64 . "') USING utf8mb4)";
         }
 
-        // Base64-encode to preserve exact bytes
+        // Everything else (binary types, strings) uses base64
         return $this->format_base64($value);
     }
 
@@ -1179,12 +1173,6 @@ class MySQLDumpProducer
 
         if ($this->is_numeric_type($data_type)) {
             return strlen((string) $value);
-        }
-
-        // Binary types are always hex-encoded
-        if ($this->is_binary_type($data_type)) {
-            $len = strlen((string) $value);
-            return $len === 0 ? 2 : (2 + ($len * 2)); // '' or 0x...
         }
 
         $len = strlen((string) $value);
@@ -1250,6 +1238,7 @@ class MySQLDumpProducer
      */
     private function is_binary_type($data_type)
     {
+        $data_type = strtoupper($data_type);
         $binary_types = [
             "BINARY",
             "VARBINARY",
@@ -1288,15 +1277,6 @@ class MySQLDumpProducer
      * @param string $value The binary value.
      * @return string The hex-encoded value with 0x prefix.
      */
-    private function format_binary($value)
-    {
-        if ($value === "") {
-            return "''";
-        }
-
-        return "0x" . bin2hex($value);
-    }
-
     /**
      * Formats binary data as base64-encoded string with FROM_BASE64() wrapper.
      *
@@ -1431,7 +1411,7 @@ class MySQLDumpProducer
 
             // Split this column into chunks
             $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
-            $chunks = $this->create_value_chunks($raw_value, $data_type, $col);
+            $chunks = $this->create_value_chunks($raw_value, $col);
 
             if (count($chunks) > 1) {
                 $chunked_columns[$col] = true;
@@ -1469,11 +1449,10 @@ class MySQLDumpProducer
      * Splits a large value into chunks that fit within max_statement_size.
      *
      * @param mixed $value The raw value.
-     * @param string $data_type The MySQL data type.
      * @param string $column The column name.
      * @return array Array of raw value chunks.
      */
-    private function create_value_chunks($value, $data_type, $column)
+    private function create_value_chunks($value, $column)
     {
         if ($value === null || $value === '') {
             return [$value];
@@ -1490,13 +1469,8 @@ class MySQLDumpProducer
         $max_chunk_raw_size = ($this->max_statement_size - $total_overhead);
 
         // Account for encoding overhead
-        if ($this->is_binary_type($data_type)) {
-            // Hex encoding: 2x size + 2 for "0x" prefix
-            $max_chunk_raw_size = (int)(($max_chunk_raw_size - 2) / 2);
-        } else {
-            // Base64: ~1.33x size + overhead for FROM_BASE64('')
-            $max_chunk_raw_size = (int)(($max_chunk_raw_size - 20) / 1.34);
-        }
+        // Base64: ~1.33x size + overhead for FROM_BASE64('')
+        $max_chunk_raw_size = (int)(($max_chunk_raw_size - 20) / 1.34);
 
         // Ensure minimum chunk size
         $max_chunk_raw_size = max($max_chunk_raw_size, 1000);
