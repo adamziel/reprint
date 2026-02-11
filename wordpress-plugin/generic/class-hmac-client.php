@@ -1,6 +1,7 @@
 <?php
+
 /**
- * HMAC Client for Site Export API.
+ * HMAC Client for the Site Export API.
  *
  * This class generates the required HMAC signatures for authenticating
  * requests to the Site Export API. The importing side uses this to sign
@@ -10,8 +11,37 @@
  *   $client = new Site_Export_HMAC_Client($shared_secret);
  *   $headers = $client->get_auth_headers($request_body);
  *   // Add $headers to your HTTP request
+ *
+ * Usage with curl:
+ *
+ * ```php
+ * // 1. First time: Generate and display a secret for the user
+ * $secret = Site_Export_HMAC_Client::generate_secret();
+ * echo "Please enter this secret in the Site Export plugin settings:\n";
+ * echo $secret . "\n";
+ *
+ * // 2. For each request: Create client and sign requests
+ * $client = new Site_Export_HMAC_Client($secret);
+ *
+ * // For GET requests:
+ * $ch = curl_init('https://example.com/site-export-api/?endpoint=file_index&directory=/var/www/html');
+ * $client->sign_curl_request($ch, '');
+ * curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+ * $response = curl_exec($ch);
+ *
+ * // For POST requests with JSON body:
+ * $body = json_encode(['paths' => ['/wp-content/uploads/image.jpg']]);
+ * $ch = curl_init('https://example.com/site-export-api/?endpoint=file_fetch');
+ * $client->sign_curl_request($ch, $body);
+ * curl_setopt($ch, CURLOPT_POST, true);
+ * curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+ * curl_setopt($ch, CURLOPT_HTTPHEADER, [
+ *     'Content-Type: application/json',
+ *     // Auth headers are added by sign_curl_request
+ * ]);
+ * $response = curl_exec($ch);
+ * ```
  */
-
 class Site_Export_HMAC_Client {
 
     /**
@@ -154,42 +184,3 @@ class Site_Export_HMAC_Client {
         return stream_context_create($options);
     }
 }
-
-/**
- * Example usage (for documentation purposes).
- *
- * On the IMPORT side (client):
- *
- * ```php
- * // 1. First time: Generate and display a secret for the user
- * $secret = Site_Export_HMAC_Client::generate_secret();
- * echo "Please enter this secret in the Site Export plugin settings:\n";
- * echo $secret . "\n";
- *
- * // 2. For each request: Create client and sign requests
- * $client = new Site_Export_HMAC_Client($secret);
- *
- * // For GET requests:
- * $ch = curl_init('https://example.com/site-export-api/?endpoint=file_index&directory=/var/www/html');
- * $client->sign_curl_request($ch, '');
- * curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
- * $response = curl_exec($ch);
- *
- * // For POST requests with JSON body:
- * $body = json_encode(['paths' => ['/wp-content/uploads/image.jpg']]);
- * $ch = curl_init('https://example.com/site-export-api/?endpoint=file_fetch');
- * $client->sign_curl_request($ch, $body);
- * curl_setopt($ch, CURLOPT_POST, true);
- * curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
- * curl_setopt($ch, CURLOPT_HTTPHEADER, [
- *     'Content-Type: application/json',
- *     // Auth headers are added by sign_curl_request
- * ]);
- * $response = curl_exec($ch);
- * ```
- *
- * On the EXPORT side (server):
- *
- * The WordPress plugin automatically verifies signatures.
- * Just ensure the same secret is configured in the plugin settings.
- */

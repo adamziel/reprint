@@ -6,6 +6,7 @@ parameters:
     level: 5
     paths:
         - wordpress-plugin
+        - importer
     excludePaths:
         - wordpress-plugin/generic/secrets.php
         - wordpress-plugin/wordpress/

@@ -1,6 +1,26 @@
 parameters:
 	ignoreErrors:
 		-
+			message: "#^Parameter \\#2 \\$newvalue of function ini_set expects string, int given\\.$#"
+			count: 1
+			path: importer/import.php
+
+		-
+			message: "#^Property ImportClient\\:\\:\\$current_curl_handle is never read, only written\\.$#"
+			count: 1
+			path: importer/import.php
+
+		-
+			message: "#^Property ImportClient\\:\\:\\$last_curl_errno is never read, only written\\.$#"
+			count: 1
+			path: importer/import.php
+
+		-
+			message: "#^Property ImportClient\\:\\:\\$last_http_code is never read, only written\\.$#"
+			count: 1
+			path: importer/import.php
+
+		-
 			message: "#^Unreachable statement \\- code above always terminates\\.$#"
 			count: 1
 			path: wordpress-plugin/generic/class-mysql-dump-producer.php
