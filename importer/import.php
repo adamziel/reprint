@@ -74,11 +74,14 @@ function parse_size(string $value): int
 class MultipartStreamParser
 {
     private const MAX_BUFFER_SIZE = 64 * 1024 * 1024; // 64MB
+    private const STATE_BOUNDARY = 0;
+    private const STATE_HEADERS = 1;
+    private const STATE_BODY = 2;
 
     private $boundary;
     private $boundary_length;
     private $buffer = "";
-    private $state = "boundary"; // boundary|headers|body
+    private $state = self::STATE_BOUNDARY;
     private $current_headers = [];
     private $body_length = 0;
     private $body_target = null;
@@ -111,15 +114,15 @@ class MultipartStreamParser
     private function parse(): void
     {
         while (true) {
-            if ($this->state === "boundary") {
+            if ($this->state === self::STATE_BOUNDARY) {
                 if (!$this->parse_boundary()) {
                     break;
                 }
-            } elseif ($this->state === "headers") {
+            } elseif ($this->state === self::STATE_HEADERS) {
                 if (!$this->parse_headers()) {
                     break;
                 }
-            } elseif ($this->state === "body") {
+            } elseif ($this->state === self::STATE_BODY) {
                 if (!$this->parse_body()) {
                     break;
                 }
@@ -161,7 +164,7 @@ class MultipartStreamParser
 
         // Consume boundary line
         $this->buffer = substr($this->buffer, $line_end);
-        $this->state = "headers";
+        $this->state = self::STATE_HEADERS;
         $this->current_headers = [];
         return true;
     }
@@ -228,7 +231,7 @@ class MultipartStreamParser
      */
     private function prepare_body(): void
     {
-        $this->state = "body";
+        $this->state = self::STATE_BODY;
         $this->body_length = 0;
 
         // Determine target length if Content-Length is specified
@@ -268,7 +271,7 @@ class MultipartStreamParser
             $this->skip_crlf();
 
             // Complete - move to next boundary
-            $this->state = "boundary";
+            $this->state = self::STATE_BOUNDARY;
             $this->emit_chunk_complete();
             return true;
         }
@@ -303,7 +306,7 @@ class MultipartStreamParser
         $this->skip_crlf();
 
         // Complete - move to next boundary
-        $this->state = "boundary";
+        $this->state = self::STATE_BOUNDARY;
         $this->emit_chunk_complete();
         return true;
     }
