@@ -586,7 +586,8 @@ class MySQLDumpProducer
 
         if ($sql) {
             $header = "--\n-- Table structure for table `{$this->current_table}`\n--\n\n";
-            $this->current_sql_fragment = $header . $sql . ";";
+            $drop = "DROP TABLE IF EXISTS `{$this->current_table}`;\n";
+            $this->current_sql_fragment = $header . $drop . $sql . ";";
         } else {
             $keys = $row ? implode(", ", array_keys($row)) : "(no row returned)";
             throw new \RuntimeException(

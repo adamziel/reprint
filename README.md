@@ -26,8 +26,9 @@ SECRET="your-shared-secret"
 php import.php preflight "$URL" "$DIR" --secret="$SECRET"
 ```
 
-**Step 1 — Download files.** This streams the entire directory tree. It can be
-interrupted and resumed at any time — just re-run the same command:
+**Step 1 — Download files.** This first builds a full index of the remote directory tree,
+then streams every file. It can be interrupted and resumed at any time — just re-run
+the same command:
 
 ```bash
 php import.php files-sync-initial "$URL" "$DIR" --secret="$SECRET"
@@ -66,9 +67,9 @@ php import.php <command> <URL> <local-path> [options]
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
+* `files-index` — Downloads the full remote file index without fetching file contents.
 * `files-sync-initial` — Full file sync. Downloads the complete directory tree from the remote server.
 * `files-sync-delta` — Incremental file sync. Only downloads files that changed since the last sync.
-* `files-index` — Downloads the full remote file index without fetching file contents.
 * `db-sync` — Downloads the database as a SQL dump to `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 
