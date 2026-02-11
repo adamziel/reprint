@@ -324,7 +324,12 @@ class MySQLDumpProducer
                     return true;
 
                 case self::STATE_START_INSERT:
-                    return $this->emit_insert_header();
+                    if ($this->emit_insert_header()) {
+                        return true;
+                    }
+                    // No rows in this table — state was changed to
+                    // STATE_NEXT_TABLE, continue the loop.
+                    break;
 
                 case self::STATE_EMIT_ROW:
                     return $this->emit_row();
@@ -641,7 +646,11 @@ class MySQLDumpProducer
     {
         $table = $this->current_table;
         $select = "SELECT";
+        
         if ($this->query_time_limit_ms !== null) {
+            // An optimizer hint to limit this statement's execution time:
+            // https://dev.mysql.com/doc/refman/8.4/en/optimizer-hints.html
+            // Isn't it super cool?
             $select .= " /*+ MAX_EXECUTION_TIME(" .
                 $this->query_time_limit_ms .
                 ") */";
