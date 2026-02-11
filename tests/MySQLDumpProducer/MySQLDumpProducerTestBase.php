@@ -144,12 +144,14 @@ abstract class MySQLDumpProducerTestBase extends TestCase
         array $tables,
     ): void {
         foreach ($tables as $table) {
+            $quoted = $this->quoteIdentifier($table);
+
             // Compare row counts
             $count1 = $pdo1
-                ->query("SELECT COUNT(*) FROM `{$table}`")
+                ->query("SELECT COUNT(*) FROM {$quoted}")
                 ->fetchColumn();
             $count2 = $pdo2
-                ->query("SELECT COUNT(*) FROM `{$table}`")
+                ->query("SELECT COUNT(*) FROM {$quoted}")
                 ->fetchColumn();
             $this->assertEquals(
                 $count1,
@@ -159,8 +161,8 @@ abstract class MySQLDumpProducerTestBase extends TestCase
 
             // Compare checksums if available
             try {
-                $checksum1 = $pdo1->query("CHECKSUM TABLE `{$table}`")->fetch();
-                $checksum2 = $pdo2->query("CHECKSUM TABLE `{$table}`")->fetch();
+                $checksum1 = $pdo1->query("CHECKSUM TABLE {$quoted}")->fetch();
+                $checksum2 = $pdo2->query("CHECKSUM TABLE {$quoted}")->fetch();
                 $this->assertEquals(
                     $checksum1["Checksum"],
                     $checksum2["Checksum"],
@@ -172,10 +174,10 @@ abstract class MySQLDumpProducerTestBase extends TestCase
 
             // Compare actual data row by row
             $rows1 = $pdo1
-                ->query("SELECT * FROM `{$table}` ORDER BY 1")
+                ->query("SELECT * FROM {$quoted} ORDER BY 1")
                 ->fetchAll();
             $rows2 = $pdo2
-                ->query("SELECT * FROM `{$table}` ORDER BY 1")
+                ->query("SELECT * FROM {$quoted} ORDER BY 1")
                 ->fetchAll();
             $this->assertEquals(
                 $rows1,
@@ -183,6 +185,11 @@ abstract class MySQLDumpProducerTestBase extends TestCase
                 "Data mismatch for table {$table}",
             );
         }
+    }
+
+    protected function quoteIdentifier(string $identifier): string
+    {
+        return '`' . str_replace('`', '``', $identifier) . '`';
     }
 
     /**

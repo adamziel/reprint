@@ -345,7 +345,7 @@ class MySQLDumpProducer
                 $this->current_result_set = $this->db->query($query);
             } catch (\PDOException $e) {
                 throw new \RuntimeException(
-                    "Database query `{$query}` failed for table `{$this->current_table}`: " . $e->getMessage(),
+                    "Database query `{$query}` failed for table " . $this->quote_identifier($this->current_table) . ": " . $e->getMessage(),
                 );
             }
             $this->rows_fetched_from_current_query = 0;
@@ -418,12 +418,12 @@ class MySQLDumpProducer
         $column_list = implode(
             ",",
             array_map(function ($col) {
-                return "`{$col}`";
+                return $this->quote_identifier($col);
             }, $this->current_column_names),
         );
 
         // Build the INSERT header
-        $header = "INSERT INTO `{$this->current_table}` ({$column_list}) VALUES\n";
+        $header = "INSERT INTO " . $this->quote_identifier($this->current_table) . " ({$column_list}) VALUES\n";
 
         // Reset statement size tracking for this new INSERT
         $this->current_statement_size = strlen($header);
@@ -545,13 +545,14 @@ class MySQLDumpProducer
      */
     private function emit_create_table_statement()
     {
+        $quoted_table = $this->quote_identifier($this->current_table);
         try {
-            $query = "SHOW CREATE TABLE `{$this->current_table}`";
+            $query = "SHOW CREATE TABLE {$quoted_table}";
             $result = $this->db->query($query);
             $row = $result->fetch(PDO::FETCH_ASSOC);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
-                "Failed to get CREATE TABLE for `{$this->current_table}`: " . $e->getMessage() . " Query: {$query}",
+                "Failed to get CREATE TABLE for {$quoted_table}: " . $e->getMessage() . " Query: {$query}",
             );
         }
 
@@ -565,13 +566,13 @@ class MySQLDumpProducer
         }
 
         if ($sql) {
-            $header = "--\n-- Table structure for table `{$this->current_table}`\n--\n\n";
-            $drop = "DROP TABLE IF EXISTS `{$this->current_table}`;\n";
+            $header = "--\n-- Table structure for table {$quoted_table}\n--\n\n";
+            $drop = "DROP TABLE IF EXISTS {$quoted_table};\n";
             $this->current_sql_fragment = $header . $drop . $sql . ";";
         } else {
             $keys = $row ? implode(", ", array_keys($row)) : "(no row returned)";
             throw new \RuntimeException(
-                "SHOW CREATE TABLE `{$this->current_table}` returned no usable SQL. " .
+                "SHOW CREATE TABLE {$quoted_table} returned no usable SQL. " .
                 "Available keys: {$keys}"
             );
         }
@@ -608,7 +609,7 @@ class MySQLDumpProducer
      */
     private function emit_table_header_comment()
     {
-        $comment = "\n--\n-- Dumping data for table `{$this->current_table}`\n--\n";
+        $comment = "\n--\n-- Dumping data for table " . $this->quote_identifier($this->current_table) . "\n--\n";
         $this->current_sql_fragment = $comment;
     }
 
@@ -635,26 +636,25 @@ class MySQLDumpProducer
         if ($this->current_column_types) {
             $select_parts = [];
             foreach ($this->current_column_types as $col_name => $col_info) {
-                $data_type = strtoupper($col_info["data_type"]);
-
                 // Don't cast numeric or already-binary types
                 if (
-                    $this->is_numeric_type($data_type) ||
-                    $this->is_binary_type($data_type)
+                    $this->is_numeric_type($col_info["data_type"]) ||
+                    $this->is_binary_type($col_info["data_type"])
                 ) {
-                    $select_parts[] = "`{$col_name}`";
+                    $select_parts[] = $this->quote_identifier($col_name);
                 } else {
                     // Cast to binary to get raw bytes without charset conversion
-                    $select_parts[] = "CAST(`{$col_name}` AS BINARY) AS `{$col_name}`";
+                    $quoted = $this->quote_identifier($col_name);
+                    $select_parts[] = "CAST({$quoted} AS BINARY) AS {$quoted}";
                 }
             }
             $query =
                 $select .
                 " " .
                 implode(", ", $select_parts) .
-                " FROM `{$table}`";
+                " FROM " . $this->quote_identifier($table);
         } else {
-            $query = $select . " * FROM `{$table}`";
+            $query = $select . " * FROM " . $this->quote_identifier($table);
         }
 
         if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {
@@ -664,7 +664,7 @@ class MySQLDumpProducer
             }
 
             $order_cols = array_map(function ($col) {
-                return "`{$col}` ASC";
+                return $this->quote_identifier($col) . " ASC";
             }, $this->current_pk_columns);
             $query .= " ORDER BY " . implode(", ", $order_cols);
             // Use batch_size as LIMIT to avoid over-fetching
@@ -732,17 +732,18 @@ class MySQLDumpProducer
      */
     private function build_comparison($column, $value, $operator)
     {
+        $quoted_col = $this->quote_identifier($column);
         if ($value === null) {
             return $operator === "="
-                ? "`{$column}` IS NULL"
-                : "`{$column}` IS NOT NULL";
+                ? "{$quoted_col} IS NULL"
+                : "{$quoted_col} IS NOT NULL";
         }
 
         if (is_numeric($value)) {
-            return "`{$column}` {$operator} {$value}";
+            return "{$quoted_col} {$operator} {$value}";
         } else {
             $quoted = $this->db->quote($value);
-            return "`{$column}` {$operator} {$quoted}";
+            return "{$quoted_col} {$operator} {$quoted}";
         }
     }
 
@@ -768,7 +769,7 @@ class MySQLDumpProducer
             $stmt->execute([$db_name, $table]);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
-                "Failed to get primary key columns for `{$table}`: " . $e->getMessage() . " Query: {$query}",
+                "Failed to get primary key columns for " . $this->quote_identifier($table) . ": " . $e->getMessage() . " Query: {$query}",
             );
         }
 
@@ -1075,7 +1076,7 @@ class MySQLDumpProducer
                 );
                 if (empty($this->current_column_types)) {
                     throw new \RuntimeException(
-                        "Table `{$this->current_table}` was dropped between export requests " .
+                        "Table " . $this->quote_identifier($this->current_table) . " was dropped between export requests " .
                         "(no columns found in INFORMATION_SCHEMA)"
                     );
                 }
@@ -1109,7 +1110,7 @@ class MySQLDumpProducer
             $stmt->execute([$database_name, $table_name]);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
-                "Failed to get column types for `{$table_name}`: " . $e->getMessage(),
+                "Failed to get column types for " . $this->quote_identifier($table_name) . ": " . $e->getMessage(),
             );
         }
 
@@ -1219,6 +1220,7 @@ class MySQLDumpProducer
      */
     private function is_numeric_type($data_type)
     {
+        $data_type = strtoupper($data_type);
         $numeric_types = [
             "TINYINT",
             "SMALLINT",
@@ -1268,6 +1270,20 @@ class MySQLDumpProducer
         }
 
         return false;
+    }
+
+    /**
+     * Quotes a MySQL identifier (table or column name) with backticks.
+     *
+     * Backticks inside the identifier are escaped by doubling them,
+     * which is the standard MySQL quoting mechanism for identifiers.
+     *
+     * @param string $identifier The raw identifier name.
+     * @return string The safely quoted identifier, e.g. "`my``table`".
+     */
+    private function quote_identifier($identifier)
+    {
+        return '`' . str_replace('`', '``', $identifier) . '`';
     }
 
     /**
@@ -1468,16 +1484,17 @@ class MySQLDumpProducer
         }
 
         // Calculate overhead for UPDATE statement:
+        $quoted_table = $this->quote_identifier($this->current_table);
+        $quoted_column = $this->quote_identifier($column);
         // UPDATE `table` SET `col` = CONCAT(`col`, <chunk>) WHERE `pk` = value;
-        $update_overhead = strlen("UPDATE `{$this->current_table}` SET `{$column}` = CONCAT(`{$column}`, ) WHERE ;");
+        $update_overhead = strlen("UPDATE {$quoted_table} SET {$quoted_column} = CONCAT({$quoted_column}, ) WHERE ;");
         $where_clause_size = $this->estimate_pk_where_size();
         $total_overhead = $update_overhead + $where_clause_size + 100; // Extra margin
 
         $max_chunk_raw_size = ($this->max_statement_size - $total_overhead);
 
         // Account for encoding overhead
-        $data_type_upper = strtoupper($data_type);
-        if ($this->is_binary_type($data_type_upper)) {
+        if ($this->is_binary_type($data_type)) {
             // Hex encoding: 2x size + 2 for "0x" prefix
             $max_chunk_raw_size = (int)(($max_chunk_raw_size - 2) / 2);
         } else {
@@ -1558,19 +1575,22 @@ class MySQLDumpProducer
         // Build WHERE clause
         $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
+            $quoted_pk = $this->quote_identifier($pk_col);
             if ($pk_value === null) {
-                $where_parts[] = "`{$pk_col}` IS NULL";
+                $where_parts[] = "{$quoted_pk} IS NULL";
             } elseif (is_numeric($pk_value)) {
-                $where_parts[] = "`{$pk_col}` = {$pk_value}";
+                $where_parts[] = "{$quoted_pk} = {$pk_value}";
             } else {
                 $quoted = $this->db->quote($pk_value);
-                $where_parts[] = "`{$pk_col}` = {$quoted}";
+                $where_parts[] = "{$quoted_pk} = {$quoted}";
             }
         }
         $where_clause = implode(" AND ", $where_parts);
 
         // Build UPDATE statement
-        $sql = "UPDATE `{$this->current_table}` SET `{$column}` = CONCAT(`{$column}`, {$formatted_chunk}) WHERE {$where_clause};";
+        $quoted_table = $this->quote_identifier($this->current_table);
+        $quoted_column = $this->quote_identifier($column);
+        $sql = "UPDATE {$quoted_table} SET {$quoted_column} = CONCAT({$quoted_column}, {$formatted_chunk}) WHERE {$where_clause};";
 
         $this->current_sql_fragment = $sql;
 

@@ -1080,4 +1080,35 @@ class BreakingEdgeCasesTest extends MySQLDumpProducerTestBase
             $this->assertEquals(0, $count);
         }
     }
+
+    // ──────────────────────────────────────────────────
+    // Identifiers containing backticks
+    // ──────────────────────────────────────────────────
+
+    /**
+     * MySQL allows backticks inside identifiers when escaped by doubling.
+     * Verify the producer handles table and column names containing backticks
+     * without generating broken SQL.
+     */
+    public function testIdentifiersContainingBackticks(): void
+    {
+        // Table name with a backtick
+        $this->pdo->exec("CREATE TABLE `tricky``table` (
+            `id` INT PRIMARY KEY,
+            `col``name` VARCHAR(100),
+            `normal` INT
+        )");
+        $this->pdo->exec("INSERT INTO `tricky``table` VALUES (1, 'hello', 42)");
+        $this->pdo->exec("INSERT INTO `tricky``table` VALUES (2, 'world', 99)");
+
+        $sql = $this->getDumpSQL();
+
+        // The dump must contain the escaped identifier
+        $this->assertSQLContains('`tricky``table`', $sql);
+        $this->assertSQLContains('`col``name`', $sql);
+
+        // Round-trip: the generated SQL must parse and reproduce the data
+        $importPdo = $this->executeDumpInNewDatabase($sql);
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ['tricky`table']);
+    }
 }
