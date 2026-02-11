@@ -100,7 +100,7 @@ describe('Import: State Corruption', () => {
         });
     });
 
-    describe('--restart flag', () => {
+    describe('--abort flag', () => {
         let tempDir;
 
         beforeAll(() => {
@@ -117,12 +117,12 @@ describe('Import: State Corruption', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('--restart clears state and exits', () => {
+        it('--abort clears state and exits', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--restart'],
+                extraArgs: ['--abort'],
             });
-            assert.equal(result.exitCode, 0, `Expected exit 0 with --restart\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+            assert.equal(result.exitCode, 0, `Expected exit 0 with --abort\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
@@ -130,7 +130,7 @@ describe('Import: State Corruption', () => {
             assert.ok(!state.cursor, 'Expected cursor to be cleared');
         });
 
-        it('running after --restart completes fresh sync', () => {
+        it('running after --abort completes fresh sync', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
             });

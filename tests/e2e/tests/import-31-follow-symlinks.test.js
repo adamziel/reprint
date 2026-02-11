@@ -151,7 +151,7 @@ describe('Import: Follow Symlinks', () => {
         // Clear any prior state first
         runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
-            extraArgs: ['--restart'],
+            extraArgs: ['--abort'],
         });
 
         const result = runImporter(importUrl(), tempDir, 'files-sync', {

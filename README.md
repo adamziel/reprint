@@ -68,12 +68,13 @@ php import.php <command> <URL> <local-path> [options]
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
-* `files-index` — Downloads the full remote file index without fetching file contents.
 * `files-sync` — Sync files. Auto-detects initial vs delta based on state: downloads the full tree on first run, only changes on subsequent runs.
+* `files-index` — Optional. It's a standalone command to index the full remote file index without fetching file contents. `files-sync` does it implicitly
+                  so this is mostly useful for testing and diagnostics.
 * `db-sync` — Downloads the database as a SQL dump to `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 
-All commands except `preflight-assert` support `--restart` to clear state and exit. Run the command again after `--restart` to start fresh. Interrupted commands automatically resume from the last saved cursor.
+All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-sync`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-sync` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
 
 ### Preflight
 

@@ -1552,7 +1552,7 @@ class ImportClient
      *
      * @param array $options Options:
      *   - command: Required. One of: files-sync, files-index, db-sync, db-index, preflight, preflight-assert
-     *   - restart: Optional. Clear state for the command and exit immediately
+     *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      */
     public function run(array $options = []): void
@@ -1560,7 +1560,7 @@ class ImportClient
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->follow_symlinks = $options["follow_symlinks"] ?? false;
         $command = $options["command"] ?? null;
-        $restart = $options["restart"] ?? false;
+        $abort = $options["abort"] ?? false;
 
         if (!$command) {
             throw new InvalidArgumentException(
@@ -1627,11 +1627,11 @@ class ImportClient
         // All other commands require a prior preflight run.
         $this->require_preflight();
 
-        // Handle --restart: clear state for the command and exit immediately.
-        // To restart a sync, run `<command> --restart` (clears state), then
+        // Handle --abort: clear state for the command and exit immediately.
+        // To abort a sync, run `<command> --abort` (clears state), then
         // run `<command>` again (starts fresh).
-        if ($restart) {
-            $this->handle_restart($command);
+        if ($abort) {
+            $this->handle_abort($command);
             return;
         }
 
@@ -1669,26 +1669,29 @@ class ImportClient
     }
 
     /**
-     * Handle --restart for any command: clear relevant state and exit.
+     * Handle --abort for any command: clear relevant state and exit.
      *
      * Each command has its own set of files and state fields that need clearing.
      * After clearing, we save state and return — the caller exits without
      * running the actual sync. The user then runs the command again to start fresh.
      */
-    private function handle_restart(string $command): void
+    private function handle_abort(string $command): void
     {
         switch ($command) {
             case "files-sync":
+                // Clear sync progress (cursor, stage, status) and transient
+                // files, but keep the local index and downloaded files intact.
+                // This way the next `files-sync` sees a completed local index
+                // and runs a delta sync rather than re-downloading everything.
                 $this->audit_log(
-                    "RESTART | Clearing files-sync state",
+                    "RESTART | Clearing files-sync progress (keeping local index and files)",
                     true,
                 );
                 $this->reset_state();
 
-                if (file_exists($this->index_file)) {
-                    @unlink($this->index_file);
-                    $this->audit_log("FILE DELETE | {$this->index_file}");
-                }
+                // Merge any pending index updates into the main index before
+                // clearing transient state so we don't lose work.
+                $this->recover_index_updates();
                 if (
                     $this->index_updates_file &&
                     file_exists($this->index_updates_file)
@@ -1714,6 +1717,18 @@ class ImportClient
                 }
                 $this->state["index"] = $this->default_state()["index"];
                 $this->state["fetch"] = $this->default_state()["fetch"];
+
+                // If we have a local index, mark the state as completed so the
+                // next run auto-detects delta mode instead of trying an initial
+                // sync into a non-empty directory.
+                $has_local_index =
+                    file_exists($this->index_file) &&
+                    filesize($this->index_file) > 0;
+                if ($has_local_index) {
+                    $this->state["command"] = "files-sync";
+                    $this->state["status"] = "complete";
+                }
+
                 $this->save_state($this->state);
                 break;
 
@@ -1745,7 +1760,7 @@ class ImportClient
                 if (file_exists($sql_file)) {
                     unlink($sql_file);
                     $this->audit_log(
-                        "FILE DELETE | {$sql_file} | restart db-sync",
+                        "FILE DELETE | {$sql_file} | abort db-sync",
                     );
                 }
                 break;
@@ -1762,17 +1777,17 @@ class ImportClient
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
-                        "FILE DELETE | {$tables_file} | restart db-index",
+                        "FILE DELETE | {$tables_file} | abort db-index",
                     );
                 }
                 break;
         }
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "State cleared for {$command}. Run the command again to start fresh.\n";
+            echo "State cleared for {$command}.\n";
         }
 
-        $this->output_progress(["status" => "restarted"]);
+        $this->output_progress(["status" => "aborted"]);
     }
 
     /**
@@ -2213,7 +2228,7 @@ class ImportClient
             if (!$is_empty) {
                 throw new RuntimeException(
                     "Target directory is not empty and no cursor found. " .
-                        "Either clear the target directory or use --restart flag.",
+                        "Either clear the target directory or use --abort flag.",
                 );
             }
 
@@ -2416,8 +2431,8 @@ class ImportClient
      *
      * Rules:
      * - Streams the full remote index (DFS across directories) until complete
-     * - If already completed: require --restart flag
-     * - If restart flag: clear remote index file and index cursor
+     * - If already completed: require --abort flag
+     * - If abort flag: clear remote index file and index cursor
      */
     private function run_files_index(): void
     {
@@ -2429,7 +2444,7 @@ class ImportClient
 
         if ($current_status === "complete") {
             throw new RuntimeException(
-                "files-index already completed. Use --restart flag to start over.",
+                "files-index already completed. Use --abort flag to start over.",
             );
         }
 
@@ -2866,8 +2881,8 @@ class ImportClient
      *
      * Rules:
      * - Stream next portion of SQL from last saved cursor
-     * - If already completed and db.sql exists: require --restart flag
-     * - If db.sql missing but state says complete: warn and require --restart flag
+     * - If already completed and db.sql exists: require --abort flag
+     * - If db.sql missing but state says complete: warn and require --abort flag
      * - Otherwise: error
      */
     private function run_db_sync(): void
@@ -2888,11 +2903,11 @@ class ImportClient
         if ($current_status === "complete") {
             if ($sql_exists) {
                 throw new RuntimeException(
-                    "db-sync already completed and db.sql exists. Use --restart flag to start over.",
+                    "db-sync already completed and db.sql exists. Use --abort flag to start over.",
                 );
             } else {
                 throw new RuntimeException(
-                    "db-sync marked complete but db.sql is missing. Use --restart flag to re-sync.",
+                    "db-sync marked complete but db.sql is missing. Use --abort flag to re-sync.",
                 );
             }
         }
@@ -2972,11 +2987,11 @@ class ImportClient
         if ($current_status === "complete") {
             if ($tables_exists) {
                 throw new RuntimeException(
-                    "db-index already completed and db-tables.jsonl exists. Use --restart flag to start over.",
+                    "db-index already completed and db-tables.jsonl exists. Use --abort flag to start over.",
                 );
             } else {
                 throw new RuntimeException(
-                    "db-index marked complete but db-tables.jsonl is missing. Use --restart flag to re-run.",
+                    "db-index marked complete but db-tables.jsonl is missing. Use --abort flag to re-run.",
                 );
             }
         }
@@ -6100,7 +6115,7 @@ if (
                 "  - Interrupted sync: resumes from the last saved cursor\n" .
                 "\n" .
                 "Options:\n" .
-                "  --restart          Clear state and exit (run again to start fresh)\n" .
+                "  --abort          Abort current sync and exit (keeps files and index)\n" .
                 "  --follow-symlinks  Follow symlinks pointing outside root directories\n" .
                 "  --secret=TOKEN     HMAC shared secret for api.php authentication\n" .
                 "  --verbose, -v      Show detailed request/response logs\n" .
@@ -6120,7 +6135,7 @@ if (
                 "to .import-index.jsonl. Does not download any file data.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --restart        Clear state and exit (run again to start fresh)\n" .
+                "  --abort        Clear state and output, then exit\n" .
                 "  --secret=TOKEN   HMAC shared secret for api.php authentication\n" .
                 "  --verbose, -v    Show detailed request/response logs\n",
         ],
@@ -6131,7 +6146,7 @@ if (
                 "Automatically resumes from the last cursor if interrupted.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --restart                   Clear state and exit (run again to start fresh)\n" .
+                "  --abort                   Clear state and output, then exit\n" .
                 "  --secret=TOKEN              HMAC shared secret for api.php authentication\n" .
                 "  --verbose, -v               Show detailed request/response logs\n" .
                 "  --max-allowed-packet=SIZE   Client max_allowed_packet (e.g. 16M, 64M)\n" .
@@ -6146,7 +6161,7 @@ if (
                 "<local-path>/db-tables.jsonl. Useful for planning and diagnostics.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --restart        Clear state and exit (run again to start fresh)\n" .
+                "  --abort        Clear state and output, then exit\n" .
                 "  --secret=TOKEN   HMAC shared secret for api.php authentication\n" .
                 "  --verbose, -v    Show detailed request/response logs\n" .
                 "\n" .
@@ -6198,14 +6213,14 @@ if (
         echo "\n";
         echo "Global options:\n";
         echo "  --secret=TOKEN       HMAC shared secret for api.php authentication\n";
-        echo "  --restart            Clear state and exit (run again to start fresh)\n";
+        echo "  --abort            Abort current sync and exit (preserves downloaded files)\n";
         echo "  --follow-symlinks    Follow symlinks pointing outside root directories\n";
         echo "  --verbose, -v        Show detailed request/response logs\n";
         echo "  --no-adaptive        Disable adaptive request tuning\n";
         echo "\n";
         echo "State is stored in <local-path>/.import-state.json. Interrupted\n";
-        echo "commands automatically resume. Use --restart to clear state and exit,\n";
-        echo "then run the command again to start fresh.\n";
+        echo "commands automatically resume. Use --abort to abort the current\n";
+        echo "sync and exit — downloaded files are preserved.\n";
         exit(1);
     }
 
@@ -6241,7 +6256,7 @@ if (
     // Parse options
     $options = [
         "command" => $command,
-        "restart" => false,
+        "abort" => false,
         "verbose" => false,
         "secret" => null,
         "tuning_config" => [],
@@ -6250,8 +6265,8 @@ if (
     for ($i = 4; $i < $argc; $i++) {
         if (strpos($argv[$i], "--secret=") === 0) {
             $options["secret"] = substr($argv[$i], strlen("--secret="));
-        } elseif ($argv[$i] === "--restart") {
-            $options["restart"] = true;
+        } elseif ($argv[$i] === "--abort") {
+            $options["abort"] = true;
         } elseif ($argv[$i] === "--verbose" || $argv[$i] === "-v") {
             $options["verbose"] = true;
         } elseif ($argv[$i] === "--follow-symlinks") {

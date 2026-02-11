@@ -93,12 +93,12 @@ describe('Import: SQL Sync', () => {
         }
     });
 
-    it('re-running db-sync without --restart fails with useful message', () => {
+    it('re-running db-sync without --abort fails with useful message', () => {
         const result = runImporter(importUrl(), tempDir, 'db-sync', {
             secret: getSiteSecret(site),
         });
         assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code');
         const output = result.stdout + result.stderr;
-        assert.ok(output.includes('--restart'), `Expected message mentioning --restart, got: ${output}`);
+        assert.ok(output.includes('--abort'), `Expected message mentioning --abort, got: ${output}`);
     });
 });

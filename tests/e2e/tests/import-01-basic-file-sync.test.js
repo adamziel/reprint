@@ -4,7 +4,7 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -77,27 +77,30 @@ describe('Import: Basic File Sync', () => {
         assert.equal(result.exitCode, 0, `Expected exit 0 (delta sync)\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
 
-    it('re-running with --restart clears state and exits', () => {
+    it('--abort clears sync progress and exits', () => {
         const restart = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
-            extraArgs: ['--restart'],
+            extraArgs: ['--abort'],
         });
         assert.equal(restart.exitCode, 0, `Expected restart exit 0, got ${restart.exitCode}\nstderr: ${restart.stderr}\nstdout: ${restart.stdout}`);
 
-        // State should be cleared — verify by reading state file
-        const stateFile = join(tempDir, '.import-state.json');
-        const state = JSON.parse(readFileSync(stateFile, 'utf8'));
-        assert.notEqual(state.status, 'complete', 'Expected status to be cleared after --restart');
+        // Local index should still exist (restart preserves it)
+        const indexFile = join(tempDir, '.import-index.jsonl');
+        assert.ok(existsSync(indexFile), 'Expected local index to be preserved after --abort');
+
+        // Transient files should be cleaned up
+        assert.ok(!existsSync(join(tempDir, '.import-remote-index.jsonl')), 'Expected remote index to be deleted');
+        assert.ok(!existsSync(join(tempDir, '.import-download-list.jsonl')), 'Expected download list to be deleted');
     });
 
-    it('running after --restart starts a fresh initial sync', () => {
-        // Clean filesystem-root so fresh sync doesn't fail on non-empty check
-        const fsRoot = join(tempDir, 'filesystem-root');
-        rmSync(fsRoot, { recursive: true, force: true });
-
+    it('running after --abort performs a delta sync', () => {
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+
+        const stateFile = join(tempDir, '.import-state.json');
+        const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+        assert.equal(state.status, 'complete');
     });
 });
