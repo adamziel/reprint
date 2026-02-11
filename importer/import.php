@@ -5243,12 +5243,100 @@ class ImportClient
         if ($this->hmac_client === null) {
             return [];
         }
-        $auth = $this->hmac_client->get_auth_headers($body);
-        $curl_headers = [];
-        foreach ($auth as $name => $value) {
-            $curl_headers[] = "{$name}: {$value}";
+        return $this->hmac_client->get_curl_headers($body);
+    }
+
+    /**
+     * Reset curl-related state at the start of each HTTP request.
+     */
+    private function reset_curl_state(): void
+    {
+        $this->last_http_code = null;
+        $this->last_curl_errno = null;
+        $this->last_curl_timeout = false;
+    }
+
+    /**
+     * Build the shared browser-mimicry headers used by both fetch_json and
+     * fetch_streaming.  The Accept value differs between the two callers.
+     */
+    private function get_base_headers(string $accept): array
+    {
+        return [
+            "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept: {$accept}",
+            "Accept-Language: en-US,en;q=0.9",
+            "Accept-Encoding: gzip, deflate, br",
+            "Cache-Control: no-cache",
+            "Pragma: no-cache",
+            "Connection: keep-alive",
+        ];
+    }
+
+    /**
+     * Build the multipart chunk handler callback shared by both parser
+     * creation sites inside fetch_streaming.
+     *
+     * The callback accumulates "body" events into $current_chunk and emits
+     * completed chunks to $context->on_chunk on "complete" events.
+     */
+    private function make_chunk_handler(
+        StreamingContext $context,
+        &$current_chunk
+    ): callable {
+        return function ($event) use ($context, &$current_chunk) {
+            if ($event["type"] === "body") {
+                // Accumulate body data in current chunk
+                if (!$current_chunk) {
+                    $current_chunk = [
+                        "headers" => $event["headers"],
+                        "body" => $event["data"],
+                    ];
+                } else {
+                    $current_chunk["body"] =
+                        ($current_chunk["body"] ?? "") .
+                        $event["data"];
+                }
+            } elseif ($event["type"] === "complete") {
+                // Chunk complete - emit to handler
+                if ($current_chunk) {
+                    if ($context->on_chunk) {
+                        ($context->on_chunk)(
+                            $current_chunk,
+                        );
+                    }
+                } elseif ($event["headers"]) {
+                    // No body data - emit just headers
+                    if ($context->on_chunk) {
+                        ($context->on_chunk)([
+                            "headers" =>
+                                $event["headers"],
+                            "body" => "",
+                        ]);
+                    }
+                }
+                $current_chunk = null;
+            }
+        };
+    }
+
+    /**
+     * Check for curl errors after curl_exec and record timeout state.
+     * Throws RuntimeException on any curl error.
+     */
+    private function check_curl_error($ch): void
+    {
+        if (!curl_errno($ch)) {
+            return;
         }
-        return $curl_headers;
+        $errno = curl_errno($ch);
+        $error = curl_error($ch);
+        $timeout_errno = defined("CURLE_OPERATION_TIMEDOUT")
+            ? CURLE_OPERATION_TIMEDOUT
+            : 28;
+        $this->last_curl_errno = $errno;
+        $this->last_curl_timeout = $errno === $timeout_errno;
+        throw new RuntimeException("cURL error: {$error}");
     }
 
     /**
@@ -5256,9 +5344,7 @@ class ImportClient
      */
     private function fetch_json(string $url): array
     {
-        $this->last_http_code = null;
-        $this->last_curl_errno = null;
-        $this->last_curl_timeout = false;
+        $this->reset_curl_state();
 
         $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
 
@@ -5266,13 +5352,7 @@ class ImportClient
         $this->current_curl_handle = $ch;
 
         $headers = [
-            "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept: application/json",
-            "Accept-Language: en-US,en;q=0.9",
-            "Accept-Encoding: gzip, deflate, br",
-            "Cache-Control: no-cache",
-            "Pragma: no-cache",
-            "Connection: keep-alive",
+            ...$this->get_base_headers("application/json"),
             ...($this->get_hmac_headers()),
         ];
 
@@ -5288,14 +5368,9 @@ class ImportClient
         $body = curl_exec($ch);
         $elapsed = microtime(true) - $start;
 
-        if (curl_errno($ch)) {
-            $errno = curl_errno($ch);
-            $error = curl_error($ch);
-            $timeout_errno = defined("CURLE_OPERATION_TIMEDOUT")
-                ? CURLE_OPERATION_TIMEDOUT
-                : 28;
-            $this->last_curl_errno = $errno;
-            $this->last_curl_timeout = $errno === $timeout_errno;
+        try {
+            $this->check_curl_error($ch);
+        } catch (RuntimeException $e) {
             curl_close($ch);
             $this->current_curl_handle = null;
             return [
@@ -5304,8 +5379,8 @@ class ImportClient
                 "elapsed" => $elapsed,
                 "body" => null,
                 "json" => null,
-                "error" => "cURL error: {$error}",
-                "curl_errno" => $errno,
+                "error" => $e->getMessage(),
+                "curl_errno" => $this->last_curl_errno,
                 "timeout" => $this->last_curl_timeout,
             ];
         }
@@ -5356,9 +5431,7 @@ class ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        $this->last_http_code = null;
-        $this->last_curl_errno = null;
-        $this->last_curl_timeout = false;
+        $this->reset_curl_state();
 
         // Log HTTP request details
         $log_parts = ["HTTP_REQUEST", $post_data ? "POST" : "GET", $url];
@@ -5395,13 +5468,7 @@ class ImportClient
 
         // Build headers to look like a real browser
         $headers = [
-            "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language: en-US,en;q=0.9",
-            "Accept-Encoding: gzip, deflate, br",
-            "Cache-Control: no-cache",
-            "Pragma: no-cache",
-            "Connection: keep-alive",
+            ...$this->get_base_headers("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
             "Upgrade-Insecure-Requests: 1",
             "Sec-Fetch-Dest: document",
             "Sec-Fetch-Mode: navigate",
@@ -5495,43 +5562,7 @@ class ImportClient
                             );
                             $parser = new MultipartStreamParser(
                                 $boundary_value,
-                                function ($event) use (
-                                    $context,
-                                    &$current_chunk
-                                ) {
-                                    if ($event["type"] === "body") {
-                                        // Accumulate body data in current chunk
-                                        if (!$current_chunk) {
-                                            $current_chunk = [
-                                                "headers" => $event["headers"],
-                                                "body" => $event["data"],
-                                            ];
-                                        } else {
-                                            $current_chunk["body"] =
-                                                ($current_chunk["body"] ?? "") .
-                                                $event["data"];
-                                        }
-                                    } elseif ($event["type"] === "complete") {
-                                        // Chunk complete - emit to handler
-                                        if ($current_chunk) {
-                                            if ($context->on_chunk) {
-                                                ($context->on_chunk)(
-                                                    $current_chunk,
-                                                );
-                                            }
-                                        } elseif ($event["headers"]) {
-                                            // No body data - emit just headers
-                                            if ($context->on_chunk) {
-                                                ($context->on_chunk)([
-                                                    "headers" =>
-                                                        $event["headers"],
-                                                    "body" => "",
-                                                ]);
-                                            }
-                                        }
-                                        $current_chunk = null;
-                                    }
-                                },
+                                $this->make_chunk_handler($context, $current_chunk),
                             );
                         }
                     }
@@ -5570,34 +5601,7 @@ class ImportClient
                                     );
                                     $parser = new MultipartStreamParser(
                                         $boundary,
-                                        function ($event) use (&$current_chunk, $context) {
-                                            if ($event["type"] === "body") {
-                                                if (!$current_chunk) {
-                                                    $current_chunk = [
-                                                        "headers" => $event["headers"],
-                                                        "body" => $event["data"],
-                                                    ];
-                                                } else {
-                                                    $current_chunk["body"] =
-                                                        ($current_chunk["body"] ?? "") .
-                                                        $event["data"];
-                                                }
-                                            } elseif ($event["type"] === "complete") {
-                                                if ($current_chunk) {
-                                                    if ($context->on_chunk) {
-                                                        ($context->on_chunk)($current_chunk);
-                                                    }
-                                                } elseif ($event["headers"]) {
-                                                    if ($context->on_chunk) {
-                                                        ($context->on_chunk)([
-                                                            "headers" => $event["headers"],
-                                                            "body" => "",
-                                                        ]);
-                                                    }
-                                                }
-                                                $current_chunk = null;
-                                            }
-                                        },
+                                        $this->make_chunk_handler($context, $current_chunk),
                                     );
                                     $parser->feed($error_body);
                                     $error_body = "";
@@ -5678,22 +5682,17 @@ class ImportClient
         );
 
         try {
-        if (curl_errno($ch)) {
-            $errno = curl_errno($ch);
-            $error = curl_error($ch);
-            $timeout_errno = defined("CURLE_OPERATION_TIMEDOUT")
-                ? CURLE_OPERATION_TIMEDOUT
-                : 28;
-            $this->last_curl_errno = $errno;
-            $this->last_curl_timeout = $errno === $timeout_errno;
+        try {
+            $this->check_curl_error($ch);
+        } catch (RuntimeException $curl_error) {
             if ($endpoint !== null) {
                 $this->handle_tuner_error($endpoint, [
                     "http_code" => 0,
                     "timeout" => $this->last_curl_timeout,
-                    "curl_errno" => $errno,
+                    "curl_errno" => $this->last_curl_errno,
                 ]);
             }
-            throw new RuntimeException("cURL error: {$error}");
+            throw $curl_error;
         }
 
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);

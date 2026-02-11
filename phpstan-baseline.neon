@@ -11,11 +11,6 @@ parameters:
 			path: importer/import.php
 
 		-
-			message: "#^Property ImportClient\\:\\:\\$last_curl_errno is never read, only written\\.$#"
-			count: 1
-			path: importer/import.php
-
-		-
 			message: "#^Property ImportClient\\:\\:\\$last_http_code is never read, only written\\.$#"
 			count: 1
 			path: importer/import.php

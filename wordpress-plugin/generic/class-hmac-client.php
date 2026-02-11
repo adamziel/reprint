@@ -141,6 +141,21 @@ class Site_Export_HMAC_Client {
     }
 
     /**
+     * Return authentication headers formatted for cURL (["Name: value", ...]).
+     *
+     * @param string $body Request body (pass empty string for GET)
+     * @return string[]
+     */
+    public function get_curl_headers(string $body = ''): array {
+        $headers = $this->get_auth_headers($body);
+        $curl_headers = [];
+        foreach ($headers as $name => $value) {
+            $curl_headers[] = "{$name}: {$value}";
+        }
+        return $curl_headers;
+    }
+
+    /**
      * Sign a cURL handle for an authenticated request.
      *
      * Convenience method for use with cURL.
@@ -150,12 +165,7 @@ class Site_Export_HMAC_Client {
      * @return void
      */
     public function sign_curl_request($ch, string $body = ''): void {
-        $headers = $this->get_auth_headers($body);
-        $curl_headers = [];
-        foreach ($headers as $name => $value) {
-            $curl_headers[] = "{$name}: {$value}";
-        }
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $curl_headers);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $this->get_curl_headers($body));
     }
 
     /**
