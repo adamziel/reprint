@@ -1141,8 +1141,6 @@ class MySQLDumpProducer
             return "NULL";
         }
 
-        $data_type = strtoupper($data_type);
-
         // Numeric types - output raw without quotes
         if ($this->is_numeric_type($data_type)) {
             return (string) $value;
@@ -1154,7 +1152,7 @@ class MySQLDumpProducer
         }
 
         // JSON columns cannot accept binary charset values, so we wrap with CONVERT
-        if ($data_type === "JSON") {
+        if (strtoupper($data_type) === "JSON") {
             if ($value === "") {
                 return "''";
             }
@@ -1178,8 +1176,6 @@ class MySQLDumpProducer
         if ($value === null) {
             return 4; // NULL
         }
-
-        $data_type = strtoupper($data_type);
 
         if ($this->is_numeric_type($data_type)) {
             return strlen((string) $value);
