@@ -2,21 +2,59 @@
 
 ## Usage
 
-1. Install the `wordpress-plugin` on the site you want to export
-2. Set up the SECRET_KEY 
-3. Run the `import.php` script locally with the right args. Docs on that are coming.
-4. Go brew some coffee. If the electricity goes down that's okay, just re-run the script and it will resume where it left off.
-5. Done. Your local directory now has a db.sql file and a directory tree snapshot.
+### Setup
 
-You can rerun the same import.php command later on with extra parameters to refresh the local data:
+1. Install the `wordpress-plugin` directory as a WordPress plugin on the source site.
+2. Activate it and set a shared secret in the plugin settings (or in `secrets.php`).
 
+### Full site migration
+
+A complete migration has three steps: download the files, download the database, then
+catch any files that changed while the database was being dumped.
+
+All commands below use the same base invocation. We'll use `$URL` and `$DIR` as shorthand:
+
+```bash
+URL="https://example.com/?site-export-api&directory=/var/www/html"
+DIR="./my-export"
+SECRET="your-shared-secret"
 ```
-# Regenerate the database dump from scratch
-import.php <export.php URL>?SECRET_KEY=<key> <local directory to export to> --refresh-db 
 
-# Get the delta in files between then and now (via deletes and upserts)
-import.php <export.php URL>?SECRET_KEY=<key> <local directory to export to> --refresh-files
+**Step 0 — Preflight.** Make sure the server is reachable and the environment looks good:
+
+```bash
+php import.php preflight "$URL" "$DIR" --secret="$SECRET"
 ```
+
+**Step 1 — Download files.** This streams the entire directory tree. It can be
+interrupted and resumed at any time — just re-run the same command:
+
+```bash
+php import.php files-sync-initial "$URL" "$DIR" --secret="$SECRET"
+```
+
+**Step 2 — Index the database.** This fetches table metadata (names, row counts, sizes)
+into `db-tables.jsonl` for planning and diagnostics:
+
+```bash
+php import.php db-index "$URL" "$DIR" --secret="$SECRET"
+```
+
+**Step 3 — Download the database.** This streams a SQL dump into `db.sql`:
+
+```bash
+php import.php db-sync "$URL" "$DIR" --secret="$SECRET"
+```
+
+**Step 4 — Catch up on file changes.** While the database was being dumped, some files
+may have changed. A delta sync downloads only the differences:
+
+```bash
+php import.php files-sync-delta "$URL" "$DIR" --secret="$SECRET"
+```
+
+That's it. Your `$DIR` now contains `filesystem-root/` with the full directory tree
+and `db.sql` with the database dump.
 
 ### CLI Commands
 
@@ -203,12 +241,12 @@ What we **don't** do:
 
 ### Open questions
 
-* How to negotiate symlinks pointing outside of the requested root directories?
 * How to handle sites with `utf8mb4` charset on platforms enforcing a different `DB_CHARSET` such as `latin1`?
 
 ### Todos
 
 * Possibly run more checks in `preflight-assert`. What would they be?
+* ✅ How to negotiate symlinks pointing outside of the requested root directories?
 * ✅ `preflight-assert` command that exits 0/1 depending on migration feasibility
 * ✅ Renamed `sql-preflight` to `db-index`
 * ✅ A runner script to easily run those downloaded sites locally while providing them with the right `Host` header and
