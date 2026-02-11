@@ -124,9 +124,8 @@ class BinaryAndUncommonTypesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // ENUM values should be quoted as strings
-        $this->assertSQLContains("'pending'", $sql);
-        $this->assertSQLContains("'active'", $sql);
+        // ENUM values should be base64-encoded
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -153,8 +152,8 @@ class BinaryAndUncommonTypesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // SET values should be quoted
-        $this->assertSQLContains("'read,write'", $sql);
+        // SET values should be base64-encoded
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -179,9 +178,8 @@ class BinaryAndUncommonTypesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // JSON should be quoted as string
-        // Check that JSON data is present (quotes may or may not be escaped)
-        $this->assertMatchesRegularExpression('/(name|age|apple|nested)/', $sql);
+        // JSON data should be base64-encoded
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

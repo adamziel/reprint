@@ -50,12 +50,6 @@ class BreakingEdgeCasesTest extends MySQLDumpProducerTestBase
     // Invalid constructor inputs
     // ──────────────────────────────────────────────────
 
-    public function testInvalidStringEncoding(): void
-    {
-        $this->expectException(\InvalidArgumentException::class);
-        $this->createProducer(['string_encoding' => 'rot13']);
-    }
-
     public function testInvalidCursorJson(): void
     {
         $this->pdo->exec("CREATE TABLE t (id INT PRIMARY KEY)");
@@ -537,42 +531,6 @@ class BreakingEdgeCasesTest extends MySQLDumpProducerTestBase
     }
 
     // ──────────────────────────────────────────────────
-    // String encoding modes: 0xbinary and base64
-    // ──────────────────────────────────────────────────
-
-    public function testHexEncodingMode(): void
-    {
-        $this->pdo->exec("CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(100))");
-        $this->pdo->exec("INSERT INTO t VALUES (1, 'hello world')");
-        $this->pdo->exec("INSERT INTO t VALUES (2, '')");
-        $this->pdo->exec("INSERT INTO t VALUES (3, NULL)");
-
-        $sql = $this->getDumpSQL(['string_encoding' => '0xbinary']);
-
-        // Non-empty strings should be hex-encoded
-        $this->assertSQLContains('0x', $sql);
-        // NULL should still be NULL
-        $this->assertMatchesRegularExpression('/3,NULL/', $sql);
-
-        $importPdo = $this->executeDumpInNewDatabase($sql);
-        $this->assertDatabasesEqual($this->pdo, $importPdo, ['t']);
-    }
-
-    public function testBase64EncodingMode(): void
-    {
-        $this->pdo->exec("CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(100))");
-        $this->pdo->exec("INSERT INTO t VALUES (1, 'hello world')");
-        $this->pdo->exec("INSERT INTO t VALUES (2, '')");
-
-        $sql = $this->getDumpSQL(['string_encoding' => 'base64']);
-
-        $this->assertSQLContains('FROM_BASE64', $sql);
-
-        $importPdo = $this->executeDumpInNewDatabase($sql);
-        $this->assertDatabasesEqual($this->pdo, $importPdo, ['t']);
-    }
-
-    // ──────────────────────────────────────────────────
     // PK-based WHERE clause with string PKs containing special chars
     // ──────────────────────────────────────────────────
 
@@ -676,7 +634,7 @@ class BreakingEdgeCasesTest extends MySQLDumpProducerTestBase
         // in the INSERT which MySQL rejects, but that's a known limitation.
         $sql = $this->getDumpSQL();
         $this->assertSQLContains('INSERT INTO', $sql);
-        $this->assertSQLContains('John', $sql);
+        $this->assertSQLContains('FROM_BASE64', $sql);
     }
 
     // ──────────────────────────────────────────────────

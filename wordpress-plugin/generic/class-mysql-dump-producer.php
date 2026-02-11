@@ -153,18 +153,6 @@ class MySQLDumpProducer
     private $emit_create_table;
 
     /**
-     * String encoding mode for non-binary string columns.
-     *
-     * Options:
-     * - "raw": Use PDO::quote() with charset conversion (default, MySQL standard)
-     * - "0xbinary": Hex-encode all strings as 0x... (preserves exact bytes)
-     * - "base64": Base64-encode all strings (preserves exact bytes, more compact than hex)
-     *
-     * @var string
-     */
-    private $string_encoding;
-
-    /**
      * Maximum size (in bytes) for a single SQL statement.
      * Rows that would produce larger statements are split using UPDATE + CONCAT().
      * Should be set below MySQL's max_allowed_packet to ensure successful imports.
@@ -223,9 +211,6 @@ class MySQLDumpProducer
         $this->batch_size = $options["batch_size"] ?? 250;
         $this->emit_create_table = $options["create_table_query"] ?? true;
 
-        // Handle string encoding option
-        $this->string_encoding = $options["string_encoding"] ?? "raw";
-
         // Maximum statement size - auto-detect from MySQL's max_allowed_packet if not specified
         if (isset($options["max_statement_size"])) {
             $this->max_statement_size = $options["max_statement_size"];
@@ -236,16 +221,6 @@ class MySQLDumpProducer
         if (isset($options["query_time_limit_ms"])) {
             $limit = (int) $options["query_time_limit_ms"];
             $this->query_time_limit_ms = $limit > 0 ? $limit : null;
-        }
-
-        // Validate string_encoding value
-        $valid_encodings = ["raw", "0xbinary", "base64"];
-        if (!in_array($this->string_encoding, $valid_encodings)) {
-            throw new \InvalidArgumentException(
-                "Invalid string_encoding value '{$this->string_encoding}'. " .
-                    "Must be one of: " .
-                    implode(", ", $valid_encodings),
-            );
         }
 
         if (isset($options["cursor"])) {
@@ -656,8 +631,8 @@ class MySQLDumpProducer
                 ") */";
         }
 
-        // For binary encodings, fetch all non-numeric columns as binary to avoid charset conversion
-        if ($this->string_encoding !== "raw" && $this->current_column_types) {
+        // Fetch all non-numeric, non-binary columns as binary to get raw bytes for base64 encoding
+        if ($this->current_column_types) {
             $select_parts = [];
             foreach ($this->current_column_types as $col_name => $col_info) {
                 $data_type = strtoupper($col_info["data_type"]);
@@ -1177,21 +1152,17 @@ class MySQLDumpProducer
             return $this->format_binary($value);
         }
 
-        // String encoding modes for non-binary types
-        switch ($this->string_encoding) {
-            case "0xbinary":
-                // Hex-encode to preserve exact bytes
-                return $this->format_binary($value);
-
-            case "base64":
-                // Base64-encode to preserve exact bytes
-                return $this->format_base64($value);
-
-            case "raw":
-            default:
-                // Use PDO::quote() with charset conversion (standard MySQL behavior)
-                return $this->db->quote($value);
+        // JSON columns cannot accept binary charset values, so we wrap with CONVERT
+        if ($data_type === "JSON") {
+            if ($value === "") {
+                return "''";
+            }
+            $base64 = base64_encode($value);
+            return "CONVERT(FROM_BASE64('" . $base64 . "') USING utf8mb4)";
         }
+
+        // Base64-encode to preserve exact bytes
+        return $this->format_base64($value);
     }
 
     /**
@@ -1213,7 +1184,7 @@ class MySQLDumpProducer
             return strlen((string) $value);
         }
 
-        // Binary types are always hex-encoded regardless of string_encoding
+        // Binary types are always hex-encoded
         if ($this->is_binary_type($data_type)) {
             $len = strlen((string) $value);
             return $len === 0 ? 2 : (2 + ($len * 2)); // '' or 0x...
@@ -1224,20 +1195,9 @@ class MySQLDumpProducer
             return 2; // ''
         }
 
-        switch ($this->string_encoding) {
-            case "0xbinary":
-                return 2 + ($len * 2); // 0x + hex
-
-            case "base64":
-                $b64_len = $this->estimate_base64_length($len);
-                // FROM_BASE64('<data>') => 15 bytes overhead + base64 length
-                return 15 + $b64_len;
-
-            case "raw":
-            default:
-                $escaped_len = $this->estimate_escaped_length((string) $value);
-                return $escaped_len + 2; // quotes
-        }
+        $b64_len = $this->estimate_base64_length($len);
+        // FROM_BASE64('<data>') => 15 bytes overhead + base64 length
+        return 15 + $b64_len;
     }
 
     /**
@@ -1249,38 +1209,6 @@ class MySQLDumpProducer
             return 0;
         }
         return 4 * intdiv($raw_len + 2, 3);
-    }
-
-    /**
-     * Estimate escaped length for MySQL string literals without allocation.
-     *
-     * Accounts for characters escaped by the MySQL driver:
-     * NUL, LF, CR, Ctrl+Z, backslash, single quote, double quote.
-     */
-    private function estimate_escaped_length(string $value): int
-    {
-        $len = strlen($value);
-        if ($len === 0) {
-            return 0;
-        }
-
-        $extra = 0;
-        for ($i = 0; $i < $len; $i++) {
-            $ch = $value[$i];
-            if (
-                $ch === "\0" ||
-                $ch === "\n" ||
-                $ch === "\r" ||
-                $ch === "\x1a" ||
-                $ch === "\\" ||
-                $ch === "'" ||
-                $ch === "\""
-            ) {
-                $extra++;
-            }
-        }
-
-        return $len + $extra;
     }
 
     /**
@@ -1552,15 +1480,9 @@ class MySQLDumpProducer
         if ($this->is_binary_type($data_type_upper)) {
             // Hex encoding: 2x size + 2 for "0x" prefix
             $max_chunk_raw_size = (int)(($max_chunk_raw_size - 2) / 2);
-        } elseif ($this->string_encoding === "base64") {
+        } else {
             // Base64: ~1.33x size + overhead for FROM_BASE64('')
             $max_chunk_raw_size = (int)(($max_chunk_raw_size - 20) / 1.34);
-        } elseif ($this->string_encoding === "0xbinary") {
-            // Hex encoding
-            $max_chunk_raw_size = (int)(($max_chunk_raw_size - 2) / 2);
-        } else {
-            // Raw/quoted: roughly 1.1x for escaping
-            $max_chunk_raw_size = (int)($max_chunk_raw_size / 1.1);
         }
 
         // Ensure minimum chunk size

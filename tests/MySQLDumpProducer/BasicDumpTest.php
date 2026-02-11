@@ -58,9 +58,8 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
 
         $this->assertSQLContains('CREATE TABLE `products`', $sql);
         $this->assertSQLContains('INSERT INTO `products`', $sql);
-        $this->assertSQLContains('Widget', $sql);
+        $this->assertSQLContains('FROM_BASE64', $sql);
         $this->assertSQLContains('19.99', $sql);
-        $this->assertSQLContains('Gadget', $sql);
     }
 
     public function testMultipleTables(): void
@@ -102,9 +101,8 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
         // Verify all tables are present and in alphabetical order
         $this->assertEquals(['categories', 'orders', 'products'], $tables);
 
-        // Verify data is present
-        $this->assertSQLContains('Electronics', $sql);
-        $this->assertSQLContains('Laptop', $sql);
+        // Verify data is present (strings are base64-encoded, numerics are raw)
+        $this->assertSQLContains('FROM_BASE64', $sql);
         $this->assertSQLContains('999.99', $sql);
     }
 
@@ -218,9 +216,8 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
         // Verify decimal precision is preserved
         $this->assertSQLContains('12345.67', $sql);
 
-        // Verify strings are quoted
-        $this->assertSQLContains("'CHAR'", $sql);
-        $this->assertSQLContains("'VARCHAR text'", $sql);
+        // Verify strings are base64-encoded
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -249,7 +246,8 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
 
         // Verify NULL is not quoted
         $this->assertMatchesRegularExpression('/\(1,NULL,NULL,NULL\)/', $sql);
-        $this->assertMatchesRegularExpression('/\(2,42,\'text\',\'2024-01-15\'\)/', $sql);
+        // Verify non-null row has numeric raw + base64-encoded strings
+        $this->assertMatchesRegularExpression('/\(2,42,FROM_BASE64\(/', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

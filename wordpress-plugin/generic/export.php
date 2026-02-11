@@ -789,7 +789,6 @@ function endpoint_sql_chunk(
     // Producer options
     $producer_options = [
         "create_table_query" => $config["create_table_query"] ?? true,
-        "string_encoding" => $config["string_encoding"] ?? "base64",
     ];
 
     // If the client sent its max_allowed_packet, cap the producer's

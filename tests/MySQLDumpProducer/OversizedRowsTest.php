@@ -287,7 +287,6 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL([
             'max_statement_size' => 15 * 1024,
-            'string_encoding' => 'base64',
         ]);
 
         // Should use FROM_BASE64 in updates

@@ -329,7 +329,7 @@ class ResumeEdgeCasesTest extends MySQLDumpProducerTestBase
         // Should have complete, valid SQL
         $this->assertStringContainsString("SET @OLD_UNIQUE_CHECKS", $completeSQL);
         $this->assertStringContainsString("COMMIT", $completeSQL);
-        $this->assertStringContainsString("only_row", $completeSQL);
+        $this->assertStringContainsString("FROM_BASE64", $completeSQL);
 
         // Should be able to import
         $importPdo = $this->executeDumpInNewDatabase($completeSQL);

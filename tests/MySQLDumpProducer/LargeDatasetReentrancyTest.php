@@ -508,7 +508,7 @@ class LargeDatasetReentrancyTest extends MySQLDumpProducerTestBase
         // Should have CREATE TABLE and one INSERT
         $this->assertSQLContains("CREATE TABLE", $sql);
         $this->assertSQLContains("INSERT INTO", $sql);
-        $this->assertSQLContains("only row", $sql);
+        $this->assertSQLContains("FROM_BASE64", $sql);
 
         // Verify only one INSERT
         $insertCount = substr_count($sql, "INSERT INTO");

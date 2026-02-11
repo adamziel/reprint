@@ -28,9 +28,9 @@ class PrimaryKeyVariationsTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL(['batch_size' => 250]);
 
-        // Verify SQL contains user data
-        $this->assertSQLContains('user1', $sql);
+        // Verify SQL contains INSERT statements with base64-encoded data
         $this->assertSQLContains('INSERT INTO', $sql);
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test - this is the real verification
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -117,9 +117,8 @@ class PrimaryKeyVariationsTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL(['batch_size' => 100]);
 
-        // Verify all rows are exported
-        $this->assertSQLContains('Log entry 1', $sql);
-        $this->assertSQLContains('Log entry 300', $sql);
+        // Verify rows are exported (strings are base64-encoded)
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -193,9 +192,8 @@ class PrimaryKeyVariationsTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Verify string PK values are properly quoted
-        $this->assertSQLContains("'US'", $sql);
-        $this->assertSQLContains("'United States'", $sql);
+        // Verify string PK values are base64-encoded
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -262,9 +260,9 @@ class PrimaryKeyVariationsTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Verify NULLs are properly handled
-        $this->assertMatchesRegularExpression('/NULL,\'e\'/', $sql);
-        $this->assertMatchesRegularExpression('/\'f\',NULL/', $sql);
+        // Verify NULLs are properly handled (strings are base64-encoded)
+        $this->assertMatchesRegularExpression('/NULL,FROM_BASE64\(/', $sql);
+        $this->assertMatchesRegularExpression('/FROM_BASE64\([^)]+\),NULL/', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

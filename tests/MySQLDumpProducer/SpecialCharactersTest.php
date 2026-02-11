@@ -23,8 +23,8 @@ class SpecialCharactersTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Verify quotes are escaped
-        $this->assertSQLContains("It\\'s a beautiful day", $sql);
+        // Verify strings are base64-encoded
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -75,8 +75,8 @@ class SpecialCharactersTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Verify backslashes are escaped
-        $this->assertSQLContains('\\\\', $sql);
+        // Verify strings are base64-encoded
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -212,6 +212,7 @@ class SpecialCharactersTest extends MySQLDumpProducerTestBase
         $sql = $this->getDumpSQL();
 
         // Verify NULL vs empty string distinction
+        // NULL stays as NULL, empty strings stay as ''
         $this->assertMatchesRegularExpression('/\(1,NULL,\'\'\)/', $sql);
         $this->assertMatchesRegularExpression('/\(2,\'\',\'\'\)/', $sql);
 
@@ -238,10 +239,10 @@ class SpecialCharactersTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Verify proper handling
+        // Verify proper handling: actual NULL stays as NULL, string "NULL" is base64-encoded
         $this->assertMatchesRegularExpression('/\(1,NULL\)/', $sql);
-        $this->assertMatchesRegularExpression('/\(2,\'NULL\'\)/', $sql);
-        $this->assertMatchesRegularExpression('/\(3,\'null\'\)/', $sql);
+        $this->assertMatchesRegularExpression('/\(2,FROM_BASE64\(/', $sql);
+        $this->assertMatchesRegularExpression('/\(3,FROM_BASE64\(/', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

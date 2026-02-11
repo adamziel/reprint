@@ -158,9 +158,8 @@ class EncodingEdgeCasesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Verify export contains all data
-        $this->assertSQLContains('café', $sql);
-        $this->assertSQLContains('中文', $sql);
+        // Verify export contains base64-encoded data
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
@@ -311,8 +310,8 @@ class EncodingEdgeCasesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
-        // Verify emojis are in the export
-        $this->assertSQLContains('😀', $sql);
+        // Verify strings are base64-encoded in the export
+        $this->assertSQLContains('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);
