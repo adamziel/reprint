@@ -1484,7 +1484,7 @@ class ImportClient
             true,
         );
 
-        if (!$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode) {
             echo "{$count} file(s) changed during sync and need re-syncing (run files-sync-delta):\n";
         }
 
@@ -1493,7 +1493,7 @@ class ImportClient
                 ? " (changed {$changes} times — may be too volatile to sync)"
                 : " (changed {$changes} time" . ($changes > 1 ? "s" : "") . ")";
             $this->audit_log("  VOLATILE FILE | path={$path} | count={$changes}");
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "  {$path}{$suffix}\n";
             }
         }
@@ -2143,7 +2143,7 @@ class ImportClient
                 true,
             );
 
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "Resuming files-sync-initial\n";
                 echo "  Stage: {$stage}\n";
                 echo "  Already indexed: {$index_size} files\n";
@@ -2159,7 +2159,7 @@ class ImportClient
 
             $this->audit_log("START files-sync-initial", true);
 
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "Starting files-sync-initial\n";
             }
         }
@@ -2256,7 +2256,7 @@ class ImportClient
             true,
         );
 
-        if (!$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode) {
             echo "files-sync-initial complete: {$index_size} files indexed\n";
             echo "Audit log: {$this->audit_log}\n";
         }
@@ -2357,7 +2357,7 @@ class ImportClient
             true,
         );
 
-        if (!$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode) {
             echo "Starting files-sync-delta\n";
             echo "  Index contains: {$index_size} files\n";
             echo "  Stage: {$stage}\n";
@@ -2451,7 +2451,7 @@ class ImportClient
             true,
         );
 
-        if (!$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode) {
             echo "files-sync-delta complete: {$index_size} files indexed\n";
             echo "Audit log: {$this->audit_log}\n";
         }
@@ -2504,7 +2504,7 @@ class ImportClient
             $this->state["stage"] = "index";
             $this->save_state($this->state);
             $this->audit_log("START files-index", true);
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "Starting files-index\n";
             }
         } else {
@@ -2516,7 +2516,7 @@ class ImportClient
                 ),
                 true,
             );
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "Resuming files-index\n";
             }
         }
@@ -2581,7 +2581,7 @@ class ImportClient
             true,
         );
 
-        if (!$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode) {
             echo "files-index complete: {$count} entries indexed\n";
             echo "Remote index: {$this->remote_index_file}\n";
             echo "Audit log: {$this->audit_log}\n";
@@ -2637,7 +2637,7 @@ class ImportClient
                 "FOLLOW SYMLINK | indexing target directory: {$dir}",
                 true,
             );
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "Following symlink target: {$dir}\n";
             }
 
@@ -2667,7 +2667,7 @@ class ImportClient
                                 substr($msg, 0, 200),
                             true,
                         );
-                        if (!$this->verbose_mode) {
+                        if ($this->is_tty && !$this->verbose_mode) {
                             echo "  Skipped (server rejected): {$dir}\n";
                         }
                         $skipped = true;
@@ -2994,7 +2994,7 @@ class ImportClient
 
             $this->audit_log("START db-sync", true);
 
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "Starting db-sync\n";
             }
         } else {
@@ -3007,7 +3007,7 @@ class ImportClient
                 true,
             );
 
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "Resuming db-sync\n";
             }
         }
@@ -3029,7 +3029,7 @@ class ImportClient
 
         $this->audit_log("db-sync complete", true);
 
-        if (!$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode) {
             echo "db-sync complete\n";
             echo "SQL file: {$sql_file}\n";
             echo "Audit log: {$this->audit_log}\n";
@@ -3096,7 +3096,7 @@ class ImportClient
             $this->save_state($this->state);
 
             $this->audit_log("START db-index", true);
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "Starting db-index\n";
             }
         } else {
@@ -3107,7 +3107,7 @@ class ImportClient
                 ),
                 true,
             );
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "Resuming db-index\n";
             }
         }
@@ -3131,7 +3131,7 @@ class ImportClient
             true,
         );
 
-        if (!$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode) {
             echo "db-index complete: {$tables} tables\n";
             echo "Table stats: {$tables_file}\n";
             echo "Audit log: {$this->audit_log}\n";
@@ -6082,7 +6082,7 @@ class ImportClient
             true,
         );
 
-        if (!$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode) {
             echo "\nInterrupted - saving state...\n";
             echo "  Command: {$current_command}\n";
             echo "  Total files indexed: {$indexed}\n";
@@ -6093,7 +6093,7 @@ class ImportClient
         // Save current state (with timeout protection)
         try {
             $this->save_state($this->state);
-            if (!$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode) {
                 echo "✓ State saved successfully\n";
             }
         } catch (Exception $e) {
@@ -6101,7 +6101,7 @@ class ImportClient
             flush();
         }
 
-        if (!$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode) {
             echo "Exiting...\n";
             flush();
         }
