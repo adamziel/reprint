@@ -1289,6 +1289,9 @@ class ImportClient
     private $last_http_code = null;
     private $last_curl_errno = null;
     private $last_curl_timeout = false;
+    private $pipeline_step = null; // Current pipeline step (1-indexed), set via --step
+    private $pipeline_steps = null; // Total pipeline steps, set via --steps
+    private $status_file; // Path to .import-status.json
     public $exit_code = 0; // Exit code: 0 = complete, 2 = partial (call again)
 
     public function __construct(string $remote_url, string $local_path)
@@ -1305,6 +1308,7 @@ class ImportClient
             $this->local_path . "/.import-download-list.jsonl";
         $this->audit_log = $this->local_path . "/.import-audit.log";
         $this->volatile_files_file = $this->local_path . "/.import-volatile-files.json";
+        $this->status_file = $this->local_path . "/.import-status.json";
 
         // Detect TTY for progress display
         $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
@@ -1562,6 +1566,8 @@ class ImportClient
         $this->follow_symlinks = $options["follow_symlinks"] ?? false;
         $command = $options["command"] ?? null;
         $abort = $options["abort"] ?? false;
+        $this->pipeline_step = $options["pipeline_step"] ?? null;
+        $this->pipeline_steps = $options["pipeline_steps"] ?? null;
 
         if (!$command) {
             throw new InvalidArgumentException(
@@ -1672,6 +1678,7 @@ class ImportClient
                 "status" => "error",
                 "error" => $e->getMessage(),
             ]);
+            $this->write_status_file($e->getMessage());
             throw $e;
         }
     }
@@ -1918,6 +1925,7 @@ class ImportClient
         }
         echo json_encode($entry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
         $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
+        $this->write_status_file($ok ? null : "Preflight failed");
         exit($ok ? 0 : 1);
     }
 
@@ -1998,9 +2006,11 @@ class ImportClient
         echo "\n";
         if ($all_pass) {
             echo "Migration looks feasible.\n";
+            $this->write_status_file();
             exit(0);
         } else {
             echo "Migration may not be feasible. Review the failures above.\n";
+            $this->write_status_file("Preflight assertions failed");
             exit(1);
         }
     }
@@ -5949,6 +5959,44 @@ class ImportClient
             ),
             false,
         );
+
+        $this->write_status_file();
+    }
+
+    /**
+     * Write a flat status file for external consumers (e.g. web UI polling).
+     *
+     * Derives a simple JSON object from the current state and pipeline
+     * position. Written atomically via temp file + rename so readers
+     * never see a partial write.
+     */
+    private function write_status_file(?string $error = null): void
+    {
+        $state = $this->state ?? [];
+        $command = $state["command"] ?? null;
+        $status = $error !== null ? "error" : ($state["status"] ?? "in_progress");
+
+        // Derive phase from the state's stage field
+        $phase = $state["stage"] ?? null;
+
+        $payload = [
+            "step" => $this->pipeline_step,
+            "steps" => $this->pipeline_steps,
+            "command" => $command,
+            "status" => $status,
+            "phase" => $phase,
+            "error" => $error,
+            "ts" => microtime(true),
+        ];
+
+        $json = json_encode($payload, JSON_PRETTY_PRINT);
+        if ($json === false) {
+            return; // Best-effort — don't crash the import over a status file
+        }
+        $tmp = $this->status_file . ".tmp";
+        if (file_put_contents($tmp, $json) !== false) {
+            rename($tmp, $this->status_file);
+        }
     }
 
     /**
@@ -6225,6 +6273,8 @@ if (
         echo "  --follow-symlinks    Follow symlinks pointing outside root directories\n";
         echo "  --verbose, -v        Show detailed request/response logs\n";
         echo "  --no-adaptive        Disable adaptive request tuning\n";
+        echo "  --step=N             Current pipeline step (1-indexed, for status file)\n";
+        echo "  --steps=N            Total pipeline steps (for status file)\n";
         echo "\n";
         echo "Exit codes:\n";
         echo "  0  Command completed successfully\n";
@@ -6451,6 +6501,10 @@ if (
             $options["max_allowed_packet"] = parse_size(
                 substr($argv[$i], strlen("--max-allowed-packet=")),
             );
+        } elseif (strpos($argv[$i], "--step=") === 0) {
+            $options["pipeline_step"] = (int) substr($argv[$i], strlen("--step="));
+        } elseif (strpos($argv[$i], "--steps=") === 0) {
+            $options["pipeline_steps"] = (int) substr($argv[$i], strlen("--steps="));
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);

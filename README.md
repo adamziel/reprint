@@ -15,7 +15,7 @@ catch any files that changed while the database was being dumped.
 All commands below use the same base invocation. We'll use `$URL` and `$DIR` as shorthand:
 
 ```bash
-URL="https://example.com/?site-export-api&directory=/var/www/html"
+URL="https://example.com/?site-export-api"
 DIR="./my-export"
 SECRET="your-shared-secret"
 ```
@@ -87,6 +87,40 @@ php import.php preflight <URL> <local-path> [options]
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
 
 All other commands check that a preflight has been completed and refuse to start without one. Use `preflight-assert` instead if you only need a pass/fail exit code.
+
+### Status file
+
+When an external process (e.g. a web UI) needs to poll migration progress, it can read
+`.import-status.json` in the output directory. This file is written atomically on every
+state change, so readers never see a partial write.
+
+Pass `--step=N` and `--steps=N` to embed pipeline position in the status file. For example,
+a four-step pipeline would pass `--step=1 --steps=4` for the preflight, `--step=2 --steps=4`
+for db-index, and so on.
+
+The file contains a flat JSON object:
+
+```json
+{
+  "step": 2,
+  "steps": 4,
+  "command": "files-sync",
+  "status": "in_progress",
+  "phase": "index",
+  "error": null,
+  "ts": 1707600000.123
+}
+```
+
+| Field     | Type              | Description |
+|-----------|-------------------|-------------|
+| `step`    | `int \| null`     | Current pipeline step (1-indexed). `null` when `--step` is not passed. |
+| `steps`   | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
+| `command` | `string \| null`  | Current command name (`preflight`, `files-sync`, `db-sync`, etc.). |
+| `status`  | `string`          | One of `in_progress`, `partial`, `complete`, `error`, `aborted`. |
+| `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`), or `null`. Derived from the internal state's `stage` field. |
+| `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
+| `ts`      | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
 
 ## Technical requirements
 
