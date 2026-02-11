@@ -282,6 +282,7 @@ What we **don't** do:
 ### Todos
 
 * Possibly run more checks in `preflight-assert`. What would they be?
+* Support sqlite sites
 * ✅ How to negotiate symlinks pointing outside of the requested root directories?
 * ✅ `preflight-assert` command that exits 0/1 depending on migration feasibility
 * ✅ Renamed `sql-preflight` to `db-index`

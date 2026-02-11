@@ -44,49 +44,24 @@
  */
 class Site_Export_HMAC_Client {
 
-    /**
-     * The shared secret used for HMAC computation.
-     * @var string
-     */
+    /** @var string */
     private $secret;
 
-    /**
-     * Create a new HMAC client.
-     *
-     * @param string $secret The shared secret. Should be generated securely
-     *                       and shared between import and export sides.
-     */
     public function __construct(string $secret) {
         $this->secret = $secret;
     }
 
-    /**
-     * Generate a new shared secret.
-     *
-     * Call this once on the import side to generate a secret,
-     * then have the user copy it to the export plugin settings.
-     *
-     * @param int $length Length of the secret in bytes (default 32 = 256 bits)
-     * @return string Hex-encoded secret (64 characters for 32 bytes)
-     */
+    /** Returns a hex-encoded random secret (64 chars = 256 bits by default). */
     public static function generate_secret(int $length = 32): string {
         return bin2hex(random_bytes($length));
     }
 
-    /**
-     * Generate a cryptographically secure nonce.
-     *
-     * @return string Hex-encoded random nonce (32 characters)
-     */
+    /** @return string Hex-encoded 16-byte nonce. */
     public function generate_nonce(): string {
         return bin2hex(random_bytes(16));
     }
 
-    /**
-     * Get the current timestamp with microsecond precision.
-     *
-     * @return string Timestamp as a float string (e.g., "1699876543.123456")
-     */
+    /** @return string Microsecond-precision Unix timestamp. */
     public function get_timestamp(): string {
         return sprintf('%.6f', microtime(true));
     }
@@ -116,16 +91,7 @@ class Site_Export_HMAC_Client {
         return hash_hmac('sha256', $message, $this->secret);
     }
 
-    /**
-     * Get all authentication headers for a request.
-     *
-     * This is the primary method to use when making requests.
-     * It generates fresh nonce and timestamp values, hashes the body,
-     * and computes the HMAC signature.
-     *
-     * @param string $body Request body (empty string for GET requests)
-     * @return array Associative array of headers to add to the request
-     */
+    /** Returns all four X-Auth-* headers for a single request. */
     public function get_auth_headers(string $body = ''): array {
         $nonce = $this->generate_nonce();
         $timestamp = $this->get_timestamp();
@@ -140,12 +106,7 @@ class Site_Export_HMAC_Client {
         ];
     }
 
-    /**
-     * Return authentication headers formatted for cURL (["Name: value", ...]).
-     *
-     * @param string $body Request body (pass empty string for GET)
-     * @return string[]
-     */
+    /** Returns auth headers formatted for CURLOPT_HTTPHEADER (["Name: value", ...]). */
     public function get_curl_headers(string $body = ''): array {
         $headers = $this->get_auth_headers($body);
         $curl_headers = [];
@@ -155,27 +116,12 @@ class Site_Export_HMAC_Client {
         return $curl_headers;
     }
 
-    /**
-     * Sign a cURL handle for an authenticated request.
-     *
-     * Convenience method for use with cURL.
-     *
-     * @param resource $ch   cURL handle
-     * @param string   $body Request body (pass empty string for GET)
-     * @return void
-     */
+    /** Sets CURLOPT_HTTPHEADER with auth headers on a cURL handle. */
     public function sign_curl_request($ch, string $body = ''): void {
         curl_setopt($ch, CURLOPT_HTTPHEADER, $this->get_curl_headers($body));
     }
 
-    /**
-     * Create an authenticated HTTP context for file_get_contents.
-     *
-     * @param string $body    Request body
-     * @param string $method  HTTP method (GET, POST)
-     * @param array  $extra   Extra context options to merge
-     * @return resource Stream context
-     */
+    /** Returns a stream context with auth headers, for use with file_get_contents(). */
     public function create_stream_context(string $body = '', string $method = 'GET', array $extra = []) {
         $headers = $this->get_auth_headers($body);
         $header_string = '';

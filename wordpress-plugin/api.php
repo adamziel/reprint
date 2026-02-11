@@ -11,12 +11,11 @@
  * universal fallback.
  */
 
-// Capture any accidental output before headers are set
+// Buffer output so stray warnings don't corrupt the JSON response
 if (!ob_get_level()) {
     ob_start();
 }
 
-// Error handling
 set_error_handler(function ($errno, $errstr, $errfile, $errline) {
     $error = [
         'error' => "PHP Error: $errstr",
@@ -50,9 +49,7 @@ set_exception_handler(function ($e) {
  */
 define('SITE_EXPORT_TIMESTAMP_TOLERANCE', 300);
 
-/**
- * Send JSON error response and exit.
- */
+/** Sends a JSON error response and terminates. */
 function site_export_error(int $code, string $message): void {
     http_response_code($code);
     header('Content-Type: application/json');
@@ -61,10 +58,10 @@ function site_export_error(int $code, string $message): void {
 }
 
 /**
- * Get a request header value.
+ * Reads a request header by name, trying both Apache (getallheaders) and
+ * CGI/FastCGI ($_SERVER HTTP_ prefix) conventions.
  */
 function site_export_get_header(string $name): ?string {
-    // Try getallheaders() first (Apache)
     if (function_exists('getallheaders')) {
         $headers = getallheaders();
         foreach ($headers as $key => $value) {
@@ -74,7 +71,6 @@ function site_export_get_header(string $name): ?string {
         }
     }
 
-    // Try $_SERVER with HTTP_ prefix (CGI/FastCGI)
     $server_key = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
     if (isset($_SERVER[$server_key])) {
         return $_SERVER[$server_key];
@@ -116,7 +112,6 @@ function site_export_verify_hmac(string $secret): ?string {
         return 'Missing X-Auth-Content-Hash header';
     }
 
-    // Validate timestamp
     if (!is_numeric($timestamp)) {
         return 'Invalid timestamp format';
     }
@@ -133,13 +128,10 @@ function site_export_verify_hmac(string $secret): ?string {
         );
     }
 
-    // Validate nonce length
     if (strlen($nonce) < 16) {
         return 'Nonce must be at least 16 characters';
     }
 
-    // Verify HMAC signature over nonce + timestamp + content_hash.
-    // This proves the content_hash was set by someone who knows the secret.
     $message = $nonce . $timestamp . $content_hash;
     $expected = hash_hmac('sha256', $message, $secret);
 
@@ -170,13 +162,10 @@ function site_export_verify_hmac(string $secret): ?string {
     return null; // Success
 }
 
-/**
- * Find WordPress root by walking up from plugin directory.
- */
+/** Walks up from the plugin directory looking for wp-config.php. */
 function site_export_find_wp_root(): ?string {
     $dir = __DIR__;
 
-    // Walk up looking for wp-config.php
     for ($i = 0; $i < 10; $i++) {
         if (file_exists($dir . '/wp-config.php')) {
             return $dir;
@@ -191,11 +180,6 @@ function site_export_find_wp_root(): ?string {
     return null;
 }
 
-// =============================================================================
-// Main execution
-// =============================================================================
-
-// Load secret from config file
 $secret_file = __DIR__ . '/secret.php';
 if (!file_exists($secret_file)) {
     site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.');
@@ -206,43 +190,33 @@ if (empty($secret) || !is_string($secret)) {
     site_export_error(503, 'Invalid secret configuration. Please reconfigure in WordPress admin.');
 }
 
-// Verify HMAC authentication
 $auth_error = site_export_verify_hmac($secret);
 if ($auth_error !== null) {
     site_export_error(403, $auth_error);
 }
 
-// Find WordPress root for default directory
 $wp_root = site_export_find_wp_root();
 
-// Set default directory to WordPress root if not specified
 if (!isset($_GET['directory']) && !isset($_POST['directory']) && $wp_root !== null) {
     $_GET['directory'] = $wp_root;
 }
 
-// Bypass export.php's SECRET_KEY check - we've already authenticated via HMAC
+// export.php has its own SECRET_KEY guard — satisfy it since we already
+// verified the request via HMAC above.
 define('SECRET_KEY', 'hmac_authenticated');
 $_GET['SECRET_KEY'] = SECRET_KEY;
 
-// Load and execute the export library
-// The export.php file is in the parent directory (site-export root)
 $export_php = __DIR__ . '/generic/export.php';
 
 if (!file_exists($export_php)) {
     site_export_error(500, 'Export library not found at: ' . $export_php);
 }
 
-// Include export.php - it will handle the rest
-// Since we're not the SCRIPT_FILENAME, export.php will load as a library
-// We need to manually trigger its HTTP runtime logic
-
 require_once $export_php;
 
-// Now run the HTTP runtime that export.php normally runs
 try {
     $config = parse_http_config();
 
-    // Decode cursor from base64 to JSON
     if (!isset($config['cursor'])) {
         $config['cursor'] = $_SERVER['HTTP_X_EXPORT_CURSOR'] ?? null;
     }

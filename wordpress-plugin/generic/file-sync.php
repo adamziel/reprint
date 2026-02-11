@@ -1,19 +1,9 @@
 <?php
 /**
- * File synchronization producer.
- *
- * Streams a provided list of filesystem paths in sorted order, with
- * cursor-based resumption. Callers are responsible for encoding cursors
- * for transport.
- */
-
-/**
- * Stream a provided list of filesystem paths in sorted order.
- *
- * The caller passes an explicit array of paths to stream. This is
- * how both export.php (endpoint_file_fetch) and the test suite use it.
- * The caller must pass the same paths array on each request when
- * resuming from a cursor.
+ * Streams a provided list of filesystem paths in sorted order with
+ * cursor-based resumption. The caller must pass the same paths array
+ * on each request when resuming from a cursor. Callers are responsible
+ * for encoding cursors for transport (e.g. base64 for HTTP headers).
  */
 class FileTreeProducer
 {
@@ -28,28 +18,30 @@ class FileTreeProducer
     private string $phase;
     private ?array $current_chunk = null;
 
-    // Paths state: explicit list of paths to stream (sorted on first use)
+    /** Explicit list of paths to stream, sorted on first use. */
     private array $paths;
     private bool $paths_sorted = false;
     private bool $paths_positioned = false;
-    private int $paths_position = 0;  // Ephemeral index, NOT stored in cursor
+    /** Ephemeral index into $paths; NOT stored in cursor. */
+    private int $paths_position = 0;
 
-    // Streaming file state
+    /** State for the file currently being streamed in chunks. */
     private $streaming_file_handle = null;
     private int $streaming_file_offset = 0;
     private ?array $current_file_meta = null;
 
-    // Last emitted path tracking (for cursor generation)
+    /** Tracks the last emitted path for cursor generation. */
     private ?string $last_emitted_path = null;
     private ?int $last_emitted_ctime = null;
 
     /**
-     * @param string|array $directories Root directories to scan
-     * @param array $options Options:
-     *   - chunk_size: bytes per file chunk
-     *   - index_only: if true, emit index entries instead of file contents
-     *   - cursor: JSON cursor string for resumption
-     *   - paths: array of specific paths to stream (required)
+     * @param string|array $directories Root directories to scan.
+     * @param array $options {
+     *     @type int    $chunk_size Bytes per file chunk (default 5MB).
+     *     @type bool   $index_only Emit index entries instead of file contents.
+     *     @type string $cursor     JSON cursor string for resumption.
+     *     @type array  $paths      Paths to stream (required).
+     * }
      */
     public function __construct($directories, array $options = [])
     {
@@ -72,7 +64,7 @@ class FileTreeProducer
     }
 
     /**
-     * Initialize a fresh traversal.
+     * Sets up a fresh traversal from the beginning.
      */
     private function initialize_new(): void
     {
@@ -93,12 +85,12 @@ class FileTreeProducer
     }
 
     /**
-     * Initialize producer state from a JSON cursor string.
+     * Restores producer state from a JSON cursor string.
      *
      * Cursor format is minimal: (path, ctime, byte_offset)
      * - path: the file/dir/symlink we were processing or just finished
      * - ctime: the ctime of the file when we started (for change detection)
-     * - b: byte offset within the file (0 if finished or non-file)
+     * - bytes: byte offset within the file (0 if finished or non-file)
      *
      * On resume, position within the paths array is determined by binary
      * search based on the path. This ensures correctness even when the
@@ -136,10 +128,10 @@ class FileTreeProducer
         $this->last_emitted_ctime = null;
 
         if ($path !== null && $byte_offset > 0) {
-            // Resuming mid-file: set up current file state
+            // Resuming mid-file.
             $size = @filesize($path);
             if ($size === false) {
-                // File no longer exists - treat as if we finished it
+                // File disappeared; treat as completed.
                 $this->current_file_meta = null;
                 $this->streaming_file_offset = 0;
                 $this->last_emitted_path = $path;
@@ -153,22 +145,15 @@ class FileTreeProducer
                 $this->last_emitted_path = $path;
             }
         } else {
-            // Starting fresh or resuming after a completed item
             $this->current_file_meta = null;
             $this->streaming_file_offset = 0;
-            $this->last_emitted_path = $path;  // might be null
+            $this->last_emitted_path = $path;
         }
         // Position within paths array will be resolved by binary search
         // when get_next_path_entry() is first called
     }
 
-    /**
-     * Normalize directories input into an array of trimmed paths.
-     */
-    /**
-     * @param string|array $directories
-     * @return array
-     */
+    /** @param string|array $directories */
     private function normalize_directories($directories): array
     {
         if (is_string($directories)) {
@@ -178,7 +163,7 @@ class FileTreeProducer
     }
 
     /**
-     * Advance to the next chunk. Returns false when finished.
+     * Advances to the next chunk. Returns false when finished.
      */
     public function next_chunk(): bool
     {
@@ -191,7 +176,7 @@ class FileTreeProducer
     }
 
     /**
-     * Produce the next chunk (file data, index entry, directory, or symlink).
+     * Produces the next chunk: file data, index entry, directory, or symlink.
      */
     private function stream_step(): void
     {
@@ -201,13 +186,12 @@ class FileTreeProducer
         }
 
         while (true) {
-            // Clear stale chunk before looking for the next item.
-            // get_next_server_file() may set current_chunk for symlinks/directories.
+            // get_next_server_file() may set current_chunk directly for
+            // symlinks and directories, so clear it before each iteration.
             $this->current_chunk = null;
 
             $server_file = $this->get_next_server_file();
 
-            // If get_next_server_file() set a chunk (symlink/directory), return it
             if ($this->current_chunk !== null) {
                 return;
             }
@@ -229,7 +213,7 @@ class FileTreeProducer
     }
 
     /**
-     * Emit index entry chunk for a file without streaming file data.
+     * Emits an index entry chunk without streaming file contents.
      */
     private function emit_index_chunk(array $file): void
     {
@@ -245,11 +229,8 @@ class FileTreeProducer
     }
 
     /**
-     * Fetch the next server file (or structural chunk) from the paths array.
-     *
-     * Position is determined by binary search based on last_emitted_path,
-     * not by a stored index. This ensures correctness even when the paths
-     * array changes between requests.
+     * Returns the next file entry, or sets current_chunk for non-file entries
+     * (symlinks, directories, missing paths) and returns null.
      */
     private function get_next_server_file(): ?array
     {
@@ -257,7 +238,7 @@ class FileTreeProducer
     }
 
     /**
-     * Fetch the next entry from the explicit paths array (paths mode).
+     * Returns the next entry from the paths array.
      *
      * Paths are sorted on first access. Position is determined by binary
      * search based on last_emitted_path, not by a stored index. This ensures
@@ -265,13 +246,11 @@ class FileTreeProducer
      */
     private function get_next_path_entry(): ?array
     {
-        // Sort paths on first access
         if (!$this->paths_sorted) {
             sort($this->paths, SORT_STRING);
             $this->paths_sorted = true;
         }
 
-        // Position to start after last_emitted_path using binary search
         if (!$this->paths_positioned) {
             if ($this->last_emitted_path !== null) {
                 $this->paths_position = $this->binary_search_next(
@@ -288,7 +267,6 @@ class FileTreeProducer
             $path = $this->paths[$this->paths_position];
             $this->paths_position++;
 
-            // Normalize path - it could be relative to a root directory
             $resolved_path = $this->resolve_path($path);
             if ($resolved_path === null) {
                 // Path doesn't exist or isn't accessible, emit as missing
@@ -350,8 +328,7 @@ class FileTreeProducer
     }
 
     /**
-     * Resolve a path that might be relative to one of the root directories.
-     * Returns the absolute path if it exists, null otherwise.
+     * Resolves a path that might be relative to one of the root directories.
      *
      * Uses both file_exists() and is_link() because file_exists() follows
      * symlinks and returns false for broken symlinks, but the symlink
@@ -363,12 +340,10 @@ class FileTreeProducer
             return null;
         }
 
-        // If it's already an absolute path and exists, use it
         if ($path[0] === "/" && (file_exists($path) || is_link($path))) {
             return $path;
         }
 
-        // Try resolving relative to each root directory
         foreach ($this->directories as $dir) {
             $candidate = $dir . "/" . ltrim($path, "/");
             if (file_exists($candidate) || is_link($candidate)) {
@@ -376,7 +351,6 @@ class FileTreeProducer
             }
         }
 
-        // If absolute path doesn't exist, return null to signal missing
         if ($path[0] === "/") {
             return null;
         }
@@ -385,7 +359,8 @@ class FileTreeProducer
     }
 
     /**
-     * Stream the current file in fixed-size chunks.
+     * Reads the next chunk from the current file and performs post-read
+     * change detection via ctime comparison.
      */
     private function stream_file_chunk(array $file): void
     {
@@ -455,7 +430,7 @@ class FileTreeProducer
         $change_size = null;
         $error_type = "file_changed";
 
-        // Post-read change detection: only compare ctime.
+        // Detect whether the file changed while we were reading it.
         clearstatcache(true, $file["path"]);
         $stat = @stat($file["path"]);
         if ($stat === false) {
@@ -515,7 +490,7 @@ class FileTreeProducer
     }
 
     /**
-     * Return the current chunk for the last step.
+     * Returns the chunk produced by the last call to next_chunk().
      */
     public function get_current_chunk(): ?array
     {
@@ -523,12 +498,12 @@ class FileTreeProducer
     }
 
     /**
-     * Serialize state into a JSON cursor string.
+     * Serializes state into a JSON cursor string.
      *
      * Cursor format is minimal: (path, ctime, byte_offset)
      * - path: last emitted path, or current file being streamed
      * - ctime: ctime of file when we started reading (for change detection)
-     * - b: byte offset within the current file (0 if not mid-file)
+     * - bytes: byte offset within the current file (0 if not mid-file)
      *
      * No traversal stack or list indices are stored. On resume, position is
      * determined by binary search based on the path. This ensures correctness
@@ -549,23 +524,19 @@ class FileTreeProducer
         ];
 
         if ($this->current_file_meta !== null) {
-            // In the middle of streaming a file
             $cursor["path"] = base64_encode($this->current_file_meta["path"]);
             $cursor["ctime"] = $this->current_file_meta["ctime"];
             $cursor["bytes"] = $this->streaming_file_offset;
         } else if ($this->last_emitted_path !== null) {
-            // Just finished emitting something, continue after this path
             $cursor["path"] = base64_encode($this->last_emitted_path);
             $cursor["ctime"] = $this->last_emitted_ctime;
             $cursor["bytes"] = 0;
         }
-        // If neither, we haven't emitted anything yet - no path needed
-
         return json_encode($cursor);
     }
 
     /**
-     * Return progress for logging and UI updates.
+     * Returns progress metadata for logging and UI updates.
      */
     public function get_progress(): array
     {
@@ -591,7 +562,7 @@ class FileTreeProducer
     }
 
     /**
-     * Return the filesystem root for metadata.
+     * Returns the filesystem root path.
      */
     public function get_filesystem_root(): ?string
     {
@@ -599,7 +570,8 @@ class FileTreeProducer
     }
 
     /**
-     * Find the next index after $last in a sorted array.
+     * Returns the index of the first entry strictly greater than $last
+     * in a sorted array, using binary search.
      */
     private function binary_search_next(array $entries, string $last): int
     {
@@ -617,9 +589,9 @@ class FileTreeProducer
     }
 
     /**
-     * Single lstat() call to classify a path.
+     * Classifies a path as file, dir, link, or other via a single lstat() call.
      *
-     * @return array|null ['type' => 'file'|'dir'|'link'|'other', 'ctime' => int|null, 'size' => int|null]
+     * @return array|null {type: 'file'|'dir'|'link'|'other', ctime: ?int, size: ?int}
      */
     private function lstat_path(string $path): ?array
     {

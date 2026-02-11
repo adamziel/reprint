@@ -7,10 +7,6 @@ if (!ob_get_level()) {
 /**
  * Unified export API for SQL and file operations.
  *
- * Provides function-based interface for:
- * - SQL database exports with cursor-based resumption
- * - File synchronization with cursor-based resumption
- *
  * CURSOR ENCODING CONTRACT:
  * - Internal: Cursors are JSON strings (e.g., {"p":"streaming","n":123})
  * - HTTP transmission: Cursors are base64-encoded in X-Cursor header (outgoing) and X-Export-Cursor header (incoming)
@@ -36,8 +32,7 @@ if (!function_exists('str_starts_with')) {
 }
 
 /**
- * Emit a well-formed error chunk into a gzip multipart stream.
- * Used by error/exception/shutdown handlers and by streaming try-catch blocks.
+ * Emits an error chunk into a gzip multipart stream.
  */
 function emit_error_chunk($gz, string $boundary, string $message): void
 {
@@ -69,7 +64,8 @@ function emit_error_chunk($gz, string $boundary, string $message): void
 }
 
 /**
- * json_encode() wrapper that throws on failure instead of returning false.
+ * Throws on json_encode failure instead of returning false.
+ *
  * Do NOT use inside error/shutdown handlers — those need hardcoded fallback strings.
  */
 function safe_json_encode($value, int $flags = 0): string
@@ -81,9 +77,10 @@ function safe_json_encode($value, int $flags = 0): string
     return $json;
 }
 
-// Global error handler — streaming-aware.
-// Pre-stream: JSON error response with HTTP 500.
-// Mid-stream: emits an error chunk into the gzip multipart stream.
+// Streaming-aware error handler. Before streaming starts, errors produce
+// a JSON response with HTTP 500. Mid-stream, errors become multipart
+// error chunks so the client receives structured diagnostics.
+//
 // Respects the @ operator: suppressed errors are logged but never emitted
 // into the stream or sent as responses, since the calling code already
 // handles the failure (e.g. @readlink checks for false).
@@ -97,8 +94,6 @@ set_error_handler(function ($errno, $errstr, $errfile, $errline) {
         "type" => $errno,
     ];
 
-    // If the @ operator was used, log the error but don't emit it — the
-    // calling code already handles the failure return value.
     if (!(error_reporting() & $errno)) {
         error_log("Export error (suppressed): " . json_encode($error));
         return true;
@@ -107,24 +102,21 @@ set_error_handler(function ($errno, $errstr, $errfile, $errline) {
     error_log("Export error: " . json_encode($error));
 
     if ($streaming_context !== null) {
-        // Mid-stream: emit error chunk into the gzip multipart stream
         emit_error_chunk(
             $streaming_context['gz'],
             $streaming_context['boundary'],
             "PHP Error ({$errno}): {$errstr} in {$errfile}:{$errline}",
         );
-        // Return true to suppress PHP's default error output
         return true;
     }
 
-    // Pre-stream: plain JSON error response
     http_response_code(500);
     @header("Content-Type: application/json");
     echo json_encode($error);
     exit(1);
 });
 
-// Global exception handler — streaming-aware.
+// Streaming-aware exception handler, mirrors the error handler above.
 set_exception_handler(function ($e) {
     global $streaming_context;
 
@@ -151,7 +143,7 @@ set_exception_handler(function ($e) {
     exit(1);
 });
 
-// Shutdown function catches E_ERROR/E_PARSE fatals that set_error_handler cannot.
+// Catches E_ERROR/E_PARSE fatals that set_error_handler cannot intercept.
 register_shutdown_function(function () {
     global $streaming_context;
 
@@ -159,7 +151,6 @@ register_shutdown_function(function () {
     if ($error === null) {
         return;
     }
-    // Only handle fatal errors that set_error_handler can't catch
     $fatal_types = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR;
     if (!($error['type'] & $fatal_types)) {
         return;
@@ -184,7 +175,6 @@ register_shutdown_function(function () {
         return;
     }
 
-    // Pre-stream fatal: send JSON if headers haven't been sent yet
     if (!headers_sent()) {
         http_response_code(500);
         @header("Content-Type: application/json");
@@ -268,7 +258,6 @@ if (false) {
     define("DB_NAME", "your-db-name");
 }
 
-// Export bounds (adjust here if needed)
 if (!defined("EXPORT_MIN_EXECUTION_TIME")) {
     define("EXPORT_MIN_EXECUTION_TIME", 1);
 }
@@ -316,13 +305,11 @@ require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/file-sync.php";
 
 /**
- * Best-effort streaming response setup.
- *
- * Disables output buffering, compression layers, and proxy buffering where possible.
+ * Prepares the PHP environment for streaming by disabling output buffering,
+ * compression layers, and proxy buffering.
  */
 function prepare_streaming_response(): void
 {
-    // Discard any buffered output before we emit headers or stream data.
     while (ob_get_level() > 0) {
         @ob_end_clean();
     }
@@ -342,10 +329,8 @@ function prepare_streaming_response(): void
 }
 
 /**
- * Streaming gzip output wrapper.
- *
- * Compresses output incrementally without buffering the entire response.
- * Uses deflate_add() with ZLIB_SYNC_FLUSH to emit compressed data immediately.
+ * Incremental gzip compressor that emits data as it arrives rather than
+ * buffering the entire response.
  */
 class GzipOutputStream
 {
@@ -370,7 +355,7 @@ class GzipOutputStream
     }
 
     /**
-     * Write data to the gzip stream without forcing a sync point.
+     * Writes data without forcing a sync point.
      *
      * Uses ZLIB_NO_FLUSH so the compressor can build back-references across
      * multiple write() calls, producing significantly better compression
@@ -401,8 +386,7 @@ class GzipOutputStream
     }
 
     /**
-     * Force a gzip sync flush so the client can decompress all data written
-     * so far.  Call this after emitting each complete multipart part.
+     * Forces a sync flush so the client can decompress all data written so far.
      */
     public function sync(): void
     {
@@ -424,16 +408,13 @@ class GzipOutputStream
         flush();
     }
 
-    /**
-     * Flush the output buffer.
-     */
     public function flush(): void
     {
         $this->sync();
     }
 
     /**
-     * Finalize the gzip stream.
+     * Finalizes the gzip stream with ZLIB_FINISH.
      */
     public function finish(): void
     {
@@ -453,14 +434,10 @@ class GzipOutputStream
 }
 
 /**
- * Extract database credentials from wp-config.php using PHP tokenizer.
- *
- * @param array $directories Array of directory paths to search for wp-config.php
- * @return array|null Array with db_host, db_name, db_user, db_password, table_prefix, wp_config_path or null
+ * Extracts database credentials from wp-config.php using the PHP tokenizer.
  */
 function extract_db_credentials_from_wp_config(array $directories): ?array
 {
-    // Search for wp-config.php in provided directories
     $wp_config_path = null;
     foreach ($directories as $dir) {
         $path = rtrim($dir, "/") . "/wp-config.php";
@@ -483,20 +460,17 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
         $tokens = token_get_all($content);
         $credentials = [];
 
-        // State machine to parse define('CONSTANT', 'value')
-        $state = "search"; // search, found_define, found_open_paren, found_constant, found_comma
+        $state = "search";
         $current_constant = null;
 
         for ($i = 0; $i < count($tokens); $i++) {
             $token = $tokens[$i];
 
-            // Skip whitespace
             if (is_array($token) && $token[0] === T_WHITESPACE) {
                 continue;
             }
 
             if ($state === "search") {
-                // Look for 'define' function call
                 if (
                     is_array($token) &&
                     $token[0] === T_STRING &&
@@ -505,14 +479,12 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
                     $state = "found_define";
                 }
             } elseif ($state === "found_define") {
-                // Expect opening parenthesis
                 if ($token === "(") {
                     $state = "found_open_paren";
                 } else {
                     $state = "search";
                 }
             } elseif ($state === "found_open_paren") {
-                // Expect constant name (string)
                 if (
                     is_array($token) &&
                     $token[0] === T_CONSTANT_ENCAPSED_STRING
@@ -535,14 +507,12 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
                     $state = "search";
                 }
             } elseif ($state === "found_constant") {
-                // Expect comma
                 if ($token === ",") {
                     $state = "found_comma";
                 } else {
                     $state = "search";
                 }
             } elseif ($state === "found_comma") {
-                // Expect value (string)
                 if (
                     is_array($token) &&
                     $token[0] === T_CONSTANT_ENCAPSED_STRING
@@ -554,7 +524,6 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
             }
         }
 
-        // Check if we found all required credentials
         $required = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"];
         foreach ($required as $key) {
             if (!isset($credentials[$key])) {
@@ -625,7 +594,7 @@ function extract_db_credentials_from_wp_config(array $directories): ?array
 }
 
 /**
- * Normalize a list of paths into unique, non-empty, absolute-ish entries.
+ * Deduplicates and resolves a list of paths, discarding empty entries.
  */
 function normalize_path_list(array $paths): array
 {
@@ -650,7 +619,7 @@ function normalize_path_list(array $paths): array
 }
 
 /**
- * Walk parent directories to detect WordPress roots.
+ * Walks parent directories upward from each start path to find WordPress installations.
  */
 function detect_wp_roots(array $start_paths): array
 {
@@ -693,14 +662,7 @@ function detect_wp_roots(array $start_paths): array
 }
 
 /**
- * Endpoint: Get next chunk of SQL data.
- *
- * @param array $config Configuration with optional cursor for resumption
- * @param float $script_start Script execution start time
- * @param int $max_execution_time Maximum execution time in seconds
- * @param int $max_memory Maximum memory in bytes
- * @param float $memory_threshold Memory usage threshold (0.0-1.0)
- * @return array Result with status and stats
+ * Streams SQL dump fragments as gzipped multipart chunks.
  */
 function endpoint_sql_chunk(
     array $config,
@@ -711,7 +673,6 @@ function endpoint_sql_chunk(
 ): array {
     global $streaming_context;
     prepare_streaming_response();
-    // Try to get credentials from config, constants, env vars, or wp-config.php
     $db_host =
         $config["db_host"] ??
         (defined("DB_HOST") ? DB_HOST : getenv("DB_HOST"));
@@ -725,8 +686,6 @@ function endpoint_sql_chunk(
         $config["db_password"] ??
         (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
 
-    // If any credentials are missing, try to extract from wp-config.php
-    // Use directory parameter to locate wp-config.php
     if (!$db_host || !$db_name || !$db_user || $db_password === false) {
         $directories = [];
         if (isset($config["directory"])) {
@@ -751,7 +710,6 @@ function endpoint_sql_chunk(
         }
     }
 
-    // Validate that we have all required credentials
     if (!$db_host || !$db_name || !$db_user || $db_password === false) {
         throw new InvalidArgumentException(
             "Database credentials not found. Please provide via config, environment variables, " .
@@ -772,7 +730,6 @@ function endpoint_sql_chunk(
         EXPORT_MAX_SQL_FRAGMENTS,
     );
 
-    // Initialize MySQL connection
     $pdo_options = [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     ];
@@ -786,7 +743,6 @@ function endpoint_sql_chunk(
         $pdo_options,
     );
 
-    // Producer options
     $producer_options = [
         "create_table_query" => $config["create_table_query"] ?? true,
     ];
@@ -797,10 +753,8 @@ function endpoint_sql_chunk(
     // smaller of the two (both scaled to 80% for protocol headroom).
     if (!empty($config["max_allowed_packet"])) {
         $client_max = (int) $config["max_allowed_packet"];
-        // Validate: 1MB – 1GB
         if ($client_max >= 1048576 && $client_max <= 1073741824) {
             $client_statement_size = (int) ($client_max * 0.8);
-            // Query the server's max_allowed_packet for comparison
             $server_statement_size = null;
             try {
                 $row = $mysql
@@ -844,7 +798,6 @@ function endpoint_sql_chunk(
         $producer_options,
     );
 
-    // Disable output buffering for immediate response
     if (ob_get_level()) {
         ob_end_flush();
     }
@@ -894,7 +847,6 @@ function endpoint_sql_chunk(
     $sql_bytes_processed = 0;
     $aborted = false;
 
-    // Process batches
     try {
     while (
         should_continue(
@@ -907,7 +859,6 @@ function endpoint_sql_chunk(
         $batch_start = microtime(true);
         $sql = [];
 
-        // Collect fragments for this batch
         $i = 0;
         while ($reader->next_sql_fragment()) {
             $sql[] = $reader->get_sql_fragment();
@@ -938,7 +889,6 @@ function endpoint_sql_chunk(
             _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
         }
 
-        // Output SQL batch as multipart chunk
         $cursor = $reader->get_reentrancy_cursor();
         $gz->write(
             "--{$boundary}\r\n" .
@@ -1006,16 +956,7 @@ function endpoint_sql_chunk(
 }
 
 /**
- * Endpoint: Stream table stats from INFORMATION_SCHEMA.
- *
- * Returns table name, estimated rows, and size information in chunks.
- *
- * @param array $config Configuration with optional cursor for resumption
- * @param float $script_start Script execution start time
- * @param int $max_execution_time Maximum execution time in seconds
- * @param int $max_memory Maximum memory in bytes
- * @param float $memory_threshold Memory usage threshold (0.0-1.0)
- * @return array Result with status and stats
+ * Streams table metadata (name, estimated rows, size) from INFORMATION_SCHEMA.
  */
 function endpoint_db_index(
     array $config,
@@ -1224,7 +1165,7 @@ function endpoint_db_index(
 }
 
 /**
- * Resolve and validate directories from config.
+ * Resolves directory paths from config, expanding ~ and relative paths.
  */
 function resolve_directories(array $config): array
 {
@@ -1278,13 +1219,8 @@ function resolve_directories(array $config): array
 }
 
 /**
- * Endpoint: Lightweight preflight checks and runtime info.
- *
- * Confirms filesystem accessibility and basic DB connectivity, and reports
- * environment details useful for diagnostics. This endpoint avoids heavy work.
- *
- * @param array $config Configuration with directory and optional DB overrides.
- * @return array Result with status and stats.
+ * Returns lightweight preflight checks: filesystem accessibility, DB connectivity,
+ * and environment details useful for diagnostics.
  */
 function endpoint_preflight(array $config): array
 {
@@ -1363,7 +1299,6 @@ function endpoint_preflight(array $config): array
                 $dh = @opendir($dir);
                 if ($dh !== false) {
                     $openable = true;
-                    // Touch one entry to confirm traversal without scanning.
                     @readdir($dh);
                     closedir($dh);
                 }
@@ -1910,7 +1845,6 @@ function endpoint_preflight(array $config): array
                         }
                         $db["wp"]["constants"] = $constant_values;
 
-                        // WordPress version
                         global $wp_version;
                         $db["wp"]["wp_version"] = isset($wp_version) && is_string($wp_version)
                             ? $wp_version
@@ -2198,7 +2132,7 @@ function endpoint_preflight(array $config): array
 }
 
 /**
- * Stream chunks from a file producer as multipart/mixed with gzip compression.
+ * Streams file chunks from a producer as gzipped multipart/mixed.
  */
 function stream_file_producer(
     $producer,
@@ -2516,7 +2450,8 @@ function stream_file_producer(
 }
 
 /**
- * Encode a file_index stack for safe JSON serialization.
+ * Encodes a file_index stack for JSON serialization.
+ *
  * Paths may contain non-UTF8 bytes, so dir and after are base64-encoded.
  */
 function encode_index_stack(array $stack): array
@@ -2578,8 +2513,8 @@ function discover_path_symlinks(string $path): array
 }
 
 /**
- * Encode file_index batch items for safe JSON serialization.
- * Paths are base64-encoded to handle non-UTF8 bytes.
+ * Encodes batch items for JSON serialization, base64-encoding paths
+ * to handle non-UTF8 filesystem bytes.
  */
 function encode_index_batch(array $batch_items): array
 {
@@ -2603,14 +2538,11 @@ function encode_index_batch(array $batch_items): array
 }
 
 /**
- * Endpoint: Stream index in batches with gzip compression.
+ * Streams a directory index as gzipped JSON batches of {path, ctime, size, type}.
  *
- * Lists entries from a single directory, sorted lexicographically.
- * The client supplies list_dir and drives traversal breadth-first by
- * enqueuing directories as they are discovered.
- *
- * Output format per batch (gzipped):
- *   JSON array of {path, ctime, size, type} objects.
+ * The client supplies list_dir and drives traversal depth-first by
+ * enqueuing directories as they are discovered. Resumption is supported
+ * via cursor containing the directory stack and last-seen entry.
  */
 function endpoint_file_index(
     array $config,
@@ -2992,11 +2924,9 @@ function endpoint_file_index(
                     if ($follow_symlinks) {
                         $raw_target = @readlink($path);
                         if ($raw_target !== false && $raw_target !== "") {
-                            // Resolve relative readlink to absolute path
                             if ($raw_target[0] !== "/") {
                                 $raw_target = dirname($path) . "/" . $raw_target;
                             }
-                            // Normalize /../ sequences
                             $parts = explode("/", $raw_target);
                             $normalized = [];
                             foreach ($parts as $p) {
@@ -3194,10 +3124,7 @@ function endpoint_file_index(
 }
 
 /**
- * Endpoint: Stream files from a provided list.
- *
- * Reads paths from an uploaded JSON file (array of strings) and streams
- * those files using FileTreeProducer with paths mode.
+ * Streams files from a client-provided path list (uploaded as JSON).
  */
 function endpoint_file_fetch(
     array $config,
@@ -3208,7 +3135,6 @@ function endpoint_file_fetch(
 ): array {
     $directories = resolve_directories($config);
 
-    // Get paths from uploaded file
     $list_path = $config["file_list_path"] ?? null;
     if ($list_path === null && isset($_FILES["file_list"])) {
         $tmp_name = $_FILES["file_list"]["tmp_name"] ?? "";
@@ -3226,7 +3152,6 @@ function endpoint_file_fetch(
         );
     }
 
-    // Read paths from the JSON file
     $raw = file_get_contents($list_path);
     if ($raw === false) {
         throw new InvalidArgumentException("Failed to read file_list");
@@ -3273,7 +3198,7 @@ function endpoint_file_fetch(
 }
 
 /**
- * Parse memory limit string into bytes.
+ * Parses a PHP memory_limit string (e.g. "128M") into bytes.
  */
 function parse_memory_limit(string $limit): int
 {
@@ -3294,7 +3219,7 @@ function parse_memory_limit(string $limit): int
 }
 
 /**
- * Require an integer within range, else throw.
+ * Validates that an integer falls within the given range, or throws.
  */
 function require_int_range(
     string $name,
@@ -3311,7 +3236,7 @@ function require_int_range(
 }
 
 /**
- * Require a float within range, else throw.
+ * Validates that a float falls within the given range, or throws.
  */
 function require_float_range(
     string $name,
@@ -3328,7 +3253,7 @@ function require_float_range(
 }
 
 /**
- * Check if execution should continue based on time and memory constraints.
+ * Returns false when the request should yield due to time or memory pressure.
  */
 function should_continue(
     float $start_time,
@@ -3336,12 +3261,10 @@ function should_continue(
     int $max_mem,
     float $threshold
 ): bool {
-    // Check execution time
     if (microtime(true) - $start_time >= $max_time) {
         return false;
     }
 
-    // Check memory usage
     $memory_used = memory_get_usage(true);
     if ($memory_used >= $max_mem * $threshold) {
         return false;
@@ -3351,7 +3274,7 @@ function should_continue(
 }
 
 /**
- * Find the position after a given entry name in a sorted list.
+ * Returns the index of the first entry lexicographically after $after (binary search).
  */
 function position_after_entry(array $entries, string $after): int
 {
@@ -3373,7 +3296,7 @@ function position_after_entry(array $entries, string $after): int
 // HTTP Runtime
 // ============================================================================
 
-// Only execute if called directly (not included as a library)
+// Only execute when called directly, not when included as a library.
 if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
     error_reporting(E_ALL);
     ini_set("display_errors", 0);
@@ -3381,17 +3304,12 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
     try {
         $config = parse_http_config();
 
-        // Decode cursor from base64 to JSON
-        // Cursor is ALWAYS base64-encoded in transit (GET param or header)
-        // Cursor is ALWAYS JSON when decoded
-
-        // First, check if cursor was already set from GET/POST params
+        // Cursors arrive base64-encoded (GET param or X-Export-Cursor header)
+        // and are decoded to JSON strings before passing to producers.
         if (!isset($config["cursor"])) {
-            // Try X-Export-Cursor header
             $config["cursor"] = $_SERVER["HTTP_X_EXPORT_CURSOR"] ?? null;
         }
 
-        // If cursor exists (from any source), decode it
         if (
             isset($config["cursor"]) &&
             $config["cursor"] !== "" &&
@@ -3399,7 +3317,6 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
         ) {
             $cursor_b64 = $config["cursor"];
 
-            // Cursor MUST be base64-encoded
             $cursor_json = base64_decode($cursor_b64, true);
             if ($cursor_json === false) {
                 throw new InvalidArgumentException(
@@ -3408,7 +3325,6 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
                 );
             }
 
-            // Decoded cursor MUST be valid JSON
             $cursor_data = json_decode($cursor_json, true);
             if (
                 $cursor_data === null &&
@@ -3424,11 +3340,9 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
                 );
             }
 
-            // Store the JSON string (not the decoded array)
             $config["cursor"] = $cursor_json;
         }
 
-        // Route to endpoint handlers based on explicit endpoint parameter
         $endpoint = $config["endpoint"] ?? null;
         if (!$endpoint) {
             throw new InvalidArgumentException(
@@ -3454,7 +3368,6 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
             EXPORT_MAX_MEMORY_THRESHOLD,
         );
 
-        // Parse memory limit
         $memory_limit = ini_get("memory_limit");
         if ($memory_limit === "-1") {
             $max_memory = PHP_INT_MAX;
@@ -3464,7 +3377,6 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
 
         $script_start = microtime(true);
 
-        // Dispatch to appropriate endpoint
         switch ($endpoint) {
             case "file_index":
                 $result = endpoint_file_index(
@@ -3525,35 +3437,27 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
 }
 
 /**
- * Parse configuration from HTTP GET/POST parameters.
- *
- * Paths can be passed as:
- * - JSON array in 'paths' parameter (GET or POST)
- * - JSON body with Content-Type: application/json containing {"paths": [...]}
+ * Builds the config array from HTTP GET/POST parameters and optional JSON body.
  */
 function parse_http_config(): array
 {
     $config = [];
     $params = array_merge($_GET, $_POST);
 
-    // Check for JSON body (application/json) - useful for passing large paths arrays
     $content_type = $_SERVER["CONTENT_TYPE"] ?? "";
     if (strpos($content_type, "application/json") !== false) {
         $json_body = file_get_contents("php://input");
         if ($json_body !== false && $json_body !== "") {
             $json_data = json_decode($json_body, true);
             if (is_array($json_data)) {
-                // Merge JSON body params, with GET params taking precedence
                 $params = array_merge($json_data, $params);
             }
         }
     }
 
     foreach ($params as $key => $value) {
-        // Convert kebab-case to snake_case
         $key = str_replace("-", "_", $key);
 
-        // Type casting for known numeric/boolean fields
         if (
             in_array($key, [
                 "max_execution_time",
@@ -3571,7 +3475,6 @@ function parse_http_config(): array
         } elseif (in_array($key, ["create_table_query", "db_unbuffered", "follow_symlinks"])) {
             $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
         } elseif ($key === "paths" && is_string($value)) {
-            // Paths passed as JSON-encoded string in parameter
             $decoded = json_decode($value, true);
             if (is_array($decoded)) {
                 $value = $decoded;

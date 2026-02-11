@@ -6,20 +6,32 @@ use PDO;
 use PDOStatement;
 
 /**
- * Produces MySQL dump SQL fragments one at a time, maintaining reentrant cursor semantics.
+ * Generates a MySQL dump as a sequence of SQL fragments, one per call to next_sql_fragment().
  *
- * Streams SQL output without buffering:
- * - Emits SQL header (SET statements)
- * - For each table: CREATE TABLE, INSERT statements (one row at a time)
- * - Emits SQL footer (COMMIT)
- * - Maintains cursor for resumable exports
- * - Self-contained with no external dependencies except PDO
+ * This class exists because shared hosting environments kill long-running PHP processes.
+ * A traditional mysqldump would time out on large databases. Instead, this producer
+ * yields one SQL fragment at a time — a CREATE TABLE, a batched INSERT, or an UPDATE —
+ * and exposes a JSON cursor that captures the full internal state. The caller can
+ * serialize that cursor, end the HTTP request, and resume from exactly where it left
+ * off in a subsequent request.
+ *
+ * The producer is a finite state machine that walks through tables sequentially:
+ *
+ *   INIT → EMIT_HEADER → NEXT_TABLE → CREATE_TABLE → TABLE_HEADER →
+ *   START_INSERT ⇄ EMIT_ROW → (EMIT_OVERSIZED_UPDATE) → … → EMIT_FOOTER → FINISHED
+ *
+ * All values are base64-encoded in the SQL output (via FROM_BASE64('...')). This avoids
+ * charset-related corruption: MySQL interprets string literals according to the
+ * connection charset, but base64 is pure ASCII and the decoded bytes are assigned
+ * directly to the column's declared charset. JSON columns are a special case — MySQL
+ * rejects binary charset input for JSON, so those get an extra CONVERT(... USING utf8mb4).
+ *
+ * Rows that would exceed MySQL's max_allowed_packet are handled by inserting the row
+ * with large columns set to empty strings, then appending the real data via a series
+ * of UPDATE ... SET col = CONCAT(col, chunk) statements.
  */
 class MySQLDumpProducer
 {
-    /**
-     * State constants for the finite state machine
-     */
     const STATE_INIT = "init";
     const STATE_EMIT_HEADER = "emit_header";
     const STATE_NEXT_TABLE = "next_table";
@@ -31,179 +43,112 @@ class MySQLDumpProducer
     const STATE_EMIT_FOOTER = "emit_footer";
     const STATE_FINISHED = "finished";
 
-    /**
-     * The database connection.
-     *
-     * @var PDO
-     */
+    /** @var PDO */
     private $db;
 
-    /**
-     * The current SQL fragment ready to be retrieved.
-     *
-     * @var string|null
-     */
+    /** @var string|null */
     private $current_sql_fragment = null;
 
-    /**
-     * The primary key columns for the current table.
-     *
-     * @var array|null
-     */
+    /** @var array|null */
     private $current_pk_columns = null;
 
     /**
-     * The values of the last processed primary key.
+     * Cursor bookmark: the PK values of the last emitted row. The next SELECT
+     * uses a WHERE clause like `(pk1, pk2) > (last1, last2)` to resume without
+     * re-reading earlier rows. Null before the first row of a table.
      *
      * @var array|null
      */
     private $last_pk_values = null;
 
     /**
-     * The offset for tables without primary keys.
+     * Fallback cursor for tables without a primary key. Unlike PK-based cursors,
+     * OFFSET pagination re-scans earlier rows on every query, so it's slower
+     * and vulnerable to drift if rows are inserted or deleted mid-export.
      *
      * @var int
      */
     private $current_offset = 0;
 
-    /**
-     * The current table being processed.
-     *
-     * @var string|null
-     */
+    /** @var string|null */
     private $current_table = null;
 
-    /**
-     * The current query result set.
-     *
-     * @var PDOStatement|null
-     */
+    /** @var PDOStatement|null */
     private $current_result_set = null;
 
     /**
-     * Counter for rows fetched from the current query.
-     * Used to detect when a new query returns 0 rows (table exhausted).
+     * Distinguishes "query returned zero rows because the table is exhausted"
+     * from "query returned zero rows because we just opened a fresh cursor."
+     * Without this, the producer would stop after every batch_size rows.
      *
      * @var int
      */
     private $rows_fetched_from_current_query = 0;
 
-    /**
-     * The list of tables to process.
-     *
-     * @var array
-     */
+    /** @var array */
     private $tables_to_process;
 
-    /**
-     * The current state of the producer.
-     *
-     * @var string
-     */
+    /** @var string */
     private $state = self::STATE_INIT;
 
     /**
-     * Cached column type information, indexed by table name.
-     * Structure: ['table_name' => ['column_name' => ['data_type' => '...', 'column_type' => '...']]]
+     * INFORMATION_SCHEMA column metadata, cached per table to avoid repeated
+     * queries. Keyed by table name, then column name. Each entry contains
+     * 'data_type' (e.g. 'varchar') and 'column_type' (e.g. 'varchar(255)').
      *
      * @var array
      */
     private $column_type_cache = [];
 
-    /**
-     * The current row being emitted (one at a time for memory efficiency).
-     *
-     * @var array|null
-     */
+    /** @var array|null */
     private $current_row = null;
 
-    /**
-     * Counter for rows emitted in the current INSERT statement.
-     *
-     * @var int
-     */
+    /** @var int */
     private $rows_in_batch = 0;
 
-    /**
-     * Column types for the current table.
-     *
-     * @var array|null
-     */
+    /** @var array|null */
     private $current_column_types = null;
 
-    /**
-     * Column names for the current table (from first row).
-     *
-     * @var array|null
-     */
+    /** @var array|null */
     private $current_column_names = null;
 
-    /**
-     * The batch size (rows per INSERT statement).
-     *
-     * @var int
-     */
+    /** @var int */
     private $batch_size;
 
-    /**
-     * Whether to emit CREATE TABLE statements.
-     *
-     * @var bool
-     */
+    /** @var bool */
     private $emit_create_table;
 
     /**
-     * Maximum size (in bytes) for a single SQL statement.
-     * Rows that would produce larger statements are split using UPDATE + CONCAT().
-     * Should be set below MySQL's max_allowed_packet to ensure successful imports.
+     * Derived from MySQL's max_allowed_packet (at 80% to leave headroom for
+     * protocol framing). Rows whose formatted SQL exceeds this limit are split
+     * into an INSERT with empty placeholders followed by UPDATE ... CONCAT()
+     * statements that append the real data in chunks.
      *
      * @var int
      */
     private $max_statement_size;
 
-    /**
-     * Optional query time limit (milliseconds) for SELECT statements.
-     *
-     * @var int|null
-     */
+    /** @var int|null */
     private $query_time_limit_ms = null;
 
     /**
-     * Queue of oversized column chunks to emit as UPDATE statements.
-     * Structure: [['column' => name, 'chunks' => [...], 'chunk_index' => int], ...]
+     * When a row is too large for a single INSERT, its big columns are split
+     * into chunks and queued here. Each entry tracks the column name, its
+     * data type, the raw chunks, and which chunk index comes next.
      *
      * @var array
      */
     private $oversized_queue = [];
 
-    /**
-     * Primary key values for the current oversized row, used for UPDATE WHERE clause.
-     *
-     * @var array|null
-     */
+    /** @var array|null */
     private $oversized_pk_values = null;
 
-    /**
-     * The state to return to after finishing oversized updates.
-     *
-     * @var string|null
-     */
+    /** @var string|null */
     private $state_after_oversized = null;
 
-    /**
-     * Tracks the actual byte size of the current INSERT statement being built.
-     * Reset when starting a new INSERT, incremented as rows are added.
-     *
-     * @var int
-     */
+    /** @var int */
     private $current_statement_size = 0;
 
-    /**
-     * Constructor.
-     *
-     * @param PDO   $db      The database connection to use.
-     * @param array $options The options to configure the producer.
-     */
     public function __construct(PDO $db, $options = [])
     {
         $this->db = $db;
@@ -211,7 +156,6 @@ class MySQLDumpProducer
         $this->batch_size = (int)($options["batch_size"] ?? 250);
         $this->emit_create_table = $options["create_table_query"] ?? true;
 
-        // Maximum statement size - auto-detect from MySQL's max_allowed_packet if not specified
         if (isset($options["max_statement_size"])) {
             $this->max_statement_size = (int)$options["max_statement_size"];
         } else {
@@ -228,30 +172,21 @@ class MySQLDumpProducer
         }
     }
 
-    /**
-     * Gets the current SQL fragment.
-     *
-     * @return string|null The SQL fragment string.
-     */
     public function get_sql_fragment(): ?string
     {
         return $this->current_sql_fragment;
     }
 
-    /**
-     * Checks if the producer has finished.
-     *
-     * @return bool True if finished.
-     */
     public function is_finished(): bool
     {
         return self::STATE_FINISHED === $this->state;
     }
 
     /**
-     * Advances to the next SQL fragment.
+     * Advances the state machine and populates the next SQL fragment.
      *
-     * @return bool Whether another fragment was generated.
+     * Call get_sql_fragment() after this returns true to retrieve the SQL.
+     * Returns false only when the dump is complete (state = FINISHED).
      */
     public function next_sql_fragment()
     {
@@ -302,20 +237,16 @@ class MySQLDumpProducer
                     if ($this->emit_insert_header()) {
                         return true;
                     }
-                    // No rows in this table — state was changed to
-                    // STATE_NEXT_TABLE, continue the loop.
+                    // Empty table — emit_insert_header set state to NEXT_TABLE
                     break;
 
                 case self::STATE_EMIT_ROW:
                     return $this->emit_row();
 
                 case self::STATE_EMIT_OVERSIZED_UPDATE:
-                    // emit_oversized_update returns true if it emitted an UPDATE,
-                    // false if the queue is empty and we should continue to next state
                     if ($this->emit_oversized_update()) {
                         return true;
                     }
-                    // Queue is empty, state has been updated - continue the loop
                     break;
 
                 case self::STATE_FINISHED:
@@ -327,15 +258,11 @@ class MySQLDumpProducer
     }
 
     /**
-     * Accumulates the next row from the current table.
+     * Fetches the next row from the current result set into $this->current_row.
      *
-     * @return bool Whether a row was accumulated.
-     */
-    /**
-     * Fetches the next row from the database and stores it in current_row.
-     * Handles query pagination and retry logic.
-     *
-     * @return bool True if a row was fetched, false if no more rows.
+     * When the result set is exhausted, checks whether the table has more rows
+     * by opening a new query from the current cursor position. Returns false
+     * only when a fresh query comes back empty, meaning the table is done.
      */
     private function fetch_and_store_row()
     {
@@ -355,31 +282,25 @@ class MySQLDumpProducer
         if (!$record) {
             $this->current_result_set = null;
 
-            // Check if we should try fetching from next batch
             if ($this->rows_fetched_from_current_query === 0) {
-                // New query returned no rows - table exhausted
                 return false;
             }
 
-            // Query had rows but is now exhausted - try next batch if cursor exists
+            // This batch is exhausted but returned rows earlier, so the table
+            // may have more. Open a new query starting after the last PK.
             if ($this->last_pk_values !== null || $this->current_offset > 0) {
-                // Recursively fetch from next batch
                 return $this->fetch_and_store_row();
             }
 
-            // No cursor and no rows
             return false;
         }
 
-        // Increment counter - we successfully fetched a row
         $this->rows_fetched_from_current_query++;
 
-        // Store column names from first row
         if ($this->current_column_names === null) {
             $this->current_column_names = array_keys($record);
         }
 
-        // Update cursor position
         if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {
             $this->last_pk_values = [];
             foreach ($this->current_pk_columns as $col) {
@@ -389,32 +310,26 @@ class MySQLDumpProducer
             $this->current_offset++;
         }
 
-        // Store the row
         $this->current_row = $record;
         return true;
     }
     /**
-     * Emits the INSERT statement header (INSERT INTO ... VALUES) with the first row.
-     * Always includes the first row to prevent dangling INSERT statements when
-     * data disappears after cursor save.
+     * Emits "INSERT INTO ... VALUES (first_row)" as a single fragment.
      *
-     * If the row is oversized, large columns are replaced with empty strings
-     * and UPDATE statements are queued to populate them incrementally.
-     *
-     * @return bool True if header was emitted, false if no rows available.
+     * The first row is always bundled with the INSERT header to prevent
+     * emitting a dangling "INSERT INTO ... VALUES" with no rows — which
+     * would happen if the caller saves the cursor right after the header
+     * and the data changes before the next request.
      */
     private function emit_insert_header()
     {
-        // Fetch first row if we don't have one
         if ($this->current_row === null) {
             if (!$this->fetch_and_store_row()) {
-                // No rows available, skip to next table
                 $this->state = self::STATE_NEXT_TABLE;
                 return false;
             }
         }
 
-        // Build column list with backticks
         $column_list = implode(
             ",",
             array_map(function ($col) {
@@ -422,34 +337,25 @@ class MySQLDumpProducer
             }, $this->current_column_names),
         );
 
-        // Build the INSERT header
         $header = "INSERT INTO " . $this->quote_identifier($this->current_table) . " ({$column_list}) VALUES\n";
-
-        // Reset statement size tracking for this new INSERT
         $this->current_statement_size = strlen($header);
 
-        // Format the first row (handles oversized columns based on current_statement_size)
         $first_row_sql = $this->format_row_for_insert($this->current_row);
-
-        // Track the row size (including comma/semicolon terminator)
         $this->current_statement_size += strlen($first_row_sql) + 1;
 
-        // Clear current row (we've processed it)
         $this->current_row = null;
-        $this->rows_in_batch = 1; // We're emitting the first row
+        $this->rows_in_batch = 1;
 
-        // Fetch next row to determine terminator
         $has_next_row = $this->fetch_and_store_row();
 
-        // If we have oversized updates, we MUST end this INSERT statement with a semicolon
-        // because we'll emit UPDATE statements next. We can't leave a dangling comma.
+        // Oversized updates require closing this INSERT with a semicolon so the
+        // subsequent UPDATE statements are syntactically separate.
         $has_oversized = $this->has_pending_oversized_updates();
 
         if (!$has_next_row) {
-            // First row is the only row - end INSERT statement
             $sql = $header . $first_row_sql . ";";
             $this->current_sql_fragment = $sql;
-            $this->current_statement_size = 0; // Statement complete
+            $this->current_statement_size = 0;
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_NEXT_TABLE;
                 $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -457,10 +363,9 @@ class MySQLDumpProducer
                 $this->state = self::STATE_NEXT_TABLE;
             }
         } elseif ($this->rows_in_batch >= $this->batch_size || $has_oversized) {
-            // Batch is full after first row OR we have oversized updates - end this INSERT
             $sql = $header . $first_row_sql . ";";
             $this->current_sql_fragment = $sql;
-            $this->current_statement_size = 0; // Statement complete, will reset on next INSERT
+            $this->current_statement_size = 0;
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_START_INSERT;
                 $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -468,7 +373,6 @@ class MySQLDumpProducer
                 $this->state = self::STATE_START_INSERT;
             }
         } else {
-            // Continue this INSERT with more rows (no oversized updates pending)
             $sql = $header . $first_row_sql . ",";
             $this->current_sql_fragment = $sql;
             $this->state = self::STATE_EMIT_ROW;
@@ -478,43 +382,27 @@ class MySQLDumpProducer
     }
 
     /**
-     * Emits a single row with appropriate terminator (, or ;).
-     *
-     * If the row is oversized, large columns are replaced with empty strings
-     * and UPDATE statements are queued to populate them incrementally.
-     *
-     * @return bool True if row was emitted.
+     * Emits one row as a SQL fragment, terminated with "," (more rows follow)
+     * or ";" (INSERT statement complete).
      */
     private function emit_row()
     {
-        // We should always have a current row when entering this state
         if ($this->current_row === null) {
-            // This shouldn't happen, but handle gracefully
             $this->state = self::STATE_NEXT_TABLE;
             return false;
         }
 
-        // Format the current row (handles oversized columns based on current_statement_size)
         $row_sql = $this->format_row_for_insert($this->current_row);
-
-        // Track the row size (including newline and comma/semicolon)
         $this->current_statement_size += strlen($row_sql) + 2;
-
-        // Clear current row (we've processed it)
         $this->current_row = null;
         $this->rows_in_batch++;
 
-        // Fetch next row to determine terminator
         $has_next_row = $this->fetch_and_store_row();
-
-        // If we have oversized updates, we MUST end this INSERT statement with a semicolon
-        // because we'll emit UPDATE statements next. We can't leave a dangling comma.
         $has_oversized = $this->has_pending_oversized_updates();
 
         if (!$has_next_row) {
-            // No more rows - end INSERT and move to next table
             $this->current_sql_fragment = $row_sql . ";";
-            $this->current_statement_size = 0; // Statement complete
+            $this->current_statement_size = 0;
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_NEXT_TABLE;
                 $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -522,9 +410,8 @@ class MySQLDumpProducer
                 $this->state = self::STATE_NEXT_TABLE;
             }
         } elseif ($this->rows_in_batch >= $this->batch_size || $has_oversized) {
-            // Batch is full OR we have oversized updates - end this INSERT
             $this->current_sql_fragment = $row_sql . ";";
-            $this->current_statement_size = 0; // Statement complete, will reset on next INSERT
+            $this->current_statement_size = 0;
             if ($has_oversized) {
                 $this->state_after_oversized = self::STATE_START_INSERT;
                 $this->state = self::STATE_EMIT_OVERSIZED_UPDATE;
@@ -532,16 +419,15 @@ class MySQLDumpProducer
                 $this->state = self::STATE_START_INSERT;
             }
         } else {
-            // Continue this INSERT (no oversized updates pending)
             $this->current_sql_fragment = $row_sql . ",";
-            // Stay in STATE_EMIT_ROW
         }
 
         return true;
     }
 
     /**
-     * Emits the CREATE TABLE statement for the current table.
+     * Emits DROP TABLE IF EXISTS followed by the CREATE TABLE from SHOW CREATE TABLE.
+     * Also handles views (SHOW CREATE TABLE returns 'Create View' for those).
      */
     private function emit_create_table_statement()
     {
@@ -579,7 +465,9 @@ class MySQLDumpProducer
     }
 
     /**
-     * Emits the SQL file header with SET statements.
+     * Emits SET statements that disable constraint checks and set a strict SQL mode.
+     * These are restored in emit_sql_footer(). Without disabling FK checks, tables
+     * that reference each other would need to be imported in dependency order.
      */
     private function emit_sql_header()
     {
@@ -591,9 +479,7 @@ class MySQLDumpProducer
         $this->current_sql_fragment = $header;
     }
 
-    /**
-     * Emits the SQL file footer with COMMIT and restore statements.
-     */
+    /** Emits COMMIT and restores the session variables saved in the header. */
     private function emit_sql_footer()
     {
         $footer =
@@ -604,9 +490,7 @@ class MySQLDumpProducer
         $this->current_sql_fragment = $footer;
     }
 
-    /**
-     * Emits a comment header for the table data section.
-     */
+    /** Emits a SQL comment marking the start of data for the current table. */
     private function emit_table_header_comment()
     {
         $comment = "\n--\n-- Dumping data for table " . $this->quote_identifier($this->current_table) . "\n--\n";
@@ -614,19 +498,22 @@ class MySQLDumpProducer
     }
 
     /**
-     * Builds a SELECT query for the current table.
+     * Builds a SELECT query for the current table's next batch of rows.
      *
-     * @return string The SELECT query.
+     * Non-numeric, non-binary columns are wrapped in CAST(... AS BINARY) so
+     * MySQL returns raw bytes rather than re-encoding through the connection
+     * charset. This is critical: without it, a latin1 column read over a utf8mb4
+     * connection would silently transcode the bytes, and our base64 encoding
+     * would capture the transcoded version instead of the original.
      */
     private function build_select_query()
     {
         $table = $this->current_table;
         $select = "SELECT";
-        
+
         if ($this->query_time_limit_ms !== null) {
-            // An optimizer hint to limit this statement's execution time:
-            // https://dev.mysql.com/doc/refman/8.4/en/optimizer-hints.html
-            // Isn't it super cool?
+            // MySQL optimizer hint — caps this query's wall-clock time so a
+            // single slow table can't consume the entire PHP execution budget.
             $select .= " /*+ MAX_EXECUTION_TIME(" .
                 $this->query_time_limit_ms .
                 ") */";
@@ -642,7 +529,6 @@ class MySQLDumpProducer
                 ) {
                     $select_parts[] = $this->quote_identifier($col_name);
                 } else {
-                    // Cast to binary to get raw bytes without charset conversion
                     $quoted = $this->quote_identifier($col_name);
                     $select_parts[] = "CAST({$quoted} AS BINARY) AS {$quoted}";
                 }
@@ -666,10 +552,8 @@ class MySQLDumpProducer
                 return $this->quote_identifier($col) . " ASC";
             }, $this->current_pk_columns);
             $query .= " ORDER BY " . implode(", ", $order_cols);
-            // Use batch_size as LIMIT to avoid over-fetching
             $query .= " LIMIT {$this->batch_size}";
         } else {
-            // For tables without PK, use offset pagination with larger LIMIT
             if ($this->current_offset > 0) {
                 $query .= " LIMIT 1000 OFFSET {$this->current_offset}";
             } else {
@@ -681,9 +565,16 @@ class MySQLDumpProducer
     }
 
     /**
-     * Builds a WHERE clause for cursor-based pagination.
+     * Builds a WHERE clause that selects rows strictly after the last emitted PK.
      *
-     * @return string The WHERE clause conditions.
+     * For composite primary keys (a, b, c), this produces the lexicographic
+     * "greater than" condition:
+     *
+     *   (a > last_a) OR (a = last_a AND b > last_b) OR (a = last_a AND b = last_b AND c > last_c)
+     *
+     * This is equivalent to `(a, b, c) > (last_a, last_b, last_c)` but written
+     * in expanded form for compatibility with MySQL versions that don't optimize
+     * row-value comparisons well.
      */
     private function build_pk_where_clause()
     {
@@ -698,8 +589,6 @@ class MySQLDumpProducer
             $value = $this->last_pk_values[$col];
             return $this->build_comparison($col, $value, ">");
         }
-
-        // Composite primary key - lexicographic ordering
         $conditions = [];
         $prefix_conditions = [];
 
@@ -721,14 +610,7 @@ class MySQLDumpProducer
         return "(" . implode(" OR ", $conditions) . ")";
     }
 
-    /**
-     * Builds a comparison clause for a column and value.
-     *
-     * @param string $column   The column name.
-     * @param mixed  $value    The value to compare against.
-     * @param string $operator The comparison operator.
-     * @return string The comparison clause.
-     */
+    /** Builds a single "column op value" SQL expression, handling NULL and quoting. */
     private function build_comparison($column, $value, $operator)
     {
         $quoted_col = $this->quote_identifier($column);
@@ -746,12 +628,7 @@ class MySQLDumpProducer
         }
     }
 
-    /**
-     * Detects and returns the primary key columns for a table.
-     *
-     * @param string $table The table name.
-     * @return array Array of primary key column names.
-     */
+    /** Returns primary key column names in ordinal order, or empty array if none. */
     private function get_primary_key_columns($table)
     {
         $pk_columns = [];
@@ -779,14 +656,9 @@ class MySQLDumpProducer
         return $pk_columns;
     }
 
-    /**
-     * Moves to the next table in the list.
-     *
-     * @return bool Whether there is another table to process.
-     */
+    /** Advances to the next table and resets all per-table state. */
     private function move_to_next_table()
     {
-        // Ensure tables_to_process is initialized
         if ($this->tables_to_process === null) {
             return false;
         }
@@ -798,7 +670,6 @@ class MySQLDumpProducer
         }
 
         if ($this->current_table) {
-            // Reset state for new table
             $this->current_pk_columns = $this->get_primary_key_columns(
                 $this->current_table,
             );
@@ -811,21 +682,16 @@ class MySQLDumpProducer
             $this->current_row = null;
             $this->rows_in_batch = 0;
 
-            // Reset oversized row tracking
             $this->oversized_queue = [];
             $this->oversized_pk_values = null;
             $this->state_after_oversized = null;
-
-            // Reset statement size tracking
             $this->current_statement_size = 0;
         }
 
         return (bool) $this->current_table;
     }
 
-    /**
-     * Initializes the list of tables to process (base tables only, no views).
-     */
+    /** Discovers all BASE TABLEs in the current database (excludes views). */
     private function initialize_tables_to_process()
     {
         $this->tables_to_process = [];
@@ -847,14 +713,18 @@ class MySQLDumpProducer
     }
 
     /**
-     * Gets the reentrancy cursor for resuming.
+     * Returns a JSON string that captures the producer's complete internal state.
      *
-     * @return string JSON string (NOT base64-encoded). Caller is responsible for base64 encoding if needed for HTTP transmission.
+     * The caller can pass this string back as the "cursor" option to a new
+     * MySQLDumpProducer to resume exactly where this one left off. The JSON is
+     * NOT base64-encoded — that's the HTTP layer's concern (export.php).
+     *
+     * String and binary values in the in-flight row and oversized chunk queue
+     * are wrapped in {"__binary__": "<base64>"} markers because raw binary
+     * bytes can't survive JSON encoding.
      */
     public function get_reentrancy_cursor()
     {
-        // Binary data in current_row and oversized_queue chunks must be base64-encoded
-        // for JSON serialization, as raw binary can't be JSON-encoded.
         $encoded_current_row = $this->encode_row_for_cursor($this->current_row);
         $encoded_oversized_queue = $this->encode_oversized_queue_for_cursor($this->oversized_queue);
 
@@ -882,13 +752,7 @@ class MySQLDumpProducer
         return $json;
     }
 
-    /**
-     * Encodes a row's values for JSON cursor serialization.
-     * Binary data is base64-encoded with a marker prefix.
-     *
-     * @param array|null $row The row data.
-     * @return array|null The encoded row.
-     */
+    /** Wraps all string values in {"__binary__": base64} for JSON safety. */
     private function encode_row_for_cursor($row)
     {
         if ($row === null) {
@@ -898,7 +762,6 @@ class MySQLDumpProducer
         $encoded = [];
         foreach ($row as $col => $value) {
             if ($value !== null && is_string($value)) {
-                // Binary data - base64 encode with marker
                 $encoded[$col] = ['__binary__' => base64_encode($value)];
             } else {
                 $encoded[$col] = $value;
@@ -907,12 +770,7 @@ class MySQLDumpProducer
         return $encoded;
     }
 
-    /**
-     * Decodes a row's values from JSON cursor serialization.
-     *
-     * @param array|null $row The encoded row data.
-     * @return array|null The decoded row.
-     */
+    /** Reverses encode_row_for_cursor(). */
     private function decode_row_from_cursor($row)
     {
         if ($row === null) {
@@ -930,19 +788,13 @@ class MySQLDumpProducer
         return $decoded;
     }
 
-    /**
-     * Encodes the oversized queue for JSON cursor serialization.
-     *
-     * @param array $queue The oversized queue.
-     * @return array The encoded queue.
-     */
+    /** Base64-encodes all chunk payloads in the oversized queue for JSON safety. */
     private function encode_oversized_queue_for_cursor($queue)
     {
         $encoded = [];
         foreach ($queue as $item) {
             $encoded_chunks = [];
             foreach ($item['chunks'] as $chunk) {
-                // Always base64-encode chunks as they may contain binary data
                 $encoded_chunks[] = base64_encode($chunk);
             }
             $encoded[] = [
@@ -955,12 +807,7 @@ class MySQLDumpProducer
         return $encoded;
     }
 
-    /**
-     * Decodes the oversized queue from JSON cursor serialization.
-     *
-     * @param array $queue The encoded queue.
-     * @return array The decoded queue.
-     */
+    /** Reverses encode_oversized_queue_for_cursor(). */
     private function decode_oversized_queue_from_cursor($queue)
     {
         if (!is_array($queue)) {
@@ -988,10 +835,12 @@ class MySQLDumpProducer
     }
 
     /**
-     * Initializes the producer from a cursor.
+     * Restores internal state from a previously-serialized cursor.
      *
-     * @param string $cursor JSON string (NOT base64-encoded). Must be valid JSON.
-     * @throws \InvalidArgumentException if cursor is not valid JSON
+     * Re-queries INFORMATION_SCHEMA for column types (the cursor doesn't store
+     * them because schema can change between requests). If the current table
+     * was dropped between requests, resets to STATE_INIT so the producer
+     * gracefully skips forward rather than crashing.
      */
     private function initialize_from_cursor($cursor)
     {
@@ -1021,7 +870,6 @@ class MySQLDumpProducer
             }
             $this->current_offset = (int) $this->current_offset;
             $this->state = $cursor_data["state"] ?? self::STATE_INIT;
-            // Decode binary data in current_row
             $encoded_row = $cursor_data["current_row"] ?? null;
             $this->current_row = $this->decode_row_from_cursor($encoded_row);
             $this->rows_in_batch = $cursor_data["rows_in_batch"] ?? 0;
@@ -1034,20 +882,16 @@ class MySQLDumpProducer
             $this->current_column_names =
                 $cursor_data["current_column_names"] ?? null;
 
-            // Restore oversized row tracking (decode base64-encoded binary data)
             $encoded_queue = $cursor_data["oversized_queue"] ?? [];
             $this->oversized_queue = $this->decode_oversized_queue_from_cursor($encoded_queue);
             $this->oversized_pk_values = $cursor_data["oversized_pk_values"] ?? null;
             $this->state_after_oversized = $cursor_data["state_after_oversized"] ?? null;
 
-            // Restore statement size tracking
             $this->current_statement_size = $cursor_data["current_statement_size"] ?? 0;
 
-            // Initialize tables_to_process if not already set
             if ($this->tables_to_process === null) {
                 $this->initialize_tables_to_process();
 
-                // Position the array pointer to the current table
                 if ($this->current_table) {
                     $found = false;
                     reset($this->tables_to_process);
@@ -1056,7 +900,7 @@ class MySQLDumpProducer
                     ) {
                         if ($table === $this->current_table) {
                             $found = true;
-                            break; // Found it, pointer is now at current_table
+                            break;
                         }
                         next($this->tables_to_process);
                     }
@@ -1068,7 +912,6 @@ class MySQLDumpProducer
                 }
             }
 
-            // Restore column types if we're in the middle of a table
             if ($this->current_table) {
                 $this->current_column_types = $this->get_column_types(
                     $this->current_table,
@@ -1083,13 +926,7 @@ class MySQLDumpProducer
         }
     }
 
-    /**
-     * Gets the column type information for a table.
-     * Queries INFORMATION_SCHEMA once per table and caches results.
-     *
-     * @param string $table_name The table name.
-     * @return array Associative array of column name => type information.
-     */
+    /** Returns cached INFORMATION_SCHEMA column metadata for a table. */
     private function get_column_types($table_name)
     {
         if (isset($this->column_type_cache[$table_name])) {
@@ -1127,25 +964,23 @@ class MySQLDumpProducer
     }
 
     /**
-     * Formats a value for inclusion in a MySQL INSERT statement.
+     * Formats a single column value as a SQL literal.
      *
-     * @param mixed  $value      The value to format.
-     * @param string $data_type  The MySQL data type (from INFORMATION_SCHEMA).
-     * @return string The formatted value ready for insertion into SQL.
+     * Numeric types are emitted as bare literals. Everything else — strings,
+     * binary, dates, enums — goes through FROM_BASE64(). JSON is special:
+     * MySQL rejects binary-charset input for JSON columns, so we wrap with
+     * CONVERT(... USING utf8mb4) to decode the base64 into a utf8mb4 string.
      */
     private function format_value($value, $data_type)
     {
-        // Handle NULL specially - no quotes, no escaping
         if ($value === null) {
             return "NULL";
         }
 
-        // Numeric types - output raw without quotes
         if ($this->is_numeric_type($data_type)) {
             return (string) $value;
         }
 
-        // JSON columns cannot accept binary charset values, so we wrap with CONVERT
         if (strtoupper($data_type) === "JSON") {
             if ($value === "") {
                 return "''";
@@ -1154,16 +989,13 @@ class MySQLDumpProducer
             return "CONVERT(FROM_BASE64('" . $base64 . "') USING utf8mb4)";
         }
 
-        // Everything else (binary types, strings) uses base64
         return $this->format_base64($value);
     }
 
     /**
-     * Estimate the formatted SQL size of a value without building the full string.
-     *
-     * @param mixed  $value     The raw value.
-     * @param string $data_type The MySQL data type (uppercase or not).
-     * @return int Estimated size in bytes of the formatted SQL literal.
+     * Estimates the byte length of format_value()'s output without actually
+     * encoding. Used by format_row_for_insert() to decide whether a row
+     * would exceed max_statement_size before doing the expensive encoding.
      */
     private function estimate_formatted_size($value, $data_type)
     {
@@ -1185,9 +1017,7 @@ class MySQLDumpProducer
         return 15 + $b64_len;
     }
 
-    /**
-     * Estimate length of a base64-encoded string without encoding.
-     */
+    /** Base64 output is always ceil(n/3)*4 bytes. */
     private function estimate_base64_length(int $raw_len): int
     {
         if ($raw_len === 0) {
@@ -1196,12 +1026,7 @@ class MySQLDumpProducer
         return 4 * intdiv($raw_len + 2, 3);
     }
 
-    /**
-     * Determines if a MySQL data type is numeric.
-     *
-     * @param string $data_type The MySQL data type (uppercase).
-     * @return bool True if numeric, false otherwise.
-     */
+    /** Numeric types are emitted as bare literals (no quoting, no base64). */
     private function is_numeric_type($data_type)
     {
         $data_type = strtoupper($data_type);
@@ -1231,10 +1056,8 @@ class MySQLDumpProducer
     }
 
     /**
-     * Determines if a MySQL data type is binary.
-     *
-     * @param string $data_type The MySQL data type (uppercase).
-     * @return bool True if binary, false otherwise.
+     * Binary columns are not CAST to BINARY in the SELECT (they already are),
+     * but they follow the same base64 encoding path as strings.
      */
     private function is_binary_type($data_type)
     {
@@ -1257,32 +1080,13 @@ class MySQLDumpProducer
         return false;
     }
 
-    /**
-     * Quotes a MySQL identifier (table or column name) with backticks.
-     *
-     * Backticks inside the identifier are escaped by doubling them,
-     * which is the standard MySQL quoting mechanism for identifiers.
-     *
-     * @param string $identifier The raw identifier name.
-     * @return string The safely quoted identifier, e.g. "`my``table`".
-     */
+    /** Escapes backticks by doubling them: `tricky`` → `tricky\`\`table`. */
     private function quote_identifier($identifier)
     {
         return '`' . str_replace('`', '``', $identifier) . '`';
     }
 
-    /**
-     * Formats binary data as hex-encoded string with 0x prefix.
-     *
-     * @param string $value The binary value.
-     * @return string The hex-encoded value with 0x prefix.
-     */
-    /**
-     * Formats binary data as base64-encoded string with FROM_BASE64() wrapper.
-     *
-     * @param string $value The binary value.
-     * @return string The base64-encoded value wrapped in FROM_BASE64().
-     */
+    /** Returns FROM_BASE64('...') or '' for empty strings. */
     private function format_base64($value)
     {
         if ($value === "") {
@@ -1293,44 +1097,37 @@ class MySQLDumpProducer
         return "FROM_BASE64('" . $base64 . "')";
     }
 
-    /**
-     * Detects the maximum safe statement size based on MySQL's max_allowed_packet.
-     *
-     * Uses 80% of max_allowed_packet to leave headroom for protocol overhead.
-     * Falls back to 1MB if detection fails.
-     *
-     * @return int Maximum statement size in bytes.
-     */
+    /** Auto-detects max_allowed_packet and uses 80% of it. Falls back to 1MB. */
     private function detect_max_statement_size()
     {
         try {
             $result = $this->db->query("SELECT @@max_allowed_packet as max_allowed_packet");
             $row = $result->fetch(PDO::FETCH_ASSOC);
             if ($row && isset($row['max_allowed_packet'])) {
-                // Use 80% of max_allowed_packet to leave headroom for protocol overhead
                 return (int)($row['max_allowed_packet'] * 0.8);
             }
         } catch (\PDOException $e) {
-            // Fall through to default
         }
 
-        // Default to 1MB if detection fails
         return 1024 * 1024;
     }
 
     /**
-     * Formats a row for SQL INSERT, handling oversized columns.
+     * Formats a row as a VALUES tuple, splitting oversized columns if needed.
      *
-     * Uses the actual tracked current_statement_size to determine if adding this row
-     * would exceed max_statement_size. If so, large columns are replaced with empty
-     * strings and queued for subsequent UPDATE statements.
+     * The approach is estimate-first: compute the approximate encoded size of
+     * each column before doing the actual (expensive) base64 encoding. If the
+     * row fits within max_statement_size, encode everything. If it doesn't,
+     * replace the largest non-PK columns with '' and queue their real values
+     * as UPDATE ... CONCAT() chunks in $this->oversized_queue.
      *
-     * @param array $row The row data.
-     * @return string The formatted VALUES clause (e.g., "(1,'hello','')")
+     * Tables without a primary key can't use the UPDATE fallback (there's no
+     * stable row identifier for the WHERE clause), so oversized rows in
+     * PK-less tables are emitted as-is — the import may fail, but that's
+     * better than silently dropping data.
      */
     private function format_row_for_insert($row)
     {
-        // First, estimate sizes without formatting (avoids large allocations)
         $estimated_sizes = [];
         $raw_values = [];
 
@@ -1341,14 +1138,9 @@ class MySQLDumpProducer
             $estimated_sizes[$col] = $this->estimate_formatted_size($value, $data_type);
         }
 
-        // Calculate this row's estimated size (values + commas + parens + newline)
         $row_size_est = array_sum($estimated_sizes) + count($estimated_sizes) + 3;
-
-        // Check if adding this row would exceed max_statement_size
-        // current_statement_size already includes the INSERT header (or accumulated rows)
         $projected_size = $this->current_statement_size + $row_size_est;
 
-        // If within limits, format all values and return
         if ($projected_size <= $this->max_statement_size) {
             $formatted_values = [];
             foreach ($this->current_column_names as $col) {
@@ -1358,11 +1150,7 @@ class MySQLDumpProducer
             return "(" . implode(",", array_values($formatted_values)) . ")";
         }
 
-        // Row exceeds limit - need to split large columns
-        // This requires a primary key to identify the row for UPDATE statements
         if (!$this->current_pk_columns || count($this->current_pk_columns) === 0) {
-            // Cannot split rows in tables without primary key - emit as-is and hope for the best
-            // The import might fail, but that's better than silently dropping data
             $formatted_values = [];
             foreach ($this->current_column_names as $col) {
                 $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
@@ -1371,45 +1159,38 @@ class MySQLDumpProducer
             return "(" . implode(",", array_values($formatted_values)) . ")";
         }
 
-        // Store PK values for UPDATE WHERE clause
         $this->oversized_pk_values = [];
         foreach ($this->current_pk_columns as $pk_col) {
             $this->oversized_pk_values[$pk_col] = $row[$pk_col] ?? null;
         }
 
-        // Find columns to split - sort by size descending
+        // Split the largest columns first to bring the row under the limit
         $sorted_sizes = $estimated_sizes;
         arsort($sorted_sizes);
 
         $this->oversized_queue = [];
         $chunked_columns = [];
 
-        // Calculate how much we need to trim to fit within max_statement_size
         $excess = $projected_size - $this->max_statement_size;
 
         foreach ($sorted_sizes as $col => $size) {
-            // Don't split primary key columns - we need them for the WHERE clause
             if (in_array($col, $this->current_pk_columns)) {
                 continue;
             }
 
-            // Skip small columns (not worth splitting)
             if ($size < 1000) {
                 continue;
             }
 
-            // Check if we've trimmed enough
             if ($excess <= 0) {
                 break;
             }
 
-            // Get raw value for chunking
             $raw_value = $raw_values[$col] ?? null;
             if ($raw_value === null || $raw_value === '') {
                 continue;
             }
 
-            // Split this column into chunks
             $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
             $chunks = $this->create_value_chunks($raw_value, $col);
 
@@ -1417,7 +1198,6 @@ class MySQLDumpProducer
                 $chunked_columns[$col] = true;
                 $excess -= ($size - 2); // Saved bytes (size minus the '' replacement)
 
-                // Queue chunks for UPDATE statements
                 $this->oversized_queue[] = [
                     'column' => $col,
                     'data_type' => $data_type,
@@ -1428,7 +1208,6 @@ class MySQLDumpProducer
         }
 
         if (empty($chunked_columns)) {
-            // Nothing to split - fall back to emitting full row
             $this->oversized_pk_values = null;
         }
 
@@ -1446,11 +1225,8 @@ class MySQLDumpProducer
     }
 
     /**
-     * Splits a large value into chunks that fit within max_statement_size.
-     *
-     * @param mixed $value The raw value.
-     * @param string $column The column name.
-     * @return array Array of raw value chunks.
+     * Splits a raw value into chunks small enough that each UPDATE ... CONCAT()
+     * statement fits within max_statement_size after base64 encoding.
      */
     private function create_value_chunks($value, $column)
     {
@@ -1458,21 +1234,16 @@ class MySQLDumpProducer
             return [$value];
         }
 
-        // Calculate overhead for UPDATE statement:
         $quoted_table = $this->quote_identifier($this->current_table);
         $quoted_column = $this->quote_identifier($column);
-        // UPDATE `table` SET `col` = CONCAT(`col`, <chunk>) WHERE `pk` = value;
         $update_overhead = strlen("UPDATE {$quoted_table} SET {$quoted_column} = CONCAT({$quoted_column}, ) WHERE ;");
         $where_clause_size = $this->estimate_pk_where_size();
         $total_overhead = $update_overhead + $where_clause_size + 100; // Extra margin
 
         $max_chunk_raw_size = ($this->max_statement_size - $total_overhead);
 
-        // Account for encoding overhead
-        // Base64: ~1.33x size + overhead for FROM_BASE64('')
+        // Base64 inflates by ~1.33x, plus FROM_BASE64('') wrapper overhead
         $max_chunk_raw_size = (int)(($max_chunk_raw_size - 20) / 1.34);
-
-        // Ensure minimum chunk size
         $max_chunk_raw_size = max($max_chunk_raw_size, 1000);
 
         $value_len = strlen($value);
@@ -1480,7 +1251,6 @@ class MySQLDumpProducer
             return [$value];
         }
 
-        // Split into chunks
         $chunks = [];
         for ($offset = 0; $offset < $value_len; $offset += $max_chunk_raw_size) {
             $chunks[] = substr($value, $offset, $max_chunk_raw_size);
@@ -1489,11 +1259,7 @@ class MySQLDumpProducer
         return $chunks;
     }
 
-    /**
-     * Estimates the size of the WHERE clause for PK columns.
-     *
-     * @return int Estimated size in bytes.
-     */
+    /** Rough byte estimate for the WHERE pk1 = v1 AND pk2 = v2 clause. */
     private function estimate_pk_where_size()
     {
         if (!$this->oversized_pk_values) {
@@ -1517,32 +1283,27 @@ class MySQLDumpProducer
     }
 
     /**
-     * Emits an UPDATE statement for the next chunk of an oversized column.
+     * Emits one UPDATE ... SET col = CONCAT(col, chunk) statement.
      *
-     * @return bool True if an UPDATE was emitted, false if queue is empty.
+     * Returns false when the queue is drained, which signals the state machine
+     * to transition back to the state saved in $state_after_oversized.
      */
     private function emit_oversized_update()
     {
         if (empty($this->oversized_queue)) {
-            // No more chunks - return to previous state
             $this->state = $this->state_after_oversized ?? self::STATE_EMIT_ROW;
             $this->state_after_oversized = null;
             $this->oversized_pk_values = null;
-
-            // Don't return a fragment here, let the state machine continue
             return false;
         }
 
-        // Get current column being processed
         $current = &$this->oversized_queue[0];
         $column = $current['column'];
         $data_type = $current['data_type'];
         $chunk = $current['chunks'][$current['chunk_index']];
 
-        // Format the chunk value
         $formatted_chunk = $this->format_value($chunk, $data_type);
 
-        // Build WHERE clause
         $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
             $quoted_pk = $this->quote_identifier($pk_col);
@@ -1557,17 +1318,13 @@ class MySQLDumpProducer
         }
         $where_clause = implode(" AND ", $where_parts);
 
-        // Build UPDATE statement
         $quoted_table = $this->quote_identifier($this->current_table);
         $quoted_column = $this->quote_identifier($column);
         $sql = "UPDATE {$quoted_table} SET {$quoted_column} = CONCAT({$quoted_column}, {$formatted_chunk}) WHERE {$where_clause};";
 
         $this->current_sql_fragment = $sql;
 
-        // Move to next chunk
         $current['chunk_index']++;
-
-        // If this column is done, remove from queue
         if ($current['chunk_index'] >= count($current['chunks'])) {
             array_shift($this->oversized_queue);
         }
@@ -1575,11 +1332,7 @@ class MySQLDumpProducer
         return true;
     }
 
-    /**
-     * Checks if there are pending oversized updates.
-     *
-     * @return bool True if there are oversized updates pending.
-     */
+    /** @return bool */
     private function has_pending_oversized_updates()
     {
         return !empty($this->oversized_queue);
