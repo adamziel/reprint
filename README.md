@@ -8,6 +8,46 @@
 4. Go brew some coffee. If the electricity goes down that's okay, just re-run the script and it will resume where it left off.
 5. Done. Your local directory now has a db.sql file and a directory tree snapshot.
 
+You can rerun the same import.php command later on with extra parameters to refresh the local data:
+
+```
+# Regenerate the database dump from scratch
+import.php <export.php URL>?SECRET_KEY=<key> <local directory to export to> --refresh-db 
+
+# Get the delta in files between then and now (via deletes and upserts)
+import.php <export.php URL>?SECRET_KEY=<key> <local directory to export to> --refresh-files
+```
+
+### CLI Commands
+
+The importer client (`import.php`) accepts the following commands:
+
+```
+php import.php <command> <URL> <local-path> [options]
+```
+
+* `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
+* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
+* `files-sync-initial` — Full file sync. Downloads the complete directory tree from the remote server.
+* `files-sync-delta` — Incremental file sync. Only downloads files that changed since the last sync.
+* `files-index` — Downloads the full remote file index without fetching file contents.
+* `sql-sync` — Downloads the database as a SQL dump to `db.sql`.
+* `index-database` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
+
+All commands except `preflight-assert` support `--restart` to clear state and start over. Interrupted commands automatically resume from the last saved cursor.
+
+### Preflight
+
+Before running any sync command, you must run a preflight check:
+
+```
+php import.php preflight <URL> <local-path> [options]
+```
+
+The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
+
+All other commands check that a preflight has been completed and refuse to start without one. Use `preflight-assert` instead if you only need a pass/fail exit code.
+
 ## Technical requirements
 
 On the **migration source** side:
@@ -168,9 +208,9 @@ What we **don't** do:
 
 ### Todos
 
-* Some kind of `preflight assert` command that will exit with either 0 or 1 depending on whether we think we can do the migration.
-* Rename `sql-preflight` to `index-database`
-* Blue/green strategy of writing to JSON files, especially for status updates
+* Possibly run more checks in `preflight-assert`. What would they be?
+* ✅ `preflight-assert` command that exits 0/1 depending on migration feasibility
+* ✅ Renamed `sql-preflight` to `index-database`
 * ✅ A runner script to easily run those downloaded sites locally while providing them with the right `Host` header and
   rewriting all the URLs on the fly (with the HTML API?)
 * ✅ PHP 7.4+ compat (or PHP 7.2+ even) with CI tests

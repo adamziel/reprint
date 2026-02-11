@@ -122,11 +122,11 @@ describe('Import: Completion Headers', () => {
         });
     });
 
-    describe('sql_preflight endpoint', () => {
+    describe('index_database endpoint', () => {
         let completion;
 
         beforeAll(async () => {
-            const response = await apiRequest(site, 'sql_preflight', {
+            const response = await apiRequest(site, 'index_database', {
                 directory: getSiteDir(site),
             });
             assert.equal(response.status, 200);

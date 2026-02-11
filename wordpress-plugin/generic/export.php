@@ -877,7 +877,7 @@ function endpoint_sql_chunk(
     $can_send_headers = !headers_sent();
     if (!$can_send_headers) {
         throw new RuntimeException(
-            "Cannot stream sql_preflight: headers already sent",
+            "Cannot stream index_database: headers already sent",
         );
     }
     @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
@@ -1018,7 +1018,7 @@ function endpoint_sql_chunk(
  * @param float $memory_threshold Memory usage threshold (0.0-1.0)
  * @return array Result with status and stats
  */
-function endpoint_sql_preflight(
+function endpoint_index_database(
     array $config,
     float $script_start,
     int $max_execution_time,
@@ -1067,7 +1067,7 @@ function endpoint_sql_preflight(
 
     if (!$db_host || !$db_name || !$db_user || $db_password === false) {
         throw new InvalidArgumentException(
-            "Database credentials not found for sql_preflight.",
+            "Database credentials not found for index_database.",
         );
     }
 
@@ -3434,7 +3434,7 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
         if (!$endpoint) {
             throw new InvalidArgumentException(
                 "endpoint parameter is required. " .
-                    "Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'sql_preflight', 'preflight'",
+                    "Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'index_database', 'preflight'",
             );
         }
 
@@ -3496,8 +3496,8 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
                     $memory_threshold,
                 );
                 break;
-            case "sql_preflight":
-                $result = endpoint_sql_preflight(
+            case "index_database":
+                $result = endpoint_index_database(
                     $config,
                     $script_start,
                     $max_execution_time,
@@ -3512,7 +3512,7 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
             default:
                 throw new InvalidArgumentException(
                     "Invalid endpoint: '{$endpoint}'. " .
-                        "Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'sql_preflight', 'preflight'",
+                        "Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'index_database', 'preflight'",
                 );
         }
     } catch (Exception $e) {

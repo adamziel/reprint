@@ -1564,7 +1564,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, sql-preflight",
+                "Command is required. Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, index-database, preflight, preflight-assert",
             );
         }
 
@@ -1574,11 +1574,13 @@ class ImportClient
                 "files-sync-delta",
                 "files-index",
                 "sql-sync",
-                "sql-preflight",
+                "index-database",
+                "preflight",
+                "preflight-assert",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, sql-preflight",
+                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, index-database, preflight, preflight-assert",
             );
         }
 
@@ -1615,11 +1617,24 @@ class ImportClient
             $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
         }
 
-        $this->run_preflight();
+        // preflight and preflight-assert run the preflight themselves and
+        // exit directly — they do not go through the normal command dispatch.
+        if ($command === "preflight") {
+            $this->run_preflight();
+            $this->run_preflight_report();
+            return;
+        }
+
+        // All other commands require a prior preflight run.
+        $this->require_preflight();
 
         // Dispatch to appropriate command handler
         try {
             switch ($command) {
+                case "preflight-assert":
+                    $this->run_preflight_assert();
+                    return;
+
                 case "files-sync-initial":
                     $this->run_files_sync_initial($restart);
                     break;
@@ -1635,8 +1650,8 @@ class ImportClient
                 case "sql-sync":
                     $this->run_sql_sync($restart);
                     break;
-                case "sql-preflight":
-                    $this->run_sql_preflight($restart);
+                case "index-database":
+                    $this->run_index_database($restart);
                     break;
             }
 
@@ -1737,6 +1752,123 @@ class ImportClient
                         "is outside wp-content ({$content_dir})",
                 );
             }
+        }
+    }
+
+    /**
+     * Assert that a preflight has already been run and stored in state.
+     * All commands except preflight/preflight-assert call this before starting work.
+     */
+    private function require_preflight(): void
+    {
+        $entry = $this->state["preflight"] ?? null;
+        if (!is_array($entry) || empty($entry["data"])) {
+            throw new RuntimeException(
+                "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
+            );
+        }
+    }
+
+    /**
+     * Command: preflight
+     *
+     * Prints the full preflight response as pretty-printed JSON to stdout.
+     * The preflight itself already ran in run_preflight() — this just
+     * outputs the stored result.
+     */
+    private function run_preflight_report(): void
+    {
+        $entry = $this->state["preflight"] ?? null;
+        if ($entry === null) {
+            echo "No preflight data available.\n";
+            exit(1);
+        }
+        echo json_encode($entry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+        $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
+        exit($ok ? 0 : 1);
+    }
+
+    /**
+     * Command: preflight-assert
+     *
+     * Inspects the preflight response (already fetched by run_preflight())
+     * and exits with code 0 if migration looks feasible, code 1 if not.
+     * Prints a human-readable pass/fail summary to stdout.
+     */
+    private function run_preflight_assert(): void
+    {
+        $entry = $this->state["preflight"] ?? null;
+        $data = $entry["data"] ?? null;
+        $checks = [];
+        $all_pass = true;
+
+        // 1. Server responded OK
+        $http_ok = ($entry["http_code"] ?? 0) === 200;
+        $checks[] = [
+            "label" => "Server responded",
+            "pass" => $http_ok,
+            "detail" => $http_ok
+                ? "HTTP 200"
+                : "HTTP " . ($entry["http_code"] ?? "no response"),
+        ];
+        if (!$http_ok) {
+            $all_pass = false;
+        }
+
+        // 2. Top-level ok flag
+        $top_ok = is_array($data) && !empty($data["ok"]);
+        $checks[] = [
+            "label" => "Preflight OK",
+            "pass" => $top_ok,
+            "detail" => $top_ok
+                ? "passed"
+                : ($data["error"] ?? "preflight not ok"),
+        ];
+        if (!$top_ok) {
+            $all_pass = false;
+        }
+
+        // 3. Filesystem accessible
+        $fs = $data["filesystem"] ?? null;
+        $fs_ok = is_array($fs) && !empty($fs["ok"]);
+        $checks[] = [
+            "label" => "Filesystem accessible",
+            "pass" => $fs_ok,
+            "detail" => $fs_ok
+                ? "directories readable"
+                : ($fs["error"] ?? "filesystem check failed"),
+        ];
+        if (!$fs_ok) {
+            $all_pass = false;
+        }
+
+        // 4. Database accessible
+        $db = $data["database"] ?? null;
+        $db_ok = is_array($db) && !empty($db["connected"]);
+        $checks[] = [
+            "label" => "Database accessible",
+            "pass" => $db_ok,
+            "detail" => $db_ok
+                ? ($db["server_version"] ?? "connected")
+                : ($db["error"] ?? "database check failed"),
+        ];
+        if (!$db_ok) {
+            $all_pass = false;
+        }
+
+        // Print summary
+        foreach ($checks as $check) {
+            $icon = $check["pass"] ? "PASS" : "FAIL";
+            echo "[{$icon}] {$check["label"]}: {$check["detail"]}\n";
+        }
+
+        echo "\n";
+        if ($all_pass) {
+            echo "Migration looks feasible.\n";
+            exit(0);
+        } else {
+            echo "Migration may not be feasible. Review the failures above.\n";
+            exit(1);
         }
     }
 
@@ -2905,27 +3037,27 @@ class ImportClient
     }
 
     /**
-     * Command: sql-preflight
+     * Command: index-database
      *
      * Streams table metadata (name/rows/size) for planning and diagnostics.
      */
-    private function run_sql_preflight(bool $restart): void
+    private function run_index_database(bool $restart): void
     {
         $state_command = $this->state["command"] ?? null;
         $tables_file = $this->local_path . "/db-tables.jsonl";
 
         $has_cursor =
-            $state_command === "sql-preflight" &&
+            $state_command === "index-database" &&
             !empty($this->state["cursor"] ?? null);
         $current_status =
-            $state_command === "sql-preflight"
+            $state_command === "index-database"
                 ? $this->state["status"] ?? null
                 : null;
         $tables_exists = file_exists($tables_file);
 
         if ($restart) {
             $this->audit_log(
-                "RESTART | Clearing sql-preflight state and starting fresh",
+                "RESTART | Clearing index-database state and starting fresh",
                 true,
             );
             $this->reset_state();
@@ -2936,7 +3068,7 @@ class ImportClient
             if ($tables_exists) {
                 unlink($tables_file);
                 $this->audit_log(
-                    "FILE DELETE | {$tables_file} | restart sql-preflight",
+                    "FILE DELETE | {$tables_file} | restart index-database",
                 );
                 $tables_exists = false;
             }
@@ -2945,62 +3077,62 @@ class ImportClient
         if ($current_status === "complete") {
             if ($tables_exists && !$restart) {
                 throw new RuntimeException(
-                    "sql-preflight already completed and db-tables.jsonl exists. Use --restart flag to start over.",
+                    "index-database already completed and db-tables.jsonl exists. Use --restart flag to start over.",
                 );
             } elseif (!$tables_exists && !$restart) {
                 throw new RuntimeException(
-                    "sql-preflight marked complete but db-tables.jsonl is missing. Use --restart flag to re-run.",
+                    "index-database marked complete but db-tables.jsonl is missing. Use --restart flag to re-run.",
                 );
             }
         }
 
         if (!$has_cursor) {
-            $this->state["command"] = "sql-preflight";
+            $this->state["command"] = "index-database";
             $this->state["status"] = "in_progress";
             $this->state["cursor"] = null;
             $this->state["stage"] = null;
             $this->state["diff"] = $this->default_state()["diff"];
-            $this->state["sql_preflight"] = $this->default_state()["sql_preflight"];
+            $this->state["index_database"] = $this->default_state()["index_database"];
             $this->save_state($this->state);
 
-            $this->audit_log("START sql-preflight", true);
+            $this->audit_log("START index-database", true);
             if (!$this->verbose_mode) {
-                echo "Starting sql-preflight\n";
+                echo "Starting index-database\n";
             }
         } else {
             $this->audit_log(
                 sprintf(
-                    "RESUME sql-preflight | cursor=%s",
+                    "RESUME index-database | cursor=%s",
                     substr($this->state["cursor"], 0, 20) . "...",
                 ),
                 true,
             );
             if (!$this->verbose_mode) {
-                echo "Resuming sql-preflight\n";
+                echo "Resuming index-database\n";
             }
         }
 
-        $this->state["command"] = "sql-preflight";
+        $this->state["command"] = "index-database";
         $this->save_state($this->state);
 
         $this->output_progress([
             "status" => "starting",
-            "phase" => "sql-preflight",
+            "phase" => "index-database",
         ]);
 
-        $this->download_sql_preflight();
+        $this->download_index_database();
 
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
-        $tables = (int) ($this->state["sql_preflight"]["tables"] ?? 0);
+        $tables = (int) ($this->state["index_database"]["tables"] ?? 0);
         $this->audit_log(
-            sprintf("sql-preflight complete: %d tables", $tables),
+            sprintf("index-database complete: %d tables", $tables),
             true,
         );
 
         if (!$this->verbose_mode) {
-            echo "sql-preflight complete: {$tables} tables\n";
+            echo "index-database complete: {$tables} tables\n";
             echo "Table stats: {$tables_file}\n";
             echo "Audit log: {$this->audit_log}\n";
         }
@@ -4234,7 +4366,7 @@ class ImportClient
                             true,
                         );
                     } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "sql-preflight", $context);
+                        $this->handle_error_chunk($chunk, "index-database", $context);
                     }
                 };
 
@@ -4260,15 +4392,15 @@ class ImportClient
     }
 
     /**
-     * Download table stats from the sql_preflight endpoint.
+     * Download table stats from the index_database endpoint.
      */
-    private function download_sql_preflight(): void
+    private function download_index_database(): void
     {
         $cursor = $this->state["cursor"] ?? null;
         $complete = false;
         $tables_file = $this->local_path . "/db-tables.jsonl";
 
-        $stats = $this->state["sql_preflight"] ?? [];
+        $stats = $this->state["index_database"] ?? [];
         $tables_written = (int) ($stats["tables"] ?? 0);
         $rows_estimated = (int) ($stats["rows_estimated"] ?? 0);
         $bytes_written = (int) ($stats["bytes"] ?? 0);
@@ -4302,7 +4434,7 @@ class ImportClient
                 $params = [
                     "tables_per_batch" => 1000,
                 ];
-                $url = $this->build_url("sql_preflight", $cursor, $params, null);
+                $url = $this->build_url("index_database", $cursor, $params, null);
 
                 $context = new StreamingContext();
                 $context->on_chunk = function ($chunk) use (
@@ -4347,7 +4479,7 @@ class ImportClient
                             }
                         }
                     } elseif ($chunk_type === "progress") {
-                        $this->handle_progress($chunk, "sql-preflight");
+                        $this->handle_progress($chunk, "index-database");
                     } elseif ($chunk_type === "completion") {
                         $complete =
                             ($chunk["headers"]["x-status"] ?? "") ===
@@ -4378,7 +4510,7 @@ class ImportClient
                         ];
                         $this->output_progress(
                             [
-                                "phase" => "sql-preflight",
+                                "phase" => "index-database",
                                 "status" =>
                                     $chunk["headers"]["x-status"] ?? "unknown",
                                 "tables_processed" =>
@@ -4399,18 +4531,18 @@ class ImportClient
                     $cursor,
                     $context,
                     null,
-                    "sql_preflight",
+                    "index_database",
                 );
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
-                    "sql_preflight",
+                    "index_database",
                     $wall_time,
                     $context->response_stats ?? [],
                 );
 
                 fflush($handle);
                 $this->state["cursor"] = $cursor;
-                $this->state["sql_preflight"] = [
+                $this->state["index_database"] = [
                     "file" => $tables_file,
                     "tables" => $tables_written,
                     "rows_estimated" => $rows_estimated,
@@ -5741,7 +5873,7 @@ class ImportClient
             "version" => null,
             "follow_symlinks" => false,
             "max_allowed_packet" => null,
-            "sql_preflight" => [
+            "index_database" => [
                 "file" => null,
                 "tables" => 0,
                 "rows_estimated" => 0,
@@ -5808,19 +5940,19 @@ class ImportClient
         $tuning = array_intersect_key($tuning, $defaults["tuning"]);
         $tuning = array_merge($defaults["tuning"], $tuning);
         $state["tuning"] = $tuning;
-        $sql_preflight = $state["sql_preflight"] ?? [];
-        if (!is_array($sql_preflight)) {
-            $sql_preflight = [];
+        $index_db = $state["index_database"] ?? [];
+        if (!is_array($index_db)) {
+            $index_db = [];
         }
-        $sql_preflight = array_intersect_key(
-            $sql_preflight,
-            $defaults["sql_preflight"],
+        $index_db = array_intersect_key(
+            $index_db,
+            $defaults["index_database"],
         );
-        $sql_preflight = array_merge(
-            $defaults["sql_preflight"],
-            $sql_preflight,
+        $index_db = array_merge(
+            $defaults["index_database"],
+            $index_db,
         );
-        $state["sql_preflight"] = $sql_preflight;
+        $state["index_database"] = $index_db;
         return $state;
     }
 
@@ -6058,126 +6190,167 @@ if (
     isset($argv) &&
     realpath($argv[0] ?? "") === __FILE__
 ) {
-    if ($argc < 3) {
-        echo "Usage: php import.php <remote-url> <local-path> <command> [options]\n";
-        echo "\n";
-        echo "Arguments:\n";
-        echo "  remote-url   URL to the export endpoint with required parameters:\n";
-        echo "               - directory: Directory to export (use directory[] for multiple)\n";
-        echo "               When using --secret (HMAC auth via api.php):\n";
-        echo "                 http://example.com/wp-content/plugins/site-export/api.php?directory=/var/www/html\n";
-        echo "               When using SECRET_KEY (direct export.php):\n";
-        echo "                 http://example.com/export.php?directory=/var/www/html&SECRET_KEY=xxx\n";
-        echo "  local-path   Local directory to store imported data\n";
-        echo "  command      Command to execute (required)\n";
+    // Per-command help definitions. Each command has a short description
+    // shown in the main help, and a detailed help block shown when you
+    // run `php import.php <command> <url> <local-path> --help`.
+    $command_help = [
+        "files-sync-initial" => [
+            "short" => "Download the full directory tree",
+            "detail" =>
+                "Streams every file from the remote server into <local-path>/filesystem-root/.\n" .
+                "Automatically resumes from the last saved cursor if interrupted.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --restart          Clear state and start over\n" .
+                "  --follow-symlinks  Follow symlinks pointing outside root directories\n" .
+                "  --secret=TOKEN     HMAC shared secret for api.php authentication\n" .
+                "  --verbose, -v      Show detailed request/response logs\n" .
+                "\n" .
+                "Output files:\n" .
+                "  filesystem-root/         Downloaded files\n" .
+                "  .import-index.jsonl      Local file index\n" .
+                "  .import-state.json       Resumable state\n" .
+                "  .import-audit.log        Audit log\n",
+        ],
+        "files-sync-delta" => [
+            "short" => "Download only files changed since last sync",
+            "detail" =>
+                "Requires a completed files-sync-initial. Fetches the remote index,\n" .
+                "compares it against the local index, then downloads changed files\n" .
+                "and deletes files that no longer exist on the remote.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --restart          Clear state and start over\n" .
+                "  --follow-symlinks  Follow symlinks pointing outside root directories\n" .
+                "  --secret=TOKEN     HMAC shared secret for api.php authentication\n" .
+                "  --verbose, -v      Show detailed request/response logs\n" .
+                "\n" .
+                "Output files:\n" .
+                "  filesystem-root/              Updated files\n" .
+                "  .import-remote-index.jsonl    Remote index snapshot\n" .
+                "  .import-download-list.jsonl   Files pending download\n",
+        ],
+        "files-index" => [
+            "short" => "Download the remote file index without fetching file contents",
+            "detail" =>
+                "Traverses the full remote directory tree and writes each entry\n" .
+                "to .import-index.jsonl. Does not download any file data.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --restart        Clear state and start over\n" .
+                "  --secret=TOKEN   HMAC shared secret for api.php authentication\n" .
+                "  --verbose, -v    Show detailed request/response logs\n",
+        ],
+        "sql-sync" => [
+            "short" => "Download the database as a SQL dump",
+            "detail" =>
+                "Streams the full database dump into <local-path>/db.sql.\n" .
+                "Automatically resumes from the last cursor if interrupted.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --restart                   Clear state and start over\n" .
+                "  --secret=TOKEN              HMAC shared secret for api.php authentication\n" .
+                "  --verbose, -v               Show detailed request/response logs\n" .
+                "  --max-allowed-packet=SIZE   Client max_allowed_packet (e.g. 16M, 64M)\n" .
+                "\n" .
+                "Output files:\n" .
+                "  db.sql                SQL dump\n",
+        ],
+        "index-database" => [
+            "short" => "Index database tables and their statistics",
+            "detail" =>
+                "Streams table metadata (name, estimated rows, data size) into\n" .
+                "<local-path>/db-tables.jsonl. Useful for planning and diagnostics.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --restart        Clear state and start over\n" .
+                "  --secret=TOKEN   HMAC shared secret for api.php authentication\n" .
+                "  --verbose, -v    Show detailed request/response logs\n" .
+                "\n" .
+                "Output files:\n" .
+                "  db-tables.jsonl  One JSON object per table\n",
+        ],
+        "preflight" => [
+            "short" => "Run preflight check and print the full result as JSON",
+            "detail" =>
+                "Contacts the export server and collects environment details:\n" .
+                "PHP/MySQL versions, memory limits, filesystem access, database\n" .
+                "connectivity, WordPress version, plugins, themes, and directory layout.\n" .
+                "\n" .
+                "Prints the full preflight response as pretty-printed JSON.\n" .
+                "Exits 0 if the server reported OK, 1 otherwise.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --secret=TOKEN   HMAC shared secret for api.php authentication\n",
+        ],
+        "preflight-assert" => [
+            "short" => "Check if migration is feasible (exits 0 or 1)",
+            "detail" =>
+                "Runs the same preflight check as the preflight command, then\n" .
+                "evaluates key assertions:\n" .
+                "\n" .
+                "  - Server responded with HTTP 200\n" .
+                "  - Preflight OK flag is set\n" .
+                "  - Filesystem directories are accessible\n" .
+                "  - Database connection works\n" .
+                "\n" .
+                "Prints a PASS/FAIL summary and exits 0 if all checks pass, 1 if not.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --secret=TOKEN   HMAC shared secret for api.php authentication\n",
+        ],
+    ];
+
+    // Show main help when invoked with no arguments or just --help
+    if ($argc < 2 || (isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]))) {
+        echo "Usage: php import.php <command> <remote-url> <local-path> [options]\n";
         echo "\n";
         echo "Commands:\n";
-        echo "  files-sync-initial   Initial full file sync\n";
-        echo "                       - If target empty: starts new sync\n";
-        echo "                       - If in progress: resumes from saved state\n";
-        echo "                       - If complete: requires --restart flag\n";
+        $max_len = max(array_map('strlen', array_keys($command_help)));
+        foreach ($command_help as $name => $info) {
+            echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
+        }
         echo "\n";
-        echo "  files-sync-delta     Delta file sync (only changed/new/deleted files)\n";
-        echo "                       - Requires completed files-sync-initial\n";
-        echo "                       - Downloads remote index and diffs locally\n";
-        echo "                       - If in progress: resumes from saved state\n";
-        echo "                       - If complete: requires --restart flag\n";
+        echo "Run 'php import.php <command> --help' for command-specific help.\n";
         echo "\n";
-        echo "  files-index          Download full remote index only\n";
-        echo "                       - Traverses the full directory tree\n";
-        echo "                       - If complete: requires --restart flag\n";
+        echo "Global options:\n";
+        echo "  --secret=TOKEN       HMAC shared secret for api.php authentication\n";
+        echo "  --restart            Clear state and start over\n";
+        echo "  --follow-symlinks    Follow symlinks pointing outside root directories\n";
+        echo "  --verbose, -v        Show detailed request/response logs\n";
+        echo "  --no-adaptive        Disable adaptive request tuning\n";
         echo "\n";
-        echo "  sql-sync             Download database dump\n";
-        echo "                       - Streams SQL to db.sql file\n";
-        echo "                       - If in progress: resumes from cursor\n";
-        echo "                       - If complete: requires --restart flag\n";
-        echo "\n";
-        echo "  sql-preflight        Fetch table stats (name/rows/size)\n";
-        echo "                       - Streams table metadata to db-tables.jsonl\n";
-        echo "                       - If in progress: resumes from cursor\n";
-        echo "                       - If complete: requires --restart flag\n";
-        echo "\n";
-        echo "Options:\n";
-        echo "  --secret=TOKEN   HMAC shared secret for api.php authentication\n";
-        echo "  --restart        Force restart of completed command (clears state)\n";
-        echo "  --follow-symlinks Follow symlinks pointing outside root directories\n";
-        echo "  --verbose, -v    Show detailed logs (default: show progress only)\n";
-        echo "  --adaptive       Enable adaptive tuning (default)\n";
-        echo "  --no-adaptive    Disable adaptive tuning\n";
-        echo "  --duty=F         Target duty cycle (0-1)\n";
-        echo "  --duty-min=F     Minimum duty cycle (0-1)\n";
-        echo "  --duty-max=F     Maximum duty cycle (0-1)\n";
-        echo "  --throughput-alpha=F    EMA alpha for throughput (0-1)\n";
-        echo "  --aimd-drop-ratio=F     Throughput ratio to trigger decrease\n";
-        echo "  --aimd-decrease-factor=F Multiplicative decrease factor\n";
-        echo "  --error-decrease-factor=F Error backoff decrease factor\n";
-        echo "  --aimd-increase-file=N  Additive increase for file chunks (bytes)\n";
-        echo "  --aimd-increase-index=N Additive increase for index batches (entries)\n";
-        echo "  --aimd-increase-sql=N   Additive increase for SQL fragments\n";
-        echo "  --tune-all       Tune on complete requests too (default: partial only)\n";
-        echo "  --buffered-ratio=F      TTFB/server_time ratio to detect buffering\n";
-        echo "  --buffered-min-time=F   Minimum server_time to consider buffering\n";
-        echo "  --buffered-cooldown=N   Requests to keep buffered mode after detection\n";
-        echo "  --error-backoff=N       Requests to stay in error-backoff after error/timeout\n";
-        echo "  --slow-host-threshold=N Buffered detections before slow-host caps\n";
-        echo "  --slow-file-chunk-max=N Max file chunk size in slow-host mode\n";
-        echo "  --slow-index-batch-max=N Max index batch size in slow-host mode\n";
-        echo "  --slow-sql-fragments-max=N Max SQL fragments in slow-host mode\n";
-        echo "  --sleep-jitter=F        Fractional jitter applied to sleep (0-0.5)\n";
-        echo "  --max-exec=N     max_execution_time sent to export.php (seconds)\n";
-        echo "  --memory-threshold=F  memory_threshold sent to export.php (0-1)\n";
-        echo "  --file-chunk-start=N  Initial file chunk size (bytes)\n";
-        echo "  --file-chunk-min=N    Minimum file chunk size (bytes)\n";
-        echo "  --file-chunk-max=N    Maximum file chunk size (bytes)\n";
-        echo "  --index-batch-start=N Initial index batch size (entries)\n";
-        echo "  --index-batch-min=N   Minimum index batch size (entries)\n";
-        echo "  --index-batch-max=N   Maximum index batch size (entries)\n";
-        echo "  --sql-fragments-start=N Initial SQL fragments per request\n";
-        echo "  --sql-fragments-min=N   Minimum SQL fragments per request\n";
-        echo "  --sql-fragments-max=N   Maximum SQL fragments per request\n";
-        echo "  --db-unbuffered         Use unbuffered MySQL queries on export\n";
-        echo "  --db-query-time-limit=N MySQL MAX_EXECUTION_TIME (ms) for SELECT\n";
-        echo "  --max-allowed-packet=SIZE Client max_allowed_packet (e.g. 16M, 64M)\n";
-        echo "\n";
-        echo "State Management:\n";
-        echo "  - Each command tracks its own state (stage/cursor/status)\n";
-        echo "  - Interrupted commands automatically resume from last saved state\n";
-        echo "  - Completed commands require --restart to run again\n";
-        echo "  - State is stored in .import-state.json\n";
-        echo "\n";
-        echo "Examples:\n";
-        echo "  # With HMAC auth (WordPress plugin api.php):\n";
-        echo "  php import.php 'http://example.com/wp-content/plugins/site-export/api.php?directory=/var/www' ./backup files-sync-initial --secret=TOKEN\n";
-        echo "\n";
-        echo "  # With SECRET_KEY auth (standalone export.php):\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-initial\n";
-        echo "\n";
-        echo "  # Delta sync (only download changes since last sync)\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup files-sync-delta\n";
-        echo "\n";
-        echo "  # Download database\n";
-        echo "  php import.php 'http://example.com/export.php?directory=/var/www&SECRET_KEY=xxx' ./backup sql-sync\n";
-        echo "\n";
-        echo "Output:\n";
-        echo "  - Progress reported as JSON lines to stdout (in verbose mode)\n";
-        echo "  - SQL written to <local-path>/db.sql\n";
-        echo "  - Files written to <local-path>/filesystem-root/\n";
-        echo "  - State written to <local-path>/.import-state.json\n";
-        echo "  - Index written to <local-path>/.import-index.jsonl\n";
-        echo "  - Audit log written to <local-path>/.import-audit.log\n";
+        echo "State is stored in <local-path>/.import-state.json. Interrupted\n";
+        echo "commands automatically resume. Completed commands require --restart.\n";
         exit(1);
     }
 
-    $remote_url = $argv[1];
-    $local_path = $argv[2];
-    $command = $argv[3] ?? null;
+    $command = $argv[1];
 
-    if (!$command) {
-        fwrite(STDERR, "Error: Command is required\n");
-        fwrite(
-            STDERR,
-            "Valid commands: files-sync-initial, files-sync-delta, files-index, sql-sync, sql-preflight\n",
-        );
+    // Per-command --help (can be requested before providing url/path)
+    if (in_array("--help", array_slice($argv, 2)) || in_array("-h", array_slice($argv, 2))) {
+        if (isset($command_help[$command])) {
+            echo "Usage: php import.php {$command} <remote-url> <local-path> [options]\n";
+            echo "\n";
+            echo $command_help[$command]["detail"] . "\n";
+        } else {
+            fwrite(STDERR, "Unknown command: {$command}\n");
+        }
+        exit(0);
+    }
+
+    $remote_url = $argv[2] ?? null;
+    $local_path = $argv[3] ?? null;
+
+    if (!$remote_url) {
+        fwrite(STDERR, "Error: <remote-url> is required\n");
+        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> <local-path> [options]\n");
+        exit(1);
+    }
+
+    if (!$local_path) {
+        fwrite(STDERR, "Error: <local-path> is required\n");
+        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> <local-path> [options]\n");
         exit(1);
     }
 

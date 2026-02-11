@@ -1,6 +1,6 @@
 /**
  * Test 02: SQL Sync via import.php
- * Tests sql-sync and sql-preflight commands produce correct output.
+ * Tests sql-sync and index-database commands produce correct output.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -70,10 +70,10 @@ describe('Import: SQL Sync', () => {
             `counts=${JSON.stringify(comparison.rowCounts)}`);
     });
 
-    it('sql-preflight produces db-tables.jsonl with table names', () => {
+    it('index-database produces db-tables.jsonl with table names', () => {
         const pfDir = createTempDir('e2e-import-sqlpf');
         try {
-            const result = runImporter(importUrl(), pfDir, 'sql-preflight', {
+            const result = runImporter(importUrl(), pfDir, 'index-database', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}`);

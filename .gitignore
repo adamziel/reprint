@@ -13,6 +13,7 @@ exports.sh
 bluehost-export
 tests/.phpunit.result.cache
 exports
+exports-old
 siteground-export-*
 node_modules
 

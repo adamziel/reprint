@@ -220,11 +220,30 @@ function parseMultipart(body, boundary) {
  */
 export function runImporter(url, outputDir, command, options = {}) {
     const secret = options.secret || '';
+
+    // Non-preflight commands require a prior preflight run.
+    // Automatically run one if the state file doesn't already have preflight data.
+    if (command !== 'preflight' && command !== 'preflight-assert' && options.skipPreflight !== true) {
+        const stateFile = join(outputDir, '.import-state.json');
+        let needsPreflight = true;
+        try {
+            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            if (state.preflight && state.preflight.data) {
+                needsPreflight = false;
+            }
+        } catch (_) {
+            // No state file or invalid JSON — need preflight
+        }
+        if (needsPreflight) {
+            runImporter(url, outputDir, 'preflight', { ...options, skipPreflight: true });
+        }
+    }
+
     const args = [
         IMPORTER_PATH,
+        command,
         url,
         outputDir,
-        command,
     ];
     if (secret) {
         args.push(`--secret=${secret}`);

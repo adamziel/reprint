@@ -87,8 +87,8 @@ describe('Import: Preflight Endpoint', () => {
         }
     });
 
-    it('sql_preflight returns table list', async () => {
-        const response = await apiRequest(site, 'sql_preflight', {
+    it('index_database returns table list', async () => {
+        const response = await apiRequest(site, 'index_database', {
             directory: getSiteDir(site),
         });
         assert.equal(response.status, 200, `Expected 200, got ${response.status}`);

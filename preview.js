@@ -209,7 +209,8 @@ define('DB_NAME', '${dbName}');
 define('DB_USER', '${DB_USER}');
 define('DB_PASSWORD', '${DB_PASS}');
 define('DB_HOST', '${DB_HOST}');
-define('DB_CHARSET', 'latin1');
+define('DB_CHARSET', 'binary');
+// define('DB_CHARSET', 'latin1');
 define('DB_COLLATE', '');
 `);
 } else {
