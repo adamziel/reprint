@@ -31,7 +31,7 @@ then streams every file. It can be interrupted and resumed at any time — just 
 the same command:
 
 ```bash
-php import.php files-sync-initial "$URL" "$DIR" --secret="$SECRET"
+php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
 ```
 
 **Step 2 — Index the database.** This fetches table metadata (names, row counts, sizes)
@@ -48,10 +48,11 @@ php import.php db-sync "$URL" "$DIR" --secret="$SECRET"
 ```
 
 **Step 4 — Catch up on file changes.** While the database was being dumped, some files
-may have changed. A delta sync downloads only the differences:
+may have changed. Running `files-sync` again auto-detects the completed sync and
+performs a delta — only downloading the differences:
 
 ```bash
-php import.php files-sync-delta "$URL" "$DIR" --secret="$SECRET"
+php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
 ```
 
 That's it. Your `$DIR` now contains `filesystem-root/` with the full directory tree
@@ -68,12 +69,11 @@ php import.php <command> <URL> <local-path> [options]
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
 * `files-index` — Downloads the full remote file index without fetching file contents.
-* `files-sync-initial` — Full file sync. Downloads the complete directory tree from the remote server.
-* `files-sync-delta` — Incremental file sync. Only downloads files that changed since the last sync.
+* `files-sync` — Sync files. Auto-detects initial vs delta based on state: downloads the full tree on first run, only changes on subsequent runs.
 * `db-sync` — Downloads the database as a SQL dump to `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 
-All commands except `preflight-assert` support `--restart` to clear state and start over. Interrupted commands automatically resume from the last saved cursor.
+All commands except `preflight-assert` support `--restart` to clear state and exit. Run the command again after `--restart` to start fresh. Interrupted commands automatically resume from the last saved cursor.
 
 ### Preflight
 

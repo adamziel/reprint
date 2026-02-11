@@ -1,6 +1,6 @@
 /**
  * Test 22: Delta Sync with Source Deletions via import.php
- * Tests that files-sync-delta correctly detects when files have been
+ * Tests that files-sync correctly detects when files have been
  * deleted on the source between initial and delta syncs.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -42,7 +42,7 @@ describe('Import: Delta Sync with Deletions', () => {
     }
 
     it('initial sync includes the extra files', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+        const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -68,10 +68,9 @@ describe('Import: Delta Sync with Deletions', () => {
         // Delete the files from the source
         execSync(`sudo rm -f ${JSON.stringify(extraFile1)} ${JSON.stringify(extraFile2)}`);
 
-        // Run delta sync with --restart
-        const result = runImporter(importUrl(), tempDir, 'files-sync-delta', {
+        // Run files-sync again — auto-detects completed state and runs delta
+        const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
-            extraArgs: ['--restart'],
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });

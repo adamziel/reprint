@@ -41,8 +41,8 @@ describe('Import: Large Single File', { timeout: 180000 }, () => {
         return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
     }
 
-    it('files-sync-initial completes', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+    it('files-sync completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
             timeout: 180000,
         });

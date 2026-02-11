@@ -45,9 +45,9 @@ describe('Import: Full Round-Trip', () => {
         }
     });
 
-    it('files-sync-initial completes', () => {
+    it('files-sync completes', () => {
         const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
-        const result = runImporter(url, tempDir, 'files-sync-initial', {
+        const result = runImporter(url, tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

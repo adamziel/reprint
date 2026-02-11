@@ -214,7 +214,7 @@ function parseMultipart(body, boundary) {
  * Run the importer CLI.
  * @param {string} url - Export URL
  * @param {string} outputDir - Local output directory
- * @param {string} command - Import command (files-sync-initial, db-sync, etc.)
+ * @param {string} command - Import command (files-sync, db-sync, etc.)
  * @param {Object} options - Additional options
  * @returns {Object} { stdout, stderr, exitCode }
  */

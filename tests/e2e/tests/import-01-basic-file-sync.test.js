@@ -1,6 +1,6 @@
 /**
  * Test 01: Basic File Sync via import.php
- * Tests files-sync-initial completes, files match source, and restart behavior.
+ * Tests files-sync completes, files match source, and restart behavior.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -31,8 +31,8 @@ describe('Import: Basic File Sync', () => {
         return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
     }
 
-    it('files-sync-initial completes successfully', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+    it('files-sync completes successfully', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -42,7 +42,7 @@ describe('Import: Basic File Sync', () => {
         const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.command, 'files-sync-initial');
+        assert.equal(state.command, 'files-sync');
         assert.equal(state.status, 'complete');
     });
 
@@ -70,23 +70,33 @@ describe('Import: Basic File Sync', () => {
         assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
     });
 
-    it('re-running without --restart fails with useful message', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+    it('re-running after completion triggers a delta sync', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });
-        assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code');
-        const output = result.stdout + result.stderr;
-        assert.ok(output.includes('--restart'), `Expected message mentioning --restart, got: ${output}`);
+        assert.equal(result.exitCode, 0, `Expected exit 0 (delta sync)\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
 
-    it('re-running with --restart succeeds', () => {
-        // Clean filesystem-root so restart doesn't fail on non-empty check
+    it('re-running with --restart clears state and exits', () => {
+        const restart = runImporter(importUrl(), tempDir, 'files-sync', {
+            secret: getSiteSecret(site),
+            extraArgs: ['--restart'],
+        });
+        assert.equal(restart.exitCode, 0, `Expected restart exit 0, got ${restart.exitCode}\nstderr: ${restart.stderr}\nstdout: ${restart.stdout}`);
+
+        // State should be cleared — verify by reading state file
+        const stateFile = join(tempDir, '.import-state.json');
+        const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+        assert.notEqual(state.status, 'complete', 'Expected status to be cleared after --restart');
+    });
+
+    it('running after --restart starts a fresh initial sync', () => {
+        // Clean filesystem-root so fresh sync doesn't fail on non-empty check
         const fsRoot = join(tempDir, 'filesystem-root');
         rmSync(fsRoot, { recursive: true, force: true });
 
-        const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+        const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
-            extraArgs: ['--restart'],
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });

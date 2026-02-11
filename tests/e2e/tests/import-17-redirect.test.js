@@ -35,12 +35,12 @@ describe('Import: 301 Redirect', () => {
         assert.ok(location.includes('8081'), 'Expected redirect to port 8081');
     });
 
-    it('importer reports HTTP 301 error for files-sync-initial', () => {
+    it('importer reports HTTP 301 error for files-sync', () => {
         const tempDir = createTempDir('e2e-import-redirect-files');
         try {
             // Use the redirect site URL but with the basic site's directory
             const url = `${getSiteUrl('redirect-301')}?directory=/srv/e2e-sites/basic`;
-            const result = runImporter(url, tempDir, 'files-sync-initial', {
+            const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret('redirect-301'),
                 timeout: 15000,
             });

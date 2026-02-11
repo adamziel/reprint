@@ -69,7 +69,7 @@ describe('Import: Gzip Corruption', () => {
         const tempDir = createTempDir('e2e-import-gzip-files');
         try {
             const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
-            const result = runImporter(url, tempDir, 'files-sync-initial', {
+            const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 timeout: 30000,
             });

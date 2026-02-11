@@ -1,6 +1,6 @@
 /**
  * Test 08: Large Directory via import.php
- * Tests files-sync-initial with 2000+ files.
+ * Tests files-sync with 2000+ files.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -41,8 +41,8 @@ describe('Import: Large Directory', () => {
         return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
     }
 
-    it('files-sync-initial completes', { timeout: 120000 }, () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+    it('files-sync completes', { timeout: 120000 }, () => {
+        const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
             timeout: 120000,
         });

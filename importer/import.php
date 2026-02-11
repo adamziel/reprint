@@ -1485,7 +1485,7 @@ class ImportClient
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "{$count} file(s) changed during sync and need re-syncing (run files-sync-delta):\n";
+            echo "{$count} file(s) changed during sync and need re-syncing (run files-sync again):\n";
         }
 
         foreach ($files as $path => $changes) {
@@ -1551,8 +1551,8 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: files-sync-initial, files-sync-delta, files-index, db-sync
-     *   - restart: Optional. Force restart of completed command
+     *   - command: Required. One of: files-sync, files-index, db-sync, db-index, preflight, preflight-assert
+     *   - restart: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      */
     public function run(array $options = []): void
@@ -1564,14 +1564,13 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync-initial, files-sync-delta, files-index, db-sync, db-index, preflight, preflight-assert",
+                "Command is required. Valid commands: files-sync, files-index, db-sync, db-index, preflight, preflight-assert",
             );
         }
 
         if (
             !in_array($command, [
-                "files-sync-initial",
-                "files-sync-delta",
+                "files-sync",
                 "files-index",
                 "db-sync",
                 "db-index",
@@ -1580,7 +1579,7 @@ class ImportClient
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync-initial, files-sync-delta, files-index, db-sync, db-index, preflight, preflight-assert",
+                "Invalid command: {$command}. Valid commands: files-sync, files-index, db-sync, db-index, preflight, preflight-assert",
             );
         }
 
@@ -1628,6 +1627,14 @@ class ImportClient
         // All other commands require a prior preflight run.
         $this->require_preflight();
 
+        // Handle --restart: clear state for the command and exit immediately.
+        // To restart a sync, run `<command> --restart` (clears state), then
+        // run `<command>` again (starts fresh).
+        if ($restart) {
+            $this->handle_restart($command);
+            return;
+        }
+
         // Dispatch to appropriate command handler
         try {
             switch ($command) {
@@ -1635,23 +1642,19 @@ class ImportClient
                     $this->run_preflight_assert();
                     return;
 
-                case "files-sync-initial":
-                    $this->run_files_sync_initial($restart);
-                    break;
-
-                case "files-sync-delta":
-                    $this->run_files_sync_delta($restart);
+                case "files-sync":
+                    $this->run_files_sync();
                     break;
 
                 case "files-index":
-                    $this->run_files_index($restart);
+                    $this->run_files_index();
                     break;
 
                 case "db-sync":
-                    $this->run_db_sync($restart);
+                    $this->run_db_sync();
                     break;
                 case "db-index":
-                    $this->run_db_index($restart);
+                    $this->run_db_index();
                     break;
             }
 
@@ -1663,6 +1666,113 @@ class ImportClient
             ]);
             throw $e;
         }
+    }
+
+    /**
+     * Handle --restart for any command: clear relevant state and exit.
+     *
+     * Each command has its own set of files and state fields that need clearing.
+     * After clearing, we save state and return — the caller exits without
+     * running the actual sync. The user then runs the command again to start fresh.
+     */
+    private function handle_restart(string $command): void
+    {
+        switch ($command) {
+            case "files-sync":
+                $this->audit_log(
+                    "RESTART | Clearing files-sync state",
+                    true,
+                );
+                $this->reset_state();
+
+                if (file_exists($this->index_file)) {
+                    @unlink($this->index_file);
+                    $this->audit_log("FILE DELETE | {$this->index_file}");
+                }
+                if (
+                    $this->index_updates_file &&
+                    file_exists($this->index_updates_file)
+                ) {
+                    @unlink($this->index_updates_file);
+                    $this->audit_log("FILE DELETE | {$this->index_updates_file}");
+                }
+                $this->index_updates_file = null;
+                $this->index_updates_handle = null;
+                $this->index_updates_count = 0;
+
+                if (file_exists($this->remote_index_file)) {
+                    @unlink($this->remote_index_file);
+                    $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+                }
+                if (file_exists($this->download_list_file)) {
+                    @unlink($this->download_list_file);
+                    $this->audit_log("FILE DELETE | {$this->download_list_file}");
+                }
+                if (file_exists($this->volatile_files_file)) {
+                    @unlink($this->volatile_files_file);
+                    $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
+                }
+                $this->state["index"] = $this->default_state()["index"];
+                $this->state["fetch"] = $this->default_state()["fetch"];
+                $this->save_state($this->state);
+                break;
+
+            case "files-index":
+                $this->audit_log(
+                    "RESTART | Clearing files-index state",
+                    true,
+                );
+                $this->state["command"] = "files-index";
+                $this->state["status"] = null;
+                $this->state["stage"] = null;
+                $this->state["index"] = $this->default_state()["index"];
+                if (file_exists($this->remote_index_file)) {
+                    @unlink($this->remote_index_file);
+                    $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+                }
+                $this->save_state($this->state);
+                break;
+
+            case "db-sync":
+                $this->audit_log(
+                    "RESTART | Clearing db-sync state",
+                    true,
+                );
+                $this->reset_state();
+                $this->save_state($this->state);
+
+                $sql_file = $this->local_path . "/db.sql";
+                if (file_exists($sql_file)) {
+                    unlink($sql_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$sql_file} | restart db-sync",
+                    );
+                }
+                break;
+
+            case "db-index":
+                $this->audit_log(
+                    "RESTART | Clearing db-index state",
+                    true,
+                );
+                $this->reset_state();
+                $this->save_state($this->state);
+
+                $tables_file = $this->local_path . "/db-tables.jsonl";
+                if (file_exists($tables_file)) {
+                    unlink($tables_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$tables_file} | restart db-index",
+                    );
+                }
+                break;
+        }
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            echo "State cleared for {$command}. Run the command again to start fresh.\n";
+        }
+
+        $this->output_progress(["status" => "restarted"]);
     }
 
     /**
@@ -2045,98 +2155,48 @@ class ImportClient
     }
 
     /**
-     * Command: files-sync-initial
+     * Command: files-sync
      *
-     * Rules:
-     * - If target directory is empty: request new session id, start sync
-     * - If not empty and last state is files-sync-initial: resume using saved state
-     * - If restart flag: clear state and start fresh
-     * - Otherwise: error
+     * Unified file synchronization that auto-detects initial vs delta mode:
+     * - No prior completed files-sync → initial mode (index all, fetch all)
+     * - Prior completed files-sync → delta mode (re-index, diff, fetch changes)
+     * - In-progress files-sync → resume from saved state
+     *
+     * Both modes share the same pipeline: index → diff → fetch.
      */
-    private function run_files_sync_initial(bool $restart): void
+    private function run_files_sync(): void
     {
         $state_command = $this->state["command"] ?? null;
-        $has_progress =
-            $state_command === "files-sync-initial" &&
-            ($this->state["status"] ?? null) !== null &&
-            ($this->state["status"] ?? null) !== "complete";
         $current_status =
-            $state_command === "files-sync-initial"
+            $state_command === "files-sync"
                 ? $this->state["status"] ?? null
                 : null;
+        $has_progress =
+            $state_command === "files-sync" &&
+            $current_status !== null &&
+            $current_status !== "complete";
+
+        $this->recover_index_updates();
+
+        // Already completed → start a delta sync (re-index, diff, fetch changes)
+        if ($current_status === "complete") {
+            $this->start_delta_sync();
+            return;
+        }
+
         $filesystem_root = $this->local_path . "/filesystem-root";
         $is_empty =
             !is_dir($filesystem_root) || count(scandir($filesystem_root)) <= 2; // only . and ..
 
-        // Handle restart flag
-        if ($restart) {
-            $this->audit_log(
-                "RESTART | Clearing files-sync-initial state and starting fresh",
-                true,
-            );
-            $this->reset_state();
-
-            if (file_exists($this->index_file)) {
-                @unlink($this->index_file);
-                $this->audit_log("FILE DELETE | {$this->index_file}");
-            }
-            if (
-                $this->index_updates_file &&
-                file_exists($this->index_updates_file)
-            ) {
-                @unlink($this->index_updates_file);
-                $this->audit_log("FILE DELETE | {$this->index_updates_file}");
-            }
-            $this->index_updates_file = null;
-            $this->index_updates_handle = null;
-            $this->index_updates_count = 0;
-
-            if (file_exists($this->remote_index_file)) {
-                @unlink($this->remote_index_file);
-                $this->audit_log("FILE DELETE | {$this->remote_index_file}");
-            }
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
-                $this->audit_log("FILE DELETE | {$this->download_list_file}");
-            }
-            if (file_exists($this->volatile_files_file)) {
-                @unlink($this->volatile_files_file);
-                $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
-            }
-            $this->state["index"] = $this->default_state()["index"];
-            $this->state["fetch"] = $this->default_state()["fetch"];
-            $this->save_state($this->state);
-            $has_progress = false;
-            $current_status = null;
-        }
-
-        $this->recover_index_updates();
-
-        // Check if already completed
-        if ($current_status === "complete" && !$restart) {
-            throw new RuntimeException(
-                "files-sync-initial already completed. Use --restart flag to start over.",
-            );
-        }
-
-        // Validate state: if no saved progress and target not empty, refuse to proceed
-        if (!$has_progress && !$is_empty) {
-            throw new RuntimeException(
-                "Target directory is not empty and no cursor found. " .
-                    "Either clear the target directory or use --restart flag.",
-            );
-        }
-
-        // Start new run only when no saved progress is available
+        // Resuming an in-progress sync
         if ($has_progress) {
-            // Resuming - reset counter to 0 for this session (we'll count new completions)
             $this->files_imported = 0;
             $index_size = $this->index_count();
 
             $stage = $this->state["stage"] ?? "index";
             $this->audit_log(
                 sprintf(
-                    "RESUME files-sync-initial | stage=%s | indexed_files=%d",
+                    "RESUME files-sync | stage=%s | indexed_files=%d",
                     $stage,
                     $index_size,
                 ),
@@ -2144,12 +2204,20 @@ class ImportClient
             );
 
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Resuming files-sync-initial\n";
+                echo "Resuming files-sync\n";
                 echo "  Stage: {$stage}\n";
                 echo "  Already indexed: {$index_size} files\n";
             }
         } else {
-            $this->state["command"] = "files-sync-initial";
+            // Starting fresh — validate that target directory is empty
+            if (!$is_empty) {
+                throw new RuntimeException(
+                    "Target directory is not empty and no cursor found. " .
+                        "Either clear the target directory or use --restart flag.",
+                );
+            }
+
+            $this->state["command"] = "files-sync";
             $this->state["status"] = "in_progress";
             $this->state["stage"] = "index";
             $this->state["diff"] = $this->default_state()["diff"];
@@ -2157,16 +2225,112 @@ class ImportClient
             $this->state["fetch"] = $this->default_state()["fetch"];
             $this->save_state($this->state);
 
-            $this->audit_log("START files-sync-initial", true);
+            $this->audit_log("START files-sync", true);
 
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Starting files-sync-initial\n";
+                echo "Starting files-sync\n";
             }
         }
 
-        $this->state["command"] = "files-sync-initial";
+        $this->state["command"] = "files-sync";
         $this->save_state($this->state);
 
+        $this->run_files_sync_pipeline();
+
+        // Pipeline returns early with partial status if interrupted
+        if (($this->state["status"] ?? null) === "partial") {
+            return;
+        }
+
+        $this->state["status"] = "complete";
+        $this->save_state($this->state);
+
+        $this->clear_progress_line();
+        $index_size = $this->index_count();
+        $this->audit_log(
+            sprintf("files-sync complete: %d files indexed", $index_size),
+            true,
+        );
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            echo "files-sync complete: {$index_size} files indexed\n";
+            echo "Audit log: {$this->audit_log}\n";
+        }
+
+        $this->report_volatile_files();
+    }
+
+    /**
+     * Start a delta sync after a previously completed files-sync.
+     *
+     * Clears the cursor and remote index so we re-index from scratch,
+     * then runs the same index → diff → fetch pipeline.
+     */
+    private function start_delta_sync(): void
+    {
+        // When starting the index stage fresh,
+        // clear the cursor so we don't reuse a stale cursor from the initial sync
+        $stage = "index";
+
+        $this->state["status"] = "in_progress";
+        $this->state["command"] = "files-sync";
+        $this->state["stage"] = $stage;
+        $this->audit_log(
+            "DELTA INDEX FRESH | clearing index state and remote index for new delta sync",
+        );
+        $this->state["index"] = $this->default_state()["index"];
+        if (file_exists($this->remote_index_file)) {
+            @unlink($this->remote_index_file);
+            $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+        }
+        $this->save_state($this->state);
+
+        $this->files_imported = 0;
+        $index_size = $this->index_count();
+        $this->audit_log(
+            "START files-sync (delta) | index_files={$index_size} | stage={$stage}",
+            true,
+        );
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            echo "Starting files-sync (delta)\n";
+            echo "  Index contains: {$index_size} files\n";
+            echo "  Stage: {$stage}\n";
+        }
+
+        $this->run_files_sync_pipeline();
+
+        // Pipeline returns early with partial status if interrupted
+        if (($this->state["status"] ?? null) === "partial") {
+            return;
+        }
+
+        $this->state["status"] = "complete";
+        $this->save_state($this->state);
+
+        $this->clear_progress_line();
+        $index_size = $this->index_count();
+        $this->audit_log(
+            sprintf("files-sync (delta) complete: %d files indexed", $index_size),
+            true,
+        );
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            echo "files-sync (delta) complete: {$index_size} files indexed\n";
+            echo "Audit log: {$this->audit_log}\n";
+        }
+
+        $this->report_volatile_files();
+    }
+
+    /**
+     * Shared index → diff → fetch pipeline used by both initial and delta syncs.
+     *
+     * Reads the current stage from state and runs each stage in sequence.
+     * Returns early (with partial status) if any stage doesn't complete.
+     */
+    private function run_files_sync_pipeline(): void
+    {
         $stage = $this->state["stage"] ?? "index";
 
         if ($stage === "index") {
@@ -2245,218 +2409,6 @@ class ImportClient
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
-
-        $this->state["status"] = "complete";
-        $this->save_state($this->state);
-
-        $this->clear_progress_line();
-        $index_size = $this->index_count();
-        $this->audit_log(
-            sprintf("files-sync-initial complete: %d files indexed", $index_size),
-            true,
-        );
-
-        if ($this->is_tty && !$this->verbose_mode) {
-            echo "files-sync-initial complete: {$index_size} files indexed\n";
-            echo "Audit log: {$this->audit_log}\n";
-        }
-
-        $this->report_volatile_files();
-    }
-
-    /**
-     * Command: files-sync-delta
-     *
-     * Rules:
-     * - If has index and just finished files-sync-initial: download remote index
-     * - Diff locally and build a download list
-     * - Fetch only changed/new files
-     * - If already completed: require --restart flag
-     * - Otherwise: error
-     */
-    private function run_files_sync_delta(bool $restart): void
-    {
-        $state_command = $this->state["command"] ?? null;
-        $current_status =
-            $state_command === "files-sync-delta"
-                ? $this->state["status"] ?? null
-                : null;
-        $stage =
-            $state_command === "files-sync-delta"
-                ? $this->state["stage"] ?? null
-                : null;
-
-        if ($restart) {
-            $this->audit_log(
-                "RESTART | Clearing files-sync-delta state and starting fresh",
-                true,
-            );
-            $this->reset_state();
-            if (file_exists($this->remote_index_file)) {
-                @unlink($this->remote_index_file);
-                $this->audit_log("FILE DELETE | {$this->remote_index_file}");
-            }
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
-                $this->audit_log("FILE DELETE | {$this->download_list_file}");
-            }
-            $this->state["index"] = $this->default_state()["index"];
-            $this->state["fetch"] = $this->default_state()["fetch"];
-            $this->save_state($this->state);
-            $current_status = null;
-            $stage = null;
-        }
-
-        $this->recover_index_updates();
-
-        if ($current_status === "complete" && !$restart) {
-            throw new RuntimeException(
-                "files-sync-delta already completed. Use --restart flag to start a new delta sync.",
-            );
-        }
-
-        if ($this->index_count() === 0) {
-            throw new RuntimeException(
-                "No import index found. You must run files-sync-initial first.",
-            );
-        }
-
-        if (
-            !file_exists($this->index_file) ||
-            filesize($this->index_file) === 0
-        ) {
-            throw new RuntimeException(
-                "files-sync-initial has not completed. Run files-sync-initial first.",
-            );
-        }
-
-        // When starting the index stage fresh (not resuming a previous delta run),
-        // clear the cursor so we don't reuse a stale cursor from files-sync-initial
-        $starting_index_fresh = $stage === null;
-        $stage = $stage ?? "index";
-
-        $this->state["status"] = "in_progress";
-        $this->state["command"] = "files-sync-delta";
-        $this->state["stage"] = $stage;
-        if ($starting_index_fresh) {
-            $this->audit_log(
-                "DELTA INDEX FRESH | clearing index state and remote index for new delta sync",
-            );
-            $this->state["index"] = $this->default_state()["index"];
-            if (file_exists($this->remote_index_file)) {
-                @unlink($this->remote_index_file);
-                $this->audit_log("FILE DELETE | {$this->remote_index_file}");
-            }
-        }
-        $this->save_state($this->state);
-
-        $this->files_imported = 0;
-        $index_size = $this->index_count();
-        $this->audit_log(
-            "START files-sync-delta | index_files={$index_size} | stage={$stage}",
-            true,
-        );
-
-        if ($this->is_tty && !$this->verbose_mode) {
-            echo "Starting files-sync-delta\n";
-            echo "  Index contains: {$index_size} files\n";
-            echo "  Stage: {$stage}\n";
-        }
-
-        if ($stage === "index") {
-            $complete = $this->download_remote_index();
-            if (!$complete) {
-                $this->state["status"] = "partial";
-                $this->save_state($this->state);
-                return;
-            }
-
-            if ($this->follow_symlinks) {
-                $this->discover_symlink_targets();
-                if ($this->shutdown_requested) {
-                    $this->state["status"] = "partial";
-                    $this->save_state($this->state);
-                    return;
-                }
-            }
-
-            $this->sort_index_file($this->remote_index_file);
-            $this->state["stage"] = "diff";
-            $this->state["diff"] = $this->default_state()["diff"];
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
-                );
-            }
-            $this->save_state($this->state);
-            $stage = "diff";
-        }
-
-        if ($stage === "diff") {
-            $complete = $this->diff_indexes_and_build_fetch_list();
-            if (!$complete) {
-                $this->state["status"] = "partial";
-                $this->save_state($this->state);
-                return;
-            }
-
-            $has_downloads =
-                file_exists($this->download_list_file) &&
-                filesize($this->download_list_file) > 0;
-            $this->state["stage"] = $has_downloads ? "fetch" : null;
-            $this->save_state($this->state);
-            $stage = $has_downloads ? "fetch" : null;
-
-            // Clean up empty download list when no files need fetching
-            if (!$has_downloads && file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | no files to fetch",
-                );
-            }
-        }
-
-        if ($stage === "fetch") {
-            $complete = $this->download_files_from_list();
-            if (!$complete) {
-                $this->state["status"] = "partial";
-                $this->save_state($this->state);
-                return;
-            }
-            $this->state["stage"] = null;
-            $this->state["fetch"] = $this->default_state()["fetch"];
-            $this->save_state($this->state);
-
-            // Clean up download list after successful fetch
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | fetch complete",
-                );
-            }
-        }
-
-        if ($this->follow_symlinks) {
-            $this->recreate_intermediate_symlinks();
-        }
-
-        $this->state["status"] = "complete";
-        $this->save_state($this->state);
-
-        $this->clear_progress_line();
-        $index_size = $this->index_count();
-        $this->audit_log(
-            sprintf("files-sync-delta complete: %d files indexed", $index_size),
-            true,
-        );
-
-        if ($this->is_tty && !$this->verbose_mode) {
-            echo "files-sync-delta complete: {$index_size} files indexed\n";
-            echo "Audit log: {$this->audit_log}\n";
-        }
-
-        $this->report_volatile_files();
     }
 
     /**
@@ -2467,7 +2419,7 @@ class ImportClient
      * - If already completed: require --restart flag
      * - If restart flag: clear remote index file and index cursor
      */
-    private function run_files_index(bool $restart): void
+    private function run_files_index(): void
     {
         $state_command = $this->state["command"] ?? null;
         $current_status =
@@ -2475,24 +2427,7 @@ class ImportClient
                 ? $this->state["status"] ?? null
                 : null;
 
-        if ($restart) {
-            $this->audit_log(
-                "RESTART | Clearing files-index state and starting fresh",
-                true,
-            );
-            $this->state["command"] = "files-index";
-            $this->state["status"] = null;
-            $this->state["stage"] = null;
-            $this->state["index"] = $this->default_state()["index"];
-            if (file_exists($this->remote_index_file)) {
-                @unlink($this->remote_index_file);
-                $this->audit_log("FILE DELETE | {$this->remote_index_file}");
-            }
-            $this->save_state($this->state);
-            $current_status = null;
-        }
-
-        if ($current_status === "complete" && !$restart) {
+        if ($current_status === "complete") {
             throw new RuntimeException(
                 "files-index already completed. Use --restart flag to start over.",
             );
@@ -2935,7 +2870,7 @@ class ImportClient
      * - If db.sql missing but state says complete: warn and require --restart flag
      * - Otherwise: error
      */
-    private function run_db_sync(bool $restart): void
+    private function run_db_sync(): void
     {
         $state_command = $this->state["command"] ?? null;
         $sql_file = $this->local_path . "/db.sql";
@@ -2949,34 +2884,13 @@ class ImportClient
                 : null;
         $sql_exists = file_exists($sql_file);
 
-        // Handle restart flag
-        if ($restart) {
-            $this->audit_log(
-                "RESTART | Clearing db-sync state and starting fresh",
-                true,
-            );
-            $this->reset_state();
-            $this->save_state($this->state);
-            $has_cursor = false;
-            $current_status = null;
-
-            // Remove existing SQL file on restart
-            if ($sql_exists) {
-                unlink($sql_file);
-                $this->audit_log(
-                    "FILE DELETE | {$sql_file} | restart db-sync",
-                );
-                $sql_exists = false;
-            }
-        }
-
         // Check if already completed
         if ($current_status === "complete") {
-            if ($sql_exists && !$restart) {
+            if ($sql_exists) {
                 throw new RuntimeException(
                     "db-sync already completed and db.sql exists. Use --restart flag to start over.",
                 );
-            } elseif (!$sql_exists && !$restart) {
+            } else {
                 throw new RuntimeException(
                     "db-sync marked complete but db.sql is missing. Use --restart flag to re-sync.",
                 );
@@ -3041,7 +2955,7 @@ class ImportClient
      *
      * Streams table metadata (name/rows/size) for planning and diagnostics.
      */
-    private function run_db_index(bool $restart): void
+    private function run_db_index(): void
     {
         $state_command = $this->state["command"] ?? null;
         $tables_file = $this->local_path . "/db-tables.jsonl";
@@ -3055,31 +2969,12 @@ class ImportClient
                 : null;
         $tables_exists = file_exists($tables_file);
 
-        if ($restart) {
-            $this->audit_log(
-                "RESTART | Clearing db-index state and starting fresh",
-                true,
-            );
-            $this->reset_state();
-            $this->save_state($this->state);
-            $has_cursor = false;
-            $current_status = null;
-
-            if ($tables_exists) {
-                unlink($tables_file);
-                $this->audit_log(
-                    "FILE DELETE | {$tables_file} | restart db-index",
-                );
-                $tables_exists = false;
-            }
-        }
-
         if ($current_status === "complete") {
-            if ($tables_exists && !$restart) {
+            if ($tables_exists) {
                 throw new RuntimeException(
                     "db-index already completed and db-tables.jsonl exists. Use --restart flag to start over.",
                 );
-            } elseif (!$tables_exists && !$restart) {
+            } else {
                 throw new RuntimeException(
                     "db-index marked complete but db-tables.jsonl is missing. Use --restart flag to re-run.",
                 );
@@ -6194,41 +6089,29 @@ if (
     // shown in the main help, and a detailed help block shown when you
     // run `php import.php <command> <url> <local-path> --help`.
     $command_help = [
-        "files-sync-initial" => [
-            "short" => "Download the full directory tree",
+        "files-sync" => [
+            "short" => "Sync files (auto-detects initial vs delta)",
             "detail" =>
-                "Streams every file from the remote server into <local-path>/filesystem-root/.\n" .
-                "Automatically resumes from the last saved cursor if interrupted.\n" .
+                "Streams files from the remote server into <local-path>/filesystem-root/.\n" .
+                "Auto-detects whether to run an initial or delta sync based on state:\n" .
+                "\n" .
+                "  - No prior sync: downloads the full directory tree (initial)\n" .
+                "  - Completed sync: re-indexes and downloads only changes (delta)\n" .
+                "  - Interrupted sync: resumes from the last saved cursor\n" .
                 "\n" .
                 "Options:\n" .
-                "  --restart          Clear state and start over\n" .
+                "  --restart          Clear state and exit (run again to start fresh)\n" .
                 "  --follow-symlinks  Follow symlinks pointing outside root directories\n" .
                 "  --secret=TOKEN     HMAC shared secret for api.php authentication\n" .
                 "  --verbose, -v      Show detailed request/response logs\n" .
                 "\n" .
                 "Output files:\n" .
-                "  filesystem-root/         Downloaded files\n" .
-                "  .import-index.jsonl      Local file index\n" .
-                "  .import-state.json       Resumable state\n" .
-                "  .import-audit.log        Audit log\n",
-        ],
-        "files-sync-delta" => [
-            "short" => "Download only files changed since last sync",
-            "detail" =>
-                "Requires a completed files-sync-initial. Fetches the remote index,\n" .
-                "compares it against the local index, then downloads changed files\n" .
-                "and deletes files that no longer exist on the remote.\n" .
-                "\n" .
-                "Options:\n" .
-                "  --restart          Clear state and start over\n" .
-                "  --follow-symlinks  Follow symlinks pointing outside root directories\n" .
-                "  --secret=TOKEN     HMAC shared secret for api.php authentication\n" .
-                "  --verbose, -v      Show detailed request/response logs\n" .
-                "\n" .
-                "Output files:\n" .
-                "  filesystem-root/              Updated files\n" .
+                "  filesystem-root/              Downloaded files\n" .
+                "  .import-index.jsonl           Local file index\n" .
                 "  .import-remote-index.jsonl    Remote index snapshot\n" .
-                "  .import-download-list.jsonl   Files pending download\n",
+                "  .import-download-list.jsonl   Files pending download\n" .
+                "  .import-state.json            Resumable state\n" .
+                "  .import-audit.log             Audit log\n",
         ],
         "files-index" => [
             "short" => "Download the remote file index without fetching file contents",
@@ -6237,7 +6120,7 @@ if (
                 "to .import-index.jsonl. Does not download any file data.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --restart        Clear state and start over\n" .
+                "  --restart        Clear state and exit (run again to start fresh)\n" .
                 "  --secret=TOKEN   HMAC shared secret for api.php authentication\n" .
                 "  --verbose, -v    Show detailed request/response logs\n",
         ],
@@ -6248,7 +6131,7 @@ if (
                 "Automatically resumes from the last cursor if interrupted.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --restart                   Clear state and start over\n" .
+                "  --restart                   Clear state and exit (run again to start fresh)\n" .
                 "  --secret=TOKEN              HMAC shared secret for api.php authentication\n" .
                 "  --verbose, -v               Show detailed request/response logs\n" .
                 "  --max-allowed-packet=SIZE   Client max_allowed_packet (e.g. 16M, 64M)\n" .
@@ -6263,7 +6146,7 @@ if (
                 "<local-path>/db-tables.jsonl. Useful for planning and diagnostics.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --restart        Clear state and start over\n" .
+                "  --restart        Clear state and exit (run again to start fresh)\n" .
                 "  --secret=TOKEN   HMAC shared secret for api.php authentication\n" .
                 "  --verbose, -v    Show detailed request/response logs\n" .
                 "\n" .
@@ -6315,13 +6198,14 @@ if (
         echo "\n";
         echo "Global options:\n";
         echo "  --secret=TOKEN       HMAC shared secret for api.php authentication\n";
-        echo "  --restart            Clear state and start over\n";
+        echo "  --restart            Clear state and exit (run again to start fresh)\n";
         echo "  --follow-symlinks    Follow symlinks pointing outside root directories\n";
         echo "  --verbose, -v        Show detailed request/response logs\n";
         echo "  --no-adaptive        Disable adaptive request tuning\n";
         echo "\n";
         echo "State is stored in <local-path>/.import-state.json. Interrupted\n";
-        echo "commands automatically resume. Completed commands require --restart.\n";
+        echo "commands automatically resume. Use --restart to clear state and exit,\n";
+        echo "then run the command again to start fresh.\n";
         exit(1);
     }
 

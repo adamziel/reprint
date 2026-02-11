@@ -28,7 +28,7 @@ describe('Import: Error Messages', () => {
         const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
         const dir = createTempDir('e2e-import-wrong-hmac');
         try {
-            const result = runImporter(url, dir, 'files-sync-initial', {
+            const result = runImporter(url, dir, 'files-sync', {
                 secret: 'wrong-secret-value',
             });
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for wrong HMAC');
@@ -46,7 +46,7 @@ describe('Import: Error Messages', () => {
         const url = 'http://127.0.0.1:19999/api.php?directory=/tmp';
         const dir = createTempDir('e2e-import-unreachable');
         try {
-            const result = runImporter(url, dir, 'files-sync-initial', {
+            const result = runImporter(url, dir, 'files-sync', {
                 secret: 'any-secret',
                 timeout: 15000,
             });
@@ -80,19 +80,19 @@ describe('Import: Error Messages', () => {
         }
     });
 
-    it('files-sync-delta without prior initial fails with useful error', () => {
+    it('files-sync without preflight fails with useful error', () => {
         const site = 'basic';
         const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
         const dir = createTempDir('e2e-import-delta-no-initial');
         try {
-            const result = runImporter(url, dir, 'files-sync-delta', {
+            const result = runImporter(url, dir, 'files-sync', {
                 secret: getSiteSecret(site),
             });
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code');
             const output = (result.stdout + result.stderr).toLowerCase();
             assert.ok(
-                output.includes('initial') || output.includes('files-sync-initial'),
-                `Expected message about needing initial sync, got: ${result.stdout + result.stderr}`
+                output.includes('preflight'),
+                `Expected message about needing preflight, got: ${result.stdout + result.stderr}`
             );
         } finally {
             cleanupTempDir(dir);

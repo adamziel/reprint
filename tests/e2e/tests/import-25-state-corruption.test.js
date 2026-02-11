@@ -40,7 +40,7 @@ describe('Import: State Corruption', () => {
 
         it('importer recovers from corrupted state and completes', () => {
             // The importer detects corrupt JSON, renames the file, and starts fresh
-            const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+            const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0 (graceful recovery)\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -88,14 +88,14 @@ describe('Import: State Corruption', () => {
 
         it('running a different command starts fresh (ignores mismatched state)', () => {
             // The importer sees command mismatch and treats it as a fresh start
-            const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+            const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-            assert.equal(state.command, 'files-sync-initial', 'Expected command to be updated');
+            assert.equal(state.command, 'files-sync', 'Expected command to be updated');
             assert.equal(state.status, 'complete');
         });
     });
@@ -107,7 +107,7 @@ describe('Import: State Corruption', () => {
             tempDir = createTempDir('e2e-state-restart');
             // Write a partial state to simulate interrupted transfer
             writeFileSync(join(tempDir, '.import-state.json'), JSON.stringify({
-                command: 'files-sync-initial',
+                command: 'files-sync',
                 status: 'in_progress',
                 cursor: 'some-old-cursor',
             }));
@@ -117,12 +117,24 @@ describe('Import: State Corruption', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('--restart clears state and starts fresh', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync-initial', {
+        it('--restart clears state and exits', () => {
+            const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--restart'],
             });
             assert.equal(result.exitCode, 0, `Expected exit 0 with --restart\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+
+            const stateFile = join(tempDir, '.import-state.json');
+            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            assert.notEqual(state.status, 'in_progress', 'Expected status to be cleared');
+            assert.ok(!state.cursor, 'Expected cursor to be cleared');
+        });
+
+        it('running after --restart completes fresh sync', () => {
+            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+                secret: getSiteSecret(site),
+            });
+            assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
