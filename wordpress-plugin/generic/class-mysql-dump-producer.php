@@ -1349,7 +1349,7 @@ class MySQLDumpProducer
 
         // Fetch just the chunk we need from the database using SUBSTRING.
         // MySQL's SUBSTRING is 1-indexed, so add 1 to our 0-based offset.
-        $chunk = $this->fetch_column_substring(
+        $chunk = $this->fetch_value_substring_from_the_current_oversized_row(
             $column,
             $byte_offset + 1,
             $chunk_size,
@@ -1365,8 +1365,8 @@ class MySQLDumpProducer
             } elseif (is_numeric($pk_value)) {
                 $where_parts[] = "{$quoted_pk} = {$pk_value}";
             } else {
-                $quoted = $this->db->quote($pk_value);
-                $where_parts[] = "{$quoted_pk} = {$quoted}";
+                // Use FROM_BASE64() to avoid having to quote() the emitted value.
+                $where_parts[] = "{$quoted_pk} = FROM_BASE64('" . base64_encode($pk_value) . "')";
             }
         }
         $where_clause = implode(" AND ", $where_parts);
@@ -1392,7 +1392,7 @@ class MySQLDumpProducer
      * Uses CAST(SUBSTRING(...) AS BINARY) to get raw bytes without charset
      * re-encoding — matching the same CAST approach used in the main SELECT.
      */
-    private function fetch_column_substring(string $column, int $start, int $length): string
+    private function fetch_value_substring_from_the_current_oversized_row(string $column, int $start, int $length): string
     {
         $quoted_table = $this->quote_identifier($this->current_table);
         $quoted_column = $this->quote_identifier($column);
