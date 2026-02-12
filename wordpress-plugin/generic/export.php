@@ -112,46 +112,6 @@ function resolve_db_credentials(array $credential_roots = []): array
         $missing[] = "db_password";
     }
 
-    // Try extracting credentials from wp-config.php when some are still missing.
-    if (!empty($missing) && !empty($credential_roots)) {
-        $wp_credentials = null;
-        if (defined("DB_HOST") && defined("DB_NAME") && defined("DB_USER") && defined("DB_PASSWORD")) {
-            $wp_credentials = [
-                "db_host" => DB_HOST,
-                "db_name" => DB_NAME,
-                "db_user" => DB_USER,
-                "db_password" => DB_PASSWORD,
-            ];
-        } elseif (function_exists('extract_db_credentials_from_wp_config')) {
-            $wp_credentials = extract_db_credentials_from_wp_config($credential_roots);
-        }
-        if ($wp_credentials !== null) {
-            $db_host = $db_host ?: $wp_credentials["db_host"];
-            $db_name = $db_name ?: $wp_credentials["db_name"];
-            $db_user = $db_user ?: $wp_credentials["db_user"];
-            $db_password =
-                ($db_password !== false && $db_password !== null && $db_password !== "")
-                    ? $db_password
-                    : $wp_credentials["db_password"];
-            $wp_config_path = $wp_credentials["wp_config_path"] ?? null;
-            $table_prefix = $wp_credentials["table_prefix"] ?? null;
-
-            $missing = [];
-            if (!$db_host) {
-                $missing[] = "db_host";
-            }
-            if (!$db_name) {
-                $missing[] = "db_name";
-            }
-            if (!$db_user) {
-                $missing[] = "db_user";
-            }
-            if ($db_password === false || $db_password === null || $db_password === "") {
-                $missing[] = "db_password";
-            }
-        }
-    }
-
     if (!empty($missing)) {
         throw new InvalidArgumentException(
             "Database credentials not found. Please provide via environment variables, " .
@@ -1012,11 +972,16 @@ function resolve_directories(array $config): array
         : [$directories_input];
 
     foreach ($dir_list as $directory) {
+        // @TODO: Do we need this? And if yes, shouldn't we expand every path segment like that?
         if ($directory[0] === "~") {
             $home = getenv("HOME") ?: (getenv("USERPROFILE") ?: "/");
             $directory = $home . substr($directory, 1);
         }
 
+        // Make relative paths absolute.
+        // @TODO: Why is __DIR__ used here? Shouldn't it be relative to something else?
+        // @TODO: Why would we get a relative path in here at all? Should we just refuse to
+        //        accept relative paths at entirely?
         if ($directory[0] !== "/") {
             $directory = __DIR__ . "/" . $directory;
         }
@@ -1029,12 +994,7 @@ function resolve_directories(array $config): array
                     getcwd() .
                     "\n" .
                     "Script directory: " .
-                    __DIR__ .
-                    "\n" .
-                    "User: " .
-                    (function_exists("posix_getpwuid")
-                        ? posix_getpwuid(posix_geteuid())["name"]
-                        : "unknown"),
+                    __DIR__
             );
         }
 
@@ -1913,7 +1873,6 @@ function stream_file_producer(
     float $memory_threshold,
     array $config = []
 ): array {
-    global $streaming_context;
     prepare_streaming_response();
 
     ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
@@ -2019,124 +1978,124 @@ function stream_file_producer(
             $cursor = $producer->get_reentrancy_cursor();
             $last_cursor = $cursor;
 
-        if ($chunk_type === "directory") {
-            $part =
-                "--{$boundary}\r\n" .
-                "Content-Type: application/octet-stream\r\n" .
-                "Content-Length: 0\r\n" .
-                "X-Chunk-Type: directory\r\n" .
-                "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n";
-            if (isset($chunk["ctime"])) {
-                $part .= "X-Directory-Ctime: " . $chunk["ctime"] . "\r\n";
-            }
-            $gz->write($part . "\r\n\r\n");
-            $gz->sync();
-        } elseif ($chunk_type === "symlink") {
-            $gz->write(
-                "--{$boundary}\r\n" .
-                "Content-Type: application/octet-stream\r\n" .
-                "Content-Length: 0\r\n" .
-                "X-Chunk-Type: symlink\r\n" .
-                "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                "X-Symlink-Path: " . base64_encode($chunk["path"]) . "\r\n" .
-                "X-Symlink-Target: " . base64_encode($chunk["target"]) . "\r\n" .
-                "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n" .
-                "\r\n\r\n",
-            );
-            $gz->sync();
-        } elseif ($chunk_type === "index") {
-            $gz->write(
-                "--{$boundary}\r\n" .
-                "Content-Type: application/octet-stream\r\n" .
-                "Content-Length: 0\r\n" .
-                "X-Chunk-Type: index\r\n" .
-                "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                "X-Index-Path: " . base64_encode($chunk["path"]) . "\r\n" .
-                "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
-                "X-File-Size: " . $chunk["size"] . "\r\n" .
-                "\r\n\r\n",
-            );
-            $gz->sync();
-        } elseif ($chunk_type === "missing") {
-            $gz->write(
-                "--{$boundary}\r\n" .
-                "Content-Type: application/octet-stream\r\n" .
-                "Content-Length: 0\r\n" .
-                "X-Chunk-Type: missing\r\n" .
-                "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n" .
-                "\r\n\r\n",
-            );
-            $gz->sync();
-        } elseif ($chunk_type === "error") {
-            $payload = [
-                "error_type" => $chunk["error_type"] ?? "unknown",
-                "path" => base64_encode($chunk["path"] ?? ""),
-                "message" => $chunk["message"] ?? "Error",
-            ];
-            if (isset($chunk["expected_ctime"])) {
-                $payload["expected_ctime"] = $chunk["expected_ctime"];
-            }
-            if (isset($chunk["actual_ctime"])) {
-                $payload["actual_ctime"] = $chunk["actual_ctime"];
-            }
-            $json = json_encode_or_throw($payload);
-            $gz->write(
-                "--{$boundary}\r\n" .
-                "Content-Type: application/json\r\n" .
-                "Content-Length: " . strlen($json) . "\r\n" .
-                "X-Chunk-Type: error\r\n" .
-                "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                "\r\n" .
-                $json . "\r\n",
-            );
-            $gz->sync();
-        } else {
-            // E2E test hook: before file chunk is emitted
-            if (getenv('SITE_EXPORT_TEST_MODE')) {
-                $hook_data = $chunk["data"];
-                $hook_args = [$chunk["path"], $chunk["offset"], &$hook_data];
-                _e2e_call_hook('test_hook_before_file_chunk', $hook_args);
-                $chunk["data"] = $hook_data;
-            }
-
-            $chunks_processed++;
-            $bytes_processed += strlen($chunk["data"]);
-            if ($chunk["is_first_chunk"]) {
-                $files_completed++;
-            }
-
-            $data = $chunk["data"];
-
-            $headers =
-                "--{$boundary}\r\n" .
-                "Content-Type: application/octet-stream\r\n" .
-                "Content-Length: " . strlen($data) . "\r\n" .
-                "X-Chunk-Type: file\r\n" .
-                "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n" .
-                "X-File-Size: " . $chunk["size"] . "\r\n" .
-                "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
-                "X-Chunk-Offset: " . $chunk["offset"] . "\r\n" .
-                "X-Chunk-Size: " . strlen($data) . "\r\n" .
-                "X-First-Chunk: " . ($chunk["is_first_chunk"] ? "1" : "0") . "\r\n" .
-                "X-Last-Chunk: " . ($chunk["is_last_chunk"] ? "1" : "0") . "\r\n";
-            if (!empty($chunk["file_changed"])) {
-                $headers .= "X-File-Changed: 1\r\n";
-                if ($chunk["change_ctime"] !== null) {
-                    $headers .= "X-File-Change-Ctime: " . $chunk["change_ctime"] . "\r\n";
+            if ($chunk_type === "directory") {
+                $part =
+                    "--{$boundary}\r\n" .
+                    "Content-Type: application/octet-stream\r\n" .
+                    "Content-Length: 0\r\n" .
+                    "X-Chunk-Type: directory\r\n" .
+                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n";
+                if (isset($chunk["ctime"])) {
+                    $part .= "X-Directory-Ctime: " . $chunk["ctime"] . "\r\n";
                 }
-                if ($chunk["change_size"] !== null) {
-                    $headers .= "X-File-Change-Size: " . $chunk["change_size"] . "\r\n";
+                $gz->write($part . "\r\n\r\n");
+                $gz->sync();
+            } elseif ($chunk_type === "symlink") {
+                $gz->write(
+                    "--{$boundary}\r\n" .
+                    "Content-Type: application/octet-stream\r\n" .
+                    "Content-Length: 0\r\n" .
+                    "X-Chunk-Type: symlink\r\n" .
+                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-Symlink-Path: " . base64_encode($chunk["path"]) . "\r\n" .
+                    "X-Symlink-Target: " . base64_encode($chunk["target"]) . "\r\n" .
+                    "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n" .
+                    "\r\n\r\n",
+                );
+                $gz->sync();
+            } elseif ($chunk_type === "index") {
+                $gz->write(
+                    "--{$boundary}\r\n" .
+                    "Content-Type: application/octet-stream\r\n" .
+                    "Content-Length: 0\r\n" .
+                    "X-Chunk-Type: index\r\n" .
+                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-Index-Path: " . base64_encode($chunk["path"]) . "\r\n" .
+                    "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
+                    "X-File-Size: " . $chunk["size"] . "\r\n" .
+                    "\r\n\r\n",
+                );
+                $gz->sync();
+            } elseif ($chunk_type === "missing") {
+                $gz->write(
+                    "--{$boundary}\r\n" .
+                    "Content-Type: application/octet-stream\r\n" .
+                    "Content-Length: 0\r\n" .
+                    "X-Chunk-Type: missing\r\n" .
+                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n" .
+                    "\r\n\r\n",
+                );
+                $gz->sync();
+            } elseif ($chunk_type === "error") {
+                $payload = [
+                    "error_type" => $chunk["error_type"] ?? "unknown",
+                    "path" => base64_encode($chunk["path"] ?? ""),
+                    "message" => $chunk["message"] ?? "Error",
+                ];
+                if (isset($chunk["expected_ctime"])) {
+                    $payload["expected_ctime"] = $chunk["expected_ctime"];
                 }
+                if (isset($chunk["actual_ctime"])) {
+                    $payload["actual_ctime"] = $chunk["actual_ctime"];
+                }
+                $json = json_encode_or_throw($payload);
+                $gz->write(
+                    "--{$boundary}\r\n" .
+                    "Content-Type: application/json\r\n" .
+                    "Content-Length: " . strlen($json) . "\r\n" .
+                    "X-Chunk-Type: error\r\n" .
+                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "\r\n" .
+                    $json . "\r\n",
+                );
+                $gz->sync();
+            } else {
+                // E2E test hook: before file chunk is emitted
+                if (getenv('SITE_EXPORT_TEST_MODE')) {
+                    $hook_data = $chunk["data"];
+                    $hook_args = [$chunk["path"], $chunk["offset"], &$hook_data];
+                    _e2e_call_hook('test_hook_before_file_chunk', $hook_args);
+                    $chunk["data"] = $hook_data;
+                }
+
+                $chunks_processed++;
+                $bytes_processed += strlen($chunk["data"]);
+                if ($chunk["is_first_chunk"]) {
+                    $files_completed++;
+                }
+
+                $data = $chunk["data"];
+
+                $headers =
+                    "--{$boundary}\r\n" .
+                    "Content-Type: application/octet-stream\r\n" .
+                    "Content-Length: " . strlen($data) . "\r\n" .
+                    "X-Chunk-Type: file\r\n" .
+                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n" .
+                    "X-File-Size: " . $chunk["size"] . "\r\n" .
+                    "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
+                    "X-Chunk-Offset: " . $chunk["offset"] . "\r\n" .
+                    "X-Chunk-Size: " . strlen($data) . "\r\n" .
+                    "X-First-Chunk: " . ($chunk["is_first_chunk"] ? "1" : "0") . "\r\n" .
+                    "X-Last-Chunk: " . ($chunk["is_last_chunk"] ? "1" : "0") . "\r\n";
+                if (!empty($chunk["file_changed"])) {
+                    $headers .= "X-File-Changed: 1\r\n";
+                    if ($chunk["change_ctime"] !== null) {
+                        $headers .= "X-File-Change-Ctime: " . $chunk["change_ctime"] . "\r\n";
+                    }
+                    if ($chunk["change_size"] !== null) {
+                        $headers .= "X-File-Change-Size: " . $chunk["change_size"] . "\r\n";
+                    }
+                }
+                $gz->write($headers . "\r\n");
+                $gz->write($data);
+                $gz->write("\r\n");
+                $gz->sync();
             }
-            $gz->write($headers . "\r\n");
-            $gz->write($data);
-            $gz->write("\r\n");
-            $gz->sync();
         }
-    }
     } catch (Throwable $e) {
         $aborted = true;
         $abort_payload = [
@@ -2149,6 +2108,10 @@ function stream_file_producer(
     // Best-effort error and completion chunks — the client already has the
     // data chunks. If the stream is broken at this point, log and move on.
     try {
+        // @TODO: What if the exception was thrown right after the previous chunk header
+        //        and the client is still consuming the data? It would consume this chunk
+        //        header as the data. We should try and backfill the previous content-length
+        //        with zeros if possible.
         if ($abort_payload !== null) {
             $json = json_encode_or_throw($abort_payload);
             $gz->write(
@@ -2243,6 +2206,7 @@ function encode_index_stack(array $stack): array
  */
 function discover_path_symlinks(string $path): array
 {
+    // @TODO: Understand this thoroughly
     $entries = [];
     $parts = explode("/", $path);
     $current = "";
@@ -2648,6 +2612,7 @@ function endpoint_file_index(
                     // Only record the target for directory symlinks — the client
                     // uses targets to discover additional directories to index,
                     // so file symlink targets are not useful.
+                    // @TODO: Understand this thoroughly.
                     $resolved_target = @realpath($path);
                     if (
                         $resolved_target !== false &&
@@ -2659,6 +2624,7 @@ function endpoint_file_index(
                 } elseif ($mode === 0040000) {
                     $type = "dir";
                 } elseif ($mode !== 0100000) {
+                    // @TODO: What's mode 0100000?
                     $type = "other";
                 }
 
@@ -2674,6 +2640,9 @@ function endpoint_file_index(
                 if ($link_target !== null && $link_target !== false) {
                     $item["target"] = $link_target;
 
+                    // @TODO: Review this in details and understand / make it a bit more
+                    // readable. It's so opaque
+
                     // Discover intermediate symlinks along the raw readlink()
                     // path.  For example, readlink() may return a relative path
                     // like "../../../wordpress/plugins/akismet/latest" which
@@ -2682,6 +2651,7 @@ function endpoint_file_index(
                     // realpath() jumps straight to /wordpress/..., so we'd never
                     // record the /srv/wordpress intermediate symlink.  By walking
                     // the raw readlink path, discover_path_symlinks() finds it.
+                    // @TODO: Understand this thoroughly.
                     if ($follow_symlinks) {
                         $raw_target = @readlink($path);
                         if ($raw_target !== false && $raw_target !== "") {
@@ -3053,150 +3023,6 @@ function position_after_entry(array $entries, string $after): int
     return $low;
 }
 
-// ============================================================================
-// HTTP Runtime
-// ============================================================================
-
-// Only execute when called directly, not when included as a library.
-if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
-    error_reporting(E_ALL);
-    ini_set("display_errors", 0);
-
-    try {
-        $config = parse_http_config();
-
-        // Cursors arrive base64-encoded (GET param or X-Export-Cursor header)
-        // and are decoded to JSON strings before passing to producers.
-        if (!isset($config["cursor"])) {
-            $config["cursor"] = $_SERVER["HTTP_X_EXPORT_CURSOR"] ?? null;
-        }
-
-        if (
-            isset($config["cursor"]) &&
-            $config["cursor"] !== "" &&
-            $config["cursor"] !== null
-        ) {
-            $cursor_b64 = $config["cursor"];
-
-            $cursor_json = base64_decode($cursor_b64, true);
-            if ($cursor_json === false) {
-                throw new InvalidArgumentException(
-                    "Cursor must be base64-encoded. Received invalid base64: " .
-                        substr($cursor_b64, 0, 50),
-                );
-            }
-
-            $cursor_data = json_decode($cursor_json, true);
-            if (
-                $cursor_data === null &&
-                json_last_error() !== JSON_ERROR_NONE
-            ) {
-                throw new InvalidArgumentException(
-                    "Cursor must be valid JSON after base64 decoding. " .
-                        "JSON error: " .
-                        json_last_error_msg() .
-                        ". " .
-                        "Base64: " .
-                        substr($cursor_b64, 0, 50),
-                );
-            }
-
-            $config["cursor"] = $cursor_json;
-        }
-
-        $endpoint = $config["endpoint"] ?? null;
-        if (!$endpoint) {
-            throw new InvalidArgumentException(
-                "endpoint parameter is required. " .
-                    "Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'db_index', 'preflight'",
-            );
-        }
-
-        $max_execution_time = $config["max_execution_time"] ?? 5;
-        $memory_threshold = $config["memory_threshold"] ?? 0.8;
-
-        $max_execution_time = require_int_range(
-            "max_execution_time",
-            (int) $max_execution_time,
-            1,
-            60,
-        );
-
-        $memory_threshold = require_float_range(
-            "memory_threshold",
-            (float) $memory_threshold,
-            0.1,
-            0.95,
-        );
-
-        $memory_limit = ini_get("memory_limit");
-        if ($memory_limit === "-1") {
-            $max_memory = PHP_INT_MAX;
-        } else {
-            $max_memory = parse_memory_limit($memory_limit);
-        }
-
-        $script_start = microtime(true);
-
-        switch ($endpoint) {
-            case "file_index":
-                $result = endpoint_file_index(
-                    $config,
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                );
-                break;
-
-            case "file_fetch":
-                $result = endpoint_file_fetch(
-                    $config,
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                );
-                break;
-
-            case "sql_chunk":
-                $result = endpoint_sql_chunk(
-                    $config,
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                );
-                break;
-            case "db_index":
-                $result = endpoint_db_index(
-                    $config,
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                );
-                break;
-            case "preflight":
-                $result = endpoint_preflight($config);
-                break;
-
-            default:
-                throw new InvalidArgumentException(
-                    "Invalid endpoint: '{$endpoint}'. " .
-                        "Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'db_index', 'preflight'",
-                );
-        }
-    } catch (Exception $e) {
-        http_response_code(400);
-        header("Content-Type: application/json");
-        echo json_encode([
-            "error" => $e->getMessage(),
-            "trace" => $e->getTraceAsString(),
-        ]);
-    }
-}
-
 /**
  * Builds the config array from HTTP GET/POST parameters and optional JSON body.
  */
@@ -3206,6 +3032,7 @@ function parse_http_config(): array
     $params = array_merge($_GET, $_POST);
 
     $content_type = $_SERVER["CONTENT_TYPE"] ?? "";
+    // @TODO: preg_match, e.g. application/jsonl would pass this test when it shouldn't
     if (strpos($content_type, "application/json") !== false) {
         $json_body = file_get_contents("php://input");
         if ($json_body !== false && $json_body !== "") {

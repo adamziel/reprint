@@ -1311,6 +1311,13 @@ class ImportClient
                         "FILE DELETE | {$sql_file} | abort db-sync",
                     );
                 }
+                $tables_file = $this->local_path . "/db-tables.jsonl";
+                if (file_exists($tables_file)) {
+                    unlink($tables_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$tables_file} | abort db-sync",
+                    );
+                }
                 break;
 
             case "db-index":
@@ -2391,9 +2398,9 @@ class ImportClient
         $state_command = $this->state["command"] ?? null;
         $sql_file = $this->local_path . "/db.sql";
 
-        $has_cursor =
+        $has_progress =
             $state_command === "db-sync" &&
-            !empty($this->state["cursor"] ?? null);
+            ($this->state["status"] ?? null) === "in_progress";
         $current_status =
             $state_command === "db-sync"
                 ? $this->state["status"] ?? null
@@ -2413,13 +2420,30 @@ class ImportClient
             }
         }
 
-        // Starting fresh SQL sync
-        if (!$has_cursor) {
+        if ($has_progress) {
+            $stage = $this->state["stage"] ?? "db-index";
+            $this->audit_log(
+                sprintf(
+                    "RESUME db-sync | stage=%s | cursor=%s",
+                    $stage,
+                    !empty($this->state["cursor"])
+                        ? substr($this->state["cursor"], 0, 20) . "..."
+                        : "none",
+                ),
+                true,
+            );
+
+            if ($this->is_tty && !$this->verbose_mode) {
+                echo "Resuming db-sync (stage: {$stage})\n";
+            }
+        } else {
+            // Starting fresh
             $this->state["command"] = "db-sync";
             $this->state["status"] = "in_progress";
             $this->state["cursor"] = null;
-            $this->state["stage"] = null;
+            $this->state["stage"] = "db-index";
             $this->state["diff"] = $this->default_state()["diff"];
+            $this->state["db_index"] = $this->default_state()["db_index"];
             $this->save_state($this->state);
 
             $this->audit_log("START db-sync", true);
@@ -2427,30 +2451,38 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 echo "Starting db-sync\n";
             }
-        } else {
-            // Resuming SQL sync
-            $this->audit_log(
-                sprintf(
-                    "RESUME db-sync | cursor=%s",
-                    substr($this->state["cursor"], 0, 20) . "...",
-                ),
-                true,
-            );
-
-            if ($this->is_tty && !$this->verbose_mode) {
-                echo "Resuming db-sync\n";
-            }
         }
 
         $this->state["command"] = "db-sync";
         $this->save_state($this->state);
 
+        // Stage 1: db-index (table metadata for progress estimation)
+        $stage = $this->state["stage"] ?? "db-index";
+        if ($stage === "db-index") {
+            $this->output_progress([
+                "status" => "starting",
+                "phase" => "db-index",
+            ]);
+
+            $this->download_db_index();
+
+            $tables = (int) ($this->state["db_index"]["tables"] ?? 0);
+            $this->audit_log(
+                sprintf("db-sync db-index stage complete: %d tables", $tables),
+            );
+
+            // Transition to sql stage
+            $this->state["stage"] = "sql";
+            $this->state["cursor"] = null;
+            $this->save_state($this->state);
+        }
+
+        // Stage 2: SQL dump download
         $this->output_progress([
             "status" => "starting",
             "phase" => "sql",
         ]);
 
-        // Execute SQL sync
         $this->download_sql();
 
         // Mark as complete
