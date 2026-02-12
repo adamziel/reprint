@@ -37,4 +37,5 @@ if (isset($_GET['site-export-api'])) {
     exit;
 }
 
+// Register the settings page.
 require_once __DIR__ . '/wordpress/site-export.php';

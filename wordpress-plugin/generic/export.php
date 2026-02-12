@@ -1,18 +1,13 @@
 <?php
+/**
+ * Unified export API for SQL and file operations.
+ */
+
 // Capture any accidental output before headers are set so we can discard it
 // when switching to streaming mode later.
 if (!ob_get_level()) {
     ob_start();
 }
-/**
- * Unified export API for SQL and file operations.
- *
- * CURSOR ENCODING CONTRACT:
- * - Internal: Cursors are JSON strings (e.g., {"p":"streaming","n":123})
- * - HTTP transmission: Cursors are base64-encoded in X-Cursor header (outgoing) and X-Export-Cursor header (incoming)
- * - This file is responsible for encoding when sending and decoding when receiving
- * - Producers (FileTreeProducer, MySQLDumpProducer) work with JSON strings only, never base64
- */
 
 /**
  * Global streaming context. When set, the error handlers emit error chunks
@@ -68,7 +63,7 @@ function emit_error_chunk($gz, string $boundary, string $message): void
  *
  * Do NOT use inside error/shutdown handlers — those need hardcoded fallback strings.
  */
-function safe_json_encode($value, int $flags = 0): string
+function json_encode_or_throw($value, int $flags = 0): string
 {
     $json = json_encode($value, $flags);
     if ($json === false) {
@@ -192,7 +187,9 @@ if (file_exists(__DIR__ . "/secrets.php")) {
 }
 
 // ============================================================================
-// Test Hook System (only active when SITE_EXPORT_TEST_MODE env var is set)
+// E2E Test Hook System (only active when SITE_EXPORT_TEST_MODE env var is set)
+// We don't want anyone to interfere with the export process, which is why those
+// hooks are not registered in production.
 // ============================================================================
 if (getenv('SITE_EXPORT_TEST_MODE')) {
     /**
@@ -249,58 +246,6 @@ if (
     die("Invalid secret key");
 }
 
-// Uncomment if you want to declare the configuration here instead of
-// passing it via env or $_GET:
-if (false) {
-    define("DB_HOST", "your-db-host");
-    define("DB_USER", "your-db-user");
-    define("DB_PASSWORD", "your-db-password");
-    define("DB_NAME", "your-db-name");
-}
-
-if (!defined("EXPORT_MIN_EXECUTION_TIME")) {
-    define("EXPORT_MIN_EXECUTION_TIME", 1);
-}
-if (!defined("EXPORT_MAX_EXECUTION_TIME")) {
-    define("EXPORT_MAX_EXECUTION_TIME", 60);
-}
-if (!defined("EXPORT_MIN_MEMORY_THRESHOLD")) {
-    define("EXPORT_MIN_MEMORY_THRESHOLD", 0.1);
-}
-if (!defined("EXPORT_MAX_MEMORY_THRESHOLD")) {
-    define("EXPORT_MAX_MEMORY_THRESHOLD", 0.95);
-}
-if (!defined("EXPORT_MIN_CHUNK_SIZE")) {
-    define("EXPORT_MIN_CHUNK_SIZE", 16 * 1024);
-}
-if (!defined("EXPORT_MAX_CHUNK_SIZE")) {
-    define("EXPORT_MAX_CHUNK_SIZE", 32 * 1024 * 1024);
-}
-if (!defined("EXPORT_MIN_INDEX_BATCH")) {
-    define("EXPORT_MIN_INDEX_BATCH", 100);
-}
-if (!defined("EXPORT_MAX_INDEX_BATCH")) {
-    define("EXPORT_MAX_INDEX_BATCH", 100000);
-}
-if (!defined("EXPORT_MIN_SQL_FRAGMENTS")) {
-    define("EXPORT_MIN_SQL_FRAGMENTS", 1);
-}
-if (!defined("EXPORT_MAX_SQL_FRAGMENTS")) {
-    define("EXPORT_MAX_SQL_FRAGMENTS", 10000);
-}
-if (!defined("EXPORT_MIN_TABLES_BATCH")) {
-    define("EXPORT_MIN_TABLES_BATCH", 10);
-}
-if (!defined("EXPORT_MAX_TABLES_BATCH")) {
-    define("EXPORT_MAX_TABLES_BATCH", 10000);
-}
-if (!defined("EXPORT_MIN_DB_QUERY_TIME_MS")) {
-    define("EXPORT_MIN_DB_QUERY_TIME_MS", 0);
-}
-if (!defined("EXPORT_MAX_DB_QUERY_TIME_MS")) {
-    define("EXPORT_MAX_DB_QUERY_TIME_MS", 300000);
-}
-
 require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/class-file-tree-producer.php";
 
@@ -335,7 +280,6 @@ function prepare_streaming_response(): void
 class GzipOutputStream
 {
     private $deflate_ctx;
-    private bool $header_sent = false;
     private bool $enabled = true;
 
     public function __construct(bool $enabled = true)
@@ -726,8 +670,8 @@ function endpoint_sql_chunk(
     $fragments_per_batch = require_int_range(
         "fragments_per_batch",
         (int) $fragments_per_batch,
-        EXPORT_MIN_SQL_FRAGMENTS,
-        EXPORT_MAX_SQL_FRAGMENTS,
+        1,
+        10000,
     );
 
     $pdo_options = [
@@ -781,8 +725,8 @@ function endpoint_sql_chunk(
         $query_time_limit = require_int_range(
             "db_query_time_limit",
             (int) $config["db_query_time_limit"],
-            EXPORT_MIN_DB_QUERY_TIME_MS,
-            EXPORT_MAX_DB_QUERY_TIME_MS,
+            0,
+            300000,
         );
         if ($query_time_limit > 0) {
             $producer_options["query_time_limit_ms"] = $query_time_limit;
@@ -1015,8 +959,8 @@ function endpoint_db_index(
     $tables_per_batch = require_int_range(
         "tables_per_batch",
         (int) $tables_per_batch,
-        EXPORT_MIN_TABLES_BATCH,
-        EXPORT_MAX_TABLES_BATCH,
+        10,
+        10000,
     );
 
     $cursor = null;
@@ -1104,8 +1048,8 @@ function endpoint_db_index(
             }
         }
 
-        $payload = safe_json_encode($tables);
-        $cursor_json = safe_json_encode([
+        $payload = json_encode_or_throw($tables);
+        $cursor_json = json_encode_or_throw([
             "phase" => "tables",
             "last_table" => $last_table,
         ]);
@@ -2173,7 +2117,7 @@ function stream_file_producer(
 
     try {
         $initial_progress = $producer->get_progress();
-        $initial_progress_json = safe_json_encode($initial_progress);
+        $initial_progress_json = json_encode_or_throw($initial_progress);
         $initial_cursor = $producer->get_reentrancy_cursor();
         $last_cursor = $initial_cursor;
         $gz->write(
@@ -2211,7 +2155,7 @@ function stream_file_producer(
                 $metadata = [
                     "filesystem_root" => base64_encode($filesystem_root ?? ""),
                 ];
-                $metadata_json = safe_json_encode($metadata);
+                $metadata_json = json_encode_or_throw($metadata);
 
                 $gz->write(
                     "--{$boundary}\r\n" .
@@ -2230,7 +2174,7 @@ function stream_file_producer(
             if ($chunk === null) {
                 $now = microtime(true);
                 if ($iterations === 1 || $now - $last_progress_output >= 3.0) {
-                    $progress_json = safe_json_encode($progress);
+                    $progress_json = json_encode_or_throw($progress);
                     $cursor = $producer->get_reentrancy_cursor();
                     $last_cursor = $cursor;
 
@@ -2317,7 +2261,7 @@ function stream_file_producer(
             if (isset($chunk["actual_ctime"])) {
                 $payload["actual_ctime"] = $chunk["actual_ctime"];
             }
-            $json = safe_json_encode($payload);
+            $json = json_encode_or_throw($payload);
             $gz->write(
                 "--{$boundary}\r\n" .
                 "Content-Type: application/json\r\n" .
@@ -2386,7 +2330,7 @@ function stream_file_producer(
     // data chunks. If the stream is broken at this point, log and move on.
     try {
         if ($abort_payload !== null) {
-            $json = safe_json_encode($abort_payload);
+            $json = json_encode_or_throw($abort_payload);
             $gz->write(
                 "--{$boundary}\r\n" .
                 "Content-Type: application/json\r\n" .
@@ -2557,8 +2501,8 @@ function endpoint_file_index(
     $batch_size = require_int_range(
         "batch_size",
         (int) $batch_size,
-        EXPORT_MIN_INDEX_BATCH,
-        EXPORT_MAX_INDEX_BATCH,
+        100,
+        100000,
     );
 
     $list_dir = $config["list_dir"] ?? null;
@@ -2697,7 +2641,7 @@ function endpoint_file_index(
             "filesystem_root" => base64_encode($filesystem_root),
             "list_dir" => base64_encode($list_dir_real),
         ];
-        $metadata_json = safe_json_encode($metadata);
+        $metadata_json = json_encode_or_throw($metadata);
 
         $gz->write(
             "--{$boundary}\r\n" .
@@ -2730,8 +2674,8 @@ function endpoint_file_index(
                     "message" => "Directory does not exist or is not accessible",
                 ];
                 array_pop($stack);
-                $json = safe_json_encode($abort_payload);
-                $cursor_json = safe_json_encode(
+                $json = json_encode_or_throw($abort_payload);
+                $cursor_json = json_encode_or_throw(
                     ["stack" => encode_index_stack($stack)],
                     JSON_UNESCAPED_SLASHES,
                 );
@@ -2769,8 +2713,8 @@ function endpoint_file_index(
                     "message" => "Directory is outside allowed roots",
                 ];
                 array_pop($stack);
-                $json = safe_json_encode($abort_payload);
-                $cursor_json = safe_json_encode(
+                $json = json_encode_or_throw($abort_payload);
+                $cursor_json = json_encode_or_throw(
                     ["stack" => encode_index_stack($stack)],
                     JSON_UNESCAPED_SLASHES,
                 );
@@ -2803,8 +2747,8 @@ function endpoint_file_index(
                     "path" => base64_encode($current_real),
                     "message" => "Failed to open directory",
                 ];
-                $json = safe_json_encode($abort_payload);
-                $cursor_json = safe_json_encode(
+                $json = json_encode_or_throw($abort_payload);
+                $cursor_json = json_encode_or_throw(
                     ["stack" => encode_index_stack($stack)],
                     JSON_UNESCAPED_SLASHES,
                 );
@@ -2960,12 +2904,12 @@ function endpoint_file_index(
                         _e2e_call_hook('test_hook_before_index_batch', $hook_args);
                     }
 
-                    $cursor_json = safe_json_encode(
+                    $cursor_json = json_encode_or_throw(
                         ["stack" => encode_index_stack($stack)],
                         JSON_UNESCAPED_SLASHES,
                     );
                     $cursor_b64 = base64_encode($cursor_json);
-                    $json = safe_json_encode(
+                    $json = json_encode_or_throw(
                         encode_index_batch($batch_items),
                         JSON_UNESCAPED_SLASHES,
                     );
@@ -3036,12 +2980,12 @@ function endpoint_file_index(
     }
 
     if (!empty($batch_items)) {
-        $cursor_json = safe_json_encode(
+        $cursor_json = json_encode_or_throw(
             ["stack" => encode_index_stack($stack)],
             JSON_UNESCAPED_SLASHES,
         );
         $cursor_b64 = base64_encode($cursor_json);
-        $json = safe_json_encode(
+        $json = json_encode_or_throw(
             encode_index_batch($batch_items),
             JSON_UNESCAPED_SLASHES,
         );
@@ -3065,8 +3009,8 @@ function endpoint_file_index(
 
     try {
         if ($abort_payload !== null) {
-            $json = safe_json_encode($abort_payload);
-            $cursor_json = safe_json_encode(
+            $json = json_encode_or_throw($abort_payload);
+            $cursor_json = json_encode_or_throw(
                 ["stack" => encode_index_stack($stack)],
                 JSON_UNESCAPED_SLASHES,
             );
@@ -3084,7 +3028,7 @@ function endpoint_file_index(
             $status = "partial";
         }
 
-        $cursor_json = safe_json_encode(
+        $cursor_json = json_encode_or_throw(
             ["stack" => encode_index_stack($stack)],
             JSON_UNESCAPED_SLASHES,
         );
@@ -3174,8 +3118,8 @@ function endpoint_file_fetch(
     $chunk_size = require_int_range(
         "chunk_size",
         (int) $chunk_size,
-        EXPORT_MIN_CHUNK_SIZE,
-        EXPORT_MAX_CHUNK_SIZE,
+        16 * 1024,
+        32 * 1024 * 1024,
     );
 
     $sync_options = [
@@ -3357,15 +3301,15 @@ if (basename(__FILE__) === basename($_SERVER["SCRIPT_FILENAME"] ?? "")) {
         $max_execution_time = require_int_range(
             "max_execution_time",
             (int) $max_execution_time,
-            EXPORT_MIN_EXECUTION_TIME,
-            EXPORT_MAX_EXECUTION_TIME,
+            1,
+            60,
         );
 
         $memory_threshold = require_float_range(
             "memory_threshold",
             (float) $memory_threshold,
-            EXPORT_MIN_MEMORY_THRESHOLD,
-            EXPORT_MAX_MEMORY_THRESHOLD,
+            0.1,
+            0.95,
         );
 
         $memory_limit = ini_get("memory_limit");

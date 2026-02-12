@@ -4,11 +4,6 @@
  *
  * This file handles export requests WITHOUT loading WordPress.
  * It performs HMAC authentication and delegates to the export library.
- *
- * TODO: On hosts that allow direct PHP execution in wp-content/plugins/,
- * this file can be called directly (bypassing WordPress entirely) for
- * lower latency. The WordPress-routed path via ?site-export-api is the
- * universal fallback.
  */
 
 // Buffer output so stray warnings don't corrupt the JSON response
@@ -254,15 +249,15 @@ try {
     $max_execution_time = require_int_range(
         'max_execution_time',
         $max_execution_time,
-        EXPORT_MIN_EXECUTION_TIME,
-        EXPORT_MAX_EXECUTION_TIME
+        1,
+        60
     );
 
     $memory_threshold = require_float_range(
         'memory_threshold',
         $memory_threshold,
-        EXPORT_MIN_MEMORY_THRESHOLD,
-        EXPORT_MAX_MEMORY_THRESHOLD
+        0.1,
+        0.95
     );
 
     $memory_limit = ini_get('memory_limit');
