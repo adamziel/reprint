@@ -1178,6 +1178,9 @@ class MySQLDumpProducer
             return "(" . implode(",", array_values($formatted_values)) . ")";
         }
 
+        // The rest of this method deals with rows that are too large to fit into a single INSERT on
+        // the receiving end.
+
         if (!$this->current_pk_columns || count($this->current_pk_columns) === 0) {
             $formatted_values = [];
             foreach ($this->current_column_names as $col) {
