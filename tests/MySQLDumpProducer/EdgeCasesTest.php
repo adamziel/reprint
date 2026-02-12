@@ -10,7 +10,7 @@ use WordPress\DataLiberation\MySQLDumpProducer;
  * data, batch boundaries, malformed inputs, column naming horrors, data type
  * extremes, concurrent mutations, and oversized-row fallbacks.
  */
-class BreakingEdgeCasesTest extends MySQLDumpProducerTestBase
+class EdgeCasesTest extends MySQLDumpProducerTestBase
 {
     // ──────────────────────────────────────────────────
     // State machine integrity

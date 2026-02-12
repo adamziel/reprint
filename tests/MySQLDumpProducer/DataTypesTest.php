@@ -3,9 +3,10 @@
 require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
 
 /**
- * Tests MySQL dump with binary data, FULLTEXT, and uncommon data types.
+ * Tests MySQL dump with binary data, FULLTEXT, and uncommon data types:
+ * blob, enum, set, JSON, geometry, bit, year, spatial, numeric.
  */
-class BinaryAndUncommonTypesTest extends MySQLDumpProducerTestBase
+class DataTypesTest extends MySQLDumpProducerTestBase
 {
     public function testBlobTypes(): void
     {
