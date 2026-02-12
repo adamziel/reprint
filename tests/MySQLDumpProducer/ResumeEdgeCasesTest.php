@@ -336,4 +336,82 @@ class ResumeEdgeCasesTest extends MySQLDumpProducerTestBase
         $count = $importPdo->query("SELECT COUNT(*) FROM final_table")->fetchColumn();
         $this->assertEquals(1, $count);
     }
+
+    /**
+     * A cursor with an oversized_queue entry missing required fields should
+     * throw, not silently default to empty/zero values.
+     */
+    public function testCorruptCursorMissingOversizedQueueFields(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE corrupt_cursor_test (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                data LONGBLOB
+            )
+        ");
+        $this->pdo->exec("INSERT INTO corrupt_cursor_test (data) VALUES ('x')");
+
+        // Build a cursor with an oversized_queue item that's missing data_type,
+        // byte_offset, and total_length. The producer should reject it.
+        $cursor = json_encode([
+            "current_table" => "corrupt_cursor_test",
+            "current_pk_columns" => ["id"],
+            "last_pk_values" => ["id" => 1],
+            "current_offset" => 0,
+            "state" => "emit_oversized_update",
+            "current_row" => null,
+            "rows_in_batch" => 0,
+            "current_column_names" => ["id", "data"],
+            "oversized_queue" => [
+                ["column" => "data"],  // missing data_type, byte_offset, total_length
+            ],
+            "oversized_pk_values" => ["id" => 1],
+            "state_after_oversized" => "start_insert",
+            "current_statement_size" => 0,
+        ]);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage("oversized_queue");
+
+        $this->createProducer(["cursor" => $cursor]);
+    }
+
+    /**
+     * A cursor in STATE_EMIT_OVERSIZED_UPDATE with null state_after_oversized
+     * should throw rather than silently fall back to an arbitrary state.
+     */
+    public function testCorruptCursorNullStateAfterOversized(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE null_state_test (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                data LONGBLOB
+            )
+        ");
+        $stmt = $this->pdo->prepare("INSERT INTO null_state_test (data) VALUES (?)");
+        $stmt->execute([random_bytes(50 * 1024)]);
+
+        // Build a cursor that's in the oversized update state but has no
+        // state_after_oversized, simulating a corrupt or hand-edited cursor.
+        $cursor = json_encode([
+            "current_table" => "null_state_test",
+            "current_pk_columns" => ["id"],
+            "last_pk_values" => ["id" => 1],
+            "current_offset" => 0,
+            "state" => "emit_oversized_update",
+            "current_row" => null,
+            "rows_in_batch" => 0,
+            "current_column_names" => ["id", "data"],
+            "oversized_queue" => [],
+            "oversized_pk_values" => ["id" => 1],
+            "state_after_oversized" => null,
+            "current_statement_size" => 0,
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage("state_after_oversized");
+
+        $producer = $this->createProducer(["cursor" => $cursor]);
+        $producer->next_sql_fragment();
+    }
 }

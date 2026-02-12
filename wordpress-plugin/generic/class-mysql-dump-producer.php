@@ -29,6 +29,14 @@ use PDOStatement;
  * Rows that would exceed MySQL's max_allowed_packet are handled by inserting the row
  * with large columns set to empty strings, then appending the real data via a series
  * of UPDATE ... SET col = CONCAT(col, chunk) statements.
+ *
+ * Known limitations:
+ * 
+ * - Rows too large to be SELECTed. If a row is larger than max_allowed_packet or the
+ *   PHP memory_limit, it won't be exported. The underlying assumption is that WordPress
+ *   wouldn't be able to use that data anyway. If that turns out to be wrong, and there
+ *   are plugins that use huge blobs with byte offset queries, we'll need to add measures
+ *   to detect those situations and export that data in chunks.
  */
 class MySQLDumpProducer
 {
@@ -307,7 +315,13 @@ class MySQLDumpProducer
         if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {
             $this->last_pk_values = [];
             foreach ($this->current_pk_columns as $col) {
-                $this->last_pk_values[$col] = $record[$col] ?? null;
+                if (!array_key_exists($col, $record)) {
+                    throw new \RuntimeException(
+                        "Primary key column '{$col}' missing from SELECT result for table " .
+                        $this->quote_identifier($this->current_table)
+                    );
+                }
+                $this->last_pk_values[$col] = $record[$col];
             }
         } else {
             $this->current_offset++;
@@ -826,16 +840,20 @@ class MySQLDumpProducer
         }
         $decoded = [];
         foreach ($queue as $item) {
-            if (!is_array($item) || !isset($item['column'])) {
+            if (
+                !is_array($item) ||
+                !isset($item['column'], $item['data_type'], $item['byte_offset'], $item['total_length'])
+            ) {
                 throw new \InvalidArgumentException(
-                    "Invalid cursor: oversized_queue item must contain a 'column' key"
+                    "Invalid cursor: oversized_queue item must contain " .
+                    "'column', 'data_type', 'byte_offset', and 'total_length' keys"
                 );
             }
             $decoded[] = [
                 'column' => $item['column'],
-                'data_type' => $item['data_type'] ?? '',
-                'byte_offset' => (int) ($item['byte_offset'] ?? 0),
-                'total_length' => (int) ($item['total_length'] ?? 0),
+                'data_type' => $item['data_type'],
+                'byte_offset' => (int) $item['byte_offset'],
+                'total_length' => (int) $item['total_length'],
             ];
         }
         return $decoded;
@@ -1028,18 +1046,10 @@ class MySQLDumpProducer
             return 2; // ''
         }
 
-        $b64_len = $this->estimate_base64_length($len);
+        /** Base64 output is always ceil(n/3)*4 bytes. */
+        $estimated_base64_length = 4 * intdiv($len + 2, 3);
         // FROM_BASE64('<data>') => 15 bytes overhead + base64 length
-        return 15 + $b64_len;
-    }
-
-    /** Base64 output is always ceil(n/3)*4 bytes. */
-    private function estimate_base64_length(int $raw_len): int
-    {
-        if ($raw_len === 0) {
-            return 0;
-        }
-        return 4 * intdiv($raw_len + 2, 3);
+        return 15 + $estimated_base64_length;
     }
 
     /** Numeric types are emitted as bare literals (no quoting, no base64). */
@@ -1096,7 +1106,20 @@ class MySQLDumpProducer
         return false;
     }
 
-    /** Escapes backticks by doubling them: `tricky`` → `tricky\`\`table`. */
+    /** Returns the DATA_TYPE string for a column, or throws if unknown. */
+    private function get_data_type(string $col): string
+    {
+        if (!isset($this->current_column_types[$col]["data_type"])) {
+            throw new \RuntimeException(
+                "No column type info for '{$col}' in table " .
+                $this->quote_identifier($this->current_table) .
+                ". This is a bug — INFORMATION_SCHEMA should have returned it."
+            );
+        }
+        return $this->current_column_types[$col]["data_type"];
+    }
+
+    /** Escapes backticks by doubling them: tricky`table → `tricky``table`. */
     private function quote_identifier($identifier)
     {
         return '`' . str_replace('`', '``', $identifier) . '`';
@@ -1139,7 +1162,7 @@ class MySQLDumpProducer
         foreach ($this->current_column_names as $col) {
             $value = $row[$col] ?? null;
             $raw_values[$col] = $value;
-            $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
+            $data_type = $this->get_data_type($col);
             $estimated_sizes[$col] = $this->estimate_formatted_size($value, $data_type);
         }
 
@@ -1149,7 +1172,7 @@ class MySQLDumpProducer
         if ($projected_size <= $this->max_statement_size) {
             $formatted_values = [];
             foreach ($this->current_column_names as $col) {
-                $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
+                $data_type = $this->get_data_type($col);
                 $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
             }
             return "(" . implode(",", array_values($formatted_values)) . ")";
@@ -1158,7 +1181,7 @@ class MySQLDumpProducer
         if (!$this->current_pk_columns || count($this->current_pk_columns) === 0) {
             $formatted_values = [];
             foreach ($this->current_column_names as $col) {
-                $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
+                $data_type = $this->get_data_type($col);
                 $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
             }
             return "(" . implode(",", array_values($formatted_values)) . ")";
@@ -1166,7 +1189,13 @@ class MySQLDumpProducer
 
         $this->oversized_pk_values = [];
         foreach ($this->current_pk_columns as $pk_col) {
-            $this->oversized_pk_values[$pk_col] = $row[$pk_col] ?? null;
+            if (!array_key_exists($pk_col, $row)) {
+                throw new \RuntimeException(
+                    "Primary key column '{$pk_col}' missing from row for table " .
+                    $this->quote_identifier($this->current_table)
+                );
+            }
+            $this->oversized_pk_values[$pk_col] = $row[$pk_col];
         }
 
         // Split the largest columns first to bring the row under the limit
@@ -1191,12 +1220,12 @@ class MySQLDumpProducer
                 break;
             }
 
-            $raw_value = $raw_values[$col] ?? null;
+            $raw_value = $raw_values[$col];
             if ($raw_value === null || $raw_value === '') {
                 continue;
             }
 
-            $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
+            $data_type = $this->get_data_type($col);
             $value_length = strlen($raw_value);
             $chunk_size = $this->compute_chunk_size($col);
 
@@ -1223,7 +1252,7 @@ class MySQLDumpProducer
                 $formatted_values[$col] = "''";
                 continue;
             }
-            $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
+            $data_type = $this->get_data_type($col);
             $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
         }
 
@@ -1287,7 +1316,14 @@ class MySQLDumpProducer
     private function emit_oversized_update()
     {
         if (empty($this->oversized_queue)) {
-            $this->state = $this->state_after_oversized ?? self::STATE_EMIT_ROW;
+            if ($this->state_after_oversized === null) {
+                throw new \RuntimeException(
+                    "State machine bug: state_after_oversized is null when " .
+                    "exiting oversized update loop for table " .
+                    $this->quote_identifier($this->current_table)
+                );
+            }
+            $this->state = $this->state_after_oversized;
             $this->state_after_oversized = null;
             $this->oversized_pk_values = null;
             return false;
