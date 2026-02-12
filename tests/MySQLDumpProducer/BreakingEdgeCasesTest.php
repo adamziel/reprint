@@ -398,19 +398,13 @@ class BreakingEdgeCasesTest extends MySQLDumpProducerTestBase
         $stmt->execute([$largeText]);
 
         // With a tiny max_statement_size, this row exceeds the limit.
-        // Since there's no PK, it cannot use UPDATE+CONCAT fallback.
-        // The code should emit it as-is rather than crash.
-        $sql = $this->getDumpSQL(['max_statement_size' => 10000]);
+        // Since there's no PK, it cannot use the UPDATE+CONCAT fallback.
+        // The producer should throw rather than silently emitting an
+        // oversized statement that may fail on import.
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage("no primary key");
 
-        // Should still have the INSERT
-        $this->assertSQLContains('INSERT INTO', $sql);
-
-        // Round-trip: the import might fail due to max_allowed_packet,
-        // but the SQL should at least be syntactically valid.
-        // We'll test with a generous max_allowed_packet.
-        $importPdo = $this->executeDumpInNewDatabase($sql);
-        $imported = $importPdo->query("SELECT data FROM no_pk")->fetchColumn();
-        $this->assertEquals($largeText, $imported);
+        $this->getDumpSQL(['max_statement_size' => 10000]);
     }
 
     // ──────────────────────────────────────────────────

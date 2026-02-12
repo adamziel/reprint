@@ -472,6 +472,29 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
     }
 
     /**
+     * Tables without a primary key can't use the UPDATE ... CONCAT() fallback
+     * for oversized rows. The producer should throw rather than silently emitting
+     * a row that exceeds max_statement_size.
+     */
+    public function testOversizedRowWithoutPrimaryKeyThrows(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE no_pk_large (
+                name VARCHAR(100),
+                content LONGBLOB
+            )
+        ");
+
+        $stmt = $this->pdo->prepare("INSERT INTO no_pk_large (name, content) VALUES (?, ?)");
+        $stmt->execute(['test', random_bytes(50 * 1024)]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage("no primary key");
+
+        $this->getDumpSQL(['max_statement_size' => 10 * 1024]);
+    }
+
+    /**
      * Cursor must stay small regardless of how large the oversized columns are.
      * The cursor stores byte offsets, not raw data, so it should never exceed 5KB.
      */

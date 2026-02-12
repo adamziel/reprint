@@ -37,6 +37,8 @@ use PDOStatement;
  *   wouldn't be able to use that data anyway. If that turns out to be wrong, and there
  *   are plugins that use huge blobs with byte offset queries, we'll need to add measures
  *   to detect those situations and export that data in chunks.
+ * - Tables without a primary key can't use the oversized row handling as there's no
+ *   stable row identifier for the UPDATE ... SET col = CONCAT(col, chunk) WHERE ... query.
  */
 class MySQLDumpProducer
 {
@@ -1166,6 +1168,7 @@ class MySQLDumpProducer
             $estimated_sizes[$col] = $this->estimate_formatted_size($value, $data_type);
         }
 
+        // Estimate the size of "(val1,val2,val3)," — values + commas between them + parens + terminator
         $row_size_est = array_sum($estimated_sizes) + count($estimated_sizes) + 3;
         $projected_size = $this->current_statement_size + $row_size_est;
 
@@ -1182,12 +1185,12 @@ class MySQLDumpProducer
         // the receiving end.
 
         if (!$this->current_pk_columns || count($this->current_pk_columns) === 0) {
-            $formatted_values = [];
-            foreach ($this->current_column_names as $col) {
-                $data_type = $this->get_data_type($col);
-                $formatted_values[$col] = $this->format_value($raw_values[$col], $data_type);
-            }
-            return "(" . implode(",", array_values($formatted_values)) . ")";
+            throw new \RuntimeException(
+                "Row in table " . $this->quote_identifier($this->current_table) .
+                " exceeds max_statement_size ({$this->max_statement_size} bytes)" .
+                " but the table has no primary key, so the oversized row" .
+                " cannot be split into UPDATE ... CONCAT() chunks."
+            );
         }
 
         $this->oversized_pk_values = [];
@@ -1282,11 +1285,15 @@ class MySQLDumpProducer
         return max($max_chunk_raw_size, 1000);
     }
 
-    /** Rough byte estimate for the WHERE pk1 = v1 AND pk2 = v2 clause. */
+    /** Rough strlen() estimate for the WHERE pk1 = v1 AND pk2 = v2 clause. */
     private function estimate_pk_where_size()
     {
         if (!$this->oversized_pk_values) {
-            return 50;
+            /** 
+             * A wild guess. 1KB is probably more than necessary, but we're trying to stay
+             * on the safe side.
+             */
+            return 1024;
         }
 
         $size = 0;
