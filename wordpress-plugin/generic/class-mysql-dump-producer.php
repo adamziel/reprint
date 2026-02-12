@@ -154,7 +154,7 @@ class MySQLDumpProducer
         $this->db = $db;
         $this->tables_to_process = $options["tables_to_process"] ?? null;
         $this->batch_size = max(1, (int)($options["batch_size"] ?? 250));
-        $this->emit_create_table = $options["create_table_query"] ?? true;
+        $this->emit_create_table = (bool)$options["create_table_query"] ?? true;
 
         if (isset($options["max_statement_size"])) {
             $this->max_statement_size = (int)$options["max_statement_size"];
@@ -452,7 +452,8 @@ class MySQLDumpProducer
         }
 
         if ($sql) {
-            $header = "--\n-- Table structure for table {$quoted_table}\n--\n\n";
+            // Prevent breaking the line by identifiers with a newline byte in them.
+            $header = "--\n-- Table structure for table ".str_replace("\n",'\n',$quoted_table)."\n--\n\n";
             $drop = "DROP TABLE IF EXISTS {$quoted_table};\n";
             $this->current_sql_fragment = $header . $drop . $sql . ";";
         } else {
@@ -493,7 +494,7 @@ class MySQLDumpProducer
     /** Emits a SQL comment marking the start of data for the current table. */
     private function emit_table_header_comment()
     {
-        $comment = "\n--\n-- Dumping data for table " . $this->quote_identifier($this->current_table) . "\n--\n";
+        $comment = "\n--\n-- Dumping data for table " . str_replace("\n",'\n',$this->quote_identifier($this->current_table)) . "\n--\n";
         $this->current_sql_fragment = $comment;
     }
 
@@ -522,14 +523,14 @@ class MySQLDumpProducer
         if ($this->current_column_types) {
             $select_parts = [];
             foreach ($this->current_column_types as $col_name => $col_info) {
+                $quoted = $this->quote_identifier($col_name);
                 // Don't cast numeric or already-binary types
                 if (
                     $this->is_numeric_type($col_info["data_type"]) ||
                     $this->is_binary_type($col_info["data_type"])
                 ) {
-                    $select_parts[] = $this->quote_identifier($col_name);
+                    $select_parts[] = $quoted;
                 } else {
-                    $quoted = $this->quote_identifier($col_name);
                     $select_parts[] = "CAST({$quoted} AS BINARY) AS {$quoted}";
                 }
             }
@@ -554,10 +555,11 @@ class MySQLDumpProducer
             $query .= " ORDER BY " . implode(", ", $order_cols);
             $query .= " LIMIT {$this->batch_size}";
         } else {
+            // Best effort pagination for tables without a primary key.
             if ($this->current_offset > 0) {
-                $query .= " LIMIT 1000 OFFSET {$this->current_offset}";
+                $query .= " LIMIT {$this->batch_size} OFFSET {$this->current_offset}";
             } else {
-                $query .= " LIMIT 1000";
+                $query .= " LIMIT {$this->batch_size}";
             }
         }
 
@@ -579,6 +581,10 @@ class MySQLDumpProducer
     private function build_pk_where_clause()
     {
         if (!$this->last_pk_values || count($this->current_pk_columns) === 0) {
+            /**
+             * When we haven't seen any PK values yet, or when the table doesn't have a primary key,
+             * we return a dummy condition that will always be true.
+             */
             return "1=1";
         }
 
@@ -592,7 +598,7 @@ class MySQLDumpProducer
         $conditions = [];
         $prefix_conditions = [];
 
-        foreach ($pk_cols as $index => $col) {
+        foreach ($pk_cols as $col) {
             $value = $this->last_pk_values[$col];
 
             $current_condition_parts = $prefix_conditions;
@@ -691,7 +697,11 @@ class MySQLDumpProducer
         return (bool) $this->current_table;
     }
 
-    /** Discovers all BASE TABLEs in the current database (excludes views). */
+    /**
+     * Discovers all BASE TABLEs in the current database (excludes views).
+     * 
+     * @TODO: Use pagination or approach to support large databases with millions of tables.
+     */
     private function initialize_tables_to_process()
     {
         $this->tables_to_process = [];
@@ -737,11 +747,13 @@ class MySQLDumpProducer
             "current_row" => $encoded_current_row,
             "rows_in_batch" => $this->rows_in_batch,
             "current_column_names" => $this->current_column_names,
-            // Oversized row tracking
+            /**
+             * Tracking for rows that are larger than max_allowed_packet or 
+             * max_statement_size.
+             */
             "oversized_queue" => $encoded_oversized_queue,
             "oversized_pk_values" => $this->oversized_pk_values,
             "state_after_oversized" => $this->state_after_oversized,
-            // Statement size tracking
             "current_statement_size" => $this->current_statement_size,
         ]);
         if ($json === false) {
@@ -752,7 +764,12 @@ class MySQLDumpProducer
         return $json;
     }
 
-    /** Wraps all string values in {"__binary__": base64} for JSON safety. */
+    /**
+     * Wraps all string values in {"__binary__": base64} for JSON safety.
+     * JSON is UTF-8-encoded and cannot express arbitrary binary data. The
+     * "__binary__" "type brand" makes it easy to detect and decode binary data
+     * when restoring the cursor.
+     */
     private function encode_row_for_cursor($row)
     {
         if ($row === null) {

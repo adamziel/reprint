@@ -5091,6 +5091,31 @@ class ImportClient
     }
 
     /**
+     * Parse a PHP memory_limit value (e.g. "128M", "1G", "-1") into bytes.
+     * Returns 0 for unlimited (-1) or unparseable values.
+     */
+    private function parse_memory_limit(string $value): int
+    {
+        $value = trim($value);
+        if ($value === "-1" || $value === "" || $value === "0") {
+            return 0;
+        }
+        $last = strtolower($value[strlen($value) - 1]);
+        $bytes = (int) $value;
+        switch ($last) {
+            case "g":
+                $bytes *= 1024;
+                // fall through
+            case "m":
+                $bytes *= 1024;
+                // fall through
+            case "k":
+                $bytes *= 1024;
+        }
+        return $bytes;
+    }
+
+    /**
      * Sort an index file by path (first column).
      */
     private function sort_index_file(string $path): void
@@ -5187,11 +5212,21 @@ class ImportClient
             return;
         }
 
+        // Estimate how much memory we can use: 60% of whatever headroom
+        // remains between current usage and the PHP memory limit.
+        $mem_limit = $this->parse_memory_limit(ini_get("memory_limit"));
+        $mem_used = memory_get_usage(true);
+        $available = $mem_limit > 0
+            ? (int) (($mem_limit - $mem_used) * 0.6)
+            : 256 * 1024 * 1024;
+
         $size = filesize($path);
-        $limit = 50 * 1024 * 1024;
-        if ($size > $limit) {
+        // In-memory sorting requires roughly 4-5x the file size (raw lines +
+        // parsed entries + sorted output string), so be conservative.
+        if ($size * 5 > $available) {
             throw new RuntimeException(
-                "Index file is too large to sort without exec()",
+                "Index file is too large to sort without exec() " .
+                "({$size} bytes, ~" . round($available / 1024 / 1024) . " MB available)",
             );
         }
 
@@ -5210,22 +5245,28 @@ class ImportClient
                 "line" => $line,
             ];
         }
+        // Free the raw lines array before sorting — we've extracted what we need.
+        unset($raw_lines);
+
         usort($entries, function ($a, $b) {
             return strcmp($a["path"], $b["path"]);
         });
-        $lines = [];
+
+        $out = fopen($tmp, "w");
+        if (!$out) {
+            throw new RuntimeException("Failed to write sorted index file");
+        }
         $prev_path = null;
         foreach ($entries as $entry) {
             if ($entry["path"] === $prev_path) {
                 continue;
             }
             $prev_path = $entry["path"];
-            $lines[] = $entry["line"];
+            fwrite($out, $entry["line"] . "\n");
         }
-        $data = implode("\n", $lines) . "\n";
-        if (file_put_contents($tmp, $data) === false) {
-            throw new RuntimeException("Failed to write sorted index file");
-        }
+        fclose($out);
+        unset($entries);
+
         if (!rename($tmp, $path)) {
             throw new RuntimeException("Failed to replace sorted index file");
         }
