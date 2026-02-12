@@ -26,21 +26,6 @@ parameters:
 			path: wordpress-plugin/generic/export.php
 
 		-
-			message: "#^If condition is always false\\.$#"
-			count: 1
-			path: wordpress-plugin/generic/export.php
-
-		-
-			message: "#^Negated boolean expression is always false\\.$#"
-			count: 1
-			path: wordpress-plugin/generic/export.php
-
-		-
-			message: "#^Negated boolean expression is always true\\.$#"
-			count: 1
-			path: wordpress-plugin/generic/export.php
-
-		-
 			message: "#^Parameter \\#1 \\$flag of function ob_implicit_flush expects int, true given\\.$#"
 			count: 1
 			path: wordpress-plugin/generic/export.php
@@ -51,12 +36,12 @@ parameters:
 			path: wordpress-plugin/generic/export.php
 
 		-
-			message: "#^Property GzipOutputStream\\:\\:\\$header_sent is never read, only written\\.$#"
+			message: "#^Negated boolean expression is always false\\.$#"
 			count: 1
 			path: wordpress-plugin/generic/export.php
 
 		-
-			message: "#^Strict comparison using \\=\\=\\= between mixed and null will always evaluate to false\\.$#"
+			message: "#^Negated boolean expression is always true\\.$#"
 			count: 1
 			path: wordpress-plugin/generic/export.php
 

@@ -19,6 +19,63 @@ if (!ob_get_level()) {
  */
 $streaming_context = null;
 
+/**
+ * Initializes a multipart/mixed streaming response with gzip compression.
+ *
+ * Every streaming endpoint needs the same setup: a unique boundary, the
+ * Content-Type header, a GzipOutputStream, and the global $streaming_context
+ * so error handlers can emit structured error chunks mid-stream.
+ *
+ * @param bool $require_headers If true, throws when headers were already sent
+ *                              (use for endpoints that can't degrade gracefully).
+ * @return array{gz: GzipOutputStream, boundary: string}
+ */
+function begin_multipart_stream(bool $require_headers = false): array
+{
+    global $streaming_context;
+
+    /**
+     * We're choosing a random boundary without checking for its presence in the content.
+     * This may seem to contradict RFC 2046, where it says:
+     * 
+     * > As stated previously, each body part is preceded by a boundary
+     * > delimiter line that contains the boundary delimiter.  The boundary
+     * > delimiter MUST NOT appear inside any of the encapsulated parts, on a
+     * > line by itself or as the prefix of any line.  This implies that it is
+     * > crucial that the composing agent be able to choose and specify a
+     * > unique boundary parameter value that does not contain the boundary
+     * > parameter value of an enclosing multipart as a prefix.
+     * > 
+     * > https://www.rfc-editor.org/rfc/rfc2046.html
+     *
+     * But in practice, we're okay. We use 128 bits of randomness. The chance of
+     * it appearing in the data is about 1 in 2^128 — effectively zero. Curl does
+     * the same here: 
+     *
+     *    https://github.com/curl/curl/blob/462244447e8ba3a53b1ba9f0ba7baa52d8777daa/lib/mime.c#L1179-L1236
+     * 
+     * Also, most chunks declare their Content-Length, so the client may skip the
+     * boundary matching entirely and just consume that many bytes.
+     */
+    $boundary = "boundary-" . bin2hex(random_bytes(16));
+    $can_send_headers = !headers_sent();
+
+    if ($require_headers && !$can_send_headers) {
+        throw new RuntimeException(
+            "Cannot begin multipart stream: headers already sent",
+        );
+    }
+
+    if ($can_send_headers) {
+        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+    }
+
+    $gz = new GzipOutputStream($can_send_headers);
+    $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
+
+    return $streaming_context;
+}
+
 // Polyfill for PHP 7.4 which lacks str_starts_with().
 if (!function_exists('str_starts_with')) {
     function str_starts_with(string $haystack, string $needle): bool {
@@ -266,6 +323,11 @@ function prepare_streaming_response(): void
         @header("Expires: 0");
     }
 
+    /**
+     * zlib.output_compression buffers the entire response before compressing. The
+     * entire point of this plugin is to stream the response, therefore we use a custom
+     * GzipOutputStream.
+     */
     @ini_set("zlib.output_compression", "0");
     @ini_set("output_buffering", "0");
     @ini_set("implicit_flush", "1");
@@ -378,166 +440,6 @@ class GzipOutputStream
 }
 
 /**
- * Extracts database credentials from wp-config.php using the PHP tokenizer.
- */
-function extract_db_credentials_from_wp_config(array $directories): ?array
-{
-    $wp_config_path = null;
-    foreach ($directories as $dir) {
-        $path = rtrim($dir, "/") . "/wp-config.php";
-        if (file_exists($path)) {
-            $wp_config_path = $path;
-            break;
-        }
-    }
-
-    if ($wp_config_path === null) {
-        return null;
-    }
-
-    try {
-        $content = file_get_contents($wp_config_path);
-        if ($content === false) {
-            return null;
-        }
-
-        $tokens = token_get_all($content);
-        $credentials = [];
-
-        $state = "search";
-        $current_constant = null;
-
-        for ($i = 0; $i < count($tokens); $i++) {
-            $token = $tokens[$i];
-
-            if (is_array($token) && $token[0] === T_WHITESPACE) {
-                continue;
-            }
-
-            if ($state === "search") {
-                if (
-                    is_array($token) &&
-                    $token[0] === T_STRING &&
-                    strtolower($token[1]) === "define"
-                ) {
-                    $state = "found_define";
-                }
-            } elseif ($state === "found_define") {
-                if ($token === "(") {
-                    $state = "found_open_paren";
-                } else {
-                    $state = "search";
-                }
-            } elseif ($state === "found_open_paren") {
-                if (
-                    is_array($token) &&
-                    $token[0] === T_CONSTANT_ENCAPSED_STRING
-                ) {
-                    $constant_name = trim($token[1], '\'"');
-                    if (
-                        in_array($constant_name, [
-                            "DB_HOST",
-                            "DB_NAME",
-                            "DB_USER",
-                            "DB_PASSWORD",
-                        ])
-                    ) {
-                        $current_constant = $constant_name;
-                        $state = "found_constant";
-                    } else {
-                        $state = "search";
-                    }
-                } else {
-                    $state = "search";
-                }
-            } elseif ($state === "found_constant") {
-                if ($token === ",") {
-                    $state = "found_comma";
-                } else {
-                    $state = "search";
-                }
-            } elseif ($state === "found_comma") {
-                if (
-                    is_array($token) &&
-                    $token[0] === T_CONSTANT_ENCAPSED_STRING
-                ) {
-                    $value = trim($token[1], '\'"');
-                    $credentials[$current_constant] = $value;
-                }
-                $state = "search";
-            }
-        }
-
-        $required = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"];
-        foreach ($required as $key) {
-            if (!isset($credentials[$key])) {
-                return null;
-            }
-        }
-
-        $table_prefix = null;
-        $prefix_state = "search";
-        for ($i = 0; $i < count($tokens); $i++) {
-            $token = $tokens[$i];
-            if (
-                is_array($token) &&
-                ($token[0] === T_WHITESPACE ||
-                    $token[0] === T_COMMENT ||
-                    $token[0] === T_DOC_COMMENT)
-            ) {
-                continue;
-            }
-
-            if ($prefix_state === "search") {
-                if (
-                    is_array($token) &&
-                    $token[0] === T_VARIABLE &&
-                    $token[1] === "\$table_prefix"
-                ) {
-                    $prefix_state = "found_var";
-                }
-                continue;
-            }
-
-            if ($prefix_state === "found_var") {
-                if ($token === "=") {
-                    $prefix_state = "found_equals";
-                } else {
-                    $prefix_state = "search";
-                }
-                continue;
-            }
-
-            if ($prefix_state === "found_equals") {
-                if (
-                    is_array($token) &&
-                    $token[0] === T_CONSTANT_ENCAPSED_STRING
-                ) {
-                    $table_prefix = trim($token[1], '\'"');
-                    break;
-                }
-                $prefix_state = "search";
-            }
-        }
-
-        return [
-            "db_host" => $credentials["DB_HOST"],
-            "db_name" => $credentials["DB_NAME"],
-            "db_user" => $credentials["DB_USER"],
-            "db_password" => $credentials["DB_PASSWORD"],
-            "table_prefix" => $table_prefix,
-            "wp_config_path" => $wp_config_path,
-        ];
-    } catch (Exception $e) {
-        error_log(
-            "Failed to extract credentials from wp-config.php: " .
-                $e->getMessage(),
-        );
-        return null;
-    }
-}
-
-/**
  * Deduplicates and resolves a list of paths, discarding empty entries.
  */
 function normalize_path_list(array $paths): array
@@ -631,30 +533,6 @@ function endpoint_sql_chunk(
         (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
 
     if (!$db_host || !$db_name || !$db_user || $db_password === false) {
-        $directories = [];
-        if (isset($config["directory"])) {
-            $directories = is_array($config["directory"])
-                ? $config["directory"]
-                : [$config["directory"]];
-        }
-
-        if (!empty($directories)) {
-            $wp_credentials = extract_db_credentials_from_wp_config(
-                $directories,
-            );
-            if ($wp_credentials !== null) {
-                $db_host = $db_host ?: $wp_credentials["db_host"];
-                $db_name = $db_name ?: $wp_credentials["db_name"];
-                $db_user = $db_user ?: $wp_credentials["db_user"];
-                $db_password =
-                    $db_password !== false
-                        ? $db_password
-                        : $wp_credentials["db_password"];
-            }
-        }
-    }
-
-    if (!$db_host || !$db_name || !$db_user || $db_password === false) {
         throw new InvalidArgumentException(
             "Database credentials not found. Please provide via config, environment variables, " .
                 "PHP constants, or ensure wp-config.php exists with valid credentials. " .
@@ -680,6 +558,13 @@ function endpoint_sql_chunk(
     if (!empty($config["db_unbuffered"])) {
         $pdo_options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = false;
     }
+    /**
+     * Use a separate connection to avoid going through any $wpdb
+     * hooks. Granted, this will fail on sites using the
+     * sqlite-database-integration plugin. Once that plugin exposes
+     * a PDO-compatible interface, we'll be able to easily support
+     * both.
+     */
     $mysql = new PDO(
         "mysql:host={$db_host};dbname={$db_name};charset=utf8mb4",
         $db_user,
@@ -722,12 +607,14 @@ function endpoint_sql_chunk(
     }
 
     if (!empty($config["db_query_time_limit"])) {
+        $execution_budget_ms = (int) ($max_execution_time * 1000 * 0.8);
         $query_time_limit = require_int_range(
             "db_query_time_limit",
             (int) $config["db_query_time_limit"],
             0,
-            300000,
+            300_000,
         );
+        $query_time_limit = min($query_time_limit, $execution_budget_ms);
         if ($query_time_limit > 0) {
             $producer_options["query_time_limit_ms"] = $query_time_limit;
         }
@@ -746,39 +633,8 @@ function endpoint_sql_chunk(
         ob_end_flush();
     }
 
-    /**
-     * We're choosing a random boundary without checking for its presence in the content.
-     * This may seem to contradict RFC 2046, where it says:
-     * 
-     * > As stated previously, each body part is preceded by a boundary
-     * > delimiter line that contains the boundary delimiter.  The boundary
-     * > delimiter MUST NOT appear inside any of the encapsulated parts, on a
-     * > line by itself or as the prefix of any line.  This implies that it is
-     * > crucial that the composing agent be able to choose and specify a
-     * > unique boundary parameter value that does not contain the boundary
-     * > parameter value of an enclosing multipart as a prefix.
-     * > 
-     * > https://www.rfc-editor.org/rfc/rfc2046.html
-     *
-     * But in practice, we're okay. We use 128 bits of randomness. The chance of
-     * it appearing in the data is about 1 in 2^128 — effectively zero. Curl does
-     * the same here: 
-     *
-     *    https://github.com/curl/curl/blob/462244447e8ba3a53b1ba9f0ba7baa52d8777daa/lib/mime.c#L1179-L1236
-     * 
-     * Also, most chunks declare their Content-Length, so the client may skip the
-     * boundary matching entirely and just consume that many bytes.
-     */
-    $boundary = "boundary-" . bin2hex(random_bytes(16));
-    $can_send_headers = !headers_sent();
-    if (!$can_send_headers) {
-        throw new RuntimeException(
-            "Cannot stream db_index: headers already sent",
-        );
-    }
-    @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
-    $gz = new GzipOutputStream(true);
-    $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
+
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(true);
 
     // E2E test hook: after gzip stream initialization
     if (getenv('SITE_EXPORT_TEST_MODE')) {
@@ -800,7 +656,6 @@ function endpoint_sql_chunk(
             $memory_threshold,
         )
     ) {
-        $batch_start = microtime(true);
         $sql = [];
 
         $i = 0;
@@ -926,30 +781,6 @@ function endpoint_db_index(
         (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
 
     if (!$db_host || !$db_name || !$db_user || $db_password === false) {
-        $directories = [];
-        if (isset($config["directory"])) {
-            $directories = is_array($config["directory"])
-                ? $config["directory"]
-                : [$config["directory"]];
-        }
-
-        if (!empty($directories)) {
-            $wp_credentials = extract_db_credentials_from_wp_config(
-                $directories,
-            );
-            if ($wp_credentials !== null) {
-                $db_host = $db_host ?: $wp_credentials["db_host"];
-                $db_name = $db_name ?: $wp_credentials["db_name"];
-                $db_user = $db_user ?: $wp_credentials["db_user"];
-                $db_password =
-                    $db_password !== false
-                        ? $db_password
-                        : $wp_credentials["db_password"];
-            }
-        }
-    }
-
-    if (!$db_host || !$db_name || !$db_user || $db_password === false) {
         throw new InvalidArgumentException(
             "Database credentials not found for db_index.",
         );
@@ -981,13 +812,7 @@ function endpoint_db_index(
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
     );
 
-    $boundary = "boundary-" . bin2hex(random_bytes(16));
-    $can_send_headers = !headers_sent();
-    if ($can_send_headers) {
-        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
-    }
-    $gz = new GzipOutputStream($can_send_headers);
-    $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
 
     $tables_processed = 0;
     $rows_estimated = 0;
@@ -2089,14 +1914,7 @@ function stream_file_producer(
     global $streaming_context;
     prepare_streaming_response();
 
-    $boundary = "boundary-" . bin2hex(random_bytes(16));
-    $can_send_headers = !headers_sent();
-    if ($can_send_headers) {
-        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
-    }
-
-    $gz = new GzipOutputStream($can_send_headers);
-    $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
 
     // E2E test hook: after gzip stream initialization (file producer)
     if (getenv('SITE_EXPORT_TEST_MODE')) {
@@ -2603,14 +2421,7 @@ function endpoint_file_index(
 
     prepare_streaming_response();
 
-    $boundary = "boundary-" . bin2hex(random_bytes(16));
-    $can_send_headers = !headers_sent();
-    if ($can_send_headers) {
-        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
-    }
-
-    $gz = new GzipOutputStream($can_send_headers);
-    $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
 
     $filesystem_root = $directories[0] ?? "/";
     $batches_emitted = 0;
