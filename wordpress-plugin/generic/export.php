@@ -76,6 +76,100 @@ function begin_multipart_stream(bool $require_headers = false): array
     return $streaming_context;
 }
 
+/**
+ * Resolves database credentials from PHP constants and environment variables.
+ *
+ * Never reads from $config / HTTP parameters — credentials must come from
+ * the server environment. Falls back to wp-config.php parsing when
+ * $credential_roots is provided and initial detection is incomplete.
+ *
+ * @param string[] $credential_roots Directories to search for wp-config.php.
+ * @return array{db_host: string, db_name: string, db_user: string, db_password: string,
+ *               wp_config_path: ?string, table_prefix: ?string}
+ * @throws InvalidArgumentException When required credentials are missing.
+ */
+function resolve_db_credentials(array $credential_roots = []): array
+{
+    $db_host = defined("DB_HOST") ? DB_HOST : getenv("DB_HOST");
+    $db_name = defined("DB_NAME") ? DB_NAME : getenv("DB_NAME");
+    $db_user = defined("DB_USER") ? DB_USER : getenv("DB_USER");
+    $db_password = defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD");
+
+    $wp_config_path = null;
+    $table_prefix = null;
+
+    $missing = [];
+    if (!$db_host) {
+        $missing[] = "db_host";
+    }
+    if (!$db_name) {
+        $missing[] = "db_name";
+    }
+    if (!$db_user) {
+        $missing[] = "db_user";
+    }
+    if ($db_password === false || $db_password === null || $db_password === "") {
+        $missing[] = "db_password";
+    }
+
+    // Try extracting credentials from wp-config.php when some are still missing.
+    if (!empty($missing) && !empty($credential_roots)) {
+        $wp_credentials = null;
+        if (defined("DB_HOST") && defined("DB_NAME") && defined("DB_USER") && defined("DB_PASSWORD")) {
+            $wp_credentials = [
+                "db_host" => DB_HOST,
+                "db_name" => DB_NAME,
+                "db_user" => DB_USER,
+                "db_password" => DB_PASSWORD,
+            ];
+        } elseif (function_exists('extract_db_credentials_from_wp_config')) {
+            $wp_credentials = extract_db_credentials_from_wp_config($credential_roots);
+        }
+        if ($wp_credentials !== null) {
+            $db_host = $db_host ?: $wp_credentials["db_host"];
+            $db_name = $db_name ?: $wp_credentials["db_name"];
+            $db_user = $db_user ?: $wp_credentials["db_user"];
+            $db_password =
+                ($db_password !== false && $db_password !== null && $db_password !== "")
+                    ? $db_password
+                    : $wp_credentials["db_password"];
+            $wp_config_path = $wp_credentials["wp_config_path"] ?? null;
+            $table_prefix = $wp_credentials["table_prefix"] ?? null;
+
+            $missing = [];
+            if (!$db_host) {
+                $missing[] = "db_host";
+            }
+            if (!$db_name) {
+                $missing[] = "db_name";
+            }
+            if (!$db_user) {
+                $missing[] = "db_user";
+            }
+            if ($db_password === false || $db_password === null || $db_password === "") {
+                $missing[] = "db_password";
+            }
+        }
+    }
+
+    if (!empty($missing)) {
+        throw new InvalidArgumentException(
+            "Database credentials not found. Please provide via environment variables, " .
+                "PHP constants, or ensure wp-config.php exists with valid credentials. " .
+                "Missing: " . implode(", ", $missing),
+        );
+    }
+
+    return [
+        "db_host" => $db_host,
+        "db_name" => $db_name,
+        "db_user" => $db_user,
+        "db_password" => $db_password,
+        "wp_config_path" => $wp_config_path,
+        "table_prefix" => $table_prefix,
+    ];
+}
+
 // Polyfill for PHP 7.4 which lacks str_starts_with().
 if (!function_exists('str_starts_with')) {
     function str_starts_with(string $haystack, string $needle): bool {
@@ -519,30 +613,11 @@ function endpoint_sql_chunk(
 ): array {
     global $streaming_context;
     prepare_streaming_response();
-    $db_host =
-        $config["db_host"] ??
-        (defined("DB_HOST") ? DB_HOST : getenv("DB_HOST"));
-    $db_name =
-        $config["db_name"] ??
-        (defined("DB_NAME") ? DB_NAME : getenv("DB_NAME"));
-    $db_user =
-        $config["db_user"] ??
-        (defined("DB_USER") ? DB_USER : getenv("DB_USER"));
-    $db_password =
-        $config["db_password"] ??
-        (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
-
-    if (!$db_host || !$db_name || !$db_user || $db_password === false) {
-        throw new InvalidArgumentException(
-            "Database credentials not found. Please provide via config, environment variables, " .
-                "PHP constants, or ensure wp-config.php exists with valid credentials. " .
-                "Missing: " .
-                (!$db_host ? "db_host " : "") .
-                (!$db_name ? "db_name " : "") .
-                (!$db_user ? "db_user " : "") .
-                ($db_password === false ? "db_password" : ""),
-        );
-    }
+    $creds = resolve_db_credentials();
+    $db_host = $creds["db_host"];
+    $db_name = $creds["db_name"];
+    $db_user = $creds["db_user"];
+    $db_password = $creds["db_password"];
 
     $fragments_per_batch = $config["fragments_per_batch"] ?? 1000;
     $fragments_per_batch = require_int_range(
@@ -764,27 +839,13 @@ function endpoint_db_index(
     int $max_memory,
     float $memory_threshold
 ): array {
-    global $streaming_context;
     prepare_streaming_response();
 
-    $db_host =
-        $config["db_host"] ??
-        (defined("DB_HOST") ? DB_HOST : getenv("DB_HOST"));
-    $db_name =
-        $config["db_name"] ??
-        (defined("DB_NAME") ? DB_NAME : getenv("DB_NAME"));
-    $db_user =
-        $config["db_user"] ??
-        (defined("DB_USER") ? DB_USER : getenv("DB_USER"));
-    $db_password =
-        $config["db_password"] ??
-        (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
-
-    if (!$db_host || !$db_name || !$db_user || $db_password === false) {
-        throw new InvalidArgumentException(
-            "Database credentials not found for db_index.",
-        );
-    }
+    $creds = resolve_db_credentials();
+    $db_host = $creds["db_host"];
+    $db_name = $creds["db_name"];
+    $db_user = $creds["db_user"];
+    $db_password = $creds["db_password"];
 
     $tables_per_batch = $config["tables_per_batch"] ?? 1000;
     $tables_per_batch = require_int_range(
@@ -820,82 +881,82 @@ function endpoint_db_index(
     $aborted = false;
 
     try {
-    while (
-        should_continue(
-            $script_start,
-            $max_execution_time,
-            $max_memory,
-            $memory_threshold,
-        )
-    ) {
-        $sql =
-            "SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, ENGINE, " .
-            "TABLE_COLLATION FROM INFORMATION_SCHEMA.TABLES " .
-            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME > :last " .
-            "ORDER BY TABLE_NAME ASC LIMIT {$tables_per_batch}";
-        $stmt = $mysql->prepare($sql);
-        $stmt->bindValue(":last", $last_table, PDO::PARAM_STR);
-        $stmt->execute();
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        while (
+            should_continue(
+                $script_start,
+                $max_execution_time,
+                $max_memory,
+                $memory_threshold,
+            )
+        ) {
+            $sql =
+                "SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, ENGINE, " .
+                "TABLE_COLLATION FROM INFORMATION_SCHEMA.TABLES " .
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME > :last " .
+                "ORDER BY TABLE_NAME ASC LIMIT {$tables_per_batch}";
+            $stmt = $mysql->prepare($sql);
+            $stmt->bindValue(":last", $last_table, PDO::PARAM_STR);
+            $stmt->execute();
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        if (!$rows) {
-            $status = "complete";
-            break;
-        }
+            if (!$rows) {
+                $status = "complete";
+                break;
+            }
 
-        $tables = [];
-        foreach ($rows as $row) {
-            $name = (string) ($row["TABLE_NAME"] ?? "");
-            $tables[] = [
-                "name" => $name,
-                "rows" =>
-                    isset($row["TABLE_ROWS"]) && is_numeric($row["TABLE_ROWS"])
-                        ? (int) $row["TABLE_ROWS"]
-                        : null,
-                "data_bytes" =>
-                    isset($row["DATA_LENGTH"]) && is_numeric($row["DATA_LENGTH"])
-                        ? (int) $row["DATA_LENGTH"]
-                        : null,
-                "index_bytes" =>
-                    isset($row["INDEX_LENGTH"]) && is_numeric($row["INDEX_LENGTH"])
-                        ? (int) $row["INDEX_LENGTH"]
-                        : null,
-                "engine" => $row["ENGINE"] ?? null,
-                "collation" => $row["TABLE_COLLATION"] ?? null,
-            ];
-            $last_table = $name;
-            $tables_processed++;
-            if (
-                isset($row["TABLE_ROWS"]) &&
-                is_numeric($row["TABLE_ROWS"])
-            ) {
-                $rows_estimated += (int) $row["TABLE_ROWS"];
+            $tables = [];
+            foreach ($rows as $row) {
+                $name = (string) ($row["TABLE_NAME"] ?? "");
+                $tables[] = [
+                    "name" => $name,
+                    "rows" =>
+                        isset($row["TABLE_ROWS"]) && is_numeric($row["TABLE_ROWS"])
+                            ? (int) $row["TABLE_ROWS"]
+                            : null,
+                    "data_bytes" =>
+                        isset($row["DATA_LENGTH"]) && is_numeric($row["DATA_LENGTH"])
+                            ? (int) $row["DATA_LENGTH"]
+                            : null,
+                    "index_bytes" =>
+                        isset($row["INDEX_LENGTH"]) && is_numeric($row["INDEX_LENGTH"])
+                            ? (int) $row["INDEX_LENGTH"]
+                            : null,
+                    "engine" => $row["ENGINE"] ?? null,
+                    "collation" => $row["TABLE_COLLATION"] ?? null,
+                ];
+                $last_table = $name;
+                $tables_processed++;
+                if (
+                    isset($row["TABLE_ROWS"]) &&
+                    is_numeric($row["TABLE_ROWS"])
+                ) {
+                    $rows_estimated += (int) $row["TABLE_ROWS"];
+                }
+            }
+
+            $payload = json_encode_or_throw($tables);
+            $cursor_json = json_encode_or_throw([
+                "phase" => "tables",
+                "last_table" => $last_table,
+            ]);
+
+            $gz->write(
+                "--{$boundary}\r\n" .
+                "Content-Type: application/json\r\n" .
+                "Content-Length: " . strlen($payload) . "\r\n" .
+                "X-Chunk-Type: table_stats\r\n" .
+                "X-Tables: " . count($tables) . "\r\n" .
+                "X-Cursor: " . base64_encode($cursor_json) . "\r\n" .
+                "\r\n" .
+                $payload . "\r\n",
+            );
+            $gz->sync();
+
+            if (count($rows) < $tables_per_batch) {
+                $status = "complete";
+                break;
             }
         }
-
-        $payload = json_encode_or_throw($tables);
-        $cursor_json = json_encode_or_throw([
-            "phase" => "tables",
-            "last_table" => $last_table,
-        ]);
-
-        $gz->write(
-            "--{$boundary}\r\n" .
-            "Content-Type: application/json\r\n" .
-            "Content-Length: " . strlen($payload) . "\r\n" .
-            "X-Chunk-Type: table_stats\r\n" .
-            "X-Tables: " . count($tables) . "\r\n" .
-            "X-Cursor: " . base64_encode($cursor_json) . "\r\n" .
-            "\r\n" .
-            $payload . "\r\n",
-        );
-        $gz->sync();
-
-        if (count($rows) < $tables_per_batch) {
-            $status = "complete";
-            break;
-        }
-    }
     } catch (\Throwable $e) {
         $aborted = true;
         emit_error_chunk($gz, $boundary, get_class($e) . ": " . $e->getMessage());
@@ -1281,34 +1342,6 @@ function endpoint_preflight(array $config): array
         "error" => null,
     ];
 
-    $db_host =
-        $config["db_host"] ??
-        (defined("DB_HOST") ? DB_HOST : getenv("DB_HOST"));
-    $db_name =
-        $config["db_name"] ??
-        (defined("DB_NAME") ? DB_NAME : getenv("DB_NAME"));
-    $db_user =
-        $config["db_user"] ??
-        (defined("DB_USER") ? DB_USER : getenv("DB_USER"));
-    $db_password =
-        $config["db_password"] ??
-        (defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD"));
-
-    $missing = [];
-    if (!$db_host) {
-        $missing[] = "db_host";
-    }
-    if (!$db_name) {
-        $missing[] = "db_name";
-    }
-    if (!$db_user) {
-        $missing[] = "db_user";
-    }
-    if ($db_password === false || $db_password === null || $db_password === "") {
-        $missing[] = "db_password";
-    }
-
-    $wp_credentials = null;
     $credential_roots = [];
     if (!empty($directories)) {
         $credential_roots = $directories;
@@ -1319,56 +1352,28 @@ function endpoint_preflight(array $config): array
     }
     $credential_roots = normalize_path_list($credential_roots);
 
-    if (!empty($missing) && !empty($credential_roots)) {
-        if(defined("DB_HOST") && defined("DB_NAME") && defined("DB_USER") && defined("DB_PASSWORD")) {
-            $wp_credentials = [
-                "db_host" => DB_HOST,
-                "db_name" => DB_NAME,
-                "db_user" => DB_USER,
-                "db_password" => DB_PASSWORD,
-            ];
-        } else {
-            $wp_credentials = extract_db_credentials_from_wp_config($credential_roots);
-        }
-        if ($wp_credentials !== null) {
-            $db_host = $db_host ?: $wp_credentials["db_host"];
-            $db_name = $db_name ?: $wp_credentials["db_name"];
-            $db_user = $db_user ?: $wp_credentials["db_user"];
-            $db_password =
-                ($db_password !== false && $db_password !== null && $db_password !== "")
-                    ? $db_password
-                    : $wp_credentials["db_password"];
-            $missing = [];
-            if (!$db_host) {
-                $missing[] = "db_host";
-            }
-            if (!$db_name) {
-                $missing[] = "db_name";
-            }
-            if (!$db_user) {
-                $missing[] = "db_user";
-            }
-            if ($db_password === false || $db_password === null || $db_password === "") {
-                $missing[] = "db_password";
-            }
-            $db["wp"]["wp_config_path"] = $wp_credentials["wp_config_path"] ?? null;
-            $db["wp"]["table_prefix"] = $wp_credentials["table_prefix"] ?? null;
-        }
-    }
-
     $db["wp"]["wp_load_path"] = $wp_load_path;
     $db["wp"]["wp_load_loaded"] = function_exists("get_option");
 
-    if (empty($missing)) {
+    $creds = null;
+    try {
+        $creds = resolve_db_credentials($credential_roots);
+        $db["wp"]["wp_config_path"] = $creds["wp_config_path"];
+        $db["wp"]["table_prefix"] = $creds["table_prefix"];
         $db["credentials_found"] = true;
+    } catch (InvalidArgumentException $e) {
+        $db["error"] = $e->getMessage();
+    }
+
+    if ($creds !== null) {
         if (!extension_loaded("pdo_mysql")) {
             $db["error"] = "pdo_mysql extension not loaded";
         } else {
             try {
                 $mysql = new PDO(
-                    "mysql:host={$db_host};dbname={$db_name};charset=utf8mb4",
-                    $db_user,
-                    $db_password,
+                    "mysql:host={$creds['db_host']};dbname={$creds['db_name']};charset=utf8mb4",
+                    $creds["db_user"],
+                    $creds["db_password"],
                     [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
                 );
                 $db["connected"] = true;
@@ -1687,9 +1692,6 @@ function endpoint_preflight(array $config): array
                 $db["error"] = $e->getMessage();
             }
         }
-    } else {
-        $db["error"] = "Database credentials not found";
-        $db["missing"] = $missing;
     }
 
     $wp_runtime_paths = null;

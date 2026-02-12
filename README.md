@@ -281,8 +281,10 @@ What we **don't** do:
 
 ### Todos
 
+* Confirm the importer never sends a request larger than the allowed PHP
+  limits, or, if it does and the response indicates that, it backs off
+  and tries a smaller body size. Also, make sure the body's gzipped.
 * Possibly run more checks in `preflight-assert`. What would they be?
-* Support sqlite sites
 * ✅ How to negotiate symlinks pointing outside of the requested root directories?
 * ✅ `preflight-assert` command that exits 0/1 depending on migration feasibility
 * ✅ Renamed `sql-preflight` to `db-index`
@@ -333,6 +335,7 @@ What we **don't** do:
 
 **Nice to haves**
 
+* Support sqlite sites
 * Importer – emit dedicated errors when we run out of the disk space or DB space on the importing end.
   * Account for the disk space limits for files and for MySQL data on the migration target.
   * we can be reactive – detect out of disk space errors when it happens. we won't know the storage quota
