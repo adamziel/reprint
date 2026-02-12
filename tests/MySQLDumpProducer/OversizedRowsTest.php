@@ -470,4 +470,54 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
         $this->assertEquals($largePk, $row['id']);
         $this->assertEquals($largeContent, $row['content']);
     }
+
+    /**
+     * Cursor must stay small regardless of how large the oversized columns are.
+     * The cursor stores byte offsets, not raw data, so it should never exceed 5KB.
+     */
+    public function testCursorSizeStaysSmallWithOversizedRows(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE cursor_size_check (
+                id INT PRIMARY KEY AUTO_INCREMENT,
+                blob1 LONGBLOB,
+                blob2 LONGBLOB,
+                blob3 LONGBLOB
+            )
+        ");
+
+        // Insert a row with 3 large columns (50MB total)
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO cursor_size_check (blob1, blob2, blob3) VALUES (?, ?, ?)"
+        );
+        $stmt->execute([
+            random_bytes(20 * 1024 * 1024),
+            random_bytes(20 * 1024 * 1024),
+            random_bytes(10 * 1024 * 1024),
+        ]);
+
+        $options = [
+            'max_statement_size' => 10 * 1024 * 1024,
+            'batch_size' => 1,
+        ];
+
+        $producer = $this->createProducer($options);
+        $maxCursorSize = 0;
+
+        // Walk through all fragments, checking cursor size at every step
+        while ($producer->next_sql_fragment()) {
+            $cursor = $producer->get_reentrancy_cursor();
+            $cursorSize = strlen($cursor);
+            if ($cursorSize > $maxCursorSize) {
+                $maxCursorSize = $cursorSize;
+            }
+        }
+
+        $this->assertLessThanOrEqual(
+            5 * 1024,
+            $maxCursorSize,
+            "Cursor must stay under 5KB even with 50MB of oversized data, " .
+            "got {$maxCursorSize} bytes"
+        );
+    }
 }

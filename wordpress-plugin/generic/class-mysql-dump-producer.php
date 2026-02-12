@@ -134,9 +134,12 @@ class MySQLDumpProducer
     /**
      * When a row is too large for a single INSERT, its big columns are split
      * into chunks and queued here. Each entry tracks the column name, its
-     * data type, the raw chunks, and which chunk index comes next.
+     * data type, the current byte offset into the value, and the total value
+     * length. The actual data is re-fetched from the database on demand via
+     * SUBSTRING queries, keeping cursors small (a few hundred bytes rather
+     * than megabytes of raw data).
      *
-     * @var array
+     * @var array Array of {column: string, data_type: string, byte_offset: int, total_length: int}
      */
     private $oversized_queue = [];
 
@@ -154,7 +157,7 @@ class MySQLDumpProducer
         $this->db = $db;
         $this->tables_to_process = $options["tables_to_process"] ?? null;
         $this->batch_size = max(1, (int)($options["batch_size"] ?? 250));
-        $this->emit_create_table = (bool)$options["create_table_query"] ?? true;
+        $this->emit_create_table = (bool)($options["create_table_query"] ?? true);
 
         if (isset($options["max_statement_size"])) {
             $this->max_statement_size = (int)$options["max_statement_size"];
@@ -806,22 +809,13 @@ class MySQLDumpProducer
     }
 
     /** Base64-encodes all chunk payloads in the oversized queue for JSON safety. */
+    /**
+     * The oversized queue entries are already cursor-safe (just column names,
+     * data types, and integer offsets), so encoding is a no-op.
+     */
     private function encode_oversized_queue_for_cursor($queue)
     {
-        $encoded = [];
-        foreach ($queue as $item) {
-            $encoded_chunks = [];
-            foreach ($item['chunks'] as $chunk) {
-                $encoded_chunks[] = base64_encode($chunk);
-            }
-            $encoded[] = [
-                'column' => $item['column'],
-                'data_type' => $item['data_type'],
-                'chunks' => $encoded_chunks,
-                'chunk_index' => $item['chunk_index'],
-            ];
-        }
-        return $encoded;
+        return $queue;
     }
 
     /** Reverses encode_oversized_queue_for_cursor(). */
@@ -832,20 +826,16 @@ class MySQLDumpProducer
         }
         $decoded = [];
         foreach ($queue as $item) {
-            if (!is_array($item) || !isset($item['chunks']) || !is_array($item['chunks'])) {
+            if (!is_array($item) || !isset($item['column'])) {
                 throw new \InvalidArgumentException(
-                    "Invalid cursor: oversized_queue item must contain a 'chunks' array"
+                    "Invalid cursor: oversized_queue item must contain a 'column' key"
                 );
             }
-            $decoded_chunks = [];
-            foreach ($item['chunks'] as $chunk) {
-                $decoded_chunks[] = base64_decode($chunk);
-            }
             $decoded[] = [
-                'column' => $item['column'] ?? '',
+                'column' => $item['column'],
                 'data_type' => $item['data_type'] ?? '',
-                'chunks' => $decoded_chunks,
-                'chunk_index' => $item['chunk_index'] ?? 0,
+                'byte_offset' => (int) ($item['byte_offset'] ?? 0),
+                'total_length' => (int) ($item['total_length'] ?? 0),
             ];
         }
         return $decoded;
@@ -987,6 +977,10 @@ class MySQLDumpProducer
      * binary, dates, enums — goes through FROM_BASE64(). JSON is special:
      * MySQL rejects binary-charset input for JSON columns, so we wrap with
      * CONVERT(... USING utf8mb4) to decode the base64 into a utf8mb4 string.
+     * JSON can only be encoded as UTF-8 or UTF-16, and it's typically UTF-8.
+     * As of this version, we do not support UTF-16-encoded JSON data strings.
+     *
+     * @TODO: Support UTF-16-encoded JSON data strings.
      */
     private function format_value($value, $data_type)
     {
@@ -1006,7 +1000,12 @@ class MySQLDumpProducer
             return "CONVERT(FROM_BASE64('" . $base64 . "') USING utf8mb4)";
         }
 
-        return $this->format_base64($value);
+        // Treat all other data types as strings and encode them as base64. This
+        // allows us to express all possible text encodings and arbitrary binary values.
+        if ($value === "") {
+            return "''";
+        }
+        return "FROM_BASE64('" . base64_encode($value) . "')";
     }
 
     /**
@@ -1101,17 +1100,6 @@ class MySQLDumpProducer
     private function quote_identifier($identifier)
     {
         return '`' . str_replace('`', '``', $identifier) . '`';
-    }
-
-    /** Returns FROM_BASE64('...') or '' for empty strings. */
-    private function format_base64($value)
-    {
-        if ($value === "") {
-            return "''";
-        }
-
-        $base64 = base64_encode($value);
-        return "FROM_BASE64('" . $base64 . "')";
     }
 
     /** Auto-detects max_allowed_packet and uses 80% of it. Falls back to 1MB. */
@@ -1209,17 +1197,18 @@ class MySQLDumpProducer
             }
 
             $data_type = $this->current_column_types[$col]["data_type"] ?? "varchar";
-            $chunks = $this->create_value_chunks($raw_value, $col);
+            $value_length = strlen($raw_value);
+            $chunk_size = $this->compute_chunk_size($col);
 
-            if (count($chunks) > 1) {
+            if ($value_length > $chunk_size) {
                 $chunked_columns[$col] = true;
                 $excess -= ($size - 2); // Saved bytes (size minus the '' replacement)
 
                 $this->oversized_queue[] = [
                     'column' => $col,
                     'data_type' => $data_type,
-                    'chunks' => $chunks,
-                    'chunk_index' => 0,
+                    'byte_offset' => 0,
+                    'total_length' => $value_length,
                 ];
             }
         }
@@ -1242,15 +1231,12 @@ class MySQLDumpProducer
     }
 
     /**
-     * Splits a raw value into chunks small enough that each UPDATE ... CONCAT()
-     * statement fits within max_statement_size after base64 encoding.
+     * Computes the maximum raw byte size of each chunk for the given column,
+     * such that an UPDATE ... SET col = CONCAT(col, FROM_BASE64('...'))
+     * statement stays within max_statement_size.
      */
-    private function create_value_chunks($value, $column)
+    private function compute_chunk_size($column)
     {
-        if ($value === null || $value === '') {
-            return [$value];
-        }
-
         $quoted_table = $this->quote_identifier($this->current_table);
         $quoted_column = $this->quote_identifier($column);
         $update_overhead = strlen("UPDATE {$quoted_table} SET {$quoted_column} = CONCAT({$quoted_column}, ) WHERE ;");
@@ -1261,19 +1247,7 @@ class MySQLDumpProducer
 
         // Base64 inflates by ~1.33x, plus FROM_BASE64('') wrapper overhead
         $max_chunk_raw_size = (int)(($max_chunk_raw_size - 20) / 1.34);
-        $max_chunk_raw_size = max($max_chunk_raw_size, 1000);
-
-        $value_len = strlen($value);
-        if ($value_len <= $max_chunk_raw_size) {
-            return [$value];
-        }
-
-        $chunks = [];
-        for ($offset = 0; $offset < $value_len; $offset += $max_chunk_raw_size) {
-            $chunks[] = substr($value, $offset, $max_chunk_raw_size);
-        }
-
-        return $chunks;
+        return max($max_chunk_raw_size, 1000);
     }
 
     /** Rough byte estimate for the WHERE pk1 = v1 AND pk2 = v2 clause. */
@@ -1302,6 +1276,11 @@ class MySQLDumpProducer
     /**
      * Emits one UPDATE ... SET col = CONCAT(col, chunk) statement.
      *
+     * Instead of storing the entire column value in memory, this method
+     * re-reads just the needed chunk from the database using SUBSTRING().
+     * This keeps the cursor tiny (byte offsets only) while still producing
+     * the correct UPDATE statements.
+     *
      * Returns false when the queue is drained, which signals the state machine
      * to transition back to the state saved in $state_after_oversized.
      */
@@ -1317,7 +1296,18 @@ class MySQLDumpProducer
         $current = &$this->oversized_queue[0];
         $column = $current['column'];
         $data_type = $current['data_type'];
-        $chunk = $current['chunks'][$current['chunk_index']];
+        $byte_offset = $current['byte_offset'];
+        $total_length = $current['total_length'];
+
+        $chunk_size = $this->compute_chunk_size($column);
+
+        // Fetch just the chunk we need from the database using SUBSTRING.
+        // MySQL's SUBSTRING is 1-indexed, so add 1 to our 0-based offset.
+        $chunk = $this->fetch_column_substring(
+            $column,
+            $byte_offset + 1,
+            $chunk_size,
+        );
 
         $formatted_chunk = $this->format_value($chunk, $data_type);
 
@@ -1341,12 +1331,52 @@ class MySQLDumpProducer
 
         $this->current_sql_fragment = $sql;
 
-        $current['chunk_index']++;
-        if ($current['chunk_index'] >= count($current['chunks'])) {
+        $current['byte_offset'] += strlen($chunk);
+        if ($current['byte_offset'] >= $total_length) {
             array_shift($this->oversized_queue);
         }
 
         return true;
+    }
+
+    /**
+     * Fetches a substring of a column value from the current table using
+     * the oversized row's primary key values.
+     *
+     * Uses CAST(SUBSTRING(...) AS BINARY) to get raw bytes without charset
+     * re-encoding — matching the same CAST approach used in the main SELECT.
+     */
+    private function fetch_column_substring(string $column, int $start, int $length): string
+    {
+        $quoted_table = $this->quote_identifier($this->current_table);
+        $quoted_column = $this->quote_identifier($column);
+
+        $where_parts = [];
+        $params = [];
+        foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
+            $quoted_pk = $this->quote_identifier($pk_col);
+            if ($pk_value === null) {
+                $where_parts[] = "{$quoted_pk} IS NULL";
+            } else {
+                $where_parts[] = "{$quoted_pk} = ?";
+                $params[] = $pk_value;
+            }
+        }
+        $where_clause = implode(" AND ", $where_parts);
+
+        $sql = "SELECT CAST(SUBSTRING({$quoted_column}, {$start}, {$length}) AS BINARY)"
+             . " FROM {$quoted_table} WHERE {$where_clause}";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        $result = $stmt->fetchColumn();
+
+        if ($result === false) {
+            throw new \RuntimeException(
+                "Failed to fetch column substring for oversized row: {$column}"
+            );
+        }
+
+        return $result;
     }
 
     /** @return bool */
