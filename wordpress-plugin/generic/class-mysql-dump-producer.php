@@ -153,7 +153,7 @@ class MySQLDumpProducer
     {
         $this->db = $db;
         $this->tables_to_process = $options["tables_to_process"] ?? null;
-        $this->batch_size = (int)($options["batch_size"] ?? 250);
+        $this->batch_size = max(1, (int)($options["batch_size"] ?? 250));
         $this->emit_create_table = $options["create_table_query"] ?? true;
 
         if (isset($options["max_statement_size"])) {

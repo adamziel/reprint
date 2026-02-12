@@ -242,7 +242,7 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
 if (
     !defined("SECRET_KEY") ||
     !isset($_GET["SECRET_KEY"]) ||
-    $_GET["SECRET_KEY"] !== SECRET_KEY
+    !hash_equals(SECRET_KEY, $_GET["SECRET_KEY"])
 ) {
     http_response_code(403);
     error_log("Invalid secret key");

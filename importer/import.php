@@ -3223,8 +3223,8 @@ class ImportClient
             $wall_time,
             $context->response_stats ?? [],
         );
-        $this->finalize_index_updates();
         $this->state["fetch"]["cursor"] = $cursor;
+        $this->finalize_index_updates();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
             fflush($context->file_handle);
@@ -4831,7 +4831,7 @@ class ImportClient
                     true,
                 );
             }
-            // return;
+            return;
         }
 
         // Security: path must be absolute (start with /)
@@ -4842,7 +4842,11 @@ class ImportClient
         }
 
         // Use full path under filesystem-root
-        $local_path = realpath($this->local_path . "/filesystem-root") . $path;
+        $root = realpath($this->local_path . "/filesystem-root");
+        if ($root === false) {
+            return;
+        }
+        $local_path = $root . $path;
 
         // Remove existing file/symlink if present
         if (file_exists($local_path) || is_link($local_path)) {
@@ -5682,23 +5686,23 @@ class ImportClient
         );
 
         try {
-        try {
-            $this->check_curl_error($ch);
-        } catch (RuntimeException $curl_error) {
-            if ($endpoint !== null) {
-                $this->handle_tuner_error($endpoint, [
-                    "http_code" => 0,
-                    "timeout" => $this->last_curl_timeout,
-                    "curl_errno" => $this->last_curl_errno,
-                ]);
+            try {
+                $this->check_curl_error($ch);
+            } catch (RuntimeException $curl_error) {
+                if ($endpoint !== null) {
+                    $this->handle_tuner_error($endpoint, [
+                        "http_code" => 0,
+                        "timeout" => $this->last_curl_timeout,
+                        "curl_errno" => $this->last_curl_errno,
+                    ]);
+                }
+                throw $curl_error;
             }
-            throw $curl_error;
-        }
 
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $this->last_http_code = $http_code;
-        $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
-        $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $this->last_http_code = $http_code;
+            $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
+            $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
         } finally {
             curl_close($ch);
             // Clear curl handle reference

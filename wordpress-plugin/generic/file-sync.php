@@ -27,6 +27,14 @@ class FileTreeProducer
 
     /** State for the file currently being streamed in chunks. */
     private $streaming_file_handle = null;
+
+    public function __destruct()
+    {
+        if ($this->streaming_file_handle !== null) {
+            fclose($this->streaming_file_handle);
+            $this->streaming_file_handle = null;
+        }
+    }
     private int $streaming_file_offset = 0;
     private ?array $current_file_meta = null;
 
