@@ -73,4 +73,4 @@ parameters:
 		-
 			message: "#^Strict comparison using \\!\\=\\= between null and null will always evaluate to false\\.$#"
 			count: 1
-			path: wordpress-plugin/generic/file-sync.php
+			path: wordpress-plugin/generic/class-file-tree-producer.php

@@ -302,7 +302,7 @@ if (!defined("EXPORT_MAX_DB_QUERY_TIME_MS")) {
 }
 
 require_once __DIR__ . "/class-mysql-dump-producer.php";
-require_once __DIR__ . "/file-sync.php";
+require_once __DIR__ . "/class-file-tree-producer.php";
 
 /**
  * Prepares the PHP environment for streaming by disabling output buffering,
