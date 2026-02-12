@@ -403,48 +403,47 @@ class AdaptiveTuner
     private array $state;
 
     /**
-     * @param array $config {
-     *     Optional. An array of arguments.
-     *
-     *     @type bool  $enabled                     Enable adaptive tuning. Default true.
-     *     @type bool  $use_server_time              Prefer server-reported runtime. Default true.
-     *     @type int   $max_execution_time           Sent to export.php (seconds). Default 5.
-     *     @type float $memory_threshold             Sent to export.php (0-1). Default 0.8.
-     *     @type float $duty                         Desired duty cycle (0-1). Default 0.5.
-     *     @type float $duty_min                     Minimum duty cycle. Default 0.35.
-     *     @type float $duty_max                     Maximum duty cycle. Default 1.0.
-     *     @type float $min_sleep                    Minimum sleep (seconds). Default 0.2.
-     *     @type float $max_sleep                    Maximum sleep (seconds). Default 10.0.
-     *     @type float $sleep_jitter                 Sleep jitter fraction (0-0.5). Default 0.1.
-     *     @type float $throughput_ema_alpha         EMA smoothing factor. Default 0.2.
-     *     @type float $aimd_drop_ratio              Throughput ratio to trigger decrease. Default 0.9.
-     *     @type float $aimd_decrease_factor         Multiplicative decrease factor. Default 0.7.
-     *     @type float $error_decrease_factor        Error backoff decrease factor. Default 0.5.
-     *     @type int   $aimd_increase_file_bytes     Additive increase for file chunks. Default 262144.
-     *     @type int   $aimd_increase_index_entries  Additive increase for index batches. Default 500.
-     *     @type int   $aimd_increase_sql_fragments  Additive increase for SQL fragments. Default 100.
-     *     @type bool  $tune_only_partial            Tune only on partial responses. Default true.
-     *     @type float $buffered_ratio_threshold     TTFB/server_time ratio for buffering. Default 0.85.
-     *     @type float $buffered_min_server_time     Minimum server_time to apply heuristic. Default 0.5.
-     *     @type int   $buffered_cooldown            Requests to keep buffered mode. Default 3.
-     *     @type int   $error_backoff_requests       Requests to stay in error backoff. Default 3.
-     *     @type int   $slow_host_threshold          Buffered detections before slow-host mode. Default 3.
-     *     @type int   $slow_host_file_chunk_max     Max file chunk in slow-host mode. Default 2097152.
-     *     @type int   $slow_host_index_batch_max    Max index batch in slow-host mode. Default 5000.
-     *     @type int   $slow_host_sql_fragments_max  Max SQL fragments in slow-host mode. Default 1000.
-     *     @type int   $file_chunk_start             Initial file chunk size. Default 5242880.
-     *     @type int   $file_chunk_min               Min file chunk size. Default 262144.
-     *     @type int   $file_chunk_max               Max file chunk size. Default 16777216.
-     *     @type int   $index_batch_start            Initial index batch size. Default 5000.
-     *     @type int   $index_batch_min              Min index batch size. Default 500.
-     *     @type int   $index_batch_max              Max index batch size. Default 50000.
-     *     @type int   $sql_fragments_start          Initial SQL fragments per request. Default 1000.
-     *     @type int   $sql_fragments_min            Min SQL fragments per request. Default 100.
-     *     @type int   $sql_fragments_max            Max SQL fragments per request. Default 5000.
-     *     @type bool  $db_unbuffered                Use unbuffered MySQL queries. Default false.
-     *     @type int   $db_query_time_limit          MySQL MAX_EXECUTION_TIME (ms). Default 0.
-     * }
-     * @param array $state Persisted tuner state (sizes, EMA values, modes).
+     * Endpoint lookup table: maps endpoint name to its size state key,
+     * throughput EMA state key, HTTP parameter name, AIMD increase config key,
+     * min/max config keys, and work metric key.
+     */
+    private const ENDPOINTS = [
+        "file_fetch" => [
+            "size_key" => "file_chunk_size",
+            "ema_key" => "file_throughput_ema",
+            "param" => "chunk_size",
+            "increase_key" => "aimd_increase_file_bytes",
+            "min_key" => "file_chunk_min",
+            "max_key" => "file_chunk_max",
+            "start_key" => "file_chunk_start",
+            "work_metric" => "bytes_processed",
+        ],
+        "file_index" => [
+            "size_key" => "index_batch_size",
+            "ema_key" => "index_throughput_ema",
+            "param" => "batch_size",
+            "increase_key" => "aimd_increase_index_entries",
+            "min_key" => "index_batch_min",
+            "max_key" => "index_batch_max",
+            "start_key" => "index_batch_start",
+            "work_metric" => "entries_processed",
+            "work_metric_alt" => "total_entries",
+        ],
+        "sql_chunk" => [
+            "size_key" => "sql_fragments_per_batch",
+            "ema_key" => "sql_throughput_ema",
+            "param" => "fragments_per_batch",
+            "increase_key" => "aimd_increase_sql_fragments",
+            "min_key" => "sql_fragments_min",
+            "max_key" => "sql_fragments_max",
+            "start_key" => "sql_fragments_start",
+            "work_metric" => "sql_bytes",
+        ],
+    ];
+
+    /**
+     * @param array $config Tuning configuration (merged with defaults, unknown keys ignored).
+     * @param array $state  Persisted tuner state (sizes, EMA values, error backoff).
      */
     public function __construct(array $config, array $state = [])
     {
@@ -465,29 +464,16 @@ class AdaptiveTuner
             "aimd_increase_file_bytes" => 256 * 1024,
             "aimd_increase_index_entries" => 500,
             "aimd_increase_sql_fragments" => 100,
-            "tune_only_partial" => true,
-            "buffered_ratio_threshold" => 0.85,
-            "buffered_min_server_time" => 0.5,
-            "buffered_cooldown" => 3,
             "error_backoff_requests" => 3,
-            "slow_host_threshold" => 3,
-            "slow_host_file_chunk_max" => 2 * 1024 * 1024,
-            "slow_host_index_batch_max" => 5000,
-            "slow_host_sql_fragments_max" => 1000,
-            "sleep_jitter" => 0.1,
-            // File chunks
             "file_chunk_start" => 5 * 1024 * 1024,
             "file_chunk_min" => 256 * 1024,
             "file_chunk_max" => 16 * 1024 * 1024,
-            // Index batch
             "index_batch_start" => 5000,
             "index_batch_min" => 500,
             "index_batch_max" => 50000,
-            // SQL fragments per request
             "sql_fragments_start" => 1000,
             "sql_fragments_min" => 100,
             "sql_fragments_max" => 5000,
-            // DB options (export side)
             "db_unbuffered" => false,
             "db_query_time_limit" => 0,
         ];
@@ -495,205 +481,56 @@ class AdaptiveTuner
         $config = array_merge($defaults, array_intersect_key($config, $defaults));
         $config["enabled"] = (bool) $config["enabled"];
         $config["use_server_time"] = (bool) $config["use_server_time"];
-        $config["max_execution_time"] = max(
-            1,
-            (int) $config["max_execution_time"],
-        );
-        $config["memory_threshold"] = $this->clamp_float(
-            (float) $config["memory_threshold"],
-            0.1,
-            0.95,
-        );
-        $config["duty"] = $this->clamp_float(
-            (float) $config["duty"],
-            0.1,
-            1.0,
-        );
-        $config["duty_min"] = $this->clamp_float(
-            (float) $config["duty_min"],
-            0.1,
-            1.0,
-        );
-        $config["duty_max"] = $this->clamp_float(
-            (float) $config["duty_max"],
-            0.1,
-            1.0,
-        );
+        $config["max_execution_time"] = max(1, (int) $config["max_execution_time"]);
+        $config["memory_threshold"] = $this->clamp((float) $config["memory_threshold"], 0.1, 0.95);
+        $config["duty"] = $this->clamp((float) $config["duty"], 0.1, 1.0);
+        $config["duty_min"] = $this->clamp((float) $config["duty_min"], 0.1, 1.0);
+        $config["duty_max"] = $this->clamp((float) $config["duty_max"], 0.1, 1.0);
         $config["min_sleep"] = max(0.0, (float) $config["min_sleep"]);
         $config["max_sleep"] = max($config["min_sleep"], (float) $config["max_sleep"]);
-        $config["throughput_ema_alpha"] = $this->clamp_float(
-            (float) $config["throughput_ema_alpha"],
-            0.05,
-            0.5,
-        );
-        $config["aimd_drop_ratio"] = $this->clamp_float(
-            (float) $config["aimd_drop_ratio"],
-            0.5,
-            0.99,
-        );
-        $config["aimd_decrease_factor"] = $this->clamp_float(
-            (float) $config["aimd_decrease_factor"],
-            0.1,
-            0.95,
-        );
-        $config["error_decrease_factor"] = $this->clamp_float(
-            (float) $config["error_decrease_factor"],
-            0.1,
-            0.95,
-        );
-        $config["aimd_increase_file_bytes"] = $this->clamp_int(
-            (int) $config["aimd_increase_file_bytes"],
-            4 * 1024,
-            (int) $config["file_chunk_max"],
-        );
-        $config["aimd_increase_index_entries"] = $this->clamp_int(
-            (int) $config["aimd_increase_index_entries"],
-            1,
-            (int) $config["index_batch_max"],
-        );
-        $config["aimd_increase_sql_fragments"] = $this->clamp_int(
-            (int) $config["aimd_increase_sql_fragments"],
-            1,
-            (int) $config["sql_fragments_max"],
-        );
-        $config["tune_only_partial"] = (bool) $config["tune_only_partial"];
-        $config["buffered_ratio_threshold"] = $this->clamp_float(
-            (float) $config["buffered_ratio_threshold"],
-            0.5,
-            1.0,
-        );
-        $config["buffered_min_server_time"] = max(
-            0.0,
-            (float) $config["buffered_min_server_time"],
-        );
-        $config["buffered_cooldown"] = $this->clamp_int(
-            (int) $config["buffered_cooldown"],
-            1,
-            20,
-        );
-        $config["error_backoff_requests"] = $this->clamp_int(
-            (int) $config["error_backoff_requests"],
-            1,
-            20,
-        );
-        $config["slow_host_threshold"] = $this->clamp_int(
-            (int) $config["slow_host_threshold"],
-            1,
-            20,
-        );
-        $config["slow_host_file_chunk_max"] = $this->clamp_int(
-            (int) $config["slow_host_file_chunk_max"],
-            (int) $config["file_chunk_min"],
-            (int) $config["file_chunk_max"],
-        );
-        $config["slow_host_index_batch_max"] = $this->clamp_int(
-            (int) $config["slow_host_index_batch_max"],
-            (int) $config["index_batch_min"],
-            (int) $config["index_batch_max"],
-        );
-        $config["slow_host_sql_fragments_max"] = $this->clamp_int(
-            (int) $config["slow_host_sql_fragments_max"],
-            (int) $config["sql_fragments_min"],
-            (int) $config["sql_fragments_max"],
-        );
-        $config["sleep_jitter"] = $this->clamp_float(
-            (float) $config["sleep_jitter"],
-            0.0,
-            0.5,
-        );
+        $config["throughput_ema_alpha"] = $this->clamp((float) $config["throughput_ema_alpha"], 0.05, 0.5);
+        $config["aimd_drop_ratio"] = $this->clamp((float) $config["aimd_drop_ratio"], 0.5, 0.99);
+        $config["aimd_decrease_factor"] = $this->clamp((float) $config["aimd_decrease_factor"], 0.1, 0.95);
+        $config["error_decrease_factor"] = $this->clamp((float) $config["error_decrease_factor"], 0.1, 0.95);
+        $config["error_backoff_requests"] = max(1, min(20, (int) $config["error_backoff_requests"]));
         $config["db_unbuffered"] = (bool) $config["db_unbuffered"];
-        $config["db_query_time_limit"] = max(
-            0,
-            (int) $config["db_query_time_limit"],
-        );
+        $config["db_query_time_limit"] = max(0, (int) $config["db_query_time_limit"]);
+
+        foreach (self::ENDPOINTS as $ep) {
+            $config[$ep["increase_key"]] = max(1, min((int) $config[$ep["max_key"]], (int) $config[$ep["increase_key"]]));
+        }
 
         $this->config = $config;
 
+        // Initialize state with defaults from config start values.
         $state_defaults = [
-            "file_chunk_size" => $config["file_chunk_start"],
-            "index_batch_size" => $config["index_batch_start"],
-            "sql_fragments_per_batch" => $config["sql_fragments_start"],
             "duty" => $config["duty"],
-            "file_throughput_ema" => null,
-            "index_throughput_ema" => null,
-            "sql_throughput_ema" => null,
-            "buffered_mode" => false,
-            "buffered_cooldown" => 0,
-            "buffered_streak" => 0,
-            "slow_host_mode" => false,
             "error_backoff_remaining" => 0,
         ];
-        $this->state = array_merge($state_defaults, $state);
-        $this->state["file_chunk_size"] = $this->clamp_int(
-            (int) $this->state["file_chunk_size"],
-            (int) $config["file_chunk_min"],
-            (int) $config["file_chunk_max"],
-        );
-        $this->state["index_batch_size"] = $this->clamp_int(
-            (int) $this->state["index_batch_size"],
-            (int) $config["index_batch_min"],
-            (int) $config["index_batch_max"],
-        );
-        $this->state["sql_fragments_per_batch"] = $this->clamp_int(
-            (int) $this->state["sql_fragments_per_batch"],
-            (int) $config["sql_fragments_min"],
-            (int) $config["sql_fragments_max"],
-        );
-        $this->state["duty"] = $this->clamp_float(
-            (float) $this->state["duty"],
-            $config["duty_min"],
-            $config["duty_max"],
-        );
-        foreach ([
-            "file_throughput_ema",
-            "index_throughput_ema",
-            "sql_throughput_ema",
-        ] as $ema_key) {
-            $ema_value = $this->state[$ema_key] ?? null;
-            if ($ema_value === null) {
-                $this->state[$ema_key] = null;
-                continue;
-            }
-            $ema_value = (float) $ema_value;
-            $this->state[$ema_key] = $ema_value > 0 ? $ema_value : null;
+        foreach (self::ENDPOINTS as $ep) {
+            $state_defaults[$ep["size_key"]] = $config[$ep["start_key"]];
+            $state_defaults[$ep["ema_key"]] = null;
         }
+        $this->state = array_merge($state_defaults, $state);
 
-        $this->state["buffered_mode"] = (bool) ($this->state["buffered_mode"] ?? false);
-        $this->state["buffered_cooldown"] = max(
-            0,
-            (int) ($this->state["buffered_cooldown"] ?? 0),
-        );
-        $this->state["buffered_streak"] = max(
-            0,
-            (int) ($this->state["buffered_streak"] ?? 0),
-        );
-        $this->state["slow_host_mode"] = (bool) ($this->state["slow_host_mode"] ?? false);
-        $this->state["error_backoff_remaining"] = max(
-            0,
-            (int) ($this->state["error_backoff_remaining"] ?? 0),
-        );
+        // Clamp restored state values.
+        foreach (self::ENDPOINTS as $ep) {
+            $this->state[$ep["size_key"]] = max(
+                (int) $config[$ep["min_key"]],
+                min((int) $config[$ep["max_key"]], (int) $this->state[$ep["size_key"]]),
+            );
+            $ema = $this->state[$ep["ema_key"]] ?? null;
+            $this->state[$ep["ema_key"]] = ($ema !== null && (float) $ema > 0) ? (float) $ema : null;
+        }
+        $this->state["duty"] = $this->clamp((float) $this->state["duty"], $config["duty_min"], $config["duty_max"]);
+        $this->state["error_backoff_remaining"] = max(0, (int) ($this->state["error_backoff_remaining"] ?? 0));
     }
 
-    /**
-     * Return the current config after defaults and clamps have been applied.
-     *
-     * This is useful for audit logs and for persisting the tuned configuration
-     * alongside the import state.
-     *
-     * @return array Normalized tuning configuration.
-     */
     public function get_config(): array
     {
         return $this->config;
     }
 
-    /**
-     * Return the current tuner state (sizes, EMA values, and modes).
-     *
-     * This is the mutable state that gets persisted between runs.
-     *
-     * @return array Current tuner state.
-     */
     public function get_state(): array
     {
         return $this->state;
@@ -702,53 +539,29 @@ class AdaptiveTuner
     /**
      * Build request parameters for a specific endpoint.
      *
-     * This applies clamped sizes and slow-host caps, and injects any DB options
-     * required by the export endpoint.
-     *
      * @param string $endpoint Endpoint name: file_fetch, file_index, sql_chunk.
      * @return array Query parameters to send to export.php.
      */
     public function get_request_params(string $endpoint): array
     {
-        // Section: base limits shared by all endpoints.
         $params = [
             "max_execution_time" => $this->config["max_execution_time"],
             "memory_threshold" => $this->config["memory_threshold"],
         ];
 
-        if ($endpoint === "file_fetch") {
-            // Section: file fetch sizes (bytes).
-            $size_key = "file_chunk_size";
-            $size = (int) $this->state[$size_key];
-            $size = $this->clamp_int(
-                $size,
-                (int) $this->config[$this->min_key_for_size($size_key)],
-                $this->effective_max_for_size($size_key),
-            );
-            $this->state[$size_key] = $size;
-            $params["chunk_size"] = $size;
-        } elseif ($endpoint === "file_index") {
-            // Section: index batch sizes (entries).
-            $size_key = "index_batch_size";
-            $size = (int) $this->state[$size_key];
-            $size = $this->clamp_int(
-                $size,
-                (int) $this->config[$this->min_key_for_size($size_key)],
-                $this->effective_max_for_size($size_key),
-            );
-            $this->state[$size_key] = $size;
-            $params["batch_size"] = $size;
-        } elseif ($endpoint === "sql_chunk") {
-            // Section: SQL fragment batch sizes and DB settings.
-            $size_key = "sql_fragments_per_batch";
-            $size = (int) $this->state[$size_key];
-            $size = $this->clamp_int(
-                $size,
-                (int) $this->config[$this->min_key_for_size($size_key)],
-                $this->effective_max_for_size($size_key),
-            );
-            $this->state[$size_key] = $size;
-            $params["fragments_per_batch"] = $size;
+        $ep = self::ENDPOINTS[$endpoint] ?? null;
+        if ($ep === null) {
+            return $params;
+        }
+
+        $size = max(
+            (int) $this->config[$ep["min_key"]],
+            min((int) $this->config[$ep["max_key"]], (int) $this->state[$ep["size_key"]]),
+        );
+        $this->state[$ep["size_key"]] = $size;
+        $params[$ep["param"]] = $size;
+
+        if ($endpoint === "sql_chunk") {
             if ($this->config["db_unbuffered"]) {
                 $params["db_unbuffered"] = 1;
             }
@@ -764,27 +577,12 @@ class AdaptiveTuner
      * Record the outcome of a request and update tuning state using AIMD.
      *
      * @param string $endpoint Endpoint name: file_fetch, file_index, sql_chunk.
-     * @param array  $metrics {
-     *     Optional. Request metrics.
-     *
-     *     @type float      $wall_time        Client wall time (seconds).
-     *     @type float      $server_time      Server-reported runtime (seconds).
-     *     @type int        $memory_used      Server memory peak (bytes).
-     *     @type int        $memory_limit     Server memory limit (bytes).
-     *     @type string     $status           Response status: partial|complete.
-     *     @type int        $bytes_processed  File bytes processed (file_fetch).
-     *     @type int        $entries_processed Index entries emitted (file_index).
-     *     @type int        $sql_bytes        SQL bytes emitted (sql_chunk).
-     *     @type float      $ttfb             Client time-to-first-byte (seconds).
-     *     @type float      $total_time       Client total time (seconds).
-     * }
+     * @param array  $metrics  Request metrics (wall_time, server_time, status, work metrics).
      * @return array Decision summary for logging and sleep.
      */
     public function record_result(string $endpoint, array $metrics): array
     {
-        // Section: fast exits and basic timing selection.
         if (!$this->config["enabled"]) {
-            // Tuning disabled: don't touch state, don't sleep.
             return [
                 "decision" => "disabled",
                 "sleep_seconds" => 0.0,
@@ -796,7 +594,6 @@ class AdaptiveTuner
         $server_time = (float) ($metrics["server_time"] ?? 0);
         if ($this->config["use_server_time"]) {
             if ($server_time <= 0) {
-                // We can't tune without server time; skip sizing but still log.
                 return [
                     "decision" => "no_server_time",
                     "sleep_seconds" => 0.0,
@@ -811,167 +608,64 @@ class AdaptiveTuner
             $elapsed = $wall_time > 0 ? $wall_time : 0.001;
         }
 
-        // Section: memory ratio (observational only for now).
-        $mem_ratio = null;
-        $memory_used = (int) ($metrics["memory_used"] ?? 0);
-        $memory_limit = (int) ($metrics["memory_limit"] ?? 0);
-        if ($memory_used > 0 && $memory_limit > 0) {
-            $mem_ratio = $memory_used / $memory_limit;
-        }
-
-        // Section: buffering heuristic and slow-host detection.
-        /**
-         * Buffering heuristic:
-         * - TTFB includes network/proxy latency, while X-Time-Elapsed is server runtime.
-         * - We treat buffering as "likely" when TTFB is close to server runtime
-         *   (ratio threshold) and runtime is above a minimum to avoid RTT-only
-         *   false positives on tiny requests.
-         */
-        $ttfb = (float) ($metrics["ttfb"] ?? 0);
-        $total_time = (float) ($metrics["total_time"] ?? 0);
-        $buffered_likely = false;
-        $buffered_ratio = null;
-        if ($server_time > 0 && $ttfb > 0) {
-            $buffered_ratio = $ttfb / $server_time;
-            if ($server_time >= $this->config["buffered_min_server_time"]) {
-                $buffered_likely =
-                    $ttfb >=
-                    ($server_time * $this->config["buffered_ratio_threshold"]);
-            }
-        }
-        if ($buffered_likely) {
-            $this->state["buffered_mode"] = true;
-            $this->state["buffered_cooldown"] = $this->config["buffered_cooldown"];
-            $this->state["buffered_streak"]++;
-        } elseif ($this->state["buffered_cooldown"] > 0) {
-            // Keep buffered mode for a few requests after detection, then clear.
-            $this->state["buffered_cooldown"]--;
-            if ($this->state["buffered_cooldown"] <= 0) {
-                $this->state["buffered_mode"] = false;
-            }
-            $this->state["buffered_streak"] = 0;
-        } else {
-            $this->state["buffered_streak"] = 0;
-        }
-
-        if (
-            !$this->state["slow_host_mode"] &&
-            $this->state["buffered_streak"] >= $this->config["slow_host_threshold"]
-        ) {
-            // Persistent buffering suggests a slow host; clamp max sizes.
-            $this->state["slow_host_mode"] = true;
-        }
-
-        // Section: compute work done and decide whether to tune this response.
+        $ep = self::ENDPOINTS[$endpoint] ?? null;
         $status = $metrics["status"] ?? null;
-        $work_done = $this->work_done_for_endpoint($endpoint, $metrics);
-        if ($work_done !== null) {
-            $work_done = (int) $work_done;
-        }
+        $work_done = $this->work_done($ep, $metrics);
 
         $decision = "steady";
-        $size_key = $this->size_key_for_endpoint($endpoint);
+        $size_key = $ep["size_key"] ?? null;
         $throughput = null;
         $throughput_ema = null;
         $throughput_ratio = null;
-        $prev_ema = null;
-        $aimd_step = $size_key ? $this->aimd_increase_step($size_key) : null;
 
         $should_tune = $work_done !== null && $work_done > 0;
-        if (
-            $should_tune &&
-            $this->config["tune_only_partial"] &&
-            $status !== "partial"
-        ) {
-            // Skip tuning on tiny final batches to avoid skewing the signal.
-            $should_tune = false;
-            $decision = "skip_complete";
-        }
 
         // Section: throughput estimation and AIMD adjustment.
-        if ($should_tune) {
+        if ($should_tune && $ep !== null) {
             $throughput = $work_done / max(0.0001, $elapsed);
-            $ema_key = $this->throughput_key_for_endpoint($endpoint);
-            if ($ema_key !== null) {
-                $prev_ema = $this->state[$ema_key] ?? null;
-                if ($prev_ema !== null && $prev_ema > 0) {
-                    $throughput_ratio = $throughput / $prev_ema;
-                }
-                // EMA (Exponential Moving Average) smooths noisy throughput.
-                // It gives more weight to recent measurements without discarding
-                // older history, using: ema = (1 - alpha) * prev + alpha * current.
-                $alpha = (float) $this->config["throughput_ema_alpha"];
-                if ($prev_ema === null || $prev_ema <= 0) {
-                    $throughput_ema = $throughput;
-                } else {
-                    $throughput_ema =
-                        $prev_ema * (1.0 - $alpha) +
-                        $throughput * $alpha;
-                }
-                $this->state[$ema_key] = $throughput_ema;
-            } else {
-                $throughput_ema = $throughput;
+            $prev_ema = $this->state[$ep["ema_key"]] ?? null;
+            if ($prev_ema !== null && $prev_ema > 0) {
+                $throughput_ratio = $throughput / $prev_ema;
             }
+
+            // EMA (Exponential Moving Average) smooths noisy throughput.
+            // It gives more weight to recent measurements without discarding
+            // older history, using: ema = (1 - alpha) * prev + alpha * current.
+            $alpha = (float) $this->config["throughput_ema_alpha"];
+            if ($prev_ema === null || $prev_ema <= 0) {
+                $throughput_ema = $throughput;
+            } else {
+                $throughput_ema = $prev_ema * (1.0 - $alpha) + $throughput * $alpha;
+            }
+            $this->state[$ep["ema_key"]] = $throughput_ema;
 
             if ($this->state["error_backoff_remaining"] > 0) {
                 // Hold sizes steady while error backoff is active.
                 $decision = "error_backoff";
-            } elseif ($size_key === null) {
-                $decision = "no_size_key";
             } elseif ($prev_ema === null || $prev_ema <= 0) {
-                // First measurement seeds the EMA; only shrink if buffering is obvious.
-                if ($buffered_likely) {
-                    $size = (int) $this->state[$size_key];
-                    $size = (int) round(
-                        $size * (float) $this->config["aimd_decrease_factor"],
-                    );
-                    $size = $this->clamp_int(
-                        $size,
-                        (int) $this->config[$this->min_key_for_size($size_key)],
-                        $this->effective_max_for_size($size_key),
-                    );
-                    $this->state[$size_key] = $size;
-                    $decision = "buffered_decrease";
-                } else {
-                    $decision = "warmup";
-                }
+                // First measurement seeds the EMA; no size change yet.
+                $decision = "warmup";
             } else {
                 $size = (int) $this->state[$size_key];
-                $decrease = false;
-
-                if ($buffered_likely) {
-                    $decrease = true;
-                    $decision = "buffered_decrease";
-                } elseif (
+                if (
                     $throughput_ratio !== null &&
                     $throughput_ratio < (float) $this->config["aimd_drop_ratio"]
                 ) {
-                    $decrease = true;
+                    // Multiplicative decrease on throughput drop.
+                    $size = (int) round($size * (float) $this->config["aimd_decrease_factor"]);
                     $decision = "decrease";
-                }
-
-                if ($decrease) {
-                    $size = (int) round(
-                        $size * (float) $this->config["aimd_decrease_factor"],
-                    );
                 } else {
-                    if (!$this->state["buffered_mode"]) {
-                        $size += (int) ($aimd_step ?? 0);
-                        $decision = "increase";
-                    } else {
-                        $decision = "buffered_hold";
-                    }
+                    // Additive increase on steady or improving throughput.
+                    $size += (int) $this->config[$ep["increase_key"]];
+                    $decision = "increase";
                 }
-
-                $size = $this->clamp_int(
-                    $size,
-                    (int) $this->config[$this->min_key_for_size($size_key)],
-                    $this->effective_max_for_size($size_key),
+                $size = max(
+                    (int) $this->config[$ep["min_key"]],
+                    min((int) $this->config[$ep["max_key"]], $size),
                 );
                 $this->state[$size_key] = $size;
             }
         } elseif ($work_done === null || $work_done <= 0) {
-            // We can't compute throughput without any recorded work.
             $decision = "no_work";
         }
 
@@ -980,38 +674,16 @@ class AdaptiveTuner
             $this->state["error_backoff_remaining"]--;
         }
 
-        // Section: compute client-side sleep from duty cycle, then add jitter.
-        $this->state["duty"] = $this->clamp_float(
-            (float) $this->state["duty"],
-            $this->config["duty_min"],
-            $this->config["duty_max"],
-        );
+        // Section: compute client-side sleep from duty cycle.
+        $duty = $this->clamp((float) $this->state["duty"], $this->config["duty_min"], $this->config["duty_max"]);
+        $this->state["duty"] = $duty;
 
         $sleep = 0.0;
-        $duty = (float) $this->state["duty"];
         if ($duty < 1.0 && $elapsed > 0) {
             $sleep = $elapsed * (1.0 / max(0.01, $duty) - 1.0);
-            $sleep = $this->clamp_float(
-                $sleep,
-                $this->config["min_sleep"],
-                $this->config["max_sleep"],
-            );
-            if ($sleep > 0 && $this->config["sleep_jitter"] > 0) {
-                $jitter = $sleep * (float) $this->config["sleep_jitter"];
-                $sleep += $this->random_float(-$jitter, $jitter);
-                if ($sleep < 0) {
-                    $sleep = 0.0;
-                }
-                $sleep = $this->clamp_float(
-                    $sleep,
-                    $this->config["min_sleep"],
-                    $this->config["max_sleep"],
-                );
-            }
+            $sleep = $this->clamp($sleep, $this->config["min_sleep"], $this->config["max_sleep"]);
         }
-
         if ($status === "complete") {
-            // Don't sleep after completion; we're done with this endpoint.
             $sleep = 0.0;
         }
 
@@ -1020,27 +692,16 @@ class AdaptiveTuner
             "sleep_seconds" => $sleep,
             "duty" => $duty,
             "elapsed" => $elapsed,
-            "mem_ratio" => $mem_ratio,
-            "size_key" => $size_key,
-            "size_value" => $size_key ? $this->state[$size_key] : null,
+            "status" => $status,
+            "wall_time" => $wall_time,
+            "server_time" => $server_time,
             "work_done" => $work_done,
             "throughput" => $throughput,
             "throughput_ema" => $throughput_ema,
             "throughput_ratio" => $throughput_ratio,
-            "aimd_drop_ratio" => $this->config["aimd_drop_ratio"],
-            "aimd_decrease_factor" => $this->config["aimd_decrease_factor"],
-            "aimd_increase_step" => $aimd_step,
-            "status" => $status,
-            "ttfb" => $ttfb,
-            "total_time" => $total_time,
-            "buffered_ratio" => $buffered_ratio,
-            "buffered_likely" => $buffered_likely,
-            "buffered_mode" => $this->state["buffered_mode"],
-            "buffered_streak" => $this->state["buffered_streak"],
-            "slow_host_mode" => $this->state["slow_host_mode"],
+            "size_key" => $size_key,
+            "size_value" => $size_key ? $this->state[$size_key] : null,
             "error_backoff_remaining" => $this->state["error_backoff_remaining"],
-            "wall_time" => $wall_time,
-            "server_time" => $server_time,
         ];
     }
 
@@ -1048,13 +709,7 @@ class AdaptiveTuner
      * Record a request-level error and trigger temporary backoff.
      *
      * @param string $endpoint Endpoint name: file_fetch, file_index, sql_chunk.
-     * @param array  $error {
-     *     Optional. Error details.
-     *
-     *     @type int  $http_code  HTTP status code, if any.
-     *     @type bool $timeout    Whether the request timed out.
-     *     @type int  $curl_errno Curl error code, if any.
-     * }
+     * @param array  $error    Error details (http_code, timeout, curl_errno).
      * @return array Decision summary for logging.
      */
     public function record_error(string $endpoint, array $error): array
@@ -1063,46 +718,35 @@ class AdaptiveTuner
         $timeout = (bool) ($error["timeout"] ?? false);
         $curl_errno = (int) ($error["curl_errno"] ?? 0);
 
-        // Section: only engage backoff on real errors or timeouts.
+        // Only engage backoff on real errors or timeouts.
         $should_backoff =
             $timeout ||
             ($http_code >= 400 && $http_code < 600) ||
             $http_code >= 600;
         if (!$should_backoff) {
-            // Non-error status: no state changes, just return context for logging.
             return [
                 "decision" => "ignore",
                 "http_code" => $http_code,
                 "timeout" => $timeout,
                 "curl_errno" => $curl_errno,
-                "buffered_mode" => $this->state["buffered_mode"],
-                "slow_host_mode" => $this->state["slow_host_mode"],
                 "error_backoff_remaining" => $this->state["error_backoff_remaining"],
             ];
         }
 
-        // Section: enable conservative mode for the next few requests.
-        $this->state["buffered_mode"] = true;
-        $this->state["buffered_cooldown"] = max(
-            $this->state["buffered_cooldown"],
-            (int) $this->config["buffered_cooldown"],
-        );
         $this->state["error_backoff_remaining"] = max(
             $this->state["error_backoff_remaining"],
             (int) $this->config["error_backoff_requests"],
         );
 
-        // Section: immediately shrink the next size to ease pressure.
-        $size_key = $this->size_key_for_endpoint($endpoint);
-        if ($size_key !== null) {
+        // Immediately shrink the endpoint's size to ease pressure.
+        $ep = self::ENDPOINTS[$endpoint] ?? null;
+        $size_key = $ep["size_key"] ?? null;
+        if ($ep !== null) {
             $size = (int) $this->state[$size_key];
-            $size = (int) round(
-                $size * (float) $this->config["error_decrease_factor"],
-            );
-            $size = $this->clamp_int(
-                $size,
-                (int) $this->config[$this->min_key_for_size($size_key)],
-                $this->effective_max_for_size($size_key),
+            $size = (int) round($size * (float) $this->config["error_decrease_factor"]);
+            $size = max(
+                (int) $this->config[$ep["min_key"]],
+                min((int) $this->config[$ep["max_key"]], $size),
             );
             $this->state[$size_key] = $size;
         }
@@ -1112,124 +756,27 @@ class AdaptiveTuner
             "http_code" => $http_code,
             "timeout" => $timeout,
             "curl_errno" => $curl_errno,
-            "buffered_mode" => $this->state["buffered_mode"],
-            "slow_host_mode" => $this->state["slow_host_mode"],
             "error_backoff_remaining" => $this->state["error_backoff_remaining"],
             "size_key" => $size_key,
             "size_value" => $size_key ? $this->state[$size_key] : null,
         ];
     }
 
-    private function throughput_key_for_endpoint(string $endpoint): ?string
+    private function work_done(?array $ep, array $metrics): ?int
     {
-        if ($endpoint === "file_fetch") {
-            return "file_throughput_ema";
-        }
-        if ($endpoint === "file_index") {
-            return "index_throughput_ema";
-        }
-        if ($endpoint === "sql_chunk") {
-            return "sql_throughput_ema";
-        }
-        return null;
-    }
-
-    private function effective_max_for_size(string $size_key): int
-    {
-        // Section: compute per-endpoint max size, then apply slow-host caps.
-        $max = (int) $this->config[$this->max_key_for_size($size_key)];
-        if (!empty($this->state["slow_host_mode"])) {
-            if ($size_key === "file_chunk_size") {
-                $max = min($max, (int) $this->config["slow_host_file_chunk_max"]);
-            } elseif ($size_key === "index_batch_size") {
-                $max = min(
-                    $max,
-                    (int) $this->config["slow_host_index_batch_max"],
-                );
-            } elseif ($size_key === "sql_fragments_per_batch") {
-                $max = min(
-                    $max,
-                    (int) $this->config["slow_host_sql_fragments_max"],
-                );
-            }
-        }
-
-        $min = (int) $this->config[$this->min_key_for_size($size_key)];
-        return $max < $min ? $min : $max;
-    }
-
-    private function work_done_for_endpoint(string $endpoint, array $metrics): ?int
-    {
-        if ($endpoint === "file_fetch") {
-            return isset($metrics["bytes_processed"])
-                ? (int) $metrics["bytes_processed"]
-                : null;
-        }
-        if ($endpoint === "file_index") {
-            if (isset($metrics["entries_processed"])) {
-                return (int) $metrics["entries_processed"];
-            }
-            if (isset($metrics["total_entries"])) {
-                return (int) $metrics["total_entries"];
-            }
+        if ($ep === null) {
             return null;
         }
-        if ($endpoint === "sql_chunk") {
-            return isset($metrics["sql_bytes"])
-                ? (int) $metrics["sql_bytes"]
-                : null;
+        if (isset($metrics[$ep["work_metric"]])) {
+            return (int) $metrics[$ep["work_metric"]];
+        }
+        if (isset($ep["work_metric_alt"]) && isset($metrics[$ep["work_metric_alt"]])) {
+            return (int) $metrics[$ep["work_metric_alt"]];
         }
         return null;
     }
 
-    private function size_key_for_endpoint(string $endpoint): ?string
-    {
-        if ($endpoint === "file_fetch") {
-            return "file_chunk_size";
-        }
-        if ($endpoint === "file_index") {
-            return "index_batch_size";
-        }
-        if ($endpoint === "sql_chunk") {
-            return "sql_fragments_per_batch";
-        }
-        return null;
-    }
-
-    private function aimd_increase_step(string $size_key): int
-    {
-        if ($size_key === "file_chunk_size") {
-            return (int) $this->config["aimd_increase_file_bytes"];
-        }
-        if ($size_key === "index_batch_size") {
-            return (int) $this->config["aimd_increase_index_entries"];
-        }
-        return (int) $this->config["aimd_increase_sql_fragments"];
-    }
-
-    private function min_key_for_size(string $size_key): string
-    {
-        if ($size_key === "file_chunk_size") {
-            return "file_chunk_min";
-        }
-        if ($size_key === "index_batch_size") {
-            return "index_batch_min";
-        }
-        return "sql_fragments_min";
-    }
-
-    private function max_key_for_size(string $size_key): string
-    {
-        if ($size_key === "file_chunk_size") {
-            return "file_chunk_max";
-        }
-        if ($size_key === "index_batch_size") {
-            return "index_batch_max";
-        }
-        return "sql_fragments_max";
-    }
-
-    private function clamp_int(int $value, int $min, int $max): int
+    private function clamp(float $value, float $min, float $max): float
     {
         if ($value < $min) {
             return $min;
@@ -1238,23 +785,6 @@ class AdaptiveTuner
             return $max;
         }
         return $value;
-    }
-
-    private function clamp_float(float $value, float $min, float $max): float
-    {
-        if ($value < $min) {
-            return $min;
-        }
-        if ($value > $max) {
-            return $max;
-        }
-        return $value;
-    }
-
-    private function random_float(float $min, float $max): float
-    {
-        $rand = mt_rand() / mt_getrandmax();
-        return $min + ($max - $min) * $rand;
     }
 }
 
@@ -1285,11 +815,9 @@ class ImportClient
     private $chunks_since_save = 0; // Track chunks for periodic saves
     private $shutdown_requested = false; // Flag for graceful shutdown
     private $follow_symlinks = false; // Whether to follow symlinks outside root
-    private $current_curl_handle = null; // Active curl handle for abort
     private $tuner = null; // AdaptiveTuner instance or null
     private $hmac_client = null; // Site_Export_HMAC_Client instance or null
     private $max_allowed_packet = null; // Client's max_allowed_packet for SQL statements
-    private $last_http_code = null;
     private $last_curl_errno = null;
     private $last_curl_timeout = false;
     private $pipeline_step = null; // Current pipeline step (1-indexed), set via --step
@@ -1622,6 +1150,8 @@ class ImportClient
         // X-Auth-Nonce, and X-Auth-Timestamp headers so api.php can verify
         // the caller without a SECRET_KEY in the URL.
         if (!empty($options["secret"])) {
+            // TODO: Distribute with the importer script somehow. Phar? Co-locate? A build script?
+            //       we'll see!
             require_once __DIR__ . "/../wordpress-plugin/generic/class-hmac-client.php";
             $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
         }
@@ -2056,10 +1586,6 @@ class ImportClient
             "http_code=" . (int) ($decision["http_code"] ?? 0),
             "timeout=" . (!empty($decision["timeout"]) ? "yes" : "no"),
             "curl_errno=" . (int) ($decision["curl_errno"] ?? 0),
-            "buffered_mode=" .
-                (!empty($decision["buffered_mode"]) ? "on" : "off"),
-            "slow_host=" .
-                (!empty($decision["slow_host_mode"]) ? "on" : "off"),
             "error_backoff_remaining=" .
                 (int) ($decision["error_backoff_remaining"] ?? 0),
         ];
@@ -2109,9 +1635,6 @@ class ImportClient
                 "s",
         ];
 
-        if (isset($decision["mem_ratio"]) && $decision["mem_ratio"] !== null) {
-            $log[] = "mem_ratio=" . sprintf("%.2f", $decision["mem_ratio"]);
-        }
         if (isset($decision["work_done"]) && $decision["work_done"] !== null) {
             $log[] = "work=" . (int) $decision["work_done"];
         }
@@ -2126,56 +1649,13 @@ class ImportClient
             $log[] =
                 "ratio=" . sprintf("%.2f", (float) $decision["throughput_ratio"]);
         }
-        if (isset($decision["aimd_drop_ratio"]) && $decision["aimd_drop_ratio"] !== null) {
+        if (!empty($decision["size_key"])) {
             $log[] =
-                "aimd_drop=" . sprintf("%.2f", (float) $decision["aimd_drop_ratio"]);
-        }
-        if (isset($decision["aimd_decrease_factor"]) && $decision["aimd_decrease_factor"] !== null) {
-            $log[] =
-                "aimd_dec=" . sprintf("%.2f", (float) $decision["aimd_decrease_factor"]);
-        }
-        if (isset($decision["aimd_increase_step"]) && $decision["aimd_increase_step"] !== null) {
-            $log[] =
-                "aimd_step=" . (int) $decision["aimd_increase_step"];
-        }
-        if (isset($decision["ttfb"]) && $decision["ttfb"] !== null) {
-            $log[] = "ttfb=" . sprintf("%.3f", (float) $decision["ttfb"]) . "s";
-        }
-        if (isset($decision["total_time"]) && $decision["total_time"] !== null) {
-            $log[] =
-                "total_time=" .
-                sprintf("%.3f", (float) $decision["total_time"]) .
-                "s";
-        }
-        if (isset($decision["buffered_ratio"]) && $decision["buffered_ratio"] !== null) {
-            $log[] =
-                "buffered_ratio=" . sprintf("%.2f", $decision["buffered_ratio"]);
-        }
-        $log[] =
-            "buffered_threshold=" .
-            sprintf("%.2f", (float) $this->tuner->get_config()["buffered_ratio_threshold"]);
-        $log[] =
-            "buffered_cooldown=" .
-            (int) ($this->tuner->get_state()["buffered_cooldown"] ?? 0);
-        if (!empty($decision["buffered_likely"])) {
-            $log[] = "buffered=likely";
-        }
-        if (isset($decision["buffered_mode"])) {
-            $log[] = "buffered_mode=" . ($decision["buffered_mode"] ? "on" : "off");
-        }
-        if (isset($decision["buffered_streak"])) {
-            $log[] = "buffered_streak=" . (int) $decision["buffered_streak"];
-        }
-        if (isset($decision["slow_host_mode"])) {
-            $log[] = "slow_host=" . ($decision["slow_host_mode"] ? "on" : "off");
+                $decision["size_key"] . "=" . (int) ($decision["size_value"] ?? 0);
         }
         if (isset($decision["error_backoff_remaining"])) {
             $log[] =
                 "error_backoff=" . (int) $decision["error_backoff_remaining"];
-        }
-        if (!empty($decision["size_key"])) {
-            $log[] =
-                $decision["size_key"] . "=" . (int) ($decision["size_value"] ?? 0);
         }
         $log[] = "duty=" . sprintf("%.2f", $decision["duty"] ?? 0);
         $log[] =
@@ -5296,7 +4776,6 @@ class ImportClient
      */
     private function reset_curl_state(): void
     {
-        $this->last_http_code = null;
         $this->last_curl_errno = null;
         $this->last_curl_timeout = false;
     }
@@ -5394,7 +4873,6 @@ class ImportClient
         $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
 
         $ch = curl_init($url);
-        $this->current_curl_handle = $ch;
 
         $headers = [
             ...$this->get_base_headers("application/json"),
@@ -5417,7 +4895,6 @@ class ImportClient
             $this->check_curl_error($ch);
         } catch (RuntimeException $e) {
             curl_close($ch);
-            $this->current_curl_handle = null;
             return [
                 "ok" => false,
                 "http_code" => 0,
@@ -5431,9 +4908,7 @@ class ImportClient
         }
 
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $this->last_http_code = $http_code;
         curl_close($ch);
-        $this->current_curl_handle = null;
 
         if ($http_code !== 200) {
             return [
@@ -5499,9 +4974,6 @@ class ImportClient
         $this->audit_log(implode(" | ", $log_parts), false);
 
         $ch = curl_init($url);
-
-        // Store curl handle so signal handler can abort it
-        $this->current_curl_handle = $ch;
 
         $parser = null;
         $current_chunk = null;
@@ -5741,13 +5213,10 @@ class ImportClient
             }
 
             $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $this->last_http_code = $http_code;
             $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
             $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
         } finally {
             curl_close($ch);
-            // Clear curl handle reference
-            $this->current_curl_handle = null;
         }
 
         if (!isset($context->response_stats) || !is_array($context->response_stats)) {

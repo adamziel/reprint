@@ -723,65 +723,65 @@ function endpoint_sql_chunk(
     $aborted = false;
 
     try {
-    while (
-        should_continue(
-            $script_start,
-            $max_execution_time,
-            $max_memory,
-            $memory_threshold,
-        )
-    ) {
-        $sql = [];
+        while (
+            should_continue(
+                $script_start,
+                $max_execution_time,
+                $max_memory,
+                $memory_threshold,
+            )
+        ) {
+            $sql = [];
 
-        $i = 0;
-        while ($reader->next_sql_fragment()) {
-            $sql[] = $reader->get_sql_fragment();
-            $i++;
+            $i = 0;
+            while ($reader->next_sql_fragment()) {
+                $sql[] = $reader->get_sql_fragment();
+                $i++;
 
-            if ($i >= $fragments_per_batch) {
-                break;
+                if ($i >= $fragments_per_batch) {
+                    break;
+                }
+
+                if (
+                    !should_continue(
+                        $script_start,
+                        $max_execution_time,
+                        $max_memory,
+                        $memory_threshold,
+                    )
+                ) {
+                    break;
+                }
+            }
+            $sql = implode("", $sql);
+            $sql_bytes_processed += strlen($sql);
+
+            // E2E test hook: before SQL batch is emitted
+            if (getenv('SITE_EXPORT_TEST_MODE')) {
+                $cursor_for_hook = $reader->get_reentrancy_cursor();
+                $hook_args = [&$sql, $cursor_for_hook];
+                _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
             }
 
-            if (
-                !should_continue(
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                )
-            ) {
+            $cursor = $reader->get_reentrancy_cursor();
+            $gz->write(
+                "--{$boundary}\r\n" .
+                "Content-Type: application/sql\r\n" .
+                "Content-Length: " . strlen($sql) . "\r\n" .
+                "X-Chunk-Type: sql\r\n" .
+                "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                "\r\n",
+            );
+            $gz->write($sql);
+            $gz->write("\r\n");
+            $gz->sync();
+
+            $batches_processed++;
+
+            if ($reader->is_finished()) {
                 break;
             }
         }
-        $sql = implode("", $sql);
-        $sql_bytes_processed += strlen($sql);
-
-        // E2E test hook: before SQL batch is emitted
-        if (getenv('SITE_EXPORT_TEST_MODE')) {
-            $cursor_for_hook = $reader->get_reentrancy_cursor();
-            $hook_args = [&$sql, $cursor_for_hook];
-            _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
-        }
-
-        $cursor = $reader->get_reentrancy_cursor();
-        $gz->write(
-            "--{$boundary}\r\n" .
-            "Content-Type: application/sql\r\n" .
-            "Content-Length: " . strlen($sql) . "\r\n" .
-            "X-Chunk-Type: sql\r\n" .
-            "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-            "\r\n",
-        );
-        $gz->write($sql);
-        $gz->write("\r\n");
-        $gz->sync();
-
-        $batches_processed++;
-
-        if ($reader->is_finished()) {
-            break;
-        }
-    }
     } catch (Throwable $e) {
         $aborted = true;
         error_log("SQL streaming error: " . $e->getMessage());
