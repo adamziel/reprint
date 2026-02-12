@@ -2315,7 +2315,6 @@ function endpoint_file_index(
     int $max_memory,
     float $memory_threshold
 ): array {
-    global $streaming_context;
     $directories = resolve_directories($config);
     $batch_size = $config["batch_size"] ?? 5000;
     $batch_size = require_int_range(
@@ -2331,6 +2330,9 @@ function endpoint_file_index(
     $ordered = [];
     $follow_symlinks = !empty($config["follow_symlinks"]);
     $cursor_provided = isset($config["cursor"]);
+
+    // Find the starting point – either by parsing the cursor, or by
+    // sourcing it from the filesystem.
 
     if ($cursor_provided) {
         $cursor_data = json_decode($config["cursor"], true);
@@ -2446,6 +2448,8 @@ function endpoint_file_index(
             }
         }
     }
+
+    // Start traversing the filesystem.
 
     $current_dir = $list_dir_real;
 

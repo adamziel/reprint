@@ -135,7 +135,7 @@ On the **migration source** side:
 On the **migration target** side:
 
  - PHP 8.1+ (we'll get down to 7.4 if needed)
- – ext-curl
+ - ext-curl
 
 
 ## File synchronization
@@ -189,9 +189,17 @@ Here's how that works now:
 This keeps the server stateless, keeps all large lists streamed (no full buffering), and guarantees ordering using `strcmp`-equivalent
 binary collation on both sides.
 
+What we **don't** do:
+
+* Upload the local index to the server for diffing. An earlier 
+  version did this, but it increased the complexity, the 
+  resource requirements on the other end, and some variants of
+  it required keeping a local state on the remote site which is
+  undesirable.
+
 ### Directory listing order
 
-The file index is produced by traversing directories depth-first. Each directory’s immediate entries are sorted in bytewise
+The file index is produced by traversing directories depth-first. Each directory's immediate entries are sorted in bytewise
 lexicographic order (equivalent to `strcmp` with `LC_ALL=C`). When a directory entry is encountered, that directory entry is
 emitted, and then we descend into it before moving to the next sibling entry. This makes the output deterministic while keeping
 the cursor small and resumable.
@@ -206,9 +214,16 @@ What we **don't** do:
   potentially, in the cursor. That could take up some space!
 * Stream sorting either inside PHP or via a shell call to `find ./ | sort`. While it would use less memory, the PHP version would be noticeably
   slower and more complex. The shell call would also slow down the entire process because of its sheer overhead when listing 99% of the typical
-  smaller directories. Furthermore, we couold never be sure whether the shell call results can be trusted – find and sort could differ between
+  smaller directories. Furthermore, we could never be sure whether the shell call results can be trusted – find and sort could differ between
   runtimes to the point where some runtimes replace them with stubs. PHP functions are much more portable. Large sites should have large memory
   banks. If they don't, then we can revisit the stream-sorting approach.
+* Order the traversal by `(ctime, filename)`. It wouldn't save us much work, as we'd still need to run a full scan of the filesystem
+  on every incremental synchronization to detect deletions. On top of that, it is impractical. First, you need to always sort the
+  entire directory tree by ctime before you can start streaming the data. That may take some time and HTTP requests in PHP land. Second,
+  there is no clear stop for the traversal. Any file that keeps changing will keep moving to the end of the queue, and meanwhile the files
+  we have already seen may also get their ctime updated.
+* Use a `DirectoryListing` abstraction class. We tried one and removed it — plain `scandir()` is simpler
+  and the abstraction added complexity without benefit.
 
 ### Volatile files
 
@@ -221,16 +236,78 @@ the **migration target** chooses how to handle it. A few choices are:
 * Retry a few more times.
 * Just ignore that file (and tell the user).
 
-#### Other considered ways of traversing the filesystem
+### Symlink handling
 
-* A `(ctime, byte offset)` cursor. We'd still need to keep track of the filename for when multiple files have the same ctime.
-* Ordering the traversal by `(ctime, filename)`. It wouldn't save us much work, as we'd still need to run a full scan of the filesystem
-  on every incremental synchronization to detect deletions. On top of that, it is impractical. First, you need to always sort the
-  entire directory tree by ctime before you can start streaming the data. That may take some time and HTTP requests in PHP land. Second,
-  there is no clear stop for the traversal. Any file that keeps changing will keep moving to the end of the queue, and meanwhile the files
-  we have already seen may also get their ctime updated.
-  
-### Resource management
+Symlinks are automatically recreated during import. The importer receives symlink chunks from the
+export stream and calls `symlink()` to recreate them locally. This is safe because all paths are
+constrained to the import directory's `filesystem-root/`.
+
+Some symlinks may point to places on the remote filesystem that are
+outside of the requested directory root. When that happens, they're
+not recreated unless you use the `--follow-symlinks` option.
+
+With the `--follow-symlinks`, the importer will create local
+symlinks even if they point ourside of the directory root. They're
+still constrained within the confines of the `filesystem-root/`
+
+## Database synchronization
+
+### SQL dump approach
+
+MySQLDumpProducer generates SQL dumps in batches (default 250 rows per INSERT statement) with cursor-based
+resumption. The dump is standard SQL — `DROP TABLE IF EXISTS`, `CREATE TABLE`, and multi-row `INSERT`
+statements — directly importable with `mysql` CLI or any standard tool.
+
+The cursor tracks the last row processed using either the primary key,
+when available, or offset otherwise.
+
+### Primary key strategies
+
+The producer handles three scenarios:
+
+* **Simple PK**: Uses the last PK value as cursor. Resumption is a simple `WHERE pk > value`.
+* **Composite PK**: Uses all PK columns in the cursor. Resumption uses a tuple comparison.
+* **No PK**: Falls back to OFFSET-based pagination. This is slower (MySQL must skip rows on each resume)
+  but is the only option when there's no stable key to anchor the cursor.
+
+### Oversized rows
+
+Rows whose encoded size exceeds the statement size limit need special handling. With a primary key,
+the producer skips the oversized row and advances the cursor past it — the row is lost but the dump
+can continue. Without a primary key, the producer fails entirely. OFFSET-based pagination can't reliably
+skip a single row without risking data loss, so failing loudly is the safer choice.
+
+### Binary and string data encoding
+
+Binary and string column data is encoded as base64 in the SQL dump (wrapped in `FROM_BASE64()`). Earlier iterations
+tried raw hex encoding and escaped binary. Base64 was chosen as the
+most conscise option.
+
+### Statement size negotiation
+
+The client detects its local MySQL's `max_allowed_packet`, sends it to the server via the
+`--max-allowed-packet` option, and the server caps SQL statements at `min(client, server) * 0.8`.
+This prevents the dump from producing statements the migration target MySQL can't execute.
+
+What we **don't** do:
+
+* Transmit data as JSON or a binary serialization format and reconstruct SQL locally. This would add
+  complexity and make the REST endpoints harder to debug. The SQL-over-HTTP approach means the dump
+  is directly importable with standard MySQL tools. Still, it would
+  be a nice optional feature to add.
+
+## Authentication
+
+Every request is authenticated with HMAC signatures computed based
+on the request content and a shared secret.
+
+## Error handling
+
+Streaming endpoints use try/catch with error chunks embedded inline in the multipart stream. When something
+goes wrong mid-response, the client sees the error as another multipart chunk rather than the default PHP 
+output such as "Fatal Error". Global error and shutdown handlers.
+
+## Resource management
 
 We need to be careful about the resource usage or we risk web hosts blocking us.
 
@@ -255,7 +332,7 @@ lets fast hosts grow steadily while slow hosts back off quickly.
 
 We also detect likely buffering (TTFB ≈ server runtime) and enter a conservative mode that clamps maximum
 sizes. Any non-2xx/3xx response or timeout triggers error backoff and an immediate size cut. Separately, a
-duty-cycle sleep (with jitter) spaces requests so we don’t monopolize PHP workers or synchronize multiple
+duty-cycle sleep (with jitter) spaces requests so we don't monopolize PHP workers or synchronize multiple
 migrations on the same host.
 
 At the start of each run the importer performs a cheap preflight request. It records PHP and MySQL versions,
@@ -275,100 +352,7 @@ What we **don't** do:
 * Aim for a fixed target runtime. The exporter almost always runs until its time budget expires, so the meaningful
   signal is throughput under that budget, not how close we got to an arbitrary time goal.
 
-### Open questions
-
-* How to handle sites with `utf8mb4` charset on platforms enforcing a different `DB_CHARSET` such as `latin1`?
-
-### Todos
-
-* Confirm the importer never sends a request larger than the allowed PHP
-  limits, or, if it does and the response indicates that, it backs off
-  and tries a smaller body size. Also, make sure the body's gzipped.
-* Possibly run more checks in `preflight-assert`. What would they be?
-* ✅ How to negotiate symlinks pointing outside of the requested root directories?
-* ✅ `preflight-assert` command that exits 0/1 depending on migration feasibility
-* ✅ Renamed `sql-preflight` to `db-index`
-* ✅ A runner script to easily run those downloaded sites locally while providing them with the right `Host` header and
-  rewriting all the URLs on the fly (with the HTML API?)
-* ✅ PHP 7.4+ compat (or PHP 7.2+ even) with CI tests
-* ✅ Export.php: compat with mostly bare PHP installation with just core extensions available.
-* More tests, in particular for:
-  * large files
-  * large databases
-  * ✅ importing wp.com-like symlink structures
-* ✅ Fetch MySQL data using some kind of serialization, chunk locally to match our `max_allowed_packet` and `current_statement_size`.
-* ✅ Add a "follow symlinks" option for the client. When active, the indexing stage will look for symlinks
-  pointing outside of the site root and add them to the top-level directory list.
-* ✅ Automated test suite to cover all the usual corner cases we are trying to account for
-* ✅ Turn it into a WordPress plugin 
- * ✅ HMAC signatures per request with a shared secret + random number + microtime
-* ✅ Handle every single possible error case, e.g. fread() returning false prematurely etc.
-* ✅ Take note of any files modified while they were streamed, re-request them later on.
-  * ✅ Tell the user when a file is too volatile to be synchronized
-* ✅ Support paths with "\n" in them – they're valid paths
-* ✅ Account for 3xx errors – just treat them as errors. Anything non-200 is an error.
-* ✅ If directory sorting exceeds per-request budgets, use real temp files to persist sort runs across requests.
-* ✅ In export.php, require `wp-load.php` if we cannot cheaply connect to MySQL using the database credentials from the wp-config.php file.
-* ✅ Pre-flight request to
-  * ✅ Confirm the host is able to export the site
-  * ✅ Get runtime details so the importing side may decide if it's capable of importing the site.
-* ✅ Auto-constraining resource usage
-* ✅ Handle 4xx and 5xx errors, support backoff strategies.
-  * How do we choose resource budgets for each host / runtime?
-  * start = microtime(); do_thing(); took = microtime() - start; usleep( max( 0.5, (2 * took ) ) );
-  * you can also if bite_size = default; ……. while ….. if ( took > threshold ) { bite_size = bite_size / 2 } else if ( took < other threshold ) { bite_size++ }
-  * for things like number of rows and or files or bytes or whatever transferred at a time
-  * [7:52 PM]so if performance gets poor it backs off hard. if performance is good it bumps up slow (edited) 
-  * [7:53 PM]you can also threshold… like if took > a then sleep 2x; if took > b then sleep 4x; if took > c then sleep 8x
-  * [7:53 PM]you should be able to make some combination of things that backs off as necessary (edited) 
-  * [7:54 PM]not simple. but if you get someone deactivated and banned .25 though a migration you’re gonna have a bad time
-* ✅ When downloading a large file and killing the process, make sure it will be resumed on the next run, regardless of
-  * what it was doing when we've killed it (e.g. appending a partial state to the local file). So, if we wrote some bytes
-  * to the file but did not update the cursor yet, make sure the next run will know we're only expected to have so many
-  * bytes and will truncate the excess bytes beyond that expected size.
-* ✅ Display nice progress information in the terminal (since that will also allow us to display it on the web)
-* ✅ Support directories with more files than can be stored in memory at once.
-* ✅ Multipart handling – do we need to check for boundary presence in our chunk when Content-Length is also present?
-* ✅ Double check we're generating a useful, append-only audit log for every export call
-* ❌ Directory tree snapshots – store root-relative path. Don't store the entire absolut  e path, it inflates the snapshot size.
-  * ^ this is okay, repetitive paths gzip exceptionally well.
-
-**Nice to haves**
-
-* Support sqlite sites
-* Importer – emit dedicated errors when we run out of the disk space or DB space on the importing end.
-  * Account for the disk space limits for files and for MySQL data on the migration target.
-  * we can be reactive – detect out of disk space errors when it happens. we won't know the storage quota
-     upfront anyway in most shared hosting environments.
-* Symlink handling – use a single bulk requests to index all the symlink targets instead of one request
-  per symlink.
-* Make sure we can ctrl+c the process without hanging if we don't have pcntl and posix extensions
-* Unit tests. They're just "nice to have" because we have E2E tests.
-
-**Out of scope for this initial version**
-
-* Sites using multiple databases (either multiple MySQL instances or also Postgres, Redis, etc.)
-* Support for directories with more files than we can sort in memory at once. A million files with 64 byte names require around 100MB of memory to sort.
-  If you have so many files, you better have that much memory available. If it turns out people tend to have more files without the available memory,
-  we can trade CPU cycles and use streaming sorting. We'd also need to use a temporary file to store the sorted list.
-* ~~When we're starting the import and we have access to local MySQL, detect our local `current_statement_size` and `max_allowed_packet` and send that
-  over to the remote host to get an appropriately-chunked dump.~~ **Done** – the client now accepts `--max-allowed-packet=SIZE` and sends it to the server,
-  which caps SQL statements to `min(client, server) * 0.8`. Alternatively, if we ever need to store the dump now and execute it later, we could
-  bring over the MySQL parser from sqlite-database-plugin – or just transmit the data over the wire as JSON (or some binary serialization format) and
-  turn it into SQL statements locally. Let's not start there, though, as that would add complexity and make the REST endpoints harder to debug.
-* Rewrite URLs in the incoming files. We have the tools to do it, but version 1 is about migrating between hosting
-  providers without changing the domain.
-  * All SQL strings. How do we handle strings that are not UTF-8 but latin1? Well, WordPress doesn't seem to actually
-    support latin1, right? It's, most likely, UTF-8 disguised as another encoding. Can we reject inputs that don't form
-    valid UTF-8 sequences? Or at least avoid modifying them? And then rewrite the ones that do look valid?
-  * Hardcoded in files. Most likely themes and plugins. We can parse and rewrite CSS, HTML, XML, JavaScript, JSON, and PHP
-    because we have structured parsers and tokenizers for all these formats. Should we leave this out of scope for the
-    initial version, though? It will be an annoying limitations for site that do need rewriting, but it's also a relatively
-    major scope creep.
-  * Figure out if we do a multi-pass rewrite or stream-rewrite (which could slow down the download).
-
-
-### Transport
+## Transport
 
 Data is sent over HTTP using multipart/mixed content-type. It gives us a way to split large files into chunks and send
 them over multiple requests, while transmitting per-chunk metadata (cursor, chunk size, etc.).
@@ -382,6 +366,27 @@ Why not ZIP or TAR? Because:
   knowing we've lost some bytes from the middle of the stream – at least until we've transferred the entire file.
 * We wouldn't have a good way of sending the cursor to the client. Where would it come in the stream?
 
-## Other explored ideas
+Why not the git protocol? We're effectively exchanging diffs here. Git already does that. But git can't
+recover from a broken exchange — you need to start from scratch. Also, the git protocol is complex.
+Multipart is simple and native to HTTP clients.
 
-* Git protocol. We're effectively exchanging diffs here. Git already does that. Why not use git? Because git can't recover from a broken exchange, you need to start from scratch. Also, git protocol is pretty complex. Multipart is simple and native to HTTP clients.
+## Next steps
+
+* Possibly run more checks in `preflight-assert`. What would they be?
+* Make sure we can ctrl+c the process without hanging if we don't have pcntl and posix extensions.
+* More tests for large files and large databases.
+* Support SQLite sites.
+* Confirm the importer never sends a request larger than the allowed PHP
+  limits, or, if it does and the response indicates that, it backs off
+  and tries a smaller body size. Also, make sure the body's gzipped.
+* Importer — emit dedicated errors when we run out of disk space or DB space on the importing end.
+  We can be reactive (detect out-of-space errors when they happen) since we won't know the storage
+  quota upfront in most shared hosting environments.
+* Symlink handling — use a single bulk request to index all symlink targets instead of one request
+  per symlink.
+* Sites using multiple databases (either multiple MySQL instances or also Postgres, Redis, etc.)
+* Rewrite URLs in the incoming files. We have the tools to do it, but version 1 is about migrating between hosting
+  providers without changing the domain. We can parse and rewrite CSS, HTML, XML, JavaScript, JSON, and PHP
+  because we have structured parsers and tokenizers for all these formats, but it's a major scope creep.
+* Support for directories with more files than we can sort in memory at once. A million files with 64 byte names
+  require around 100MB of memory to sort. If you have so many files, you better have that much memory available.

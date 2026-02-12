@@ -94,7 +94,7 @@ Override with environment variables if needed.
 
 ### Symlink Security
 
-Symlinks are NOT automatically recreated during import for security reasons (directory traversal, absolute path exploits). Instead, they are recorded in a `symlinks.json` manifest file that users must review and manually recreate if appropriate. See markdown/SYMLINKS.md for details.
+Symlinks ARE automatically recreated during import. This is safe because all paths are relative to the import directory's `filesystem-root/`, preventing directory traversal outside it. Errors are logged to the audit log.
 
 ### SQL Dump Batching
 
