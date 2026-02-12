@@ -664,9 +664,9 @@ class MySQLDumpProducer
         }
 
         if (!$this->current_table) {
-            $this->current_table = reset($this->tables_to_process);
+            $this->current_table = reset($this->tables_to_process) ?: null;
         } else {
-            $this->current_table = next($this->tables_to_process);
+            $this->current_table = next($this->tables_to_process) ?: null;
         }
 
         if ($this->current_table) {
