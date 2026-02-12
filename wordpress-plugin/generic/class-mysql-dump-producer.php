@@ -1339,7 +1339,7 @@ class MySQLDumpProducer
             return false;
         }
 
-        $current = &$this->oversized_queue[0];
+        $current = $this->oversized_queue[0];
         $column = $current['column'];
         $data_type = $current['data_type'];
         $byte_offset = $current['byte_offset'];
@@ -1377,8 +1377,8 @@ class MySQLDumpProducer
 
         $this->current_sql_fragment = $sql;
 
-        $current['byte_offset'] += strlen($chunk);
-        if ($current['byte_offset'] >= $total_length) {
+        $this->oversized_queue[0]['byte_offset'] += strlen($chunk);
+        if ($this->oversized_queue[0]['byte_offset'] >= $total_length) {
             array_shift($this->oversized_queue);
         }
 
