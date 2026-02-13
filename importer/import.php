@@ -2122,11 +2122,12 @@ class ImportClient
     }
 
     /**
-     * Discover directories that need indexing beyond the primary export roots.
+     * Recursively discover directories that need indexing beyond the primary
+     * export roots.
      *
      * Scans the remote index for symlink entries with a "target" field,
      * resolves relative targets to absolute paths, and indexes each target
-     * directory.  Repeats until the queue is drained, with cycle detection.
+     * directory. Repeats until the queue is drained, with cycle detection.
      */
     private function discover_symlink_targets(): void
     {
