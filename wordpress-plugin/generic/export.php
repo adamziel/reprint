@@ -88,6 +88,61 @@ function begin_multipart_stream(bool $require_headers = false): array
  *               wp_config_path: ?string, table_prefix: ?string}
  * @throws InvalidArgumentException When required credentials are missing.
  */
+function extract_wp_config_define(string $config_contents, string $constant): ?string
+{
+    $pattern =
+        '/define\\s*\\(\\s*[\'"]' .
+        preg_quote($constant, "/") .
+        '[\'"]\\s*,\\s*([\'"])(.*?)\\1\\s*\\)\\s*;?/is';
+    if (preg_match($pattern, $config_contents, $matches) === 1) {
+        return stripcslashes($matches[2]);
+    }
+    return null;
+}
+
+function extract_wp_table_prefix(string $config_contents): ?string
+{
+    $pattern = '/\\$table_prefix\\s*=\\s*([\'"])(.*?)\\1\\s*;/is';
+    if (preg_match($pattern, $config_contents, $matches) === 1) {
+        return stripcslashes($matches[2]);
+    }
+    return null;
+}
+
+function find_wp_config_paths(array $roots): array
+{
+    $candidates = [];
+    foreach ($roots as $root) {
+        if (!is_string($root) || $root === "") {
+            continue;
+        }
+        $current = realpath($root);
+        if ($current === false) {
+            $current = $root;
+        }
+        $current = rtrim($current, "/");
+        if ($current === "") {
+            $current = "/";
+        }
+        for ($i = 0; $i < 12; $i++) {
+            $candidate = $current === "/" ? "/wp-config.php" : $current . "/wp-config.php";
+            if (
+                is_file($candidate) &&
+                is_readable($candidate) &&
+                !in_array($candidate, $candidates, true)
+            ) {
+                $candidates[] = $candidate;
+            }
+            $parent = dirname($current);
+            if ($parent === $current) {
+                break;
+            }
+            $current = $parent;
+        }
+    }
+    return $candidates;
+}
+
 function resolve_db_credentials(array $credential_roots = []): array
 {
     $db_host = defined("DB_HOST") ? DB_HOST : getenv("DB_HOST");
@@ -98,18 +153,80 @@ function resolve_db_credentials(array $credential_roots = []): array
     $wp_config_path = null;
     $table_prefix = null;
 
-    $missing = [];
-    if (!$db_host) {
-        $missing[] = "db_host";
-    }
-    if (!$db_name) {
-        $missing[] = "db_name";
-    }
-    if (!$db_user) {
-        $missing[] = "db_user";
-    }
-    if ($db_password === false || $db_password === null) {
-        $missing[] = "db_password";
+    $compute_missing = static function (
+        $host,
+        $name,
+        $user,
+        $password
+    ): array {
+        $missing = [];
+        if (!$host) {
+            $missing[] = "db_host";
+        }
+        if (!$name) {
+            $missing[] = "db_name";
+        }
+        if (!$user) {
+            $missing[] = "db_user";
+        }
+        if ($password === false || $password === null) {
+            $missing[] = "db_password";
+        }
+        return $missing;
+    };
+
+    $missing = $compute_missing($db_host, $db_name, $db_user, $db_password);
+
+    // Fallback: parse wp-config.php from discovered roots when constants/env
+    // are unavailable (common in standalone exporter mode).
+    if (!empty($missing) && !empty($credential_roots)) {
+        foreach (find_wp_config_paths($credential_roots) as $candidate) {
+            $contents = @file_get_contents($candidate);
+            if ($contents === false) {
+                continue;
+            }
+
+            $parsed_host = extract_wp_config_define($contents, "DB_HOST");
+            $parsed_name = extract_wp_config_define($contents, "DB_NAME");
+            $parsed_user = extract_wp_config_define($contents, "DB_USER");
+            $parsed_password = extract_wp_config_define($contents, "DB_PASSWORD");
+            $parsed_prefix = extract_wp_table_prefix($contents);
+
+            if (!$db_host && $parsed_host !== null) {
+                $db_host = $parsed_host;
+            }
+            if (!$db_name && $parsed_name !== null) {
+                $db_name = $parsed_name;
+            }
+            if (!$db_user && $parsed_user !== null) {
+                $db_user = $parsed_user;
+            }
+            if (
+                ($db_password === false || $db_password === null) &&
+                $parsed_password !== null
+            ) {
+                $db_password = $parsed_password;
+            }
+            if ($table_prefix === null && $parsed_prefix !== null) {
+                $table_prefix = $parsed_prefix;
+            }
+
+            if (
+                $wp_config_path === null &&
+                ($parsed_host !== null ||
+                    $parsed_name !== null ||
+                    $parsed_user !== null ||
+                    $parsed_password !== null ||
+                    $parsed_prefix !== null)
+            ) {
+                $wp_config_path = $candidate;
+            }
+
+            $missing = $compute_missing($db_host, $db_name, $db_user, $db_password);
+            if (empty($missing)) {
+                break;
+            }
+        }
     }
 
     if (!empty($missing)) {
@@ -128,6 +245,19 @@ function resolve_db_credentials(array $credential_roots = []): array
         "wp_config_path" => $wp_config_path,
         "table_prefix" => $table_prefix,
     ];
+}
+
+function resolve_credential_roots_from_config(array $config): array
+{
+    if (!array_key_exists("directory", $config) || $config["directory"] === null) {
+        return [];
+    }
+
+    try {
+        return resolve_directories($config);
+    } catch (Exception $e) {
+        return [];
+    }
 }
 
 // Polyfill for PHP 7.4 which lacks str_starts_with().
@@ -333,7 +463,10 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
         $candidates[] = dirname(__DIR__) . '/test-hooks.php';
         foreach ($candidates as $candidate) {
             if (file_exists($candidate)) {
-                require_once $candidate;
+                if (function_exists('opcache_invalidate')) {
+                    @opcache_invalidate($candidate, true);
+                }
+                require $candidate;
                 $__test_hook_file_loaded = true;
                 return;
             }
@@ -574,7 +707,7 @@ function endpoint_sql_chunk(
 ): array {
     global $streaming_context;
     prepare_streaming_response();
-    $creds = resolve_db_credentials();
+    $creds = resolve_db_credentials(resolve_credential_roots_from_config($config));
     $db_host = $creds["db_host"];
     $db_name = $creds["db_name"];
     $db_user = $creds["db_user"];
@@ -802,7 +935,7 @@ function endpoint_db_index(
 ): array {
     prepare_streaming_response();
 
-    $creds = resolve_db_credentials();
+    $creds = resolve_db_credentials(resolve_credential_roots_from_config($config));
     $db_host = $creds["db_host"];
     $db_name = $creds["db_name"];
     $db_user = $creds["db_user"];

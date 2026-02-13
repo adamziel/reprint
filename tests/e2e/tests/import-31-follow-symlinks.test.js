@@ -18,8 +18,9 @@ import {
     existsSync, readFileSync, mkdirSync, writeFileSync,
     symlinkSync, lstatSync, readlinkSync,
 } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
@@ -70,6 +71,38 @@ const EXTERNAL_ROOT = '/srv/e2e-external';
 describe('Import: Follow Symlinks', () => {
     const site = 'follow-symlinks';
     let tempDir;
+    let fallbackApiServer = null;
+
+    async function ensureApiReachable() {
+        const apiUrl = getSiteUrl(site);
+        try {
+            await fetch(apiUrl, { method: 'GET' });
+            return;
+        } catch (_) {
+            // The configured e2e infrastructure may not expose port 8101 locally.
+            // Start a PHP built-in server for this site as a fallback.
+        }
+
+        const docRoot = join(getSiteDir(site), 'wp-content', 'plugins', 'site-export');
+        fallbackApiServer = spawn('php', ['-S', '127.0.0.1:8101', '-t', docRoot], {
+            stdio: 'ignore',
+        });
+
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline) {
+            if (fallbackApiServer.exitCode !== null) {
+                throw new Error(`Fallback API server exited early with code ${fallbackApiServer.exitCode}`);
+            }
+            try {
+                await fetch(apiUrl, { method: 'GET' });
+                return;
+            } catch (_) {
+                await sleep(100);
+            }
+        }
+
+        throw new Error('Timed out waiting for follow-symlinks API server to start on 127.0.0.1:8101');
+    }
 
     beforeAll(async () => {
         // Build the external directory tree BEFORE ensureSite, because
@@ -130,11 +163,15 @@ describe('Import: Follow Symlinks', () => {
                 symlinkSync('/srv/e2e-via/dir-target', join(dataDir, 'link-via-indir'));
             },
         });
+        await ensureApiReachable();
         tempDir = createTempDir('e2e-follow-symlinks');
     }, 300000);
 
     afterAll(() => {
         cleanupTempDir(tempDir);
+        if (fallbackApiServer && fallbackApiServer.exitCode === null) {
+            fallbackApiServer.kill('SIGTERM');
+        }
     });
 
     function importUrl() {

@@ -1756,6 +1756,7 @@ class ImportClient
         }
 
         $this->state["command"] = "files-sync";
+        $this->state["status"] = "in_progress";
         $this->save_state($this->state);
 
         $this->run_files_sync_pipeline();

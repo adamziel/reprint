@@ -87,6 +87,7 @@ describe('Import: Error Messages', () => {
         try {
             const result = runImporter(url, dir, 'files-sync', {
                 secret: getSiteSecret(site),
+                skipPreflight: true,
             });
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code');
             const output = (result.stdout + result.stderr).toLowerCase();
