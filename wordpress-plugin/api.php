@@ -264,7 +264,7 @@ try {
     if ($memory_limit === '-1') {
         $max_memory = PHP_INT_MAX;
     } else {
-        $max_memory = parse_memory_limit($memory_limit);
+        $max_memory = parse_size($memory_limit);
     }
 
     $script_start = microtime(true);

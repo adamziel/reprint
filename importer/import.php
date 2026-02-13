@@ -794,6 +794,7 @@ class ImportClient
      * collects index mutations (upserts and deletes) during the current run. Merged into
      * $index_file at the end of a successful sync.
      */
+    /** @var string|null */
     private $index_updates_file;
 
     /** @var resource|null Open file handle for $index_updates_file while writing. */
@@ -847,6 +848,7 @@ class ImportClient
      * @var array Persistent import state loaded from / saved to $state_file.
      * Keys: command, status, cursor, stage, preflight, version, follow_symlinks,
      * max_allowed_packet, db_index, file_index.
+     * @var array|null
      */
     private $state;
 
@@ -4177,7 +4179,7 @@ class ImportClient
      */
     private function assert_is_absolute_normalized_path(string $path, string $label = "path"): void
     {
-        if ($path === "" || $path[0] !== "/" || $path[0] === "~") {
+        if ($path === "" || $path[0] !== "/") {
             throw new RuntimeException("Security: {$label} must be absolute: {$path}");
         }
         if (strpos($path, "\0") !== false) {
