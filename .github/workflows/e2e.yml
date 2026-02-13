@@ -33,6 +33,50 @@ jobs:
         working-directory: tests/e2e
         run: npm install
 
+      - name: Provision basic site and smoke-test API
+        working-directory: tests/e2e
+        run: |
+          # Provision the "basic" site
+          node --input-type=module <<'NODESCRIPT'
+          import { ensureSite } from "./lib/site-setup.js";
+          await ensureSite("basic");
+          console.log("Basic site provisioned");
+          NODESCRIPT
+
+          # Quick check that the export API responds for both SQL and file endpoints.
+          SECRET="test-secret-basic"
+          BASE="http://127.0.0.1:8081/api.php"
+          DIR="/srv/e2e-sites/basic"
+
+          sign_url() {
+            php -r '
+              require_once "wordpress-plugin/generic/class-hmac-client.php";
+              $c = new HmacClient($argv[1]);
+              echo $c->sign_url($argv[2]);
+            ' "$SECRET" "$1"
+          }
+
+          echo "=== Preflight ==="
+          SIGNED=$(sign_url "${BASE}?endpoint=preflight&directory=${DIR}")
+          curl -sf --max-time 10 "$SIGNED" | python3 -m json.tool 2>/dev/null | head -40 || echo "FAILED or not JSON"
+          echo ""
+
+          echo "=== File Index (10s timeout) ==="
+          SIGNED=$(sign_url "${BASE}?endpoint=file_index&directory=${DIR}&list_dir=${DIR}")
+          curl -sf --max-time 10 "$SIGNED" -o /tmp/file_index_response -w "HTTP %{http_code}, %{size_download} bytes, %{time_total}s\n" && echo "OK" || echo "FAILED: exit=$?"
+          xxd /tmp/file_index_response 2>/dev/null | head -20
+
+          echo "=== SQL Chunk (10s timeout) ==="
+          SIGNED=$(sign_url "${BASE}?endpoint=sql_chunk&directory=${DIR}")
+          curl -sf --max-time 10 "$SIGNED" -o /tmp/sql_chunk_response -w "HTTP %{http_code}, %{size_download} bytes, %{time_total}s\n" && echo "OK" || echo "FAILED: exit=$?"
+          xxd /tmp/sql_chunk_response 2>/dev/null | head -20
+
+          echo "=== Importer preflight (30s timeout) ==="
+          timeout 30 php ../../importer/import.php preflight "${BASE}?directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+
+          echo "=== Importer files-sync (30s timeout) ==="
+          timeout 30 php ../../importer/import.php files-sync "${BASE}?directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+
       - name: Run E2E tests
         working-directory: tests/e2e
         run: npx vitest run

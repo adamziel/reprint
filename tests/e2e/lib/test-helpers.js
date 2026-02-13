@@ -276,6 +276,8 @@ export function runImporter(url, outputDir, command, options = {}) {
     }
 
     const commandExtraArgs = options.extraArgs || [];
+    const wallTimeout = options.wallTimeout || 120000; // 2 minutes total wall-clock
+    const wallStart = Date.now();
     let result = runImporterOnce(command, commandExtraArgs);
     if (
         runWithResume &&
@@ -284,6 +286,14 @@ export function runImporter(url, outputDir, command, options = {}) {
     ) {
         let attempts = 0;
         while (result.exitCode === 2 && attempts < maxResumeAttempts) {
+            if (Date.now() - wallStart > wallTimeout) {
+                result = {
+                    ...result,
+                    exitCode: 1,
+                    stderr: `${result.stderr}\nWall-clock timeout (${wallTimeout}ms) after ${attempts} resume attempts.`,
+                };
+                break;
+            }
             attempts += 1;
             const next = runImporterOnce(command, commandExtraArgs);
             result = {
