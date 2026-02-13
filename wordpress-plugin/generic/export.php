@@ -77,16 +77,7 @@ function begin_multipart_stream(bool $require_headers = false): array
 }
 
 /**
- * Resolves database credentials from PHP constants and environment variables.
- *
- * Never reads from $config / HTTP parameters — credentials must come from
- * the server environment. Falls back to wp-config.php parsing when
- * $credential_roots is provided and initial detection is incomplete.
- *
- * @param string[] $credential_roots Directories to search for wp-config.php.
- * @return array{db_host: string, db_name: string, db_user: string, db_password: string,
- *               wp_config_path: ?string, table_prefix: ?string}
- * @throws InvalidArgumentException When required credentials are missing.
+ * Extract a DB-related constant value from wp-config.php contents.
  */
 function extract_wp_config_define(string $config_contents, string $constant): ?string
 {
@@ -143,6 +134,18 @@ function find_wp_config_paths(array $roots): array
     return $candidates;
 }
 
+/**
+ * Resolves database credentials from PHP constants and environment variables.
+ *
+ * Never reads from $config / HTTP parameters — credentials must come from
+ * the server environment. Falls back to wp-config.php parsing when
+ * $credential_roots is provided and initial detection is incomplete.
+ *
+ * @param string[] $credential_roots Directories to search for wp-config.php.
+ * @return array{db_host: string, db_name: string, db_user: string, db_password: string,
+ *               wp_config_path: ?string, table_prefix: ?string}
+ * @throws InvalidArgumentException When required credentials are missing.
+ */
 function resolve_db_credentials(array $credential_roots = []): array
 {
     $db_host = defined("DB_HOST") ? DB_HOST : getenv("DB_HOST");
