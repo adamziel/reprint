@@ -37,8 +37,8 @@ jobs:
         working-directory: tests/e2e
         run: npx vitest run
 
-      - name: Debug logs on failure
-        if: failure()
+      - name: Debug logs
+        if: always()
         run: |
           echo "--- Listening ports ---"
           sudo ss -tlnp 2>/dev/null || true
@@ -54,3 +54,5 @@ jobs:
           sudo journalctl -u nginx --no-pager -n 30 2>/dev/null || true
           echo "--- MariaDB journal ---"
           sudo journalctl -u mariadb --no-pager -n 30 2>/dev/null || true
+          echo "--- PHP processes ---"
+          ps aux | grep php || true
