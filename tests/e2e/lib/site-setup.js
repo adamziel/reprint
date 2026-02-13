@@ -226,15 +226,17 @@ export async function ensureSite(name, options = {}) {
     const port = REGISTRY.sites[name]?.port;
     const siteUrl = port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1';
 
-    console.log(`  Setting up site: ${name} (db: ${dbName})`);
+    const log = (msg) => console.log(`  [${name}] ${msg}`);
+    log(`Setting up site (db: ${dbName})`);
 
     await ensureWpTemplate();
+    log('WP template ready');
 
     // Remove old site dir (clean slate), create fresh, copy WP template
-    execSync(`sudo rm -rf "${siteDir}"`);
-    execSync(`sudo mkdir -p "${SITE_ROOT}" && sudo mkdir -p "${siteDir}"`);
-    execSync(`sudo cp -a "${WP_TEMPLATE}/." "${siteDir}/"`);
-    execSync(`sudo chmod -R 777 "${siteDir}"`);
+    execSync(`sudo rm -rf "${siteDir}"`, { timeout: 30000 });
+    execSync(`sudo mkdir -p "${SITE_ROOT}" && sudo mkdir -p "${siteDir}"`, { timeout: 30000 });
+    execSync(`sudo cp -a "${WP_TEMPLATE}/." "${siteDir}/"`, { timeout: 60000 });
+    execSync(`sudo chmod -R 777 "${siteDir}"`, { timeout: 30000 });
 
     // Create directories (writable now, no sudo needed)
     mkdirSync(join(siteDir, 'wp-content', 'plugins', 'site-export', 'generic'), { recursive: true });
@@ -260,26 +262,35 @@ export async function ensureSite(name, options = {}) {
             join(siteDir, 'wp-content', 'plugins', 'site-export', 'generic', f)
         );
     }
+    log('Files copied');
 
     // Create database and run wp core install
     if (dbOpt !== 'none') {
+        log('Connecting to DB...');
         const adminConn = await createConnection({
             host: DB_HOST, user: DB_USER, password: DB_PASS, multipleStatements: true,
+            connectTimeout: 10000,
         });
         await adminConn.query(`DROP DATABASE IF EXISTS \`${dbName}\`; CREATE DATABASE \`${dbName}\``);
         await adminConn.end();
+        log('DB created');
 
         // wp core install creates all real WP tables (wp_options, wp_posts, etc.)
+        log('Running wp core install...');
         wpCoreInstall(siteDir, siteUrl, name);
+        log('wp core install done');
 
         // Run customDb hook to add extra tables on top of real WP
         if (options.customDb) {
+            log('Running customDb hook...');
             const conn = await createConnection({
                 host: DB_HOST, user: DB_USER, password: DB_PASS,
                 database: dbName, multipleStatements: true,
+                connectTimeout: 10000,
             });
             await options.customDb(dbName, conn);
             await conn.end();
+            log('customDb hook done');
         }
     }
 
@@ -302,11 +313,13 @@ export async function ensureSite(name, options = {}) {
 
     // Run afterCreate hook (dir is still writable — use Node fs, not exec)
     if (options.afterCreate) {
+        log('Running afterCreate hook...');
         await options.afterCreate(siteDir, dbName);
+        log('afterCreate hook done');
     }
 
     // Set final ownership and permissions
-    execSync(`sudo chown -R nginx:nginx "${siteDir}" && sudo chmod -R 755 "${siteDir}"`);
+    execSync(`sudo chown -R nginx:nginx "${siteDir}" && sudo chmod -R 755 "${siteDir}"`, { timeout: 60000 });
 
     // Run afterPermissions hook (for operations that need to happen after chown/chmod,
     // e.g. chmod 000 for permission-denied tests)
@@ -315,7 +328,8 @@ export async function ensureSite(name, options = {}) {
     }
 
     // Write marker
-    execSync(`sudo touch "${markerPath}"`);
+    execSync(`sudo touch "${markerPath}"`, { timeout: 10000 });
+    log('Setup complete');
 
     } finally {
         try { unlinkSync(lockPath); } catch (e) {}
