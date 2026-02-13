@@ -1236,6 +1236,8 @@ class ImportClient
         // To abort a sync, run `<command> --abort` (clears state), then
         // run `<command>` again (starts fresh).
         if ($abort) {
+            // @TODO: Co-locate abort for each command with the run_*() method
+            //        for that command.
             $this->handle_abort($command);
             return;
         }
@@ -1438,7 +1440,7 @@ class ImportClient
      */
     private function run_preflight(): void
     {
-        $url = $this->build_url("preflight", null, [], null);
+        $url = $this->build_url("preflight", null, []);
         $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
 
         $result = $this->fetch_json($url);
@@ -1602,6 +1604,9 @@ class ImportClient
         if (!$db_ok) {
             $all_pass = false;
         }
+
+        // We do not check for any encoding issues here. We'll move over
+        // the entire database as it is.
 
         // Print summary
         foreach ($checks as $check) {
@@ -2722,7 +2727,7 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
-        $url = $this->build_url("file_fetch", $cursor, $params, null);
+        $url = $this->build_url("file_fetch", $cursor, $params);
         $this->audit_log("Downloading file fetch from {$url}");
         $this->audit_log("POST data: " . json_encode($post_data));
 
@@ -2895,7 +2900,7 @@ class ImportClient
         if ($this->follow_symlinks) {
             $params["follow_symlinks"] = "1";
         }
-        $url = $this->build_url("file_index", $cursor, $params, null);
+        $url = $this->build_url("file_index", $cursor, $params);
         $context = new StreamingContext();
 
         $context->on_chunk = function ($chunk) use (
@@ -3841,7 +3846,7 @@ class ImportClient
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
-                $url = $this->build_url("sql_chunk", $cursor, $params, null);
+                $url = $this->build_url("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
                 $context->sql_handle = $sql_handle;
@@ -3995,7 +4000,7 @@ class ImportClient
                 $params = [
                     "tables_per_batch" => 1000,
                 ];
-                $url = $this->build_url("db_index", $cursor, $params, null);
+                $url = $this->build_url("db_index", $cursor, $params);
 
                 $context = new StreamingContext();
                 $context->on_chunk = function ($chunk) use (
@@ -4692,8 +4697,7 @@ class ImportClient
     private function build_url(
         string $endpoint,
         ?string $cursor,
-        array $params = [],
-        ?string $session_id = null
+        array $params = []
     ): string {
         $url = $this->remote_url;
         $separator = strpos($url, "?") === false ? "?" : "&";
@@ -4703,12 +4707,6 @@ class ImportClient
             // Also include cursor in query params as a fallback when headers are stripped.
             $params["cursor"] = $cursor;
         }
-
-        // Add session_id for server to load client state
-        if ($session_id) {
-            $params["session_id"] = $session_id;
-        }
-
         $params["_cache_bust"] = time() . "-" . rand(0, 999999);
 
         return $url . $separator . http_build_query($params);
