@@ -697,6 +697,7 @@ function endpoint_sql_chunk(
     $db_user = $creds["db_user"];
     $db_password = $creds["db_password"];
 
+    // -- Parse request parameters --
     $fragments_per_batch = $config["fragments_per_batch"] ?? 1000;
     $fragments_per_batch = require_int_range(
         "fragments_per_batch",
@@ -729,6 +730,7 @@ function endpoint_sql_chunk(
         "create_table_query" => $config["create_table_query"] ?? true,
     ];
 
+    // -- Cap statement size to the smaller of client and server max_allowed_packet --
     // If the client sent its max_allowed_packet, cap the producer's
     // max_statement_size so the dump stays importable on the client.
     // We query the server's own max_allowed_packet too and use the
@@ -796,6 +798,10 @@ function endpoint_sql_chunk(
         _e2e_call_hook('test_hook_after_gzip_init', $hook_args);
     }
 
+    // -- Stream SQL fragments --
+    // Pull SQL fragments from the producer in batches, writing each batch
+    // as a multipart chunk. Stop when the producer is exhausted or the
+    // resource budget (time/memory) runs out.
     $batches_processed = 0;
     $sql_bytes_processed = 0;
     $aborted = false;
@@ -1090,29 +1096,13 @@ function resolve_directories(array $config): array
         : [$directories_input];
 
     foreach ($dir_list as $directory) {
-        // @TODO: Move this to a assert_path_is_valid() function or so and
-        //        reuse between the exporter and the importer
         if (!is_string($directory)) {
             throw new InvalidArgumentException(
                 "directory entries must be non-empty strings",
             );
         }
         $directory = trim($directory);
-        if ($directory === "") {
-            throw new InvalidArgumentException(
-                "directory entries must be non-empty strings",
-            );
-        }
-        if ($directory[0] !== "/") {
-            throw new InvalidArgumentException(
-                "directory entries must be absolute paths",
-            );
-        }
-        if(strpos($directory, "\0") !== false) {
-            throw new InvalidArgumentException(
-                "directory entries must not contain NUL bytes",
-            );
-        }
+        assert_valid_path($directory, "directory entry");
 
         $real_directory = realpath($directory);
         if ($real_directory === false) {
@@ -1142,6 +1132,9 @@ function resolve_directories(array $config): array
  */
 function endpoint_preflight(array $config): array
 {
+    // -- Resolve filesystem roots --
+    // Determine which directories to scan: either from the client-provided
+    // "directory" config, or by auto-detecting from cwd/DOCUMENT_ROOT/__DIR__.
     $directories = [];
     $dir_error = null;
     $has_root_input = array_key_exists("directory", $config) && $config["directory"] !== null;
@@ -1171,6 +1164,8 @@ function endpoint_preflight(array $config): array
         $search_roots = normalize_path_list($filtered);
     }
 
+    // -- Detect WordPress installations --
+    // Walk parent directories to find wp-load.php / wp-config.php.
     $wp_detect = detect_wp_roots($search_roots);
     $detected_root_paths = [];
     foreach ($wp_detect["roots"] as $root) {
@@ -1203,6 +1198,8 @@ function endpoint_preflight(array $config): array
         array_merge($scan_roots, $detected_root_paths),
     );
 
+    // -- Probe each directory --
+    // Check accessibility, read .htaccess files, and collect disk space info.
     $dir_checks = [];
     $htaccess_files = [];
     $wp_paths = [];
@@ -1322,6 +1319,9 @@ function endpoint_preflight(array $config): array
         $filesystem_ok = false;
     }
 
+    // -- PHP resource limits --
+    // Gather memory, upload, and execution limits so the client can tune
+    // its request sizes accordingly.
     $memory_limit_raw = ini_get("memory_limit");
     $memory_limit_bytes = null;
     if ($memory_limit_raw !== false && $memory_limit_raw !== "") {
@@ -1355,6 +1355,8 @@ function endpoint_preflight(array $config): array
         $max_request_bytes = $upload_max_bytes;
     }
 
+    // -- PHP extensions --
+    // Report loaded extensions and image processing capabilities.
     $extensions = get_loaded_extensions();
     sort($extensions, SORT_STRING);
     $extension_versions = [];
@@ -1397,6 +1399,11 @@ function endpoint_preflight(array $config): array
         ? (phpversion("imagick") ?: null)
         : null;
 
+    // -- Database connectivity --
+    // Find wp-config.php credentials, connect to MySQL, and probe server
+    // variables (charset, collation, max_allowed_packet, sql_mode).
+    // If WordPress is loadable, also read options like active_plugins,
+    // theme, siteurl, multisite config, and WP constants.
     $db = [
         "credentials_found" => false,
         "connected" => false,
@@ -1782,6 +1789,10 @@ function endpoint_preflight(array $config): array
         }
     }
 
+    // -- WordPress content inventory --
+    // If WordPress was loaded, use its constants for the real plugin/theme/
+    // mu-plugin paths. Otherwise, fall back to conventional wp-content/ layout.
+    // Scan each directory to list installed plugins, mu-plugins, and themes.
     $wp_runtime_paths = null;
     if ($db["wp"]["wp_load_loaded"]) {
         $runtime_root = defined("ABSPATH") ? rtrim(ABSPATH, "/") : null;
@@ -1893,6 +1904,7 @@ function endpoint_preflight(array $config): array
         $wp_content["roots"][] = $root_entry;
     }
 
+    // -- Assemble and return the preflight response --
     $ok =
         $preflight_error === null &&
         $filesystem_ok &&
@@ -2022,6 +2034,11 @@ function stream_file_producer(
     $abort_payload = null;
     $last_cursor = "";
 
+    // -- Stream chunks from the producer --
+    // The producer yields file data, directories, symlinks, index entries,
+    // and progress updates. Each chunk type is wrapped in a multipart part
+    // with metadata headers (path, cursor, size, ctime). The loop runs
+    // until the producer is exhausted or the resource budget runs out.
     try {
         $initial_progress = $producer->get_progress();
         $initial_progress_json = json_encode_or_throw($initial_progress);
@@ -2426,6 +2443,10 @@ function endpoint_file_index(
     // Find the starting point – either by parsing the cursor, or by
     // sourcing it from the filesystem.
 
+    // -- Restore or initialize the directory traversal stack --
+    // On resumption, the cursor encodes the stack of directories and the
+    // last-processed entry in each. On first request, build the stack from
+    // the list_dir and any extra allowed roots.
     if ($cursor_provided) {
         $cursor_data = json_decode($config["cursor"], true);
         if (!is_array($cursor_data)) {
@@ -2536,6 +2557,7 @@ function endpoint_file_index(
     $aborted = false;
     $abort_payload = null;
 
+    // -- Pre-scan: discover intermediate symlinks --
     // When following symlinks, discover intermediate symlinks along each
     // directory path being traversed.  For example, if list_dir is
     // /srv/wordpress/plugins/akismet/latest and /srv/wordpress is itself
@@ -2550,7 +2572,11 @@ function endpoint_file_index(
         }
     }
 
-    // Start traversing the filesystem.
+    // -- Depth-first directory traversal --
+    // Walk the directory tree using the stack. Each directory's entries are
+    // read with scandir (sorted ascending), yielding files, symlinks, and
+    // subdirectories. Subdirectories push new frames onto the stack. Entries
+    // are batched into JSON index_batch chunks and streamed to the client.
 
     $current_dir = $list_dir_real;
 
@@ -2903,6 +2929,7 @@ function endpoint_file_index(
         ];
     }
 
+    // -- Flush remaining items and write completion chunk --
     if (!empty($batch_items)) {
         $cursor_json = json_encode_or_throw(
             ["stack" => encode_index_stack($stack)],

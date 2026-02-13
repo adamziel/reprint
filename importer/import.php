@@ -790,11 +790,10 @@ class ImportClient
     private $index_file;
 
     /**
-     * @var string Path to .import-index-updates.jsonl — temporary append-only file that
+     * @var string|null Path to .import-index-updates.jsonl — temporary append-only file that
      * collects index mutations (upserts and deletes) during the current run. Merged into
      * $index_file at the end of a successful sync.
      */
-    /** @var string|null */
     private $index_updates_file;
 
     /** @var resource|null Open file handle for $index_updates_file while writing. */
@@ -2955,7 +2954,7 @@ class ImportClient
                             "Invalid index batch item: path base64 decode failed",
                         );
                     }
-                    $this->assert_is_absolute_normalized_path(
+                    assert_valid_path(
                         $path,
                         "index batch path",
                     );
@@ -3428,7 +3427,7 @@ class ImportClient
         if ($path === "" || $path === false) {
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
-        $this->assert_is_absolute_normalized_path($path, "index path");
+        assert_valid_path($path, "index path");
         return [
             "path" => $path,
             "ctime" => (int) ($data["ctime"] ?? 0),
@@ -4174,26 +4173,6 @@ class ImportClient
         return $real;
     }
 
-    /**
-     * Validate a remote absolute path coming from the server.
-     */
-    private function assert_is_absolute_normalized_path(string $path, string $label = "path"): void
-    {
-        if ($path === "" || $path[0] !== "/") {
-            throw new RuntimeException("Security: {$label} must be absolute: {$path}");
-        }
-        if (strpos($path, "\0") !== false) {
-            throw new RuntimeException("Security: {$label} contains NUL byte");
-        }
-
-        foreach (explode("/", $path) as $segment) {
-            if ($segment === "." || $segment === "..") {
-                throw new RuntimeException(
-                    "Security: {$label} contains disallowed dot-segments: {$path}",
-                );
-            }
-        }
-    }
 
     /**
      * Resolve a remote absolute path into a local path under filesystem-root.
@@ -4206,7 +4185,7 @@ class ImportClient
     private function remote_path_to_local_path_within_import_root(
         string $path
     ): string {
-        $this->assert_is_absolute_normalized_path($path, "remote path");
+        assert_valid_path($path, "remote path");
         return $this->get_filesystem_root_path() . $path;
     }
 

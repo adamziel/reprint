@@ -79,3 +79,36 @@ function path_is_within_root(string $path, string $root): bool
 {
     return $path === $root || str_starts_with($path, $root . "/");
 }
+
+/**
+ * Validates that a path is a non-empty absolute string without NUL bytes
+ * or dot-segments (. or ..).
+ *
+ * Useful anywhere untrusted or remote paths need to be checked before
+ * use — both the exporter (directory config) and the importer (remote
+ * paths from the server) share this validation.
+ *
+ * @param string $path  The path to validate.
+ * @param string $label Human-readable label for error messages (e.g. "directory", "remote path").
+ * @throws InvalidArgumentException When the path fails any check.
+ */
+function assert_valid_path(string $path, string $label = "path"): void
+{
+    $path = trim($path);
+    if ($path === "") {
+        throw new InvalidArgumentException("{$label} must be a non-empty string");
+    }
+    if ($path[0] !== "/") {
+        throw new InvalidArgumentException("{$label} must be an absolute path: {$path}");
+    }
+    if (strpos($path, "\0") !== false) {
+        throw new InvalidArgumentException("{$label} must not contain NUL bytes");
+    }
+    foreach (explode("/", $path) as $segment) {
+        if ($segment === "." || $segment === "..") {
+            throw new InvalidArgumentException(
+                "{$label} must not contain dot-segments (. or ..): {$path}",
+            );
+        }
+    }
+}
