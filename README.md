@@ -126,6 +126,18 @@ You've got a copy of the remote files in `$DIR/filesystem-root/` and
 the database in `$DIR/db.sql`. From here, you need to figure out how
 to run that on your platform.
 
+The `db.sql` file will contain the relevant `DELETE TABLE IF EXISTS`
+statements to make sure it can always succeed. You might want to,
+before the first run, clean up any tables that may have been already 
+created by your environment. We won't need them. Furthermore, they may
+not get deleted during the database import if the site doesn't use
+the same table prefix as your environment.
+
+At the moment, there is no convenient way of piping the downloaded
+SQL straight into MySQL while it's still being downloaded. This would
+be a useful feature that will likely be added later on. Today, though,
+you just need to download the entire SQL dump and only pipe it then.
+
 ### Status files
 
 These files live directly in `$DIR` and are updated by the `import.php`
@@ -233,6 +245,28 @@ If the JSON is invalid on load, the importer renames it to
 still running, completed, or needs resuming. The `command` + `status` fields
 tell you where the pipeline is. The `stage` field gives finer granularity
 (e.g., `"scanning"`, `"sorting"`, `"streaming"` for file sync).
+
+#### `.import-volatile-files.json` — files that changed during sync
+
+During `files-sync`, a file on the source may be modified while the importer is
+streaming it. When that happens, the server returns a different content hash than
+expected and the importer records the file in `.import-volatile-files.json`
+instead of failing.
+
+The file is a flat JSON object mapping paths to the number of times each file
+was detected as changed:
+
+```json
+{
+  "/srv/htdocs/wp-content/debug.log": 4,
+  "/srv/htdocs/wp-content/cache/object-cache.tmp": 2
+}
+```
+
+At the end of `files-sync`, the importer prints a summary of volatile files so
+the caller can decide what to do — re-run the sync, ignore them, or ask the user.
+Files that are subsequently downloaded successfully are automatically removed
+from the tracker. The file is deleted entirely once all entries are cleared.
 
 ### Gotchas
 
