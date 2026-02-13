@@ -9,6 +9,17 @@ if (!ob_get_level()) {
     ob_start();
 }
 
+
+// File type mask + file type values (top bits of st_mode)
+define('STAT_TYPE_MASK',   0170000);
+define('STAT_TYPE_SOCKET', 0140000);
+define('STAT_TYPE_LINK',   0120000);
+define('STAT_TYPE_FILE',   0100000);
+define('STAT_TYPE_BLOCK',  0060000);
+define('STAT_TYPE_DIR',    0040000);
+define('STAT_TYPE_CHAR',   0020000);
+define('STAT_TYPE_FIFO',   0010000);
+
 /**
  * Global streaming context. When set, the error handlers emit error chunks
  * into the active gzip multipart stream instead of sending plain JSON
@@ -146,7 +157,7 @@ function find_wp_config_paths(array $roots): array
  *               wp_config_path: ?string, table_prefix: ?string}
  * @throws InvalidArgumentException When required credentials are missing.
  */
-function resolve_db_credentials(array $credential_roots = []): array
+function resolve_db_credentials(): array
 {
     $db_host = defined("DB_HOST") ? DB_HOST : getenv("DB_HOST");
     $db_name = defined("DB_NAME") ? DB_NAME : getenv("DB_NAME");
@@ -156,82 +167,13 @@ function resolve_db_credentials(array $credential_roots = []): array
     $wp_config_path = null;
     $table_prefix = null;
 
-    $compute_missing = static function (
-        $host,
-        $name,
-        $user,
-        $password
-    ): array {
-        $missing = [];
-        if (!$host) {
-            $missing[] = "db_host";
-        }
-        if (!$name) {
-            $missing[] = "db_name";
-        }
-        if (!$user) {
-            $missing[] = "db_user";
-        }
-        if ($password === false || $password === null) {
-            $missing[] = "db_password";
-        }
-        return $missing;
-    };
-
-    $missing = $compute_missing($db_host, $db_name, $db_user, $db_password);
-
-    // Fallback: parse wp-config.php from discovered roots when constants/env
-    // are unavailable (common in standalone exporter mode).
-    if (!empty($missing) && !empty($credential_roots)) {
-        foreach (find_wp_config_paths($credential_roots) as $candidate) {
-            $contents = @file_get_contents($candidate);
-            if ($contents === false) {
-                continue;
-            }
-
-            $parsed_host = extract_wp_config_define($contents, "DB_HOST");
-            $parsed_name = extract_wp_config_define($contents, "DB_NAME");
-            $parsed_user = extract_wp_config_define($contents, "DB_USER");
-            $parsed_password = extract_wp_config_define($contents, "DB_PASSWORD");
-            $parsed_prefix = extract_wp_table_prefix($contents);
-
-            if (!$db_host && $parsed_host !== null) {
-                $db_host = $parsed_host;
-            }
-            if (!$db_name && $parsed_name !== null) {
-                $db_name = $parsed_name;
-            }
-            if (!$db_user && $parsed_user !== null) {
-                $db_user = $parsed_user;
-            }
-            if (
-                ($db_password === false || $db_password === null) &&
-                $parsed_password !== null
-            ) {
-                $db_password = $parsed_password;
-            }
-            if ($table_prefix === null && $parsed_prefix !== null) {
-                $table_prefix = $parsed_prefix;
-            }
-
-            if (
-                $wp_config_path === null &&
-                ($parsed_host !== null ||
-                    $parsed_name !== null ||
-                    $parsed_user !== null ||
-                    $parsed_password !== null ||
-                    $parsed_prefix !== null)
-            ) {
-                $wp_config_path = $candidate;
-            }
-
-            $missing = $compute_missing($db_host, $db_name, $db_user, $db_password);
-            if (empty($missing)) {
-                break;
-            }
-        }
+    $missing = [];
+    if (!$db_host) { $missing[] = "db_host"; }
+    if (!$db_name) { $missing[] = "db_name"; }
+    if (!$db_user) { $missing[] = "db_user"; }
+    if ($db_password === false || $db_password === null) {
+        $missing[] = "db_password";
     }
-
     if (!empty($missing)) {
         throw new InvalidArgumentException(
             "Database credentials not found. Please provide via environment variables, " .
@@ -248,19 +190,6 @@ function resolve_db_credentials(array $credential_roots = []): array
         "wp_config_path" => $wp_config_path,
         "table_prefix" => $table_prefix,
     ];
-}
-
-function resolve_credential_roots_from_config(array $config): array
-{
-    if (!array_key_exists("directory", $config) || $config["directory"] === null) {
-        return [];
-    }
-
-    try {
-        return resolve_directories($config);
-    } catch (Exception $e) {
-        return [];
-    }
 }
 
 require_once __DIR__ . "/utils.php";
@@ -689,9 +618,8 @@ function endpoint_sql_chunk(
     int $max_memory,
     float $memory_threshold
 ): array {
-    global $streaming_context;
     prepare_streaming_response();
-    $creds = resolve_db_credentials(resolve_credential_roots_from_config($config));
+    $creds = resolve_db_credentials();
     $db_host = $creds["db_host"];
     $db_name = $creds["db_name"];
     $db_user = $creds["db_user"];
@@ -925,7 +853,7 @@ function endpoint_db_index(
 ): array {
     prepare_streaming_response();
 
-    $creds = resolve_db_credentials(resolve_credential_roots_from_config($config));
+    $creds = resolve_db_credentials();
     $db_host = $creds["db_host"];
     $db_name = $creds["db_name"];
     $db_user = $creds["db_user"];
@@ -2253,10 +2181,10 @@ function stream_file_producer(
     // Best-effort error and completion chunks — the client already has the
     // data chunks. If the stream is broken at this point, log and move on.
     try {
-        // @TODO: What if the exception was thrown right after the previous chunk header
-        //        and the client is still consuming the data? It would consume this chunk
-        //        header as the data. We should try and backfill the previous content-length
-        //        with zeros if possible.
+        // @TODO: If an exception is thrown right after the previous chunk header,
+        //        it read the fixed Content-Length value and will consume this next
+        //        chunk as data. We should try and backfill the output up to the 
+        //        previous content-length value if possible.
         if ($abort_payload !== null) {
             $json = json_encode_or_throw($abort_payload);
             $gz->write(
@@ -2339,47 +2267,72 @@ function encode_index_stack(array $stack): array
 }
 
 /**
- * Walk a path component by component and return symlink entries for any
- * intermediate symlinks found along the way.
+ * Given a path, such as `/srv/wordpress/wp-content/plugins/akismet/assets`, returns
+ * a list of all the parent paths that are symlinks. It will check `/srv`,
+ * `/srv/wordpress`, `/srv/wordpress/wp-content`, etc.
+ * 
+ * For example, given the following filesystem layout:
+ * 
+ *     /srv/wordpress/wp-content -> /htdocs/wp-content
+ *     /srv/wordpress/wp-content/plugins/akismet -> /wordpress/plugins/akismet/latest
+ *     /wordpress/plugins/akismet/latest -> /wordpress/plugins/akismet/5.0.5
+ * 
+ * Calling
+ * 
+ *     find_parents_symlinks("/srv/wordpress/wp-content/plugins/akismet/assets")
+ * 
+ * will return the following symlinks:
+ * 
+ * ['path' => '/srv/wordpress/wp-content', 'target' => '/htdocs/wp-content']
+ * ['path' => '/htdocs/wp-content/plugins/akismet', 'target' => '/wordpress/plugins/akismet/latest']
  *
- * For example, given "/srv/wordpress/plugins/akismet/latest" where
- * /srv/wordpress is a symlink to /wordpress and "latest" is a symlink
- * to "5.0.1", this returns entries for both intermediate symlinks.
- *
- * The caller can inject these into the index batch so the client knows
- * about every symlink in the chain and can recreate them locally.
+ * Note:
+ * 
+ * * Every found `path` is a resolved realpath(), which means that all the parents are
+ *   regular directories, not symlinks.
+ * * It is intentionally not recursive. That last `akismet/latest` -> `akismet/5.0.5`
+ *   symlink was not returned. The client is free to recursively request the files from
+ *   any additional directories outside of the initial content root based on the parent
+ *   symlinks resolved by this function.
  */
-function discover_path_symlinks(string $path): array
+function find_parents_symlinks(string $path): array
 {
-    // @TODO: Understand this thoroughly
     $entries = [];
     $parts = explode("/", $path);
     $current = "";
+    // Walk through /srv, /srv/wordpress, /srv/wordpress/wp-content, etc.
     foreach ($parts as $part) {
         if ($part === "") {
             $current = "/";
             continue;
         }
         $current = rtrim($current, "/") . "/" . $part;
-        if (@is_link($current)) {
-            $target = @readlink($current);
-            if ($target !== false && $target !== "") {
-                $stat = @lstat($current);
-                $entries[] = [
-                    "path" => $current,
-                    "ctime" => (int) ($stat["ctime"] ?? 0),
-                    "size" => 0,
-                    "type" => "link",
-                    "target" => $target,
-                    "intermediate" => true,
-                ];
-            }
-            // Continue walking through the resolved path so subsequent
-            // components are checked against the real filesystem.
-            $real = @realpath($current);
-            if ($real !== false) {
-                $current = $real;
-            }
+        // If the path up to this point is not a symlink, we can just
+        // expand to the next path segment.
+        if (!@is_link($current)) {
+            continue;
+        }
+
+        // If we're looking at a valid symlink, record it.
+        $target = @readlink($current);
+        if ($target !== false && $target !== "") {
+            $stat = @lstat($current);
+            $entries[] = [
+                "path" => $current,
+                "ctime" => (int) ($stat["ctime"] ?? 0),
+                "size" => 0,
+                "type" => "link",
+                "target" => $target,
+                "intermediate" => true,
+            ];
+        }
+        // Swap the current path for the resolved realpath().
+        // e.g. if $current is a symlink at /srv/wordpress/wp-content pointing
+        // to /htdocs/wp-content, then from now on we'll use /htdocs/wp-content
+        // as our $current and append the next path segments to it.
+        $real = @realpath($current);
+        if ($real !== false) {
+            $current = $real;
         }
     }
     return $entries;
@@ -2565,7 +2518,7 @@ function endpoint_file_index(
     // client can recreate the full chain locally.
     if (!$cursor_provided && $follow_symlinks) {
         foreach ($ordered as $dir) {
-            $path_symlinks = discover_path_symlinks($dir);
+            $path_symlinks = find_parents_symlinks($dir);
             foreach ($path_symlinks as $entry) {
                 $batch_items[] = $entry;
             }
@@ -2759,10 +2712,10 @@ function endpoint_file_index(
                     continue;
                 }
 
-                $mode = $stat["mode"] & 0170000;
+                $mode = $stat["mode"] & STAT_TYPE_MASK;
                 $type = "file";
                 $link_target = null;
-                if ($mode === 0120000) {
+                if ($mode === STAT_TYPE_LINK) {
                     $type = "link";
                     // Use realpath() to resolve the symlink target into the
                     // canonical path.  On hosts like wp.com, /srv is a symlink
@@ -2784,10 +2737,9 @@ function endpoint_file_index(
                     ) {
                         $link_target = $resolved_target;
                     }
-                } elseif ($mode === 0040000) {
+                } elseif ($mode === STAT_TYPE_DIR) {
                     $type = "dir";
-                } elseif ($mode !== 0100000) {
-                    // @TODO: What's mode 0100000?
+                } elseif ($mode !== STAT_TYPE_FILE) {
                     $type = "other";
                 }
 
@@ -2813,7 +2765,7 @@ function endpoint_file_index(
                     // /srv/wordpress component is itself a symlink to /wordpress.
                     // realpath() jumps straight to /wordpress/..., so we'd never
                     // record the /srv/wordpress intermediate symlink.  By walking
-                    // the raw readlink path, discover_path_symlinks() finds it.
+                    // the raw readlink path, find_parents_symlinks() finds it.
                     // @TODO: Understand this thoroughly.
                     if ($follow_symlinks) {
                         $raw_target = @readlink($path);
@@ -2836,7 +2788,7 @@ function endpoint_file_index(
                             }
                             $abs_raw = implode("/", $normalized);
                             if ($abs_raw !== "" && $abs_raw[0] === "/" && $abs_raw !== $link_target) {
-                                $intermediates = discover_path_symlinks($abs_raw);
+                                $intermediates = find_parents_symlinks($abs_raw);
                                 foreach ($intermediates as $intermediate) {
                                     $batch_items[] = $intermediate;
                                 }
