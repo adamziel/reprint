@@ -1,102 +1,132 @@
 # WordPress Site Export - File Sync Architecture
 
-## Usage
+### Technical requirements
 
-### Setup
+On the **migration source** side:
 
-1. Install the `wordpress-plugin` directory as a WordPress plugin on the source site.
-2. Activate it and set a shared secret in the plugin settings (or in `secrets.php`).
+ - PHP 7.4+
+ - ext-json — JSON encoding/decoding
+ - ext-hash — hash_hmac, hash_equals
+ - ext-zlib — deflate_init/deflate_add for gzip streaming
+ - ext-pdo + ext-pdo_mysql — database access (already in composer.json)
 
-### Full site migration
+On the **migration target** side:
 
-A complete migration has three steps: download the files, download the database, then
-catch any files that changed while the database was being dumped.
+ - PHP 7.4+
+ - ext-json — JSON encoding/decoding
+ - ext-hash — hash_hmac, hash_equals
+ - ext-zlib — deflate_init/deflate_add for gzip streaming
+
+## Integrating with a hosting platform
+
+### Getting started
+
+This project consists of two parts:
+
+* A `./wordpress-plugin` that must be installed in the **migration source** (the remote site we want to migrate).
+* A `./importer/import.php` script, that must run on the **migration target** hosting account (the "local" site we are migrating to).
+
+Both must share the same secret string. The plugin has a UI screen where the user can paste the secret, and then
+the import.php script will have to be fed the same secret string (more details below). Alternatively, the plugin
+can be pre-packaged with a `./wordpress-plugin/secret.php` file where a pre-determined secret is shipped:
+
+```php
+<?php
+return 'MY_SECRET_STRING';
+```
+
+### Migrating the data
+
+The migration process has a few steps:
+
+1. Preflight
+2. Download the files
+3. Download the database dump
+4. Download the files delta
 
 All commands below use the same base invocation. We'll use `$URL` and `$DIR` as shorthand:
 
 ```bash
 URL="https://example.com/?site-export-api"
-DIR="./my-export"
+DIR="./local-directory-where-all-the-files-will-be-created"
 SECRET="your-shared-secret"
 ```
 
-**Step 0 — Preflight.** Make sure the server is reachable and the environment looks good:
+#### Step 1 — Preflight.
+
+First, wel'l makes sure the server is reachable and the environment is in a good shape:
 
 ```bash
 php import.php preflight "$URL" "$DIR" --secret="$SECRET"
-```
-
-**Step 1 — Download files.** This first builds a full index of the remote directory tree,
-then streams every file. It can be interrupted and resumed at any time — just re-run
-the same command:
-
-```bash
-php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
-```
-
-**Step 2 — Index the database.** This fetches table metadata (names, row counts, sizes)
-into `db-tables.jsonl` for planning and diagnostics:
-
-```bash
-php import.php db-index "$URL" "$DIR" --secret="$SECRET"
-```
-
-**Step 3 — Download the database.** This streams a SQL dump into `db.sql`:
-
-```bash
-php import.php db-sync "$URL" "$DIR" --secret="$SECRET"
-```
-
-**Step 4 — Catch up on file changes.** While the database was being dumped, some files
-may have changed. Running `files-sync` again auto-detects the completed sync and
-performs a delta — only downloading the differences:
-
-```bash
-php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
-```
-
-That's it. Your `$DIR` now contains `filesystem-root/` with the full directory tree
-and `db.sql` with the database dump.
-
-### CLI Commands
-
-The importer client (`import.php`) accepts the following commands:
-
-```
-php import.php <command> <URL> <local-path> [options]
-```
-
-* `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
-* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
-* `files-sync` — Sync files. Auto-detects initial vs delta based on state: downloads the full tree on first run, only changes on subsequent runs.
-* `files-index` — Optional. It's a standalone command to index the full remote file index without fetching file contents. `files-sync` does it implicitly
-                  so this is mostly useful for testing and diagnostics.
-* `db-sync` — Downloads the database as a SQL dump to `db.sql`.
-* `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
-
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-sync`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-sync` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
-
-### Preflight
-
-Before running any sync command, you must run a preflight check:
-
-```
-php import.php preflight <URL> <local-path> [options]
 ```
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
 
 All other commands check that a preflight has been completed and refuse to start without one. Use `preflight-assert` instead if you only need a pass/fail exit code.
 
-### Status file
+#### Step 2 — Download files.
+
+This first builds a full index of the remote directory tree, then streams every file.
+It can be interrupted and resumed at any time — just re-run the same command:
+
+```bash
+php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
+```
+
+#### Step 3 — Download the database.
+
+This streams a SQL dump into `db.sql`:
+
+```bash
+php import.php db-sync "$URL" "$DIR" --secret="$SECRET"
+```
+
+#### Step 4 — Download files delta.
+
+While the database was being dumped, some files may have changed.
+
+First, we must abort the previous files-sync. Otherwise, it would just
+tell us it's completed and refuse to proceed:
+
+```bash
+php import.php files-sync "$URL" "$DIR" --secret="$SECRET --abort"
+```
+
+From here, we can run the `files-sync` command again. It will index
+the remote filesystem once again, compute which files have changed
+since the initial sync, and apply that delta in the local directory:
+
+```bash
+php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
+```
+
+#### Shoehorning the site onto your platform
+
+You've got a copy of the remote files in `$DIR/filesystem-root/` and
+the database in `$DIR/db.sql`. From here, you need to figure out how
+to run that on your platform.
+
+### Status files
+
+These files live directly in `$DIR` and are updated by the `import.php`
+script with the latest migration details. They're written atomically,
+such that a `.tmp` files is written first and then renamed to its final
+name – this ensures readers never see a partially written state.
+
+While there's many of these files, most of them are for internal use only.
+The two that might be particularly useful for integrators are:
+
+* `.import-status.json` – the current progress
+* `.import-state.json` – the migration state store
+
+#### `.import-status.json` – the current progress
 
 When an external process (e.g. a web UI) needs to poll migration progress, it can read
-`.import-status.json` in the output directory. This file is written atomically on every
-state change, so readers never see a partial write.
+`.import-status.json` in the output directory.
 
-Pass `--step=N` and `--steps=N` to embed pipeline position in the status file. For example,
-a four-step pipeline would pass `--step=1 --steps=4` for the preflight, `--step=2 --steps=4`
-for db-index, and so on.
+Pass `--step=N` and `--steps=N` to your `import.php` calls to embed the pipeline position in
+the status file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
+preflight, `--step=2 --steps=4` for db-index, and so on.
 
 The file contains a flat JSON object:
 
@@ -122,21 +152,87 @@ The file contains a flat JSON object:
 | `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
 | `ts`      | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
 
-## Technical requirements
+#### `.import-state.json` — the migration state store
 
-On the **migration source** side:
+This is the importer's brain. Every command reads it on startup and writes it
+back periodically and on shutdown. It stores everything needed to resume after
+a crash or interruption: the current command, cursor position, AIMD tuning
+state, and per-phase bookmarks.
 
- - PHP 7.4+
- - ext-pdo + ext-pdo_mysql — database access (already in composer.json)
- - ext-json — JSON encoding/decoding
- - ext-hash — hash_hmac, hash_equals
- - ext-zlib — deflate_init/deflate_add for gzip streaming
+Written atomically (temp file + rename) so a crash mid-write never corrupts it.
+If the JSON is invalid on load, the importer renames it to
+`.import-state.json.corrupt.<timestamp>` and starts fresh.
 
-On the **migration target** side:
+```jsonc
+{
+  "command": "files-sync",         // active command
+  "status": "in_progress",        // "in_progress" | "complete" | null
+  "cursor": "...",                 // server-side cursor (opaque string)
+  "stage": "streaming",           // current phase within the command
+  "preflight": { ... },           // cached preflight response
+  "version": "...",               // importer version
+  "follow_symlinks": false,
+  "max_allowed_packet": null,     // client-side MySQL packet limit
 
- - PHP 8.1+ (we'll get down to 7.4 if needed)
- - ext-curl
+  // Per-command state sections:
+  "db_index": {
+    "file": "db-tables.jsonl",
+    "tables": 42,
+    "rows_estimated": 150000,
+    "bytes": 8192,
+    "updated_at": "2025-01-15T10:30:00Z"
+  },
+  "diff": {
+    "remote_offset": 1024,        // byte offset into remote index
+    "local_after": "base64..."    // last compared local path
+  },
+  "index": {
+    "cursor": "..."               // file_index cursor
+  },
+  "fetch": {
+    "offset": 512,                // byte offset into download list
+    "next_offset": 1024,
+    "batch_file": null,
+    "cursor": "..."               // file_fetch cursor
+  },
 
+  // Crash recovery: if the importer dies mid-write, these let it
+  // truncate the partially-written file back to its last good state.
+  "current_file": "filesystem-root/wp-content/uploads/photo.jpg",
+  "current_file_bytes": 1048576,  // expected size after last complete write
+  "sql_bytes": 524288,            // expected db.sql size
+
+  "tuning": {
+    "config": { ... },            // AIMD parameters
+    "state": { ... }              // current AIMD sizes
+  }
+}
+```
+
+**For the hosting platform**: Read this file to determine whether a command is
+still running, completed, or needs resuming. The `command` + `status` fields
+tell you where the pipeline is. The `stage` field gives finer granularity
+(e.g., `"scanning"`, `"sorting"`, `"streaming"` for file sync).
+
+### Other CLI Commands
+
+The importer client (`import.php`) accepts the following commands:
+
+```
+php import.php <command> <URL> <local-path> [options]
+```
+
+* `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
+* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
+* `files-sync` — Sync files. Auto-detects initial vs delta based on state: downloads the full tree on first run, only changes on subsequent runs.
+* `files-index` — Optional. It's a standalone command to index the full remote file index without fetching file contents. `files-sync` does it implicitly
+                  so this is mostly useful for testing and diagnostics.
+* `db-sync` — Downloads the database as a SQL dump to `db.sql`.
+* `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
+
+All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-sync`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-sync` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+
+# Architecture
 
 ## File synchronization
 
@@ -298,8 +394,10 @@ What we **don't** do:
 
 ## Authentication
 
-Every request is authenticated with HMAC signatures computed based
-on the request content and a shared secret.
+Every request is authenticated with HMAC signatures computed based on the request data and
+a shared secret. If the signature doesn't match the remote site's expectations, it refuses
+to process the request. The HTTP responses are assumed to be trusted and don't expose any HMAC.
+They couldn't do it easily anyway, since the response body is streamed and not known upfront.
 
 ## Error handling
 
