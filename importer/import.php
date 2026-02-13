@@ -2295,11 +2295,6 @@ class ImportClient
             return;
         }
 
-        $fs_root = realpath($this->local_path . "/filesystem-root");
-        if ($fs_root === false) {
-            return;
-        }
-
         $h = fopen($this->remote_index_file, "r");
         if (!$h) {
             return;
@@ -2326,13 +2321,21 @@ class ImportClient
                 continue;
             }
 
-            $path = base64_decode($path_encoded);
-            $target = base64_decode($target_encoded);
+            $path = base64_decode($path_encoded, true);
+            $target = base64_decode($target_encoded, true);
             if ($path === false || $path === "" || $target === false || $target === "") {
                 continue;
             }
 
-            $local_path = $fs_root . $path;
+            try {
+                $local_path = $this->local_path_for_remote_path($path, true);
+            } catch (RuntimeException $e) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: invalid path {$path}: " . $e->getMessage(),
+                    true,
+                );
+                continue;
+            }
 
             // Already correct — skip
             if (is_link($local_path) && readlink($local_path) === $target) {
@@ -2342,7 +2345,16 @@ class ImportClient
             // Create parent directory
             $parent = dirname($local_path);
             if (!is_dir($parent)) {
-                @mkdir($parent, 0755, true);
+                try {
+                    $this->ensure_directory_path($parent);
+                } catch (RuntimeException $e) {
+                    $this->audit_log(
+                        "INTERMEDIATE SYMLINK SKIP: failed to prepare parent for {$path}: " .
+                            $e->getMessage(),
+                        true,
+                    );
+                    continue;
+                }
             }
 
             // Remove stale symlink if present
@@ -3265,10 +3277,18 @@ class ImportClient
      */
     private function delete_local_file_path(string $path): void
     {
-        if ($path === "" || $path[0] !== "/") {
+        if ($path === "") {
             return;
         }
-        $local_path = $this->local_path . "/filesystem-root" . $path;
+        try {
+            $local_path = $this->local_path_for_remote_path($path);
+        } catch (RuntimeException $e) {
+            $this->audit_log(
+                "Security: refusing to delete invalid path '{$path}': " . $e->getMessage(),
+                true,
+            );
+            return;
+        }
         if (!file_exists($local_path) && !is_link($local_path)) {
             return;
         }
@@ -3306,10 +3326,11 @@ class ImportClient
         if (!is_string($path_encoded) || $path_encoded === "") {
             throw new RuntimeException("Invalid index path");
         }
-        $path = base64_decode($path_encoded);
+        $path = base64_decode($path_encoded, true);
         if ($path === "" || $path === false) {
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
+        $this->validate_remote_absolute_path($path, "index path");
         return [
             "path" => $path,
             "ctime" => (int) ($data["ctime"] ?? 0),
@@ -4000,6 +4021,106 @@ class ImportClient
     }
 
     /**
+     * Returns true when $path is equal to $root or strictly under it.
+     */
+    private function path_is_within_root(string $path, string $root): bool
+    {
+        return $path === $root || str_starts_with($path, $root . "/");
+    }
+
+    /**
+     * Return canonical filesystem-root path.
+     *
+     * @return string|null Canonical path, or null when missing and not created.
+     */
+    private function get_filesystem_root_path(bool $create_if_missing = false): ?string
+    {
+        $filesystem_root_base = $this->local_path . "/filesystem-root";
+        if (!is_dir($filesystem_root_base)) {
+            if (!$create_if_missing) {
+                return null;
+            }
+            if (!mkdir($filesystem_root_base, 0755, true) && !is_dir($filesystem_root_base)) {
+                throw new RuntimeException(
+                    "Failed to create filesystem-root directory: {$filesystem_root_base}",
+                );
+            }
+        }
+
+        $real = realpath($filesystem_root_base);
+        if ($real === false) {
+            if ($create_if_missing) {
+                throw new RuntimeException(
+                    "Failed to resolve filesystem-root path: {$filesystem_root_base}",
+                );
+            }
+            return null;
+        }
+
+        return $real;
+    }
+
+    /**
+     * Validate a remote absolute path coming from the server.
+     */
+    private function validate_remote_absolute_path(string $path, string $label = "path"): void
+    {
+        if ($path === "" || $path[0] !== "/") {
+            throw new RuntimeException("Security: {$label} must be absolute: {$path}");
+        }
+        if (strpos($path, "\0") !== false) {
+            throw new RuntimeException("Security: {$label} contains NUL byte");
+        }
+
+        foreach (explode("/", $path) as $segment) {
+            if ($segment === "." || $segment === "..") {
+                throw new RuntimeException(
+                    "Security: {$label} contains disallowed dot-segments: {$path}",
+                );
+            }
+        }
+    }
+
+    /**
+     * Resolve a remote absolute path into a local path under filesystem-root.
+     */
+    private function local_path_for_remote_path(
+        string $path,
+        bool $create_root = false
+    ): string {
+        $this->validate_remote_absolute_path($path, "remote path");
+        $root = $this->get_filesystem_root_path($create_root);
+        if ($root === null) {
+            throw new RuntimeException("filesystem-root is not available");
+        }
+
+        $local_path = $root . $path;
+        $check_path = $local_path;
+        while (!file_exists($check_path) && !is_link($check_path) && $check_path !== dirname($check_path)) {
+            $check_path = dirname($check_path);
+        }
+        if (file_exists($check_path) || is_link($check_path)) {
+            if (is_link($check_path) && $check_path === $local_path) {
+                $real_parent = realpath(dirname($check_path));
+                if ($real_parent === false || !$this->path_is_within_root($real_parent, $root)) {
+                    throw new RuntimeException(
+                        "Security: Refusing path outside filesystem-root: {$path}",
+                    );
+                }
+                return $local_path;
+            }
+            $real_check = realpath($check_path);
+            if ($real_check === false || !$this->path_is_within_root($real_check, $root)) {
+                throw new RuntimeException(
+                    "Security: Refusing path outside filesystem-root: {$path}",
+                );
+            }
+        }
+
+        return $local_path;
+    }
+
+    /**
      * Handle a metadata chunk from multipart response.
      */
     private function handle_metadata_chunk(
@@ -4007,7 +4128,7 @@ class ImportClient
         StreamingContext $context
     ): void {
         $headers = $chunk["headers"];
-        $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "");
+        $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "", true);
 
         if ($filesystem_root) {
             $context->filesystem_root = $filesystem_root;
@@ -4024,11 +4145,11 @@ class ImportClient
     ): void {
         $headers = $chunk["headers"];
         $raw_header = $headers["x-file-path"] ?? "";
-        $path = base64_decode($raw_header);
+        $path = base64_decode($raw_header, true);
         $is_first = ($headers["x-first-chunk"] ?? "0") === "1";
         $is_last = ($headers["x-last-chunk"] ?? "0") === "1";
 
-        if (!$path) {
+        if ($path === false || $path === "") {
             if ($raw_header !== "") {
                 $this->audit_log(
                     "Warning: base64_decode failed for x-file-path header: " .
@@ -4039,15 +4160,7 @@ class ImportClient
             return;
         }
 
-        // Security: path must be absolute (start with /)
-        if ($path[0] !== "/") {
-            throw new RuntimeException(
-                "Security: File path must be absolute: {$path}",
-            );
-        }
-
-        // Use full path under filesystem-root
-        $local_path = $this->local_path . "/filesystem-root" . $path;
+        $local_path = $this->local_path_for_remote_path($path, true);
 
         // Open file on first chunk
         if ($is_first) {
@@ -4192,14 +4305,9 @@ class ImportClient
     private function ensure_directory_path(string $dir): void
     {
         // Security: Ensure path is under filesystem-root
-        $filesystem_root_base = $this->local_path . "/filesystem-root";
-        $real_filesystem_root = realpath($filesystem_root_base);
-        if ($real_filesystem_root === false) {
-            // filesystem-root doesn't exist yet, create it first
-            if (!is_dir($filesystem_root_base)) {
-                mkdir($filesystem_root_base, 0755, true);
-            }
-            $real_filesystem_root = realpath($filesystem_root_base);
+        $real_filesystem_root = $this->get_filesystem_root_path(true);
+        if ($real_filesystem_root === null) {
+            throw new RuntimeException("filesystem-root is not available");
         }
 
         // Resolve the target path (or what it would be)
@@ -4216,7 +4324,7 @@ class ImportClient
             $real_check = realpath($check_path);
             if (
                 $real_check === false ||
-                strpos($real_check, $real_filesystem_root) !== 0
+                !$this->path_is_within_root($real_check, $real_filesystem_root)
             ) {
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside filesystem-root: {$dir}",
@@ -4228,28 +4336,31 @@ class ImportClient
             return;
         }
 
-        // For absolute paths starting with /, build from root
-        // For relative paths, build incrementally
-        $is_absolute = $dir[0] === "/";
-        $parts = explode("/", $dir);
-        $current = "";
+        if (
+            $dir !== $real_filesystem_root &&
+            !str_starts_with($dir, $real_filesystem_root . "/")
+        ) {
+            throw new RuntimeException(
+                "Security: Refusing to create directory outside filesystem-root: {$dir}",
+            );
+        }
 
-        foreach ($parts as $i => $part) {
-            // Skip empty parts except for the first one in absolute paths
+        $relative = ltrim(substr($dir, strlen($real_filesystem_root)), "/");
+        if ($relative === "") {
+            return;
+        }
+
+        $current = $real_filesystem_root;
+        foreach (explode("/", $relative) as $part) {
             if ($part === "") {
-                if ($i === 0 && $is_absolute) {
-                    $current = "/";
-                }
                 continue;
             }
+            $current .= "/" . $part;
 
-            // Build path incrementally
-            if ($current === "") {
-                $current = $part;
-            } elseif ($current === "/") {
-                $current = "/" . $part;
-            } else {
-                $current .= "/" . $part;
+            if (is_link($current)) {
+                throw new RuntimeException(
+                    "Security: Refusing to traverse symlink while creating directory: {$current}",
+                );
             }
 
             // Remove file if blocking directory creation
@@ -4275,6 +4386,13 @@ class ImportClient
                     );
                 }
             }
+
+            $resolved = realpath($current);
+            if ($resolved === false || !$this->path_is_within_root($resolved, $real_filesystem_root)) {
+                throw new RuntimeException(
+                    "Security: Refusing to create directory outside filesystem-root: {$current}",
+                );
+            }
         }
     }
 
@@ -4285,10 +4403,10 @@ class ImportClient
     {
         $headers = $chunk["headers"];
         $raw_header = $headers["x-directory-path"] ?? "";
-        $path = base64_decode($raw_header);
+        $path = base64_decode($raw_header, true);
         $ctime = (int) ($headers["x-directory-ctime"] ?? 0);
 
-        if (!$path) {
+        if ($path === false || $path === "") {
             if ($raw_header !== "") {
                 $this->audit_log(
                     "Warning: base64_decode failed for x-directory-path header: " .
@@ -4299,15 +4417,7 @@ class ImportClient
             return;
         }
 
-        // Security: path must be absolute (start with /)
-        if ($path[0] !== "/") {
-            throw new RuntimeException(
-                "Security: Directory path must be absolute: {$path}",
-            );
-        }
-
-        // Use full path under filesystem-root
-        $local_path = $this->local_path . "/filesystem-root" . $path;
+        $local_path = $this->local_path_for_remote_path($path, true);
 
         // Create directory, removing any files that block the path
         $this->ensure_directory_path($local_path);
@@ -4330,13 +4440,13 @@ class ImportClient
     {
         $headers = $chunk["headers"];
         $raw_path = $headers["x-symlink-path"] ?? "";
-        $path = base64_decode($raw_path);
-        $target = base64_decode($headers["x-symlink-target"] ?? "");
+        $path = base64_decode($raw_path, true);
+        $target = base64_decode($headers["x-symlink-target"] ?? "", true);
         $ctime = (int) ($headers["x-symlink-ctime"] ?? 0);
 
         // Skip if path or target is missing/empty
-        if (!$path || $target === false || $target === "") {
-            if ($raw_path !== "" && !$path) {
+        if ($path === false || $path === "" || $target === false || $target === "") {
+            if ($raw_path !== "" && ($path === false || $path === "")) {
                 $this->audit_log(
                     "Warning: base64_decode failed for x-symlink-path header: " .
                         substr($raw_path, 0, 100),
@@ -4346,19 +4456,7 @@ class ImportClient
             return;
         }
 
-        // Security: path must be absolute (start with /)
-        if ($path[0] !== "/") {
-            throw new RuntimeException(
-                "Security: Symlink path must be absolute: {$path}",
-            );
-        }
-
-        // Use full path under filesystem-root
-        $root = realpath($this->local_path . "/filesystem-root");
-        if ($root === false) {
-            return;
-        }
-        $local_path = $root . $path;
+        $local_path = $this->local_path_for_remote_path($path, true);
 
         // Remove existing file/symlink if present
         if (file_exists($local_path) || is_link($local_path)) {
@@ -4368,7 +4466,9 @@ class ImportClient
         // Create parent directory
         $dir = dirname($local_path);
         if (!is_dir($dir)) {
-            if (!mkdir($dir, 0755, true) && !is_dir($dir)) {
+            try {
+                $this->ensure_directory_path($dir);
+            } catch (RuntimeException $e) {
                 // Log error and skip this symlink
                 $this->audit_log(
                     "Failed to create directory for symlink: {$dir}",

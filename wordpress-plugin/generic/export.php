@@ -108,7 +108,7 @@ function resolve_db_credentials(array $credential_roots = []): array
     if (!$db_user) {
         $missing[] = "db_user";
     }
-    if ($db_password === false || $db_password === null || $db_password === "") {
+    if ($db_password === false || $db_password === null) {
         $missing[] = "db_password";
     }
 
@@ -347,10 +347,11 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
     }
 }
 
+$secret_key_input = $_GET["SECRET_KEY"] ?? null;
 if (
     !defined("SECRET_KEY") ||
-    !isset($_GET["SECRET_KEY"]) ||
-    !hash_equals(SECRET_KEY, $_GET["SECRET_KEY"])
+    !is_string($secret_key_input) ||
+    !hash_equals(SECRET_KEY, $secret_key_input)
 ) {
     http_response_code(403);
     error_log("Invalid secret key");
@@ -972,6 +973,18 @@ function resolve_directories(array $config): array
         : [$directories_input];
 
     foreach ($dir_list as $directory) {
+        if (!is_string($directory)) {
+            throw new InvalidArgumentException(
+                "directory entries must be non-empty strings",
+            );
+        }
+        $directory = trim($directory);
+        if ($directory === "") {
+            throw new InvalidArgumentException(
+                "directory entries must be non-empty strings",
+            );
+        }
+
         // @TODO: Do we need this? And if yes, shouldn't we expand every path segment like that?
         if ($directory[0] === "~") {
             $home = getenv("HOME") ?: (getenv("USERPROFILE") ?: "/");
@@ -2314,12 +2327,21 @@ function endpoint_file_index(
             if (!is_string($dir_encoded) || $dir_encoded === "") {
                 throw new InvalidArgumentException("Index cursor frame missing dir");
             }
-            $dir = base64_decode($dir_encoded);
+            $dir = base64_decode($dir_encoded, true);
+            if ($dir === false || $dir === "") {
+                throw new InvalidArgumentException("Index cursor frame has invalid dir encoding");
+            }
             $after_encoded = $frame["after"] ?? null;
             if ($after_encoded !== null && !is_string($after_encoded)) {
                 throw new InvalidArgumentException("Index cursor frame invalid after");
             }
-            $after = $after_encoded !== null ? base64_decode($after_encoded) : null;
+            $after = null;
+            if ($after_encoded !== null) {
+                $after = base64_decode($after_encoded, true);
+                if ($after === false) {
+                    throw new InvalidArgumentException("Index cursor frame has invalid after encoding");
+                }
+            }
             $stack[] = [
                 "dir" => $dir,
                 "after" => $after,
@@ -3032,8 +3054,8 @@ function parse_http_config(): array
     $params = array_merge($_GET, $_POST);
 
     $content_type = $_SERVER["CONTENT_TYPE"] ?? "";
-    // @TODO: preg_match, e.g. application/jsonl would pass this test when it shouldn't
-    if (strpos($content_type, "application/json") !== false) {
+    $content_type_main = strtolower(trim((string) strtok($content_type, ";")));
+    if ($content_type_main === "application/json") {
         $json_body = file_get_contents("php://input");
         if ($json_body !== false && $json_body !== "") {
             $json_data = json_decode($json_body, true);
