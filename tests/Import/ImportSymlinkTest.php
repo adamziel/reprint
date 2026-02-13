@@ -76,7 +76,12 @@ class ImportSymlinkTest extends TestCase
         $this->assertEquals('target', readlink($symlinkPath), 'Symlink target should match');
     }
 
-    public function testRelativeSymlinkPreserved()
+    /**
+     * A relative symlink that escapes the filesystem root should be rejected.
+     * Path /a/link with target ../../../escape resolves to
+     * filesystem-root/a/../../escape = filesystem-root/../escape — outside root.
+     */
+    public function testRelativeSymlinkEscapingRootRejected()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir);
 
@@ -85,37 +90,47 @@ class ImportSymlinkTest extends TestCase
 
         $chunk = [
             'headers' => [
-                'x-symlink-path' => base64_encode('/var/www/site/__wp__'),
-                'x-symlink-target' => base64_encode('../../../wordpress/core/latest'),
+                'x-symlink-path' => base64_encode('/a/link'),
+                'x-symlink-target' => base64_encode('../../../escape'),
                 'x-symlink-ctime' => '1234567890'
             ]
         ];
 
         $method->invoke($client, $chunk);
 
-        $symlinkPath = $this->tempDir . '/filesystem-root/var/www/site/__wp__';
-        $this->assertTrue(is_link($symlinkPath), 'Symlink should be created');
-        $this->assertEquals('../../../wordpress/core/latest', readlink($symlinkPath));
+        $symlinkPath = $this->tempDir . '/filesystem-root/a/link';
+        $this->assertFalse(is_link($symlinkPath), 'Symlink escaping root should not be created');
     }
 
-    public function testChainedSymlinks()
+    /**
+     * When the first symlink in a chain escapes the root, it should be
+     * rejected. The second symlink (which references the first) should
+     * still be created since its own target stays within root.
+     */
+    public function testChainedSymlinksEscapingRootRejected()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir);
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
 
-        // Create first symlink
+        // First symlink: /site/__wp__ -> ../wordpress/core
+        // Resolved: /wordpress/core — still within root, so this is fine.
+        // Wait — /site/../wordpress/core = /wordpress/core which IS under root.
+        // Let's use a target that actually escapes.
         $chunk1 = [
             'headers' => [
                 'x-symlink-path' => base64_encode('/site/__wp__'),
-                'x-symlink-target' => base64_encode('../wordpress/core'),
+                'x-symlink-target' => base64_encode('../../outside'),
                 'x-symlink-ctime' => '1234567890'
             ]
         ];
         $method->invoke($client, $chunk1);
 
-        // Create second symlink that uses the first
+        $link1 = $this->tempDir . '/filesystem-root/site/__wp__';
+        $this->assertFalse(is_link($link1), 'Symlink escaping root should not be created');
+
+        // Second symlink references a path within root — should succeed
         $chunk2 = [
             'headers' => [
                 'x-symlink-path' => base64_encode('/site/wp-load.php'),
@@ -125,16 +140,16 @@ class ImportSymlinkTest extends TestCase
         ];
         $method->invoke($client, $chunk2);
 
-        $link1 = $this->tempDir . '/filesystem-root/site/__wp__';
         $link2 = $this->tempDir . '/filesystem-root/site/wp-load.php';
-
-        $this->assertTrue(is_link($link1));
-        $this->assertTrue(is_link($link2));
-        $this->assertEquals('../wordpress/core', readlink($link1));
+        $this->assertTrue(is_link($link2), 'Symlink staying within root should be created');
         $this->assertEquals('__wp__/wp-load.php', readlink($link2));
     }
 
-    public function testAbsoluteSymlinkPreserved()
+    /**
+     * An absolute symlink target pointing outside the filesystem root
+     * should be rejected.
+     */
+    public function testAbsoluteSymlinkOutsideRootRejected()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir);
 
@@ -152,8 +167,60 @@ class ImportSymlinkTest extends TestCase
         $method->invoke($client, $chunk);
 
         $symlinkPath = $this->tempDir . '/filesystem-root/bin-link';
-        $this->assertTrue(is_link($symlinkPath));
-        $this->assertEquals('/usr/local/bin/php', readlink($symlinkPath));
+        $this->assertFalse(is_link($symlinkPath), 'Absolute symlink outside root should not be created');
+    }
+
+    /**
+     * A relative symlink target that stays within the filesystem root
+     * should be created successfully.
+     */
+    public function testRelativeSymlinkWithinRootCreated()
+    {
+        $client = new \ImportClient('http://fake.url', $this->tempDir);
+
+        $reflection = new \ReflectionClass($client);
+        $method = $reflection->getMethod('handle_symlink_chunk');
+
+        $chunk = [
+            'headers' => [
+                'x-symlink-path' => base64_encode('/wp-content/link'),
+                'x-symlink-target' => base64_encode('../uploads/file.txt'),
+                'x-symlink-ctime' => '1234567890'
+            ]
+        ];
+
+        $method->invoke($client, $chunk);
+
+        $symlinkPath = $this->tempDir . '/filesystem-root/wp-content/link';
+        $this->assertTrue(is_link($symlinkPath), 'Symlink within root should be created');
+        $this->assertEquals('../uploads/file.txt', readlink($symlinkPath));
+    }
+
+    /**
+     * An absolute symlink target that points within the filesystem root
+     * should be created successfully.
+     */
+    public function testAbsoluteSymlinkWithinRootCreated()
+    {
+        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $root = realpath($this->tempDir . '/filesystem-root');
+
+        $reflection = new \ReflectionClass($client);
+        $method = $reflection->getMethod('handle_symlink_chunk');
+
+        $chunk = [
+            'headers' => [
+                'x-symlink-path' => base64_encode('/link'),
+                'x-symlink-target' => base64_encode($root . '/some/target'),
+                'x-symlink-ctime' => '1234567890'
+            ]
+        ];
+
+        $method->invoke($client, $chunk);
+
+        $symlinkPath = $root . '/link';
+        $this->assertTrue(is_link($symlinkPath), 'Absolute symlink within root should be created');
+        $this->assertEquals($root . '/some/target', readlink($symlinkPath));
     }
 
     public function testSymlinkWithMissingDataSkipped()

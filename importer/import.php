@@ -496,8 +496,8 @@ class AdaptiveTuner
         $config["db_unbuffered"] = (bool) $config["db_unbuffered"];
         $config["db_query_time_limit"] = max(0, (int) $config["db_query_time_limit"]);
 
-        foreach (self::ENDPOINTS as $ep) {
-            $config[$ep["increase_key"]] = max(1, min((int) $config[$ep["max_key"]], (int) $config[$ep["increase_key"]]));
+        foreach (self::ENDPOINTS as $endpoint) {
+            $config[$endpoint["increase_key"]] = max(1, min((int) $config[$endpoint["max_key"]], (int) $config[$endpoint["increase_key"]]));
         }
 
         $this->config = $config;
@@ -507,20 +507,24 @@ class AdaptiveTuner
             "duty" => $config["duty"],
             "error_backoff_remaining" => 0,
         ];
-        foreach (self::ENDPOINTS as $ep) {
-            $state_defaults[$ep["size_key"]] = $config[$ep["start_key"]];
-            $state_defaults[$ep["ema_key"]] = null;
+        foreach (self::ENDPOINTS as $endpoint) {
+            $state_defaults[$endpoint["size_key"]] = $config[$endpoint["start_key"]];
+            $state_defaults[$endpoint["ema_key"]] = null;
         }
         $this->state = array_merge($state_defaults, $state);
 
         // Clamp restored state values.
-        foreach (self::ENDPOINTS as $ep) {
-            $this->state[$ep["size_key"]] = max(
-                (int) $config[$ep["min_key"]],
-                min((int) $config[$ep["max_key"]], (int) $this->state[$ep["size_key"]]),
+        foreach (self::ENDPOINTS as $endpoint) {
+            $this->state[$endpoint["size_key"]] = max(
+                (int) $config[$endpoint["min_key"]],
+                min((int) $config[$endpoint["max_key"]], (int) $this->state[$endpoint["size_key"]]),
             );
-            $ema = $this->state[$ep["ema_key"]] ?? null;
-            $this->state[$ep["ema_key"]] = ($ema !== null && (float) $ema > 0) ? (float) $ema : null;
+            // EMA is Exponential Moving Average.
+            // It gives more weight to recent measurements without discarding
+            // older history, using: ema = (1 - alpha) * prev + alpha * current.
+            // We only restore the EMA if it's valid and greater than 0.
+            $ema = $this->state[$endpoint["ema_key"]] ?? null;
+            $this->state[$endpoint["ema_key"]] = ($ema !== null && (float) $ema > 0) ? (float) $ema : null;
         }
         $this->state["duty"] = $this->clamp((float) $this->state["duty"], $config["duty_min"], $config["duty_max"]);
         $this->state["error_backoff_remaining"] = max(0, (int) ($this->state["error_backoff_remaining"] ?? 0));
@@ -790,40 +794,137 @@ class AdaptiveTuner
 
 class ImportClient
 {
+    /** @var string Export server URL. */
     private $remote_url;
+
+    /** @var string Local directory for all import artifacts (state files, filesystem-root/, db.sql, etc.). */
     private $local_path;
+
+    /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
+
+    /**
+     * @var float Monotonic timestamp of last progress JSON line emitted.
+     * Used with $progress_throttle to rate-limit stdout progress output.
+     */
     private $last_progress_output = 0;
-    private $progress_throttle = 1.0; // seconds
-    private $index_file; // Local index of imported files for delta detection (sorted JSON lines)
-    private $index_updates_file; // Temp file collecting sorted index updates this run (JSON lines)
+
+    /** @var float Minimum seconds between progress output lines. */
+    private $progress_throttle = 1.0;
+
+    /**
+     * @var string Path to .import-index.jsonl — sorted JSON-lines file tracking every
+     * imported file's path, ctime, size, and type. Used for delta detection: on the next
+     * sync we compare this against the remote index to decide what to download or delete.
+     */
+    private $index_file;
+
+    /**
+     * @var string Path to .import-index-updates.jsonl — temporary append-only file that
+     * collects index mutations (upserts and deletes) during the current run. Merged into
+     * $index_file at the end of a successful sync.
+     */
+    private $index_updates_file;
+
+    /** @var resource|null Open file handle for $index_updates_file while writing. */
     private $index_updates_handle;
+
+    /** @var int Number of entries written to $index_updates_file this run. */
     private $index_updates_count = 0;
+
+    /**
+     * Deduplication state for index updates. Consecutive upsert_index_entry() or
+     * delete_index_entry() calls for the same path are collapsed into one write.
+     *
+     * @var string|null Last path written to the index updates file.
+     */
     private $last_update_path = null;
+
+    /** @var bool|null Whether the last index update was a deletion (true) or upsert (false). */
     private $last_update_delete = null;
+
+    /** @var int|null ctime of the last upserted index entry. */
     private $last_update_ctime = null;
+
+    /** @var int|null Size in bytes of the last upserted index entry. */
     private $last_update_size = null;
+
+    /** @var string|null Type ("file", "link", "dir") of the last upserted index entry. */
     private $last_update_type = null;
-    private $remote_index_file; // Path to latest remote index JSON lines
-    private $download_list_file; // Path to file list for downloads (JSON lines)
-    private $audit_log; // Audit log file for all operations
-    private $volatile_files_file; // Path to .import-volatile-files.json
-    private $verbose_mode = false; // Whether to show verbose output
-    private $is_tty; // Whether stdout is a TTY
-    private $files_imported = 0; // Counter for imported files
-    private $state; // Current import state
-    private $chunks_since_save = 0; // Track chunks for periodic saves
-    private $shutdown_requested = false; // Flag for graceful shutdown
-    private $follow_symlinks = false; // Whether to follow symlinks outside root
-    private $tuner = null; // AdaptiveTuner instance or null
-    private $hmac_client = null; // Site_Export_HMAC_Client instance or null
-    private $max_allowed_packet = null; // Client's max_allowed_packet for SQL statements
+
+    /** @var string Path to .import-remote-index.jsonl — latest file index received from the server. */
+    private $remote_index_file;
+
+    /** @var string Path to .import-download-list.jsonl — files to download, computed by diffing remote vs local index. */
+    private $download_list_file;
+
+    /** @var string Path to .import-audit.log — append-only log of every operation for debugging. */
+    private $audit_log;
+
+    /** @var string Path to .import-volatile-files.json — files the server marks as frequently-changing. */
+    private $volatile_files_file;
+
+    /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
+    private $verbose_mode = false;
+
+    /** @var bool Whether stdout is a TTY (enables interactive progress display). */
+    private $is_tty;
+
+    /** @var int Running count of files imported in the current invocation. */
+    private $files_imported = 0;
+
+    /**
+     * @var array Persistent import state loaded from / saved to $state_file.
+     * Keys: command, status, cursor, stage, preflight, version, follow_symlinks,
+     * max_allowed_packet, db_index, file_index.
+     */
+    private $state;
+
+    /** @var int Chunks processed since last state save — triggers periodic persistence. */
+    private $chunks_since_save = 0;
+
+    /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
+    private $shutdown_requested = false;
+
+    /**
+     * @var bool When true, tell the server to follow symlinks that point outside
+     * the document root (expanding them into real files). Set via --follow-symlinks,
+     * persisted in state so it survives across invocations.
+     */
+    private $follow_symlinks = false;
+
+    /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
+    private $tuner = null;
+
+    /** @var Site_Export_HMAC_Client|null Signs requests when HMAC auth is configured. */
+    private $hmac_client = null;
+
+    /**
+     * @var int|null MySQL max_allowed_packet value for the import database connection.
+     * Passed to the server so it can split SQL statements to fit within this limit.
+     */
+    private $max_allowed_packet = null;
+
+    /** @var int|null Last curl error number, for retry/diagnostic logic. */
     private $last_curl_errno = null;
+
+    /** @var bool Whether the last curl request timed out. */
     private $last_curl_timeout = false;
-    private $pipeline_step = null; // Current pipeline step (1-indexed), set via --step
-    private $pipeline_steps = null; // Total pipeline steps, set via --steps
-    private $status_file; // Path to .import-status.json
-    public $exit_code = 0; // Exit code: 0 = complete, 2 = partial (call again)
+
+    /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
+    private $pipeline_step = null;
+
+    /** @var int|null Total number of pipeline steps. Set via --steps. */
+    private $pipeline_steps = null;
+
+    /** @var string Path to .import-status.json — machine-readable status for external progress readers. */
+    private $status_file;
+
+    /**
+     * @var int Process exit code. 0 = import complete, 2 = partial progress
+     * (caller should invoke again to continue).
+     */
+    public $exit_code = 0;
 
     public function __construct(string $remote_url, string $local_path)
     {
@@ -875,16 +976,9 @@ class ImportClient
         if (!file_exists($this->index_file)) {
             return 0;
         }
-        $h = fopen($this->index_file, "r");
-        if (!$h) {
-            return 0;
-        }
-        $c = 0;
-        while (fgets($h) !== false) {
-            $c++;
-        }
-        fclose($h);
-        return $c;
+        return is_file($this->index_file) 
+            ? iterator_count(new SplFileObject($this->index_file, 'r'))
+            : 0;
     }
 
     /**
@@ -2335,7 +2429,7 @@ class ImportClient
             }
 
             try {
-                $local_path = $this->remote_path_to_local_path_within_import_root($path, true);
+                $local_path = $this->remote_path_to_local_path_within_import_root($path);
             } catch (RuntimeException $e) {
                 $this->audit_log(
                     "INTERMEDIATE SYMLINK SKIP: invalid path {$path}: " . $e->getMessage(),
@@ -2375,6 +2469,22 @@ class ImportClient
             if (file_exists($local_path)) {
                 $this->audit_log(
                     "INTERMEDIATE SYMLINK SKIP: {$path} already exists as a real file/dir",
+                    true,
+                );
+                continue;
+            }
+
+            // Validate that the symlink target doesn't escape the filesystem root.
+            $root = $this->get_filesystem_root_path();
+            try {
+                $this->assert_symlink_target_within_root(
+                    dirname($local_path),
+                    $target,
+                    $root
+                );
+            } catch (RuntimeException $e) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
                     true,
                 );
                 continue;
@@ -4044,17 +4154,65 @@ class ImportClient
     }
 
     /**
-     * Return canonical filesystem-root path.
+     * Resolve ".." and "." segments in a path without touching the filesystem.
      *
-     * @return string|null Canonical path, or null when missing and not created.
+     * Unlike realpath(), this works on paths that don't exist yet.
      */
-    private function get_filesystem_root_path(bool $create_if_missing = false): ?string
+    private function normalize_path(string $path): string
+    {
+        $parts = explode("/", $path);
+        $resolved = [];
+        foreach ($parts as $part) {
+            if ($part === "" || $part === ".") {
+                continue;
+            }
+            if ($part === "..") {
+                array_pop($resolved);
+            } else {
+                $resolved[] = $part;
+            }
+        }
+        return "/" . implode("/", $resolved);
+    }
+
+    /**
+     * Assert that a symlink target resolves to a path within $root.
+     *
+     * For absolute targets, the target itself must be under $root.
+     * For relative targets, the resolved path (parent dir + target) must be
+     * under $root. We normalize ".." segments without touching the filesystem,
+     * since the target may not exist yet.
+     *
+     * @throws RuntimeException if the target escapes the root.
+     */
+    private function assert_symlink_target_within_root(
+        string $symlink_parent_dir,
+        string $target,
+        string $root
+    ): void {
+        if (str_starts_with($target, "/")) {
+            // Absolute target: must be under root
+            $resolved = $this->normalize_path($target);
+        } else {
+            // Relative target: resolve against the symlink's parent directory
+            $resolved = $this->normalize_path($symlink_parent_dir . "/" . $target);
+        }
+
+        if (!$this->path_is_within_root($resolved, $root)) {
+            throw new RuntimeException(
+                "Security: symlink target escapes filesystem root: {$target} " .
+                "(resolves to {$resolved}, root is {$root})"
+            );
+        }
+    }
+
+    /**
+     * Return canonical filesystem-root path, creating it if it doesn't exist.
+     */
+    private function get_filesystem_root_path(): string
     {
         $filesystem_root_base = $this->local_path . "/filesystem-root";
         if (!is_dir($filesystem_root_base)) {
-            if (!$create_if_missing) {
-                return null;
-            }
             if (!mkdir($filesystem_root_base, 0755, true) && !is_dir($filesystem_root_base)) {
                 throw new RuntimeException(
                     "Failed to create filesystem-root directory: {$filesystem_root_base}",
@@ -4064,12 +4222,9 @@ class ImportClient
 
         $real = realpath($filesystem_root_base);
         if ($real === false) {
-            if ($create_if_missing) {
-                throw new RuntimeException(
-                    "Failed to resolve filesystem-root path: {$filesystem_root_base}",
-                );
-            }
-            return null;
+            throw new RuntimeException(
+                "Failed to resolve filesystem-root path: {$filesystem_root_base}",
+            );
         }
 
         return $real;
@@ -4105,57 +4260,10 @@ class ImportClient
      * write files outside the import root.
      */
     private function remote_path_to_local_path_within_import_root(
-        string $path,
-        bool $create_root = false
+        string $path
     ): string {
-        // Validate inputs: the path must be absolute, and the root must exist
-        // (or be created if $create_root is true).
         $this->assert_is_absolute_normalized_path($path, "remote path");
-        $root = $this->get_filesystem_root_path($create_root);
-        if ($root === null) {
-            throw new RuntimeException("filesystem-root is not available");
-        }
-
-        // Embed the remote path in our local import root.
-        $local_path = $root . $path;
-
-        // Walk up from the constructed $local_path to find the nearest ancestor that
-        // actually exists on disk.
-        // Why?
-        // We need a real path component to resolve symlinks against later on – the
-        // symlink target may not exist yet.
-        $check_path = $local_path;
-        while (!file_exists($check_path) && !is_link($check_path) && $check_path !== dirname($check_path)) {
-            $check_path = dirname($check_path);
-        }
-
-        // If we found an existing ancestor, verify it doesn't escape the root
-        // via symlinks. Two cases:
-        if (file_exists($check_path) || is_link($check_path)) {
-            // Case 1: The exact target path is itself a symlink. We allow this
-            // (symlinks are recreated during import), but verify its parent
-            // directory resolves to somewhere within the root.
-            if (is_link($check_path) && $check_path === $local_path) {
-                $real_parent = realpath(dirname($check_path));
-                if ($real_parent === false || !$this->path_is_within_root($real_parent, $root)) {
-                    throw new RuntimeException(
-                        "Security: Refusing path outside filesystem-root: {$path}",
-                    );
-                }
-                return $local_path;
-            }
-            // Case 2: Some ancestor directory (or the target itself if it's a
-            // regular file) exists. Resolve it fully and confirm it's within root.
-            // This catches symlinked parent directories that point outside root.
-            $real_check = realpath($check_path);
-            if ($real_check === false || !$this->path_is_within_root($real_check, $root)) {
-                throw new RuntimeException(
-                    "Security: Refusing path outside filesystem-root: {$path}",
-                );
-            }
-        }
-
-        return $local_path;
+        return $this->get_filesystem_root_path() . $path;
     }
 
     /**
@@ -4198,7 +4306,7 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->remote_path_to_local_path_within_import_root($path, true);
+        $local_path = $this->remote_path_to_local_path_within_import_root($path);
 
         // Open file on first chunk
         if ($is_first) {
@@ -4343,10 +4451,7 @@ class ImportClient
     private function ensure_directory_path(string $dir): void
     {
         // Security: Ensure path is under filesystem-root
-        $real_filesystem_root = $this->get_filesystem_root_path(true);
-        if ($real_filesystem_root === null) {
-            throw new RuntimeException("filesystem-root is not available");
-        }
+        $real_filesystem_root = $this->get_filesystem_root_path();
 
         // Resolve the target path (or what it would be)
         // For non-existent paths, resolve the parent and append the final component
@@ -4455,7 +4560,7 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->remote_path_to_local_path_within_import_root($path, true);
+        $local_path = $this->remote_path_to_local_path_within_import_root($path);
 
         // Create directory, removing any files that block the path
         $this->ensure_directory_path($local_path);
@@ -4494,7 +4599,26 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->remote_path_to_local_path_within_import_root($path, true);
+        $local_path = $this->remote_path_to_local_path_within_import_root($path);
+
+        // Validate that the symlink target doesn't escape the filesystem root.
+        $root = $this->get_filesystem_root_path();
+        try {
+            $this->assert_symlink_target_within_root(
+                dirname($local_path),
+                $target,
+                $root
+            );
+        } catch (RuntimeException $e) {
+            $this->audit_log($e->getMessage(), true);
+            $this->output_progress([
+                "type" => "symlink_error",
+                "path" => $path,
+                "target" => $target,
+                "error" => $e->getMessage(),
+            ]);
+            return;
+        }
 
         // Remove existing file/symlink if present
         if (file_exists($local_path) || is_link($local_path)) {

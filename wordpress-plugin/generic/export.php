@@ -1092,7 +1092,7 @@ function endpoint_db_index(
 }
 
 /**
- * Resolves directory paths from config, expanding ~ and relative paths.
+ * Resolves directory paths from config.
  */
 function resolve_directories(array $config): array
 {
@@ -1109,6 +1109,8 @@ function resolve_directories(array $config): array
         : [$directories_input];
 
     foreach ($dir_list as $directory) {
+        // @TODO: Move this to a assert_path_is_valid() function or so and
+        //        reuse between the exporter and the importer
         if (!is_string($directory)) {
             throw new InvalidArgumentException(
                 "directory entries must be non-empty strings",
@@ -1120,19 +1122,15 @@ function resolve_directories(array $config): array
                 "directory entries must be non-empty strings",
             );
         }
-
-        // @TODO: Do we need this? And if yes, shouldn't we expand every path segment like that?
-        if ($directory[0] === "~") {
-            $home = getenv("HOME") ?: (getenv("USERPROFILE") ?: "/");
-            $directory = $home . substr($directory, 1);
-        }
-
-        // Make relative paths absolute.
-        // @TODO: Why is __DIR__ used here? Shouldn't it be relative to something else?
-        // @TODO: Why would we get a relative path in here at all? Should we just refuse to
-        //        accept relative paths at entirely?
         if ($directory[0] !== "/") {
-            $directory = __DIR__ . "/" . $directory;
+            throw new InvalidArgumentException(
+                "directory entries must be absolute paths",
+            );
+        }
+        if(strpos($directory, "\0") !== false) {
+            throw new InvalidArgumentException(
+                "directory entries must not contain NUL bytes",
+            );
         }
 
         $real_directory = realpath($directory);
