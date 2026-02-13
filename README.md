@@ -62,7 +62,18 @@ php import.php preflight "$URL" "$DIR" --secret="$SECRET"
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
 
-All other commands check that a preflight has been completed and refuse to start without one. Use `preflight-assert` instead if you only need a pass/fail exit code.
+All other commands check that a preflight has been completed and refuse to start without one.
+
+To run very basic diagnostics that confirms the remote server replied and it has a
+sound-looking filesystem and a database connection, run:
+
+```bash
+php import.php preflight-assert "$URL" "$DIR" --secret="$SECRET"
+```
+
+For hosting platform-specific checks, such as database version compatibility or
+php version compatibility, you might need your own custom logic. See the 
+[Status files](#status-files) section for more details.
 
 #### Step 2 — Download files.
 
