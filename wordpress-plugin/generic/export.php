@@ -149,10 +149,8 @@ function find_wp_config_paths(array $roots): array
  * Resolves database credentials from PHP constants and environment variables.
  *
  * Never reads from $config / HTTP parameters — credentials must come from
- * the server environment. Falls back to wp-config.php parsing when
- * $credential_roots is provided and initial detection is incomplete.
+ * the server environment (PHP constants or environment variables).
  *
- * @param string[] $credential_roots Directories to search for wp-config.php.
  * @return array{db_host: string, db_name: string, db_user: string, db_password: string,
  *               wp_config_path: ?string, table_prefix: ?string}
  * @throws InvalidArgumentException When required credentials are missing.
@@ -165,7 +163,7 @@ function resolve_db_credentials(): array
     $db_password = defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD");
 
     $wp_config_path = null;
-    $table_prefix = null;
+    $table_prefix = $GLOBALS['table_prefix'] ?? null;
 
     $missing = [];
     if (!$db_host) { $missing[] = "db_host"; }
@@ -1380,7 +1378,7 @@ function endpoint_preflight(array $config): array
 
     $creds = null;
     try {
-        $creds = resolve_db_credentials($credential_roots);
+        $creds = resolve_db_credentials();
         $db["wp"]["wp_config_path"] = $creds["wp_config_path"];
         $db["wp"]["table_prefix"] = $creds["table_prefix"];
         $db["credentials_found"] = true;

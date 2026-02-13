@@ -196,6 +196,37 @@ if (!isset($_GET['directory']) && !isset($_POST['directory']) && $wp_root !== nu
     $_GET['directory'] = $wp_root;
 }
 
+// When running standalone (not inside WordPress), load DB credentials from
+// wp-config.php so that resolve_db_credentials() can find them as constants.
+// We parse the file as text rather than including it, since the full config
+// loads wp-settings.php which bootstraps all of WordPress.
+if ($wp_root !== null && !defined('DB_HOST')) {
+    $wp_config_path = $wp_root . '/wp-config.php';
+    if (is_readable($wp_config_path)) {
+        $config_contents = @file_get_contents($wp_config_path);
+        if ($config_contents !== false) {
+            // Extract define('CONSTANT', 'value') patterns
+            foreach (['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'] as $const) {
+                if (!defined($const) && preg_match(
+                    '/define\s*\(\s*[\'"]' . preg_quote($const, '/') . '[\'"]\s*,\s*[\'"]([^\'"]*)[\'"]\s*\)/',
+                    $config_contents,
+                    $m
+                )) {
+                    define($const, $m[1]);
+                }
+            }
+            // Extract $table_prefix
+            if (!isset($GLOBALS['table_prefix']) && preg_match(
+                '/\$table_prefix\s*=\s*[\'"]([^\'"]*)[\'"]\s*;/',
+                $config_contents,
+                $m
+            )) {
+                $GLOBALS['table_prefix'] = $m[1];
+            }
+        }
+    }
+}
+
 // export.php has its own SECRET_KEY guard — satisfy it since we already
 // verified the request via HMAC above.
 define('SECRET_KEY', 'hmac_authenticated');
