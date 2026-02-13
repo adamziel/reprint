@@ -2856,12 +2856,20 @@ class ImportClient
                     }
                     $path_encoded = $item["path"] ?? "";
                     if (!is_string($path_encoded) || $path_encoded === "") {
-                        continue;
+                        throw new RuntimeException(
+                            "Invalid index batch item: missing path",
+                        );
                     }
-                    $path = base64_decode($path_encoded);
+                    $path = base64_decode($path_encoded, true);
                     if ($path === "" || $path === false) {
-                        continue;
+                        throw new RuntimeException(
+                            "Invalid index batch item: path base64 decode failed",
+                        );
                     }
+                    $this->validate_remote_absolute_path(
+                        $path,
+                        "index batch path",
+                    );
                     $ctime = (int) ($item["ctime"] ?? 0);
                     $size = (int) ($item["size"] ?? 0);
                     $type = (string) ($item["type"] ?? "file");
