@@ -263,12 +263,7 @@ function resolve_credential_roots_from_config(array $config): array
     }
 }
 
-// Polyfill for PHP 7.4 which lacks str_starts_with().
-if (!function_exists('str_starts_with')) {
-    function str_starts_with(string $haystack, string $needle): bool {
-        return strncmp($haystack, $needle, strlen($needle)) === 0;
-    }
-}
+require_once __DIR__ . "/utils.php";
 
 /**
  * Emits an error chunk into a gzip multipart stream.
@@ -300,20 +295,6 @@ function emit_error_chunk($gz, string $boundary, string $message): void
         echo $chunk;
         flush();
     }
-}
-
-/**
- * Throws on json_encode failure instead of returning false.
- *
- * Do NOT use inside error/shutdown handlers — those need hardcoded fallback strings.
- */
-function json_encode_or_throw($value, int $flags = 0): string
-{
-    $json = json_encode($value, $flags);
-    if ($json === false) {
-        throw new RuntimeException("json_encode failed: " . json_last_error_msg());
-    }
-    return $json;
 }
 
 // Streaming-aware error handler. Before streaming starts, errors produce
@@ -1347,7 +1328,7 @@ function endpoint_preflight(array $config): array
         if ($memory_limit_raw === "-1") {
             $memory_limit_bytes = PHP_INT_MAX;
         } else {
-            $memory_limit_bytes = parse_memory_limit($memory_limit_raw);
+            $memory_limit_bytes = parse_size($memory_limit_raw);
         }
     }
     $memory_used = memory_get_usage(true);
@@ -1359,11 +1340,11 @@ function endpoint_preflight(array $config): array
     $upload_max_filesize_raw = ini_get("upload_max_filesize");
     $post_max_bytes =
         $post_max_size_raw !== false && $post_max_size_raw !== ""
-            ? parse_memory_limit($post_max_size_raw)
+            ? parse_size($post_max_size_raw)
             : null;
     $upload_max_bytes =
         $upload_max_filesize_raw !== false && $upload_max_filesize_raw !== ""
-            ? parse_memory_limit($upload_max_filesize_raw)
+            ? parse_size($upload_max_filesize_raw)
             : null;
     $max_request_bytes = null;
     if ($post_max_bytes !== null && $upload_max_bytes !== null) {
@@ -3082,27 +3063,6 @@ function endpoint_file_fetch(
         $memory_threshold,
         $config,
     );
-}
-
-/**
- * Parses a PHP memory_limit string (e.g. "128M") into bytes.
- */
-function parse_memory_limit(string $limit): int
-{
-    $limit = trim($limit);
-    $unit = strtoupper(substr($limit, -1));
-    $value = (int) substr($limit, 0, -1);
-
-    switch ($unit) {
-        case "G":
-            return $value * 1024 * 1024 * 1024;
-        case "M":
-            return $value * 1024 * 1024;
-        case "K":
-            return $value * 1024;
-        default:
-            return (int) $limit;
-    }
 }
 
 /**

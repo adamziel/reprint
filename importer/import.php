@@ -13,12 +13,7 @@ error_reporting(E_ALL);
 ini_set("display_errors", "stderr");
 ini_set("display_startup_errors", 1);
 
-// Polyfill for PHP 7.4 which lacks str_starts_with().
-if (!function_exists('str_starts_with')) {
-    function str_starts_with(string $haystack, string $needle): bool {
-        return $needle === '' || strncmp($haystack, $needle, strlen($needle)) === 0;
-    }
-}
+require_once __DIR__ . "/../wordpress-plugin/generic/utils.php";
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -41,31 +36,6 @@ register_shutdown_function(function () {
     fwrite(STDERR, $json . "\n");
 });
 
-/**
- * Parse a human-readable size string (e.g. "16M", "1G", "512K") into bytes.
- * Accepts plain integers as well.
- */
-function parse_size(string $value): int
-{
-    $value = trim($value);
-    if (!preg_match('/^(\d+(?:\.\d+)?)\s*([KMGkmg])?[Bb]?$/', $value, $m)) {
-        throw new InvalidArgumentException(
-            "Invalid size value: '{$value}'. Use a number optionally followed by K, M, or G (e.g. 64M).",
-        );
-    }
-    $num = (float) $m[1];
-    $suffix = strtoupper($m[2] ?? "");
-    switch ($suffix) {
-        case "K":
-            return (int) ($num * 1024);
-        case "M":
-            return (int) ($num * 1024 * 1024);
-        case "G":
-            return (int) ($num * 1024 * 1024 * 1024);
-        default:
-            return (int) $num;
-    }
-}
 
 /**
  * Streaming multipart parser.
@@ -1557,6 +1527,7 @@ class ImportClient
             echo "No preflight data available.\n";
             exit(1);
         }
+        // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
         echo json_encode($entry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
         $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
         $this->write_status_file($ok ? null : "Preflight failed");
@@ -4145,35 +4116,6 @@ class ImportClient
         }
     }
 
-    /**
-     * Returns true when $path is equal to $root or strictly under it.
-     */
-    private function path_is_within_root(string $path, string $root): bool
-    {
-        return $path === $root || str_starts_with($path, $root . "/");
-    }
-
-    /**
-     * Resolve ".." and "." segments in a path without touching the filesystem.
-     *
-     * Unlike realpath(), this works on paths that don't exist yet.
-     */
-    private function normalize_path(string $path): string
-    {
-        $parts = explode("/", $path);
-        $resolved = [];
-        foreach ($parts as $part) {
-            if ($part === "" || $part === ".") {
-                continue;
-            }
-            if ($part === "..") {
-                array_pop($resolved);
-            } else {
-                $resolved[] = $part;
-            }
-        }
-        return "/" . implode("/", $resolved);
-    }
 
     /**
      * Assert that a symlink target resolves to a path within $root.
@@ -4192,13 +4134,13 @@ class ImportClient
     ): void {
         if (str_starts_with($target, "/")) {
             // Absolute target: must be under root
-            $resolved = $this->normalize_path($target);
+            $resolved = normalize_path($target);
         } else {
             // Relative target: resolve against the symlink's parent directory
-            $resolved = $this->normalize_path($symlink_parent_dir . "/" . $target);
+            $resolved = normalize_path($symlink_parent_dir . "/" . $target);
         }
 
-        if (!$this->path_is_within_root($resolved, $root)) {
+        if (!path_is_within_root($resolved, $root)) {
             throw new RuntimeException(
                 "Security: symlink target escapes filesystem root: {$target} " .
                 "(resolves to {$resolved}, root is {$root})"
@@ -4467,7 +4409,7 @@ class ImportClient
             $real_check = realpath($check_path);
             if (
                 $real_check === false ||
-                !$this->path_is_within_root($real_check, $real_filesystem_root)
+                !path_is_within_root($real_check, $real_filesystem_root)
             ) {
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside filesystem-root: {$dir}",
@@ -4531,7 +4473,7 @@ class ImportClient
             }
 
             $resolved = realpath($current);
-            if ($resolved === false || !$this->path_is_within_root($resolved, $real_filesystem_root)) {
+            if ($resolved === false || !path_is_within_root($resolved, $real_filesystem_root)) {
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside filesystem-root: {$current}",
                 );
@@ -4864,30 +4806,6 @@ class ImportClient
         return !in_array($name, $list, true);
     }
 
-    /**
-     * Parse a PHP memory_limit value (e.g. "128M", "1G", "-1") into bytes.
-     * Returns 0 for unlimited (-1) or unparseable values.
-     */
-    private function parse_memory_limit(string $value): int
-    {
-        $value = trim($value);
-        if ($value === "-1" || $value === "" || $value === "0") {
-            return 0;
-        }
-        $last = strtolower($value[strlen($value) - 1]);
-        $bytes = (int) $value;
-        switch ($last) {
-            case "g":
-                $bytes *= 1024;
-                // fall through
-            case "m":
-                $bytes *= 1024;
-                // fall through
-            case "k":
-                $bytes *= 1024;
-        }
-        return $bytes;
-    }
 
     /**
      * Sort an index file by path (first column).
@@ -4988,7 +4906,10 @@ class ImportClient
 
         // Estimate how much memory we can use: 60% of whatever headroom
         // remains between current usage and the PHP memory limit.
-        $mem_limit = $this->parse_memory_limit(ini_get("memory_limit"));
+        $mem_limit_raw = ini_get("memory_limit");
+        $mem_limit = ($mem_limit_raw === "-1" || $mem_limit_raw === "" || $mem_limit_raw === "0")
+            ? 0
+            : parse_size($mem_limit_raw);
         $mem_used = memory_get_usage(true);
         $available = $mem_limit > 0
             ? (int) (($mem_limit - $mem_used) * 0.6)

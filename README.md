@@ -73,6 +73,14 @@ It can be interrupted and resumed at any time — just re-run the same command:
 php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
 ```
 
+The command returns one of three exit codes:
+
+- 0: sync completed
+- 1: failure
+- 2: partial completion, needs re-running
+
+Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
+
 #### Step 3 — Download the database.
 
 This streams a SQL dump into `db.sql`:
@@ -80,6 +88,12 @@ This streams a SQL dump into `db.sql`:
 ```bash
 php import.php db-sync "$URL" "$DIR" --secret="$SECRET"
 ```
+
+The command returns one of three exit codes:
+
+- 0: sync completed
+- 1: failure
+- 2: partial completion, needs re-running
 
 #### Step 4 — Download files delta.
 
@@ -99,6 +113,12 @@ since the initial sync, and apply that delta in the local directory:
 ```bash
 php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
 ```
+
+The command returns one of three exit codes:
+
+- 0: sync completed
+- 1: failure
+- 2: partial completion, needs re-running
 
 #### Shoehorning the site onto your platform
 
@@ -213,6 +233,11 @@ If the JSON is invalid on load, the importer renames it to
 still running, completed, or needs resuming. The `command` + `status` fields
 tell you where the pipeline is. The `stage` field gives finer granularity
 (e.g., `"scanning"`, `"sorting"`, `"streaming"` for file sync).
+
+### Gotchas
+
+* `import.php` requires some files from the `wordpress-plugin` so you'll need both
+  on the importing end. This will be sorted out soon.
 
 ### Other CLI Commands
 
