@@ -2127,10 +2127,7 @@ class ImportClient
      */
     private function discover_symlink_targets(): void
     {
-        $roots = $this->get_root_directories_from_url();
-        if (empty($roots)) {
-            $roots = $this->get_root_directories_from_preflight();
-        }
+        $roots = $this->get_root_directories_from_preflight();
 
         // Collect all indexed directory real paths for containment checks
         $visited = [];
@@ -2865,10 +2862,7 @@ class ImportClient
         $index_state = $this->state["index"] ?? $this->default_state()["index"];
         $cursor = $index_state["cursor"] ?? null;
 
-        $roots = $this->get_root_directories_from_url();
-        if (empty($roots)) {
-            $roots = $this->get_root_directories_from_preflight();
-        }
+        $roots = $this->get_root_directories_from_preflight();
         if (empty($roots)) {
             throw new RuntimeException(
                 "No root directories found. Either add directory[]=... to the " .
@@ -4740,33 +4734,6 @@ class ImportClient
             );
         }
         return $dirs;
-    }
-
-    private function get_root_directories_from_url(): array
-    {
-        $parts = parse_url($this->remote_url);
-        $query = $parts["query"] ?? "";
-        if ($query === "") {
-            return [];
-        }
-        $params = [];
-        parse_str($query, $params);
-        $dirs = $params["directory"] ?? [];
-        if (!is_array($dirs)) {
-            $dirs = [$dirs];
-        }
-        $normalized = [];
-        foreach ($dirs as $dir) {
-            if (!is_string($dir)) {
-                continue;
-            }
-            $dir = rtrim($dir, "/");
-            if ($dir === "") {
-                continue;
-            }
-            $normalized[] = $dir;
-        }
-        return array_values(array_unique($normalized));
     }
 
     /**
