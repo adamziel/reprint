@@ -56,7 +56,7 @@ jobs:
 
           sign_url() {
             php -r '
-              require_once "wordpress-plugin/generic/class-hmac-client.php";
+              require_once "../../wordpress-plugin/generic/class-hmac-client.php";
               $c = new HmacClient($argv[1]);
               echo $c->sign_url($argv[2]);
             ' "$SECRET" "$1"
