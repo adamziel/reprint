@@ -279,6 +279,22 @@ the caller can decide what to do — re-run the sync, ignore them, or ask the us
 Files that are subsequently downloaded successfully are automatically removed
 from the tracker. The file is deleted entirely once all entries are cleared.
 
+#### `.import-audit.log` — append-only event log
+
+Every significant event during import is recorded in `.import-audit.log` as a
+timestamped line. This includes file downloads, deletions, volatile file
+detections, errors, and state transitions. The log is append-only — it's never
+truncated or rotated, so it provides a complete history of the migration.
+
+```
+[2025-01-15 10:30:01] VOLATILE | path=/srv/htdocs/wp-content/debug.log | count=1
+[2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
+[2025-01-15 10:31:12] FILE DELETE | .import-index-updates.jsonl
+```
+
+Pass `--verbose` to also print audit log entries to the console as they happen.
+This is useful for debugging but noisy for production use.
+
 ### Gotchas
 
 * `import.php` requires some files from the `wordpress-plugin` so you'll need both

@@ -142,6 +142,7 @@ $table_prefix = 'wp_';
  * Run wp core install to create all real WordPress tables.
  */
 function wpCoreInstall(siteDir, siteUrl, siteName) {
+    const allowRoot = process.getuid?.() === 0 ? ' --allow-root' : '';
     execSync(
         `php ${WP_CLI_PATH} core install` +
         ` --path=${JSON.stringify(siteDir)}` +
@@ -150,7 +151,8 @@ function wpCoreInstall(siteDir, siteUrl, siteName) {
         ` --admin_user=admin` +
         ` --admin_password=password` +
         ` --admin_email=admin@example.com` +
-        ` --skip-email`,
+        ` --skip-email` +
+        allowRoot,
         { timeout: 60000, stdio: 'pipe' }
     );
 }

@@ -764,6 +764,9 @@ class AdaptiveTuner
 
 class ImportClient
 {
+
+    private const SAVE_STATE_EVERY_N_CHUNKS = 50;
+
     /** @var string Export server URL. */
     private $remote_url;
 
@@ -2747,7 +2750,7 @@ class ImportClient
             }
 
             $this->chunks_since_save++;
-            if ($this->chunks_since_save >= 50) {
+            if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                 $this->state["fetch"]["cursor"] = $cursor;
                 // Track current file for crash recovery
                 if ($context->file_handle && $context->file_path) {
@@ -2912,7 +2915,7 @@ class ImportClient
             }
 
             $this->chunks_since_save++;
-            if ($this->chunks_since_save >= 50) {
+            if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                 $this->state["index"] = [
                     "cursor" => $cursor,
                 ];
@@ -3866,7 +3869,7 @@ class ImportClient
 
                     // Save cursor periodically (every 50 chunks)
                     $this->chunks_since_save++;
-                    if ($this->chunks_since_save >= 50) {
+                    if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                         // Flush to ensure bytes are on disk before saving state
                         fflush($sql_handle);
                         $this->state["cursor"] = $cursor;
@@ -5606,11 +5609,11 @@ class ImportClient
         $state = $this->normalize_state($state);
 
         // Write to temp file first, then atomic rename
-        $tmp_file = $this->state_file . '.tmp';
         $json = json_encode($state, JSON_PRETTY_PRINT);
         if ($json === false) {
             throw new RuntimeException("Failed to encode state: " . json_last_error_msg());
         }
+        $tmp_file = $this->state_file . '.tmp';
         $bytes = file_put_contents($tmp_file, $json);
         if ($bytes === false) {
             throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");
