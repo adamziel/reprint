@@ -2322,6 +2322,12 @@ class ImportClient
                 continue;
             }
 
+            /**
+             * base64_decode second parameter is a `strict` flag. It rejects the entire
+             * input if it contains any bytes that are not produced by base64_encode().
+             * 
+             * @see https://www.php.net/base64_decode
+             */
             $path = base64_decode($path_encoded, true);
             $target = base64_decode($target_encoded, true);
             if ($path === false || $path === "" || $target === false || $target === "") {
@@ -2329,7 +2335,7 @@ class ImportClient
             }
 
             try {
-                $local_path = $this->local_path_for_remote_path($path, true);
+                $local_path = $this->remote_path_to_local_path_within_import_root($path, true);
             } catch (RuntimeException $e) {
                 $this->audit_log(
                     "INTERMEDIATE SYMLINK SKIP: invalid path {$path}: " . $e->getMessage(),
@@ -2866,7 +2872,7 @@ class ImportClient
                             "Invalid index batch item: path base64 decode failed",
                         );
                     }
-                    $this->validate_remote_absolute_path(
+                    $this->assert_is_absolute_normalized_path(
                         $path,
                         "index batch path",
                     );
@@ -3290,7 +3296,7 @@ class ImportClient
             return;
         }
         try {
-            $local_path = $this->local_path_for_remote_path($path);
+            $local_path = $this->remote_path_to_local_path_within_import_root($path);
         } catch (RuntimeException $e) {
             $this->audit_log(
                 "Security: refusing to delete invalid path '{$path}': " . $e->getMessage(),
@@ -3339,7 +3345,7 @@ class ImportClient
         if ($path === "" || $path === false) {
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
-        $this->validate_remote_absolute_path($path, "index path");
+        $this->assert_is_absolute_normalized_path($path, "index path");
         return [
             "path" => $path,
             "ctime" => (int) ($data["ctime"] ?? 0),
@@ -4072,9 +4078,9 @@ class ImportClient
     /**
      * Validate a remote absolute path coming from the server.
      */
-    private function validate_remote_absolute_path(string $path, string $label = "path"): void
+    private function assert_is_absolute_normalized_path(string $path, string $label = "path"): void
     {
-        if ($path === "" || $path[0] !== "/") {
+        if ($path === "" || $path[0] !== "/" || $path[0] === "~") {
             throw new RuntimeException("Security: {$label} must be absolute: {$path}");
         }
         if (strpos($path, "\0") !== false) {
@@ -4092,23 +4098,43 @@ class ImportClient
 
     /**
      * Resolve a remote absolute path into a local path under filesystem-root.
+     *
+     * Maps a remote absolute path (e.g. "/wp-content/uploads/photo.jpg") to a
+     * local path under the import directory's filesystem-root/. Performs symlink
+     * traversal security checks to prevent directory traversal attacks that could
+     * write files outside the import root.
      */
-    private function local_path_for_remote_path(
+    private function remote_path_to_local_path_within_import_root(
         string $path,
         bool $create_root = false
     ): string {
-        $this->validate_remote_absolute_path($path, "remote path");
+        // Validate inputs: the path must be absolute, and the root must exist
+        // (or be created if $create_root is true).
+        $this->assert_is_absolute_normalized_path($path, "remote path");
         $root = $this->get_filesystem_root_path($create_root);
         if ($root === null) {
             throw new RuntimeException("filesystem-root is not available");
         }
 
+        // Embed the remote path in our local import root.
         $local_path = $root . $path;
+
+        // Walk up from the constructed $local_path to find the nearest ancestor that
+        // actually exists on disk.
+        // Why?
+        // We need a real path component to resolve symlinks against later on – the
+        // symlink target may not exist yet.
         $check_path = $local_path;
         while (!file_exists($check_path) && !is_link($check_path) && $check_path !== dirname($check_path)) {
             $check_path = dirname($check_path);
         }
+
+        // If we found an existing ancestor, verify it doesn't escape the root
+        // via symlinks. Two cases:
         if (file_exists($check_path) || is_link($check_path)) {
+            // Case 1: The exact target path is itself a symlink. We allow this
+            // (symlinks are recreated during import), but verify its parent
+            // directory resolves to somewhere within the root.
             if (is_link($check_path) && $check_path === $local_path) {
                 $real_parent = realpath(dirname($check_path));
                 if ($real_parent === false || !$this->path_is_within_root($real_parent, $root)) {
@@ -4118,6 +4144,9 @@ class ImportClient
                 }
                 return $local_path;
             }
+            // Case 2: Some ancestor directory (or the target itself if it's a
+            // regular file) exists. Resolve it fully and confirm it's within root.
+            // This catches symlinked parent directories that point outside root.
             $real_check = realpath($check_path);
             if ($real_check === false || !$this->path_is_within_root($real_check, $root)) {
                 throw new RuntimeException(
@@ -4169,7 +4198,7 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->local_path_for_remote_path($path, true);
+        $local_path = $this->remote_path_to_local_path_within_import_root($path, true);
 
         // Open file on first chunk
         if ($is_first) {
@@ -4426,7 +4455,7 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->local_path_for_remote_path($path, true);
+        $local_path = $this->remote_path_to_local_path_within_import_root($path, true);
 
         // Create directory, removing any files that block the path
         $this->ensure_directory_path($local_path);
@@ -4465,7 +4494,7 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->local_path_for_remote_path($path, true);
+        $local_path = $this->remote_path_to_local_path_within_import_root($path, true);
 
         // Remove existing file/symlink if present
         if (file_exists($local_path) || is_link($local_path)) {
