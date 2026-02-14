@@ -57,7 +57,7 @@ SECRET="your-shared-secret"
 First, wel'l makes sure the server is reachable and the environment is in a good shape:
 
 ```bash
-php import.php preflight "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php preflight "$URL" "$DIR" --secret="$SECRET"
 ```
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
@@ -68,7 +68,7 @@ To run very basic diagnostics that confirms the remote server replied and it has
 sound-looking filesystem and a database connection, run:
 
 ```bash
-php import.php preflight-assert "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php preflight-assert "$URL" "$DIR" --secret="$SECRET"
 ```
 
 For hosting platform-specific checks, such as database version compatibility or
@@ -81,7 +81,7 @@ This first builds a full index of the remote directory tree, then streams every 
 It can be interrupted and resumed at any time — just re-run the same command:
 
 ```bash
-php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php files-sync "$URL" "$DIR" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -97,7 +97,7 @@ Which is to say, you'll need to wrap it in a loop that runs until failure or ful
 This streams a SQL dump into `db.sql`:
 
 ```bash
-php import.php db-sync "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php db-sync "$URL" "$DIR" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -114,7 +114,7 @@ First, we must abort the previous files-sync. Otherwise, it would just
 tell us it's completed and refuse to proceed:
 
 ```bash
-php import.php files-sync "$URL" "$DIR" --secret="$SECRET --abort"
+php importer/import.php files-sync "$URL" "$DIR" --secret="$SECRET --abort"
 ```
 
 From here, we can run the `files-sync` command again. It will index
@@ -122,7 +122,7 @@ the remote filesystem once again, compute which files have changed
 since the initial sync, and apply that delta in the local directory:
 
 ```bash
-php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php files-sync "$URL" "$DIR" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -305,7 +305,7 @@ This is useful for debugging but noisy for production use.
 The importer client (`import.php`) accepts the following commands:
 
 ```
-php import.php <command> <URL> <local-path> [options]
+php importer/import.php <command> <URL> <local-path> [options]
 ```
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
