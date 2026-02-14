@@ -767,12 +767,6 @@ class ImportClient
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
-    private const STATE_PATH_FIELDS = [
-        ["diff", "local_after"],
-        ["fetch", "batch_file"],
-        ["current_file"],
-        ["db_index", "file"],
-    ];
 
     /** @var string Export server URL. */
     private $remote_url;
@@ -5700,15 +5694,30 @@ class ImportClient
      */
     private function encode_state_paths(array $state): array
     {
-        foreach (self::STATE_PATH_FIELDS as $field_keys) {
-            $state = $this->transform_state_path_field(
-                $state,
-                $field_keys,
-                function ($value) {
-                    return $this->encode_state_path_value($value);
-                },
+        $state["diff"]["local_after"] = $this->encode_state_path_value(
+            $state["diff"]["local_after"] ?? null,
+        );
+        $state["fetch"]["batch_file"] = $this->encode_state_path_value(
+            $state["fetch"]["batch_file"] ?? null,
+        );
+        $state["current_file"] = $this->encode_state_path_value(
+            $state["current_file"] ?? null,
+        );
+        $state["db_index"]["file"] = $this->encode_state_path_value(
+            $state["db_index"]["file"] ?? null,
+        );
+
+        if (
+            isset($state["preflight"]) &&
+            is_array($state["preflight"]) &&
+            isset($state["preflight"]["data"]) &&
+            is_array($state["preflight"]["data"])
+        ) {
+            $state["preflight"]["data"] = $this->encode_preflight_data_paths(
+                $state["preflight"]["data"],
             );
         }
+
         return $state;
     }
 
@@ -5719,48 +5728,163 @@ class ImportClient
      */
     private function decode_state_paths(array $state): array
     {
-        foreach (self::STATE_PATH_FIELDS as $field_keys) {
-            $state = $this->transform_state_path_field(
-                $state,
-                $field_keys,
-                function ($value) {
-                    return $this->decode_state_path_value($value);
-                },
+        $state["diff"]["local_after"] = $this->decode_state_path_value(
+            $state["diff"]["local_after"] ?? null,
+        );
+        $state["fetch"]["batch_file"] = $this->decode_state_path_value(
+            $state["fetch"]["batch_file"] ?? null,
+        );
+        $state["current_file"] = $this->decode_state_path_value(
+            $state["current_file"] ?? null,
+        );
+        $state["db_index"]["file"] = $this->decode_state_path_value(
+            $state["db_index"]["file"] ?? null,
+        );
+
+        if (
+            isset($state["preflight"]) &&
+            is_array($state["preflight"]) &&
+            isset($state["preflight"]["data"]) &&
+            is_array($state["preflight"]["data"])
+        ) {
+            $state["preflight"]["data"] = $this->decode_preflight_data_paths(
+                $state["preflight"]["data"],
             );
         }
+
         return $state;
     }
 
     /**
-     * Apply a transform to a top-level or two-level state field.
-     *
-     * @param array<int, string> $field_keys
+     * Encode preflight path fields.
      */
-    private function transform_state_path_field(
-        array $state,
-        array $field_keys,
-        callable $transform
-    ): array {
-        if (count($field_keys) === 1) {
-            $key = $field_keys[0];
-            if (array_key_exists($key, $state)) {
-                $state[$key] = $transform($state[$key]);
+    private function encode_preflight_data_paths(array $data): array
+    {
+        if (isset($data["wp_detect"]["searched"]) && is_array($data["wp_detect"]["searched"])) {
+            foreach ($data["wp_detect"]["searched"] as $idx => $path) {
+                $data["wp_detect"]["searched"][$idx] = $this->encode_state_path_value($path);
             }
-            return $state;
         }
 
-        $outer = $field_keys[0];
-        $inner = $field_keys[1];
-        if (
-            !array_key_exists($outer, $state) ||
-            !is_array($state[$outer]) ||
-            !array_key_exists($inner, $state[$outer])
-        ) {
-            return $state;
+        if (isset($data["wp_detect"]["roots"]) && is_array($data["wp_detect"]["roots"])) {
+            foreach ($data["wp_detect"]["roots"] as $idx => $root) {
+                if (!is_array($root)) {
+                    continue;
+                }
+                foreach (["path", "wp_load_path", "wp_config_path"] as $key) {
+                    if (array_key_exists($key, $root)) {
+                        $data["wp_detect"]["roots"][$idx][$key] = $this->encode_state_path_value($root[$key]);
+                    }
+                }
+            }
         }
 
-        $state[$outer][$inner] = $transform($state[$outer][$inner]);
-        return $state;
+        if (isset($data["runtime"]) && is_array($data["runtime"])) {
+            foreach (["php_ini", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
+                if (array_key_exists($key, $data["runtime"])) {
+                    $data["runtime"][$key] = $this->encode_state_path_value($data["runtime"][$key]);
+                }
+            }
+        }
+
+        if (isset($data["filesystem"]["directories"]) && is_array($data["filesystem"]["directories"])) {
+            foreach ($data["filesystem"]["directories"] as $idx => $dir_entry) {
+                if (!is_array($dir_entry) || !array_key_exists("path", $dir_entry)) {
+                    continue;
+                }
+                $data["filesystem"]["directories"][$idx]["path"] = $this->encode_state_path_value($dir_entry["path"]);
+            }
+        }
+
+        if (isset($data["htaccess"]["files"]) && is_array($data["htaccess"]["files"])) {
+            foreach ($data["htaccess"]["files"] as $idx => $file_entry) {
+                if (!is_array($file_entry) || !array_key_exists("path", $file_entry)) {
+                    continue;
+                }
+                $data["htaccess"]["files"][$idx]["path"] = $this->encode_state_path_value($file_entry["path"]);
+            }
+        }
+
+        if (isset($data["wp_content"]["roots"]) && is_array($data["wp_content"]["roots"])) {
+            foreach ($data["wp_content"]["roots"] as $idx => $root_entry) {
+                if (!is_array($root_entry)) {
+                    continue;
+                }
+                foreach (["root", "content_dir"] as $key) {
+                    if (array_key_exists($key, $root_entry)) {
+                        $data["wp_content"]["roots"][$idx][$key] = $this->encode_state_path_value($root_entry[$key]);
+                    }
+                }
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * Decode preflight path fields.
+     */
+    private function decode_preflight_data_paths(array $data): array
+    {
+        if (isset($data["wp_detect"]["searched"]) && is_array($data["wp_detect"]["searched"])) {
+            foreach ($data["wp_detect"]["searched"] as $idx => $path) {
+                $data["wp_detect"]["searched"][$idx] = $this->decode_state_path_value($path);
+            }
+        }
+
+        if (isset($data["wp_detect"]["roots"]) && is_array($data["wp_detect"]["roots"])) {
+            foreach ($data["wp_detect"]["roots"] as $idx => $root) {
+                if (!is_array($root)) {
+                    continue;
+                }
+                foreach (["path", "wp_load_path", "wp_config_path"] as $key) {
+                    if (array_key_exists($key, $root)) {
+                        $data["wp_detect"]["roots"][$idx][$key] = $this->decode_state_path_value($root[$key]);
+                    }
+                }
+            }
+        }
+
+        if (isset($data["runtime"]) && is_array($data["runtime"])) {
+            foreach (["php_ini", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
+                if (array_key_exists($key, $data["runtime"])) {
+                    $data["runtime"][$key] = $this->decode_state_path_value($data["runtime"][$key]);
+                }
+            }
+        }
+
+        if (isset($data["filesystem"]["directories"]) && is_array($data["filesystem"]["directories"])) {
+            foreach ($data["filesystem"]["directories"] as $idx => $dir_entry) {
+                if (!is_array($dir_entry) || !array_key_exists("path", $dir_entry)) {
+                    continue;
+                }
+                $data["filesystem"]["directories"][$idx]["path"] = $this->decode_state_path_value($dir_entry["path"]);
+            }
+        }
+
+        if (isset($data["htaccess"]["files"]) && is_array($data["htaccess"]["files"])) {
+            foreach ($data["htaccess"]["files"] as $idx => $file_entry) {
+                if (!is_array($file_entry) || !array_key_exists("path", $file_entry)) {
+                    continue;
+                }
+                $data["htaccess"]["files"][$idx]["path"] = $this->decode_state_path_value($file_entry["path"]);
+            }
+        }
+
+        if (isset($data["wp_content"]["roots"]) && is_array($data["wp_content"]["roots"])) {
+            foreach ($data["wp_content"]["roots"] as $idx => $root_entry) {
+                if (!is_array($root_entry)) {
+                    continue;
+                }
+                foreach (["root", "content_dir"] as $key) {
+                    if (array_key_exists($key, $root_entry)) {
+                        $data["wp_content"]["roots"][$idx][$key] = $this->decode_state_path_value($root_entry[$key]);
+                    }
+                }
+            }
+        }
+
+        return $data;
     }
 
     /**
