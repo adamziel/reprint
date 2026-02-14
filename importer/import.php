@@ -766,6 +766,13 @@ class ImportClient
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
+    private const STATE_PATH_ENCODING_PREFIX = "base64:";
+    private const STATE_PATH_FIELDS = [
+        ["diff", "local_after"],
+        ["fetch", "batch_file"],
+        ["current_file"],
+        ["db_index", "file"],
+    ];
 
     /** @var string Export server URL. */
     private $remote_url;
@@ -3396,20 +3403,52 @@ class ImportClient
             return;
         }
 
-        if (is_dir($local_path) && !is_link($local_path)) {
-            if (true !== @rmdir($local_path)) {
-                $this->audit_log("Failed to delete directory: {$path}", true);
-            } else {
-                $this->audit_log("Deleted directory: {$path}", false);
-            }
+        if ($this->remove_local_path_without_following_symlinks($local_path)) {
+            $this->audit_log("Deleted: {$path}", false);
             return;
         }
 
-        if (true !== @unlink($local_path)) {
-            $this->audit_log("Failed to delete: {$path}", true);
-        } else {
-            $this->audit_log("Deleted: {$path}", false);
+        $this->audit_log("Failed to delete: {$path}", true);
+    }
+
+    /**
+     * Remove a local path recursively without traversing symlink targets.
+     *
+     * Symlinks are always unlinked as links. Directories are traversed
+     * depth-first.
+     */
+    private function remove_local_path_without_following_symlinks(
+        string $local_path
+    ): bool {
+        if (!file_exists($local_path) && !is_link($local_path)) {
+            return true;
         }
+
+        if (is_link($local_path) || is_file($local_path)) {
+            return true === @unlink($local_path);
+        }
+
+        if (is_dir($local_path)) {
+            $entries = @scandir($local_path);
+            if ($entries === false) {
+                return false;
+            }
+            foreach ($entries as $entry) {
+                if ($entry === "." || $entry === "..") {
+                    continue;
+                }
+                if (
+                    !$this->remove_local_path_without_following_symlinks(
+                        $local_path . "/" . $entry
+                    )
+                ) {
+                    return false;
+                }
+            }
+            return true === @rmdir($local_path);
+        }
+
+        return true === @unlink($local_path);
     }
 
     /**
@@ -4241,6 +4280,21 @@ class ImportClient
 
         // Open file on first chunk
         if ($is_first) {
+            if (
+                (file_exists($local_path) || is_link($local_path)) &&
+                (!is_file($local_path) || is_link($local_path))
+            ) {
+                if (
+                    !$this->remove_local_path_without_following_symlinks(
+                        $local_path
+                    )
+                ) {
+                    throw new RuntimeException(
+                        "Failed to replace path with file: {$path}",
+                    );
+                }
+            }
+
             // Check if file exists locally
             $exists_locally = file_exists($local_path);
             $local_size = $exists_locally ? filesize($local_path) : 0;
@@ -4406,7 +4460,7 @@ class ImportClient
             }
         }
 
-        if (is_dir($dir)) {
+        if (is_dir($dir) && !is_link($dir)) {
             return;
         }
 
@@ -4492,6 +4546,18 @@ class ImportClient
         }
 
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        if (
+            (file_exists($local_path) || is_link($local_path)) &&
+            (!is_dir($local_path) || is_link($local_path))
+        ) {
+            if (
+                !$this->remove_local_path_without_following_symlinks($local_path)
+            ) {
+                throw new RuntimeException(
+                    "Failed to replace path with directory: {$path}",
+                );
+            }
+        }
 
         // Create directory, removing any files that block the path
         $this->ensure_directory_path($local_path);
@@ -4558,7 +4624,21 @@ class ImportClient
 
         // Remove existing file/symlink if present
         if (file_exists($local_path) || is_link($local_path)) {
-            unlink($local_path);
+            if (
+                !$this->remove_local_path_without_following_symlinks($local_path)
+            ) {
+                $this->audit_log(
+                    "Failed to remove existing path for symlink: {$local_path}",
+                    true,
+                );
+                $this->output_progress([
+                    "type" => "symlink_error",
+                    "path" => $path,
+                    "target" => $target,
+                    "error" => "Failed to replace existing path",
+                ]);
+                return;
+            }
         }
 
         // Create parent directory
@@ -5600,6 +5680,110 @@ class ImportClient
     }
 
     /**
+     * Encode state path fields as base64 to make JSON persistence byte-safe.
+     */
+    private function encode_state_paths(array $state): array
+    {
+        foreach (self::STATE_PATH_FIELDS as $field_keys) {
+            $state = $this->transform_state_path_field(
+                $state,
+                $field_keys,
+                function ($value) {
+                    return $this->encode_state_path_value($value);
+                },
+            );
+        }
+        return $state;
+    }
+
+    /**
+     * Decode base64-encoded path fields in state after loading.
+     *
+     * Supports legacy plain-string fields for backward compatibility.
+     */
+    private function decode_state_paths(array $state): array
+    {
+        foreach (self::STATE_PATH_FIELDS as $field_keys) {
+            $state = $this->transform_state_path_field(
+                $state,
+                $field_keys,
+                function ($value) {
+                    return $this->decode_state_path_value($value);
+                },
+            );
+        }
+        return $state;
+    }
+
+    /**
+     * Apply a transform to a top-level or two-level state field.
+     *
+     * @param array<int, string> $field_keys
+     */
+    private function transform_state_path_field(
+        array $state,
+        array $field_keys,
+        callable $transform
+    ): array {
+        if (count($field_keys) === 1) {
+            $key = $field_keys[0];
+            if (array_key_exists($key, $state)) {
+                $state[$key] = $transform($state[$key]);
+            }
+            return $state;
+        }
+
+        $outer = $field_keys[0];
+        $inner = $field_keys[1];
+        if (
+            !array_key_exists($outer, $state) ||
+            !is_array($state[$outer]) ||
+            !array_key_exists($inner, $state[$outer])
+        ) {
+            return $state;
+        }
+
+        $state[$outer][$inner] = $transform($state[$outer][$inner]);
+        return $state;
+    }
+
+    /**
+     * @param mixed $value
+     * @return mixed
+     */
+    private function encode_state_path_value($value)
+    {
+        if (!is_string($value) || $value === "") {
+            return $value;
+        }
+        return self::STATE_PATH_ENCODING_PREFIX . base64_encode($value);
+    }
+
+    /**
+     * @param mixed $value
+     * @return mixed
+     */
+    private function decode_state_path_value($value)
+    {
+        if (!is_string($value) || $value === "") {
+            return $value;
+        }
+        if (!str_starts_with($value, self::STATE_PATH_ENCODING_PREFIX)) {
+            return $value;
+        }
+        $encoded = substr($value, strlen(self::STATE_PATH_ENCODING_PREFIX));
+        $decoded = base64_decode($encoded, true);
+        if ($decoded === false) {
+            $this->audit_log(
+                "Warning: invalid base64-encoded state path; resetting field",
+                true,
+            );
+            return null;
+        }
+        return $decoded;
+    }
+
+    /**
      * Load import state from disk.
      */
     private function load_state(): array
@@ -5624,7 +5808,8 @@ class ImportClient
             return $this->default_state();
         }
 
-        return $this->normalize_state($state);
+        $state = $this->normalize_state($state);
+        return $this->decode_state_paths($state);
     }
 
     /**
@@ -5642,6 +5827,7 @@ class ImportClient
             ];
         }
         $state = $this->normalize_state($state);
+        $state = $this->encode_state_paths($state);
 
         // Write to temp file first, then atomic rename
         $json = json_encode($state, JSON_PRETTY_PRINT);
