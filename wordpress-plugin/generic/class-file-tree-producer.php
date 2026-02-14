@@ -137,6 +137,7 @@ class FileTreeProducer
 
         if ($path !== null && $byte_offset > 0) {
             // Resuming mid-file.
+            clearstatcache(true, $path);
             $size = @filesize($path);
             if ($size === false) {
                 // File disappeared; treat as completed.
@@ -348,12 +349,14 @@ class FileTreeProducer
             return null;
         }
 
+        clearstatcache(true, $path);
         if ($path[0] === "/" && (file_exists($path) || is_link($path))) {
             return $path;
         }
 
         foreach ($this->directories as $dir) {
             $candidate = $dir . "/" . ltrim($path, "/");
+            clearstatcache(true, $candidate);
             if (file_exists($candidate) || is_link($candidate)) {
                 return $candidate;
             }
@@ -373,6 +376,24 @@ class FileTreeProducer
     private function stream_file_chunk(array $file): void
     {
         if ($this->streaming_file_handle === null) {
+            clearstatcache(true, $file["path"]);
+            $pre_stat = @lstat($file["path"]);
+            if ($pre_stat === false || (($pre_stat["mode"] & 0170000) !== 0100000)) {
+                $this->streaming_file_handle = null;
+                $this->current_file_meta = null;
+                $this->current_chunk = [
+                    "type" => "error",
+                    "error_type" => $pre_stat === false ? "file_missing" : "file_changed",
+                    "path" => $file["path"],
+                    "message" => $pre_stat === false
+                        ? "File disappeared before read"
+                        : "Path is no longer a regular file",
+                ];
+                $this->last_emitted_path = $file["path"];
+                $this->last_emitted_ctime = $file["ctime"];
+                return;
+            }
+
             $this->streaming_file_handle = @fopen($file["path"], "r");
             if (!$this->streaming_file_handle) {
                 $this->streaming_file_handle = null;
@@ -603,6 +624,7 @@ class FileTreeProducer
      */
     private function lstat_path(string $path): ?array
     {
+        clearstatcache(true, $path);
         $stat = @lstat($path);
         if ($stat === false) {
             return null;
