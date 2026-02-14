@@ -4768,6 +4768,111 @@ class ImportClient
 
 
     /**
+     * Fast-path index sort via shell exec.
+     *
+     * Prepends a hex-encoded sort key to each line, shells out to `sort(1)`,
+     * strips the keys, and deduplicates.  This handles arbitrarily large
+     * files with no PHP memory pressure.
+     *
+     * @param string $path         The JSONL index file to sort.
+     * @param string $tmp          Temporary output path for the sorted result.
+     * @return bool True if the exec-based sort succeeded (and $path was replaced).
+     */
+    private function try_exec_sort(string $path, string $tmp): bool
+    {
+        if (!$this->function_available("exec")) {
+            return false;
+        }
+
+        $keyed = $path . ".keyed";
+        $sorted_keyed = $path . ".keyed.sorted";
+        $in = fopen($path, "r");
+        $out = fopen($keyed, "w");
+        if (!$in || !$out) {
+            if ($in) {
+                fclose($in);
+            }
+            if ($out) {
+                fclose($out);
+            }
+            $this->audit_log("Failed to prepare keyed index file, falling back to PHP sort");
+            return false;
+        }
+        while (($line = fgets($in)) !== false) {
+            $line = rtrim($line, "\r\n");
+            if ($line === "") {
+                continue;
+            }
+            $entry = $this->parse_index_line($line);
+            if ($entry === null) {
+                continue;
+            }
+            $key = bin2hex($entry["path"]);
+            fwrite($out, $key . "\t" . $line . "\n");
+        }
+        fclose($in);
+        fclose($out);
+
+        $cmd =
+            "LC_ALL=C sort -t '\t' -k1,1 " .
+            escapeshellarg($keyed) .
+            " > " .
+            escapeshellarg($sorted_keyed);
+        $output = [];
+        $code = 0;
+        exec($cmd, $output, $code);
+        if ($code !== 0) {
+            @unlink($keyed);
+            @unlink($sorted_keyed);
+            $this->audit_log("exec() sort failed (exit code {$code}), falling back to PHP sort");
+            return false;
+        }
+
+        $sorted_in = fopen($sorted_keyed, "r");
+        $sorted_out = fopen($tmp, "w");
+        if (!$sorted_in || !$sorted_out) {
+            if ($sorted_in) {
+                fclose($sorted_in);
+            }
+            if ($sorted_out) {
+                fclose($sorted_out);
+            }
+            @unlink($keyed);
+            @unlink($sorted_keyed);
+            $this->audit_log("Failed to open sorted index files, falling back to PHP sort");
+            return false;
+        }
+
+        $prev_key = null;
+        while (($line = fgets($sorted_in)) !== false) {
+            $pos = strpos($line, "\t");
+            if ($pos === false) {
+                continue;
+            }
+            $key = substr($line, 0, $pos);
+            $data = substr($line, $pos + 1);
+            if ($data === "") {
+                continue;
+            }
+            // Deduplicate: skip entries with the same path as the previous one.
+            // This handles overlapping symlink targets that index the same files.
+            if ($key === $prev_key) {
+                continue;
+            }
+            $prev_key = $key;
+            fwrite($sorted_out, $data);
+        }
+        fclose($sorted_in);
+        fclose($sorted_out);
+        @unlink($keyed);
+        @unlink($sorted_keyed);
+        if (!rename($tmp, $path)) {
+            throw new RuntimeException("Failed to replace sorted index file");
+        }
+        return true;
+    }
+
+    /**
      * Sorts an index file by path and removes duplicate entries.
      *
      * Tries the fast path first: prepends a hex-encoded sort key to each line,
@@ -4795,98 +4900,9 @@ class ImportClient
         // Try the fast path first: shell out to `sort` for O(n log n) with
         // no memory pressure.  If anything goes wrong, fall through to the
         // PHP-native sorting below.
-        do {
-            if (!$this->function_available("exec")) {
-                break;
-            }
-
-            $keyed = $path . ".keyed";
-            $sorted_keyed = $path . ".keyed.sorted";
-            $in = fopen($path, "r");
-            $out = fopen($keyed, "w");
-            if (!$in || !$out) {
-                if ($in) {
-                    fclose($in);
-                }
-                if ($out) {
-                    fclose($out);
-                }
-                $this->audit_log("Failed to prepare keyed index file, falling back to PHP sort");
-                break;
-            }
-            while (($line = fgets($in)) !== false) {
-                $line = rtrim($line, "\r\n");
-                if ($line === "") {
-                    continue;
-                }
-                $entry = $this->parse_index_line($line);
-                if ($entry === null) {
-                    continue;
-                }
-                $key = bin2hex($entry["path"]);
-                fwrite($out, $key . "\t" . $line . "\n");
-            }
-            fclose($in);
-            fclose($out);
-
-            $cmd =
-                "LC_ALL=C sort -t '\t' -k1,1 " .
-                escapeshellarg($keyed) .
-                " > " .
-                escapeshellarg($sorted_keyed);
-            $output = [];
-            $code = 0;
-            exec($cmd, $output, $code);
-            if ($code !== 0) {
-                @unlink($keyed);
-                @unlink($sorted_keyed);
-                $this->audit_log("exec() sort failed (exit code {$code}), falling back to PHP sort");
-                break;
-            }
-
-            $sorted_in = fopen($sorted_keyed, "r");
-            $sorted_out = fopen($tmp, "w");
-            if (!$sorted_in || !$sorted_out) {
-                if ($sorted_in) {
-                    fclose($sorted_in);
-                }
-                if ($sorted_out) {
-                    fclose($sorted_out);
-                }
-                @unlink($keyed);
-                @unlink($sorted_keyed);
-                $this->audit_log("Failed to open sorted index files, falling back to PHP sort");
-                break;
-            }
-
-            $prev_key = null;
-            while (($line = fgets($sorted_in)) !== false) {
-                $pos = strpos($line, "\t");
-                if ($pos === false) {
-                    continue;
-                }
-                $key = substr($line, 0, $pos);
-                $data = substr($line, $pos + 1);
-                if ($data === "") {
-                    continue;
-                }
-                // Deduplicate: skip entries with the same path as the previous one.
-                // This handles overlapping symlink targets that index the same files.
-                if ($key === $prev_key) {
-                    continue;
-                }
-                $prev_key = $key;
-                fwrite($sorted_out, $data);
-            }
-            fclose($sorted_in);
-            fclose($sorted_out);
-            @unlink($keyed);
-            @unlink($sorted_keyed);
-            if (!rename($tmp, $path)) {
-                throw new RuntimeException("Failed to replace sorted index file");
-            }
+        if ($this->try_exec_sort($path, $tmp)) {
             return;
-        } while (false);
+        }
 
         // Estimate how much memory we can use: 60% of whatever headroom
         // remains between current usage and the PHP memory limit.
