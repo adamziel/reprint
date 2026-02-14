@@ -36,6 +36,84 @@ register_shutdown_function(function () {
     fwrite(STDERR, $json . "\n");
 });
 
+/**
+ * Atomically write a file via temp file + rename.
+ *
+ * @param string $target_path Final destination path.
+ * @param string $contents    File contents to write.
+ * @param string $context     Human-readable context for error messages.
+ * @param bool   $throw_on_error Whether to throw or return false on failure.
+ */
+function atomic_write_file(
+    string $target_path,
+    string $contents,
+    string $context = "file",
+    bool $throw_on_error = true
+): bool {
+    $tmp_path = $target_path . ".tmp";
+    $bytes = file_put_contents($tmp_path, $contents);
+    if ($bytes === false) {
+        if ($throw_on_error) {
+            throw new RuntimeException("Failed to write {$context}: {$tmp_path} (disk full?)");
+        }
+        return false;
+    }
+    if (!rename($tmp_path, $target_path)) {
+        @unlink($tmp_path);
+        if ($throw_on_error) {
+            throw new RuntimeException("Failed to rename {$context}: {$tmp_path} -> {$target_path}");
+        }
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Check whether a PHP function is available and not disabled.
+ */
+function is_runtime_function_available(string $name): bool
+{
+    if (!function_exists($name)) {
+        return false;
+    }
+    $disabled = ini_get("disable_functions");
+    if ($disabled === false || trim($disabled) === "") {
+        return true;
+    }
+    $list = array_map("trim", explode(",", $disabled));
+    return !in_array($name, $list, true);
+}
+
+/**
+ * Parse one JSON index line into a normalized entry.
+ */
+function parse_index_entry_line(string $line): ?array
+{
+    $line = trim($line);
+    if ($line === "") {
+        return null;
+    }
+    $data = json_decode($line, true);
+    if (!is_array($data)) {
+        throw new RuntimeException("Invalid index line format");
+    }
+    $path_encoded = $data["path"] ?? "";
+    if (!is_string($path_encoded) || $path_encoded === "") {
+        throw new RuntimeException("Invalid index path");
+    }
+    $path = base64_decode($path_encoded, true);
+    if ($path === "" || $path === false) {
+        throw new RuntimeException("Invalid index path (base64 decode failed)");
+    }
+    assert_valid_path($path, "index path");
+    return [
+        "path" => $path,
+        "ctime" => (int) ($data["ctime"] ?? 0),
+        "size" => (int) ($data["size"] ?? 0),
+        "type" => (string) ($data["type"] ?? "file"),
+    ];
+}
+
 
 /**
  * Streaming multipart parser.
@@ -3075,7 +3153,7 @@ class ImportClient
             }
 
             $remote_offset = ftell($remote_handle);
-            $remote = $this->parse_index_line($line);
+            $remote = parse_index_entry_line($line);
             if (!$remote) {
                 continue;
             }
@@ -3446,36 +3524,6 @@ class ImportClient
     }
 
     /**
-     * Parse one JSON index line into an array.
-     */
-    private function parse_index_line(string $line): ?array
-    {
-        $line = trim($line);
-        if ($line === "") {
-            return null;
-        }
-        $data = json_decode($line, true);
-        if (!is_array($data)) {
-            throw new RuntimeException("Invalid index line format");
-        }
-        $path_encoded = $data["path"] ?? "";
-        if (!is_string($path_encoded) || $path_encoded === "") {
-            throw new RuntimeException("Invalid index path");
-        }
-        $path = base64_decode($path_encoded, true);
-        if ($path === "" || $path === false) {
-            throw new RuntimeException("Invalid index path (base64 decode failed)");
-        }
-        assert_valid_path($path, "index path");
-        return [
-            "path" => $path,
-            "ctime" => (int) ($data["ctime"] ?? 0),
-            "size" => (int) ($data["size"] ?? 0),
-            "type" => (string) ($data["type"] ?? "file"),
-        ];
-    }
-
-    /**
      * Start collecting index updates into a temp file for streaming merge.
      */
     private function begin_index_updates(): void
@@ -3738,7 +3786,7 @@ class ImportClient
             return null;
         }
         while (($line = fgets($handle)) !== false) {
-            $parsed = $this->parse_index_line($line);
+            $parsed = parse_index_entry_line($line);
             if ($parsed !== null) {
                 return $parsed;
             }
@@ -4825,23 +4873,6 @@ class ImportClient
     }
 
     /**
-     * Check if a function is available (not disabled).
-     */
-    private function function_available(string $name): bool
-    {
-        if (!function_exists($name)) {
-            return false;
-        }
-        $disabled = ini_get("disable_functions");
-        if ($disabled === false || trim($disabled) === "") {
-            return true;
-        }
-        $list = array_map("trim", explode(",", $disabled));
-        return !in_array($name, $list, true);
-    }
-
-
-    /**
      * Fast-path index sort via shell exec.
      *
      * Prepends a hex-encoded sort key to each line, shells out to `sort(1)`,
@@ -4854,7 +4885,7 @@ class ImportClient
      */
     private function try_exec_sort(string $path, string $tmp): bool
     {
-        if (!$this->function_available("exec")) {
+        if (!is_runtime_function_available("exec")) {
             return false;
         }
 
@@ -4877,7 +4908,7 @@ class ImportClient
             if ($line === "") {
                 continue;
             }
-            $entry = $this->parse_index_line($line);
+            $entry = parse_index_entry_line($line);
             if ($entry === null) {
                 continue;
             }
@@ -5005,7 +5036,7 @@ class ImportClient
         }
         $entries = [];
         foreach ($raw_lines as $line) {
-            $entry = $this->parse_index_line($line);
+            $entry = parse_index_entry_line($line);
             if ($entry === null) {
                 continue;
             }
@@ -5969,19 +6000,11 @@ class ImportClient
         $state = $this->normalize_state($state);
         $state = $this->encode_state_paths($state);
 
-        // Write to temp file first, then atomic rename
         $json = json_encode($state, JSON_PRETTY_PRINT);
         if ($json === false) {
             throw new RuntimeException("Failed to encode state: " . json_last_error_msg());
         }
-        $tmp_file = $this->state_file . '.tmp';
-        $bytes = file_put_contents($tmp_file, $json);
-        if ($bytes === false) {
-            throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");
-        }
-        if (!rename($tmp_file, $this->state_file)) {
-            throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->state_file}");
-        }
+        atomic_write_file($this->state_file, $json, "state file");
 
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run
@@ -6034,10 +6057,7 @@ class ImportClient
         if ($json === false) {
             return; // Best-effort — don't crash the import over a status file
         }
-        $tmp = $this->status_file . ".tmp";
-        if (file_put_contents($tmp, $json) !== false) {
-            rename($tmp, $this->status_file);
-        }
+        atomic_write_file($this->status_file, $json, "status file", false);
     }
 
     /**
