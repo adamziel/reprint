@@ -2424,24 +2424,20 @@ class ImportClient
                 continue;
             }
 
-            // In follow-symlinks mode, keep absolute intermediate symlink targets
-            // unchanged so path-component links mirror the remote host.
-            $should_validate_target = !($this->follow_symlinks && str_starts_with($target, "/"));
-            if ($should_validate_target) {
-                $root = $this->get_filesystem_root_path();
-                try {
-                    $this->assert_symlink_target_within_root(
-                        dirname($local_path),
-                        $target,
-                        $root
-                    );
-                } catch (RuntimeException $e) {
-                    $this->audit_log(
-                        "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
-                        true,
-                    );
-                    continue;
-                }
+            // Validate that the symlink target doesn't escape the filesystem root.
+            $root = $this->get_filesystem_root_path();
+            try {
+                $this->assert_symlink_target_within_root(
+                    dirname($local_path),
+                    $target,
+                    $root
+                );
+            } catch (RuntimeException $e) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
+                    true,
+                );
+                continue;
             }
 
             if (@symlink($target, $local_path)) {
@@ -4541,28 +4537,23 @@ class ImportClient
 
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
 
-        // In follow-symlinks mode, keep absolute targets as-is so imported
-        // links mirror the server layout (e.g. /srv/e2e-via -> /srv/e2e-external).
-        // Otherwise, enforce root-bounded targets for safety.
-        $should_validate_target = !($this->follow_symlinks && str_starts_with($target, "/"));
-        if ($should_validate_target) {
-            $root = $this->get_filesystem_root_path();
-            try {
-                $this->assert_symlink_target_within_root(
-                    dirname($local_path),
-                    $target,
-                    $root
-                );
-            } catch (RuntimeException $e) {
-                $this->audit_log($e->getMessage(), true);
-                $this->output_progress([
-                    "type" => "symlink_error",
-                    "path" => $path,
-                    "target" => $target,
-                    "error" => $e->getMessage(),
-                ]);
-                return;
-            }
+        // Validate that the symlink target doesn't escape the filesystem root.
+        $root = $this->get_filesystem_root_path();
+        try {
+            $this->assert_symlink_target_within_root(
+                dirname($local_path),
+                $target,
+                $root
+            );
+        } catch (RuntimeException $e) {
+            $this->audit_log($e->getMessage(), true);
+            $this->output_progress([
+                "type" => "symlink_error",
+                "path" => $path,
+                "target" => $target,
+                "error" => $e->getMessage(),
+            ]);
+            return;
         }
 
         // Remove existing file/symlink if present
