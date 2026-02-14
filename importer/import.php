@@ -947,12 +947,19 @@ class ImportClient
      */
     private function index_count(): int
     {
-        if (!file_exists($this->index_file)) {
+        if (!is_file($this->index_file)) {
             return 0;
         }
-        return is_file($this->index_file) 
-            ? iterator_count(new SplFileObject($this->index_file, 'r'))
-            : 0;
+        $h = fopen($this->index_file, "r");
+        if ($h === false) {
+            return 0;
+        }
+        $c = 0;
+        while (fgets($h) !== false) {
+            $c++;
+        }
+        fclose($h);
+        return $c;
     }
 
     /**
@@ -2174,19 +2181,22 @@ class ImportClient
 
             // Reset the index cursor so download_remote_index starts fresh
             // for this directory, but appends to the existing index file.
+            // Note we are not losing the previous cursor position. This code
+            // runs only after the previous directory was fully indexed so
+            // we won't need any prior cursor information again.
             $this->state["index"]["cursor"] = null;
             $this->save_state($this->state);
 
-            // The server may reject this directory (e.g. if the updated plugin
-            // isn't deployed yet and list_dir validation fails).  In that case,
-            // log a warning and skip to the next directory instead of crashing.
             $attempts = 0;
             $last_cursor = null;
-            $skipped = false;
             while (true) {
                 try {
                     $complete = $this->download_remote_index($dir);
                 } catch (RuntimeException $e) {
+                    // We won't be able to follow every symlink. If
+                    // the response seems like the remote server rejecting
+                    // our attempt to index this directory, log a warning
+                    // and skip to the next directory instead of crashing.
                     $msg = $e->getMessage();
                     if (
                         strpos($msg, "HTTP error 4") !== false ||
@@ -2201,9 +2211,10 @@ class ImportClient
                         if ($this->is_tty && !$this->verbose_mode) {
                             echo "  Skipped (server rejected): {$dir}\n";
                         }
-                        $skipped = true;
-                        break;
+                        continue 2;
                     }
+
+                    // Still throw all the other errors.
                     throw $e;
                 }
                 if ($complete) {
@@ -2223,14 +2234,13 @@ class ImportClient
                 $last_cursor = $current_cursor;
 
                 $attempts++;
-                if ($attempts > 100000) {
+                if ($attempts > 10_000) {
+                    // @TODO: Consider a configurable maximum attempts for really large sites that
+                    //        require more than 10,000 requests to index.
                     throw new RuntimeException(
                         "files-index (symlink follow) exceeded maximum attempts",
                     );
                 }
-            }
-            if ($skipped) {
-                continue;
             }
 
             // Scan newly added entries for more symlink targets
@@ -2258,12 +2268,12 @@ class ImportClient
             return $targets;
         }
 
-        $h = fopen($this->remote_index_file, "r");
-        if (!$h) {
+        $handle = fopen($this->remote_index_file, "r");
+        if (!$handle) {
             return $targets;
         }
 
-        while (($line = fgets($h)) !== false) {
+        while (($line = fgets($handle)) !== false) {
             $entry = json_decode($line, true);
             if (!is_array($entry)) {
                 continue;
@@ -2283,46 +2293,8 @@ class ImportClient
                 continue;
             }
 
-            // The server resolves symlink targets via realpath(), so they
-            // should always be absolute.  This fallback handles older server
-            // versions that may still send raw readlink() output.
-            if ($target[0] !== "/") {
-                $path_encoded = $entry["path"] ?? null;
-                if (!is_string($path_encoded) || $path_encoded === "") {
-                    continue;
-                }
-                $symlink_path = base64_decode($path_encoded);
-                if ($symlink_path === false || $symlink_path === "") {
-                    continue;
-                }
-                $parent = dirname($symlink_path);
-                // Normalize "/../" sequences to produce an absolute path
-                $parts = explode("/", $parent . "/" . $target);
-                $resolved = [];
-                foreach ($parts as $part) {
-                    if ($part === "" || $part === ".") {
-                        if (empty($resolved)) {
-                            $resolved[] = "";
-                        }
-                        continue;
-                    }
-                    if ($part === "..") {
-                        if (count($resolved) > 1) {
-                            array_pop($resolved);
-                        }
-                        continue;
-                    }
-                    $resolved[] = $part;
-                }
-                $target = implode("/", $resolved);
-                if ($target === "" || $target[0] !== "/") {
-                    continue;
-                }
-            }
-
-            // The server only emits targets for directory symlinks, so no
-            // need to filter out file targets here.
-
+            // If we've seen this target already, we can move on
+            // to the next one.
             if (isset($visited[$target])) {
                 continue;
             }
@@ -2341,7 +2313,7 @@ class ImportClient
 
             $targets[] = $target;
         }
-        fclose($h);
+        fclose($handle);
 
         return array_values(array_unique($targets));
     }
@@ -4770,7 +4742,15 @@ class ImportClient
         }
 
         $tmp = $path . ".sorted";
-        if ($this->function_available("exec")) {
+
+        // Try the fast path first: shell out to `sort` for O(n log n) with
+        // no memory pressure.  If anything goes wrong, fall through to the
+        // PHP-native sorting below.
+        do {
+            if (!$this->function_available("exec")) {
+                break;
+            }
+
             $keyed = $path . ".keyed";
             $sorted_keyed = $path . ".keyed.sorted";
             $in = fopen($path, "r");
@@ -4782,7 +4762,8 @@ class ImportClient
                 if ($out) {
                     fclose($out);
                 }
-                throw new RuntimeException("Failed to prepare index file for sorting");
+                $this->audit_log("Failed to prepare keyed index file, falling back to PHP sort");
+                break;
             }
             while (($line = fgets($in)) !== false) {
                 $line = rtrim($line, "\r\n");
@@ -4810,8 +4791,10 @@ class ImportClient
             if ($code !== 0) {
                 @unlink($keyed);
                 @unlink($sorted_keyed);
-                throw new RuntimeException("Failed to sort index file");
+                $this->audit_log("exec() sort failed (exit code {$code}), falling back to PHP sort");
+                break;
             }
+
             $sorted_in = fopen($sorted_keyed, "r");
             $sorted_out = fopen($tmp, "w");
             if (!$sorted_in || !$sorted_out) {
@@ -4823,8 +4806,10 @@ class ImportClient
                 }
                 @unlink($keyed);
                 @unlink($sorted_keyed);
-                throw new RuntimeException("Failed to finalize sorted index file");
+                $this->audit_log("Failed to open sorted index files, falling back to PHP sort");
+                break;
             }
+
             $prev_key = null;
             while (($line = fgets($sorted_in)) !== false) {
                 $pos = strpos($line, "\t");
@@ -4852,7 +4837,7 @@ class ImportClient
                 throw new RuntimeException("Failed to replace sorted index file");
             }
             return;
-        }
+        } while (false);
 
         // Estimate how much memory we can use: 60% of whatever headroom
         // remains between current usage and the PHP memory limit.
@@ -5622,8 +5607,10 @@ class ImportClient
         if (!rename($tmp_file, $this->state_file)) {
             throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->state_file}");
         }
+        fwrite(STDERR, "DEBUG save_state #{$save_count} file written (" . strlen($json) . "b)\n");
 
         $indexed = $this->index_count();
+        fwrite(STDERR, "DEBUG save_state #{$save_count} index_count=$indexed\n");
         $files_imported = $this->files_imported; // Completed in this run
         $has_cursor =
             !empty($state["cursor"] ?? null) ||
