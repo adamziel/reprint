@@ -2758,6 +2758,7 @@ class ImportClient
                 if ($path) {
                     $this->audit_log("Missing on server: {$path}", true);
                 }
+                // @TODO: Cleanup the local file that we may have started downloading.
             } elseif ($chunk_type === "error") {
                 $this->handle_error_chunk($chunk, "files", $context);
             } elseif ($chunk_type === "progress") {
@@ -3208,13 +3209,29 @@ class ImportClient
     }
 
     /**
-     * Build a batch file for file_fetch without exceeding request limits.
+     * Builds a JSON batch file listing the next set of paths to download.
+     *
+     * Reads from the download list (.import-download-list.jsonl) starting at
+     * $offset, accumulating paths into a JSON array until the batch approaches
+     * 80% of the server's max request size.  Always includes at least one path,
+     * even if it alone exceeds the limit.
+     *
+     * The batch file is written to a temp file and intended to be uploaded as
+     * the request body for the file_fetch endpoint.
+     *
+     * @param int $offset Byte offset into the download list file.
+     * @return array{file: string, offset: int, next_offset: int}|null
+     *         The temp file path and byte offsets, or null if no paths remain.
      */
     private function prepare_fetch_batch(int $offset): ?array
     {
+        // Cap the batch at 80% of the server's max request size so the
+        // multipart envelope and headers still fit.  Floor at 256 KB so
+        // tiny max_request values don't produce degenerate single-file batches.
         $max_request = $this->get_max_request_bytes();
         $limit = (int) max(256 * 1024, $max_request * 0.8);
 
+        // Open the download list and seek to where the previous batch left off.
         $handle = fopen($this->download_list_file, "r");
         if (!$handle) {
             throw new RuntimeException("Failed to open download list file");
@@ -3224,6 +3241,9 @@ class ImportClient
             fseek($handle, $offset);
         }
 
+        // The output is a temp file containing a JSON array of paths, e.g.
+        // ["/wp-content/uploads/photo.jpg","/wp-content/themes/flavor/style.css"]
+        // This file gets uploaded as the request body for the file_fetch endpoint.
         $tmp = tempnam(sys_get_temp_dir(), "file-fetch-");
         if ($tmp === false) {
             fclose($handle);
@@ -3236,11 +3256,18 @@ class ImportClient
             throw new RuntimeException("Failed to open fetch batch file");
         }
 
+        // Read lines from the download list (one JSON entry per line) and
+        // accumulate them into the JSON array until we approach the size limit.
+        // The download list supports two formats:
+        //   - A bare JSON string:   "/path/to/file"
+        //   - A JSON object:        {"path": "<base64-encoded path>"}
         $bytes = 0;
         $first = true;
         fwrite($out, "[");
         $bytes = 1;
         while (true) {
+            // Remember where this line started so we can rewind if the
+            // entry doesn't fit in the current batch.
             $line_start = ftell($handle);
             $line = fgets($handle);
             if ($line === false) {
@@ -3272,12 +3299,15 @@ class ImportClient
             $chunk = $prefix . $json_path;
             $needed = $bytes + strlen($chunk) + 1; // +1 for closing bracket
 
+            // Would this entry push us over the limit?
             if (!$first && $needed > $limit) {
+                // Rewind to the start of this line so the next batch picks it up.
                 fseek($handle, $line_start);
                 break;
             }
             if ($first && $needed > $limit) {
-                // Still write at least one entry even if it exceeds the limit.
+                // Still write at least one entry even if it exceeds the limit,
+                // otherwise we'd loop forever on a single long path.
                 if (fwrite($out, $chunk) === false) {
                     throw new RuntimeException("Failed to write fetch batch file (disk full?)");
                 }
@@ -3299,6 +3329,7 @@ class ImportClient
         fclose($handle);
         fclose($out);
 
+        // An empty batch (just "[]") means we've exhausted the download list.
         if ($bytes <= 2) {
             @unlink($tmp);
             return null;
@@ -4473,11 +4504,16 @@ class ImportClient
     }
 
     /**
-     * Handle a symlink chunk (recreate symlink in filesystem).
+     * Recreates a symlink from the export stream in the local filesystem.
      *
-     * Symlinks are safely recreated because we download the complete directory
-     * tree including all symlink targets. The paths are relative to the
-     * filesystem root which prevents directory traversal outside the import directory.
+     * Decodes the base64-encoded path and target from the chunk headers,
+     * validates that the target stays within the filesystem root (preventing
+     * directory traversal), then creates the symlink.  Failures are logged
+     * to the audit log and reported as symlink_error progress events — they
+     * do not halt the import.
+     *
+     * @param array $chunk Multipart chunk with x-symlink-path, x-symlink-target,
+     *                     and x-symlink-ctime headers (all base64-encoded).
      */
     private function handle_symlink_chunk(array $chunk): void
     {
@@ -4732,7 +4768,18 @@ class ImportClient
 
 
     /**
-     * Sort an index file by path (first column).
+     * Sorts an index file by path and removes duplicate entries.
+     *
+     * Tries the fast path first: prepends a hex-encoded sort key to each line,
+     * shells out to `sort(1)`, then strips the keys.  This handles arbitrarily
+     * large files with no PHP memory pressure.  If exec() is unavailable or
+     * the sort command fails, falls back to an in-memory usort() — which
+     * requires roughly 5x the file size in available memory.
+     *
+     * Duplicates arise from overlapping symlink targets that index the same
+     * files; they are removed during the final write pass.
+     *
+     * @param string $path The JSONL index file to sort in place.
      */
     private function sort_index_file(string $path): void
     {
@@ -5609,10 +5656,8 @@ class ImportClient
         if (!rename($tmp_file, $this->state_file)) {
             throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->state_file}");
         }
-        fwrite(STDERR, "DEBUG save_state #{$save_count} file written (" . strlen($json) . "b)\n");
 
         $indexed = $this->index_count();
-        fwrite(STDERR, "DEBUG save_state #{$save_count} index_count=$indexed\n");
         $files_imported = $this->files_imported; // Completed in this run
         $has_cursor =
             !empty($state["cursor"] ?? null) ||
