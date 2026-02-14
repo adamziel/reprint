@@ -13,12 +13,7 @@ error_reporting(E_ALL);
 ini_set("display_errors", "stderr");
 ini_set("display_startup_errors", 1);
 
-// Polyfill for PHP 7.4 which lacks str_starts_with().
-if (!function_exists('str_starts_with')) {
-    function str_starts_with(string $haystack, string $needle): bool {
-        return $needle === '' || strncmp($haystack, $needle, strlen($needle)) === 0;
-    }
-}
+require_once __DIR__ . "/../wordpress-plugin/generic/utils.php";
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -41,31 +36,6 @@ register_shutdown_function(function () {
     fwrite(STDERR, $json . "\n");
 });
 
-/**
- * Parse a human-readable size string (e.g. "16M", "1G", "512K") into bytes.
- * Accepts plain integers as well.
- */
-function parse_size(string $value): int
-{
-    $value = trim($value);
-    if (!preg_match('/^(\d+(?:\.\d+)?)\s*([KMGkmg])?[Bb]?$/', $value, $m)) {
-        throw new InvalidArgumentException(
-            "Invalid size value: '{$value}'. Use a number optionally followed by K, M, or G (e.g. 64M).",
-        );
-    }
-    $num = (float) $m[1];
-    $suffix = strtoupper($m[2] ?? "");
-    switch ($suffix) {
-        case "K":
-            return (int) ($num * 1024);
-        case "M":
-            return (int) ($num * 1024 * 1024);
-        case "G":
-            return (int) ($num * 1024 * 1024 * 1024);
-        default:
-            return (int) $num;
-    }
-}
 
 /**
  * Streaming multipart parser.
@@ -496,8 +466,8 @@ class AdaptiveTuner
         $config["db_unbuffered"] = (bool) $config["db_unbuffered"];
         $config["db_query_time_limit"] = max(0, (int) $config["db_query_time_limit"]);
 
-        foreach (self::ENDPOINTS as $ep) {
-            $config[$ep["increase_key"]] = max(1, min((int) $config[$ep["max_key"]], (int) $config[$ep["increase_key"]]));
+        foreach (self::ENDPOINTS as $endpoint) {
+            $config[$endpoint["increase_key"]] = max(1, min((int) $config[$endpoint["max_key"]], (int) $config[$endpoint["increase_key"]]));
         }
 
         $this->config = $config;
@@ -507,20 +477,24 @@ class AdaptiveTuner
             "duty" => $config["duty"],
             "error_backoff_remaining" => 0,
         ];
-        foreach (self::ENDPOINTS as $ep) {
-            $state_defaults[$ep["size_key"]] = $config[$ep["start_key"]];
-            $state_defaults[$ep["ema_key"]] = null;
+        foreach (self::ENDPOINTS as $endpoint) {
+            $state_defaults[$endpoint["size_key"]] = $config[$endpoint["start_key"]];
+            $state_defaults[$endpoint["ema_key"]] = null;
         }
         $this->state = array_merge($state_defaults, $state);
 
         // Clamp restored state values.
-        foreach (self::ENDPOINTS as $ep) {
-            $this->state[$ep["size_key"]] = max(
-                (int) $config[$ep["min_key"]],
-                min((int) $config[$ep["max_key"]], (int) $this->state[$ep["size_key"]]),
+        foreach (self::ENDPOINTS as $endpoint) {
+            $this->state[$endpoint["size_key"]] = max(
+                (int) $config[$endpoint["min_key"]],
+                min((int) $config[$endpoint["max_key"]], (int) $this->state[$endpoint["size_key"]]),
             );
-            $ema = $this->state[$ep["ema_key"]] ?? null;
-            $this->state[$ep["ema_key"]] = ($ema !== null && (float) $ema > 0) ? (float) $ema : null;
+            // EMA is Exponential Moving Average.
+            // It gives more weight to recent measurements without discarding
+            // older history, using: ema = (1 - alpha) * prev + alpha * current.
+            // We only restore the EMA if it's valid and greater than 0.
+            $ema = $this->state[$endpoint["ema_key"]] ?? null;
+            $this->state[$endpoint["ema_key"]] = ($ema !== null && (float) $ema > 0) ? (float) $ema : null;
         }
         $this->state["duty"] = $this->clamp((float) $this->state["duty"], $config["duty_min"], $config["duty_max"]);
         $this->state["error_backoff_remaining"] = max(0, (int) ($this->state["error_backoff_remaining"] ?? 0));
@@ -790,40 +764,141 @@ class AdaptiveTuner
 
 class ImportClient
 {
+
+    private const SAVE_STATE_EVERY_N_CHUNKS = 50;
+
+    /** @var string Export server URL. */
     private $remote_url;
+
+    /** @var string Local directory for all import artifacts (state files, filesystem-root/, db.sql, etc.). */
     private $local_path;
+
+    /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
+
+    /**
+     * @var float Monotonic timestamp of last progress JSON line emitted.
+     * Used with $progress_throttle to rate-limit stdout progress output.
+     */
     private $last_progress_output = 0;
-    private $progress_throttle = 1.0; // seconds
-    private $index_file; // Local index of imported files for delta detection (sorted JSON lines)
-    private $index_updates_file; // Temp file collecting sorted index updates this run (JSON lines)
+
+    /** @var float Minimum seconds between progress output lines. */
+    private $progress_throttle = 1.0;
+
+    /**
+     * @var string Path to .import-index.jsonl — sorted JSON-lines file tracking every
+     * imported file's path, ctime, size, and type. Used for delta detection: on the next
+     * sync we compare this against the remote index to decide what to download or delete.
+     */
+    private $index_file;
+
+    /**
+     * @var string|null Path to .import-index-updates.jsonl — temporary append-only file that
+     * collects index mutations (upserts and deletes) during the current run. Merged into
+     * $index_file at the end of a successful sync.
+     */
+    private $index_updates_file;
+
+    /** @var resource|null Open file handle for $index_updates_file while writing. */
     private $index_updates_handle;
+
+    /** @var int Number of entries written to $index_updates_file this run. */
     private $index_updates_count = 0;
+
+    /**
+     * Deduplication state for index updates. Consecutive upsert_index_entry() or
+     * delete_index_entry() calls for the same path are collapsed into one write.
+     *
+     * @var string|null Last path written to the index updates file.
+     */
     private $last_update_path = null;
+
+    /** @var bool|null Whether the last index update was a deletion (true) or upsert (false). */
     private $last_update_delete = null;
+
+    /** @var int|null ctime of the last upserted index entry. */
     private $last_update_ctime = null;
+
+    /** @var int|null Size in bytes of the last upserted index entry. */
     private $last_update_size = null;
+
+    /** @var string|null Type ("file", "link", "dir") of the last upserted index entry. */
     private $last_update_type = null;
-    private $remote_index_file; // Path to latest remote index JSON lines
-    private $download_list_file; // Path to file list for downloads (JSON lines)
-    private $audit_log; // Audit log file for all operations
-    private $volatile_files_file; // Path to .import-volatile-files.json
-    private $verbose_mode = false; // Whether to show verbose output
-    private $is_tty; // Whether stdout is a TTY
-    private $files_imported = 0; // Counter for imported files
-    private $state; // Current import state
-    private $chunks_since_save = 0; // Track chunks for periodic saves
-    private $shutdown_requested = false; // Flag for graceful shutdown
-    private $follow_symlinks = false; // Whether to follow symlinks outside root
-    private $tuner = null; // AdaptiveTuner instance or null
-    private $hmac_client = null; // Site_Export_HMAC_Client instance or null
-    private $max_allowed_packet = null; // Client's max_allowed_packet for SQL statements
+
+    /** @var string Path to .import-remote-index.jsonl — latest file index received from the server. */
+    private $remote_index_file;
+
+    /** @var string Path to .import-download-list.jsonl — files to download, computed by diffing remote vs local index. */
+    private $download_list_file;
+
+    /** @var string Path to .import-audit.log — append-only log of every operation for debugging. */
+    private $audit_log;
+
+    /** @var string Path to .import-volatile-files.json — files the server marks as frequently-changing. */
+    private $volatile_files_file;
+
+    /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
+    private $verbose_mode = false;
+
+    /** @var bool Whether stdout is a TTY (enables interactive progress display). */
+    private $is_tty;
+
+    /** @var int Running count of files imported in the current invocation. */
+    private $files_imported = 0;
+
+    /**
+     * @var array Persistent import state loaded from / saved to $state_file.
+     * Keys: command, status, cursor, stage, preflight, version, follow_symlinks,
+     * max_allowed_packet, db_index, file_index.
+     * @var array|null
+     */
+    private $state;
+
+    /** @var int Chunks processed since last state save — triggers periodic persistence. */
+    private $chunks_since_save = 0;
+
+    /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
+    private $shutdown_requested = false;
+
+    /**
+     * @var bool When true, tell the server to follow symlinks that point outside
+     * the document root (expanding them into real files). Set via --follow-symlinks,
+     * persisted in state so it survives across invocations.
+     */
+    private $follow_symlinks = false;
+
+    /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
+    private $tuner = null;
+
+    /** @var Site_Export_HMAC_Client|null Signs requests when HMAC auth is configured. */
+    private $hmac_client = null;
+
+    /**
+     * @var int|null MySQL max_allowed_packet value for the import database connection.
+     * Passed to the server so it can split SQL statements to fit within this limit.
+     */
+    private $max_allowed_packet = null;
+
+    /** @var int|null Last curl error number, for retry/diagnostic logic. */
     private $last_curl_errno = null;
+
+    /** @var bool Whether the last curl request timed out. */
     private $last_curl_timeout = false;
-    private $pipeline_step = null; // Current pipeline step (1-indexed), set via --step
-    private $pipeline_steps = null; // Total pipeline steps, set via --steps
-    private $status_file; // Path to .import-status.json
-    public $exit_code = 0; // Exit code: 0 = complete, 2 = partial (call again)
+
+    /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
+    private $pipeline_step = null;
+
+    /** @var int|null Total number of pipeline steps. Set via --steps. */
+    private $pipeline_steps = null;
+
+    /** @var string Path to .import-status.json — machine-readable status for external progress readers. */
+    private $status_file;
+
+    /**
+     * @var int Process exit code. 0 = import complete, 2 = partial progress
+     * (caller should invoke again to continue).
+     */
+    public $exit_code = 0;
 
     public function __construct(string $remote_url, string $local_path)
     {
@@ -872,19 +947,19 @@ class ImportClient
      */
     private function index_count(): int
     {
-        if (!file_exists($this->index_file)) {
+        if (!is_file($this->index_file)) {
             return 0;
         }
-        $h = fopen($this->index_file, "r");
-        if (!$h) {
+        $handle = fopen($this->index_file, "r");
+        if (!$handle) {
             return 0;
         }
-        $c = 0;
-        while (fgets($h) !== false) {
-            $c++;
+        $count = 0;
+        while (fgets($handle) !== false) {
+            $count++;
         }
-        fclose($h);
-        return $c;
+        fclose($handle);
+        return $count;
     }
 
     /**
@@ -1171,6 +1246,8 @@ class ImportClient
         // To abort a sync, run `<command> --abort` (clears state), then
         // run `<command>` again (starts fresh).
         if ($abort) {
+            // @TODO: Co-locate abort for each command with the run_*() method
+            //        for that command.
             $this->handle_abort($command);
             return;
         }
@@ -1373,7 +1450,7 @@ class ImportClient
      */
     private function run_preflight(): void
     {
-        $url = $this->build_url("preflight", null, [], null);
+        $url = $this->build_url("preflight", null, []);
         $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
 
         $result = $this->fetch_json($url);
@@ -1463,6 +1540,7 @@ class ImportClient
             echo "No preflight data available.\n";
             exit(1);
         }
+        // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
         echo json_encode($entry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
         $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
         $this->write_status_file($ok ? null : "Preflight failed");
@@ -1536,6 +1614,9 @@ class ImportClient
         if (!$db_ok) {
             $all_pass = false;
         }
+
+        // We do not check for any encoding issues here. We'll move over
+        // the entire database as it is.
 
         // Print summary
         foreach ($checks as $check) {
@@ -1756,6 +1837,7 @@ class ImportClient
         }
 
         $this->state["command"] = "files-sync";
+        $this->state["status"] = "in_progress";
         $this->save_state($this->state);
 
         $this->run_files_sync_pipeline();
@@ -2047,18 +2129,16 @@ class ImportClient
     }
 
     /**
-     * Discover directories that need indexing beyond the primary export roots.
+     * Recursively discover directories that need indexing beyond the primary
+     * export roots.
      *
      * Scans the remote index for symlink entries with a "target" field,
      * resolves relative targets to absolute paths, and indexes each target
-     * directory.  Repeats until the queue is drained, with cycle detection.
+     * directory. Repeats until the queue is drained, with cycle detection.
      */
     private function discover_symlink_targets(): void
     {
-        $roots = $this->get_root_directories_from_url();
-        if (empty($roots)) {
-            $roots = $this->get_root_directories_from_preflight();
-        }
+        $roots = $this->get_root_directories_from_preflight();
 
         // Collect all indexed directory real paths for containment checks
         $visited = [];
@@ -2101,19 +2181,22 @@ class ImportClient
 
             // Reset the index cursor so download_remote_index starts fresh
             // for this directory, but appends to the existing index file.
+            // Note we are not losing the previous cursor position. This code
+            // runs only after the previous directory was fully indexed so
+            // we won't need any prior cursor information again.
             $this->state["index"]["cursor"] = null;
             $this->save_state($this->state);
 
-            // The server may reject this directory (e.g. if the updated plugin
-            // isn't deployed yet and list_dir validation fails).  In that case,
-            // log a warning and skip to the next directory instead of crashing.
             $attempts = 0;
             $last_cursor = null;
-            $skipped = false;
             while (true) {
                 try {
                     $complete = $this->download_remote_index($dir);
                 } catch (RuntimeException $e) {
+                    // We won't be able to follow every symlink. If
+                    // the response seems like the remote server rejecting
+                    // our attempt to index this directory, log a warning
+                    // and skip to the next directory instead of crashing.
                     $msg = $e->getMessage();
                     if (
                         strpos($msg, "HTTP error 4") !== false ||
@@ -2128,9 +2211,10 @@ class ImportClient
                         if ($this->is_tty && !$this->verbose_mode) {
                             echo "  Skipped (server rejected): {$dir}\n";
                         }
-                        $skipped = true;
-                        break;
+                        continue 2;
                     }
+
+                    // Still throw all the other errors.
                     throw $e;
                 }
                 if ($complete) {
@@ -2150,14 +2234,13 @@ class ImportClient
                 $last_cursor = $current_cursor;
 
                 $attempts++;
-                if ($attempts > 100000) {
+                if ($attempts > 10_000) {
+                    // @TODO: Consider a configurable maximum attempts for really large sites that
+                    //        require more than 10,000 requests to index.
                     throw new RuntimeException(
                         "files-index (symlink follow) exceeded maximum attempts",
                     );
                 }
-            }
-            if ($skipped) {
-                continue;
             }
 
             // Scan newly added entries for more symlink targets
@@ -2185,12 +2268,12 @@ class ImportClient
             return $targets;
         }
 
-        $h = fopen($this->remote_index_file, "r");
-        if (!$h) {
+        $handle = fopen($this->remote_index_file, "r");
+        if (!$handle) {
             return $targets;
         }
 
-        while (($line = fgets($h)) !== false) {
+        while (($line = fgets($handle)) !== false) {
             $entry = json_decode($line, true);
             if (!is_array($entry)) {
                 continue;
@@ -2210,46 +2293,8 @@ class ImportClient
                 continue;
             }
 
-            // The server resolves symlink targets via realpath(), so they
-            // should always be absolute.  This fallback handles older server
-            // versions that may still send raw readlink() output.
-            if ($target[0] !== "/") {
-                $path_encoded = $entry["path"] ?? null;
-                if (!is_string($path_encoded) || $path_encoded === "") {
-                    continue;
-                }
-                $symlink_path = base64_decode($path_encoded);
-                if ($symlink_path === false || $symlink_path === "") {
-                    continue;
-                }
-                $parent = dirname($symlink_path);
-                // Normalize "/../" sequences to produce an absolute path
-                $parts = explode("/", $parent . "/" . $target);
-                $resolved = [];
-                foreach ($parts as $part) {
-                    if ($part === "" || $part === ".") {
-                        if (empty($resolved)) {
-                            $resolved[] = "";
-                        }
-                        continue;
-                    }
-                    if ($part === "..") {
-                        if (count($resolved) > 1) {
-                            array_pop($resolved);
-                        }
-                        continue;
-                    }
-                    $resolved[] = $part;
-                }
-                $target = implode("/", $resolved);
-                if ($target === "" || $target[0] !== "/") {
-                    continue;
-                }
-            }
-
-            // The server only emits targets for directory symlinks, so no
-            // need to filter out file targets here.
-
+            // If we've seen this target already, we can move on
+            // to the next one.
             if (isset($visited[$target])) {
                 continue;
             }
@@ -2268,7 +2313,7 @@ class ImportClient
 
             $targets[] = $target;
         }
-        fclose($h);
+        fclose($handle);
 
         return array_values(array_unique($targets));
     }
@@ -2292,11 +2337,6 @@ class ImportClient
     private function recreate_intermediate_symlinks(): void
     {
         if (!file_exists($this->remote_index_file)) {
-            return;
-        }
-
-        $fs_root = realpath($this->local_path . "/filesystem-root");
-        if ($fs_root === false) {
             return;
         }
 
@@ -2326,13 +2366,27 @@ class ImportClient
                 continue;
             }
 
-            $path = base64_decode($path_encoded);
-            $target = base64_decode($target_encoded);
+            /**
+             * base64_decode second parameter is a `strict` flag. It rejects the entire
+             * input if it contains any bytes that are not produced by base64_encode().
+             * 
+             * @see https://www.php.net/base64_decode
+             */
+            $path = base64_decode($path_encoded, true);
+            $target = base64_decode($target_encoded, true);
             if ($path === false || $path === "" || $target === false || $target === "") {
                 continue;
             }
 
-            $local_path = $fs_root . $path;
+            try {
+                $local_path = $this->remote_path_to_local_path_within_import_root($path);
+            } catch (RuntimeException $e) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: invalid path {$path}: " . $e->getMessage(),
+                    true,
+                );
+                continue;
+            }
 
             // Already correct — skip
             if (is_link($local_path) && readlink($local_path) === $target) {
@@ -2342,7 +2396,16 @@ class ImportClient
             // Create parent directory
             $parent = dirname($local_path);
             if (!is_dir($parent)) {
-                @mkdir($parent, 0755, true);
+                try {
+                    $this->ensure_directory_path($parent);
+                } catch (RuntimeException $e) {
+                    $this->audit_log(
+                        "INTERMEDIATE SYMLINK SKIP: failed to prepare parent for {$path}: " .
+                            $e->getMessage(),
+                        true,
+                    );
+                    continue;
+                }
             }
 
             // Remove stale symlink if present
@@ -2356,6 +2419,22 @@ class ImportClient
             if (file_exists($local_path)) {
                 $this->audit_log(
                     "INTERMEDIATE SYMLINK SKIP: {$path} already exists as a real file/dir",
+                    true,
+                );
+                continue;
+            }
+
+            // Validate that the symlink target doesn't escape the filesystem root.
+            $root = $this->get_filesystem_root_path();
+            try {
+                $this->assert_symlink_target_within_root(
+                    dirname($local_path),
+                    $target,
+                    $root
+                );
+            } catch (RuntimeException $e) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
                     true,
                 );
                 continue;
@@ -2621,7 +2700,7 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
-        $url = $this->build_url("file_fetch", $cursor, $params, null);
+        $url = $this->build_url("file_fetch", $cursor, $params);
         $this->audit_log("Downloading file fetch from {$url}");
         $this->audit_log("POST data: " . json_encode($post_data));
 
@@ -2644,7 +2723,7 @@ class ImportClient
             }
 
             $this->chunks_since_save++;
-            if ($this->chunks_since_save >= 50) {
+            if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                 $this->state["fetch"]["cursor"] = $cursor;
                 // Track current file for crash recovery
                 if ($context->file_handle && $context->file_path) {
@@ -2679,6 +2758,7 @@ class ImportClient
                 if ($path) {
                     $this->audit_log("Missing on server: {$path}", true);
                 }
+                // @TODO: Cleanup the local file that we may have started downloading.
             } elseif ($chunk_type === "error") {
                 $this->handle_error_chunk($chunk, "files", $context);
             } elseif ($chunk_type === "progress") {
@@ -2759,10 +2839,7 @@ class ImportClient
         $index_state = $this->state["index"] ?? $this->default_state()["index"];
         $cursor = $index_state["cursor"] ?? null;
 
-        $roots = $this->get_root_directories_from_url();
-        if (empty($roots)) {
-            $roots = $this->get_root_directories_from_preflight();
-        }
+        $roots = $this->get_root_directories_from_preflight();
         if (empty($roots)) {
             throw new RuntimeException(
                 "No root directories found. Either add directory[]=... to the " .
@@ -2794,7 +2871,7 @@ class ImportClient
         if ($this->follow_symlinks) {
             $params["follow_symlinks"] = "1";
         }
-        $url = $this->build_url("file_index", $cursor, $params, null);
+        $url = $this->build_url("file_index", $cursor, $params);
         $context = new StreamingContext();
 
         $context->on_chunk = function ($chunk) use (
@@ -2812,7 +2889,7 @@ class ImportClient
             }
 
             $this->chunks_since_save++;
-            if ($this->chunks_since_save >= 50) {
+            if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                 $this->state["index"] = [
                     "cursor" => $cursor,
                 ];
@@ -2843,12 +2920,20 @@ class ImportClient
                     }
                     $path_encoded = $item["path"] ?? "";
                     if (!is_string($path_encoded) || $path_encoded === "") {
-                        continue;
+                        throw new RuntimeException(
+                            "Invalid index batch item: missing path",
+                        );
                     }
-                    $path = base64_decode($path_encoded);
+                    $path = base64_decode($path_encoded, true);
                     if ($path === "" || $path === false) {
-                        continue;
+                        throw new RuntimeException(
+                            "Invalid index batch item: path base64 decode failed",
+                        );
                     }
+                    assert_valid_path(
+                        $path,
+                        "index batch path",
+                    );
                     $ctime = (int) ($item["ctime"] ?? 0);
                     $size = (int) ($item["size"] ?? 0);
                     $type = (string) ($item["type"] ?? "file");
@@ -3124,13 +3209,29 @@ class ImportClient
     }
 
     /**
-     * Build a batch file for file_fetch without exceeding request limits.
+     * Builds a JSON batch file listing the next set of paths to download.
+     *
+     * Reads from the download list (.import-download-list.jsonl) starting at
+     * $offset, accumulating paths into a JSON array until the batch approaches
+     * 80% of the server's max request size.  Always includes at least one path,
+     * even if it alone exceeds the limit.
+     *
+     * The batch file is written to a temp file and intended to be uploaded as
+     * the request body for the file_fetch endpoint.
+     *
+     * @param int $offset Byte offset into the download list file.
+     * @return array{file: string, offset: int, next_offset: int}|null
+     *         The temp file path and byte offsets, or null if no paths remain.
      */
     private function prepare_fetch_batch(int $offset): ?array
     {
+        // Cap the batch at 80% of the server's max request size so the
+        // multipart envelope and headers still fit.  Floor at 256 KB so
+        // tiny max_request values don't produce degenerate single-file batches.
         $max_request = $this->get_max_request_bytes();
         $limit = (int) max(256 * 1024, $max_request * 0.8);
 
+        // Open the download list and seek to where the previous batch left off.
         $handle = fopen($this->download_list_file, "r");
         if (!$handle) {
             throw new RuntimeException("Failed to open download list file");
@@ -3140,6 +3241,9 @@ class ImportClient
             fseek($handle, $offset);
         }
 
+        // The output is a temp file containing a JSON array of paths, e.g.
+        // ["/wp-content/uploads/photo.jpg","/wp-content/themes/flavor/style.css"]
+        // This file gets uploaded as the request body for the file_fetch endpoint.
         $tmp = tempnam(sys_get_temp_dir(), "file-fetch-");
         if ($tmp === false) {
             fclose($handle);
@@ -3152,11 +3256,18 @@ class ImportClient
             throw new RuntimeException("Failed to open fetch batch file");
         }
 
+        // Read lines from the download list (one JSON entry per line) and
+        // accumulate them into the JSON array until we approach the size limit.
+        // The download list supports two formats:
+        //   - A bare JSON string:   "/path/to/file"
+        //   - A JSON object:        {"path": "<base64-encoded path>"}
         $bytes = 0;
         $first = true;
         fwrite($out, "[");
         $bytes = 1;
         while (true) {
+            // Remember where this line started so we can rewind if the
+            // entry doesn't fit in the current batch.
             $line_start = ftell($handle);
             $line = fgets($handle);
             if ($line === false) {
@@ -3188,12 +3299,15 @@ class ImportClient
             $chunk = $prefix . $json_path;
             $needed = $bytes + strlen($chunk) + 1; // +1 for closing bracket
 
+            // Would this entry push us over the limit?
             if (!$first && $needed > $limit) {
+                // Rewind to the start of this line so the next batch picks it up.
                 fseek($handle, $line_start);
                 break;
             }
             if ($first && $needed > $limit) {
-                // Still write at least one entry even if it exceeds the limit.
+                // Still write at least one entry even if it exceeds the limit,
+                // otherwise we'd loop forever on a single long path.
                 if (fwrite($out, $chunk) === false) {
                     throw new RuntimeException("Failed to write fetch batch file (disk full?)");
                 }
@@ -3215,6 +3329,7 @@ class ImportClient
         fclose($handle);
         fclose($out);
 
+        // An empty batch (just "[]") means we've exhausted the download list.
         if ($bytes <= 2) {
             @unlink($tmp);
             return null;
@@ -3265,10 +3380,18 @@ class ImportClient
      */
     private function delete_local_file_path(string $path): void
     {
-        if ($path === "" || $path[0] !== "/") {
+        if ($path === "") {
             return;
         }
-        $local_path = $this->local_path . "/filesystem-root" . $path;
+        try {
+            $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        } catch (RuntimeException $e) {
+            $this->audit_log(
+                "Security: refusing to delete invalid path '{$path}': " . $e->getMessage(),
+                true,
+            );
+            return;
+        }
         if (!file_exists($local_path) && !is_link($local_path)) {
             return;
         }
@@ -3306,10 +3429,11 @@ class ImportClient
         if (!is_string($path_encoded) || $path_encoded === "") {
             throw new RuntimeException("Invalid index path");
         }
-        $path = base64_decode($path_encoded);
+        $path = base64_decode($path_encoded, true);
         if ($path === "" || $path === false) {
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
+        assert_valid_path($path, "index path");
         return [
             "path" => $path,
             "ctime" => (int) ($data["ctime"] ?? 0),
@@ -3473,6 +3597,7 @@ class ImportClient
                     "FILE DELETE | {$this->index_updates_file} | no updates to merge",
                 );
             }
+            $this->index_updates_count = 0;
             return;
         }
 
@@ -3568,6 +3693,7 @@ class ImportClient
 
         @unlink($updates_path);
         $this->audit_log("FILE DELETE | {$updates_path} | updates merged");
+        $this->index_updates_count = 0;
     }
 
     /**
@@ -3723,7 +3849,7 @@ class ImportClient
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
-                $url = $this->build_url("sql_chunk", $cursor, $params, null);
+                $url = $this->build_url("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
                 $context->sql_handle = $sql_handle;
@@ -3749,7 +3875,7 @@ class ImportClient
 
                     // Save cursor periodically (every 50 chunks)
                     $this->chunks_since_save++;
-                    if ($this->chunks_since_save >= 50) {
+                    if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                         // Flush to ensure bytes are on disk before saving state
                         fflush($sql_handle);
                         $this->state["cursor"] = $cursor;
@@ -3877,7 +4003,7 @@ class ImportClient
                 $params = [
                     "tables_per_batch" => 1000,
                 ];
-                $url = $this->build_url("db_index", $cursor, $params, null);
+                $url = $this->build_url("db_index", $cursor, $params);
 
                 $context = new StreamingContext();
                 $context->on_chunk = function ($chunk) use (
@@ -3999,6 +4125,78 @@ class ImportClient
         }
     }
 
+
+    /**
+     * Assert that a symlink target resolves to a path within $root.
+     *
+     * For absolute targets, the target itself must be under $root.
+     * For relative targets, the resolved path (parent dir + target) must be
+     * under $root. We normalize ".." segments without touching the filesystem,
+     * since the target may not exist yet.
+     *
+     * @throws RuntimeException if the target escapes the root.
+     */
+    private function assert_symlink_target_within_root(
+        string $symlink_parent_dir,
+        string $target,
+        string $root
+    ): void {
+        if (str_starts_with($target, "/")) {
+            // Absolute target: must be under root
+            $resolved = normalize_path($target);
+        } else {
+            // Relative target: resolve against the symlink's parent directory
+            $resolved = normalize_path($symlink_parent_dir . "/" . $target);
+        }
+
+        if (!path_is_within_root($resolved, $root)) {
+            throw new RuntimeException(
+                "Security: symlink target escapes filesystem root: {$target} " .
+                "(resolves to {$resolved}, root is {$root})"
+            );
+        }
+    }
+
+    /**
+     * Return canonical filesystem-root path, creating it if it doesn't exist.
+     */
+    private function get_filesystem_root_path(): string
+    {
+        $filesystem_root_base = $this->local_path . "/filesystem-root";
+        if (!is_dir($filesystem_root_base)) {
+            if (!mkdir($filesystem_root_base, 0755, true) && !is_dir($filesystem_root_base)) {
+                throw new RuntimeException(
+                    "Failed to create filesystem-root directory: {$filesystem_root_base}",
+                );
+            }
+        }
+
+        $real = realpath($filesystem_root_base);
+        if ($real === false) {
+            throw new RuntimeException(
+                "Failed to resolve filesystem-root path: {$filesystem_root_base}",
+            );
+        }
+
+        return $real;
+    }
+
+
+    /**
+     * Resolve a remote absolute path into a local path under filesystem-root.
+     *
+     * Maps a remote absolute path (e.g. "/wp-content/uploads/photo.jpg") to a
+     * local path under the import directory's filesystem-root/. Performs symlink
+     * traversal security checks to prevent directory traversal attacks that could
+     * write files outside the import root.
+     */
+    private function remote_path_to_local_path_within_import_root(
+        string $path
+    ): string {
+        assert_valid_path($path, "remote path");
+        return $this->get_filesystem_root_path() . $path;
+    }
+
     /**
      * Handle a metadata chunk from multipart response.
      */
@@ -4007,7 +4205,7 @@ class ImportClient
         StreamingContext $context
     ): void {
         $headers = $chunk["headers"];
-        $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "");
+        $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "", true);
 
         if ($filesystem_root) {
             $context->filesystem_root = $filesystem_root;
@@ -4024,11 +4222,11 @@ class ImportClient
     ): void {
         $headers = $chunk["headers"];
         $raw_header = $headers["x-file-path"] ?? "";
-        $path = base64_decode($raw_header);
+        $path = base64_decode($raw_header, true);
         $is_first = ($headers["x-first-chunk"] ?? "0") === "1";
         $is_last = ($headers["x-last-chunk"] ?? "0") === "1";
 
-        if (!$path) {
+        if ($path === false || $path === "") {
             if ($raw_header !== "") {
                 $this->audit_log(
                     "Warning: base64_decode failed for x-file-path header: " .
@@ -4039,15 +4237,7 @@ class ImportClient
             return;
         }
 
-        // Security: path must be absolute (start with /)
-        if ($path[0] !== "/") {
-            throw new RuntimeException(
-                "Security: File path must be absolute: {$path}",
-            );
-        }
-
-        // Use full path under filesystem-root
-        $local_path = $this->local_path . "/filesystem-root" . $path;
+        $local_path = $this->remote_path_to_local_path_within_import_root($path);
 
         // Open file on first chunk
         if ($is_first) {
@@ -4192,15 +4382,7 @@ class ImportClient
     private function ensure_directory_path(string $dir): void
     {
         // Security: Ensure path is under filesystem-root
-        $filesystem_root_base = $this->local_path . "/filesystem-root";
-        $real_filesystem_root = realpath($filesystem_root_base);
-        if ($real_filesystem_root === false) {
-            // filesystem-root doesn't exist yet, create it first
-            if (!is_dir($filesystem_root_base)) {
-                mkdir($filesystem_root_base, 0755, true);
-            }
-            $real_filesystem_root = realpath($filesystem_root_base);
-        }
+        $real_filesystem_root = $this->get_filesystem_root_path();
 
         // Resolve the target path (or what it would be)
         // For non-existent paths, resolve the parent and append the final component
@@ -4216,7 +4398,7 @@ class ImportClient
             $real_check = realpath($check_path);
             if (
                 $real_check === false ||
-                strpos($real_check, $real_filesystem_root) !== 0
+                !path_is_within_root($real_check, $real_filesystem_root)
             ) {
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside filesystem-root: {$dir}",
@@ -4228,28 +4410,31 @@ class ImportClient
             return;
         }
 
-        // For absolute paths starting with /, build from root
-        // For relative paths, build incrementally
-        $is_absolute = $dir[0] === "/";
-        $parts = explode("/", $dir);
-        $current = "";
+        if (
+            $dir !== $real_filesystem_root &&
+            !str_starts_with($dir, $real_filesystem_root . "/")
+        ) {
+            throw new RuntimeException(
+                "Security: Refusing to create directory outside filesystem-root: {$dir}",
+            );
+        }
 
-        foreach ($parts as $i => $part) {
-            // Skip empty parts except for the first one in absolute paths
+        $relative = ltrim(substr($dir, strlen($real_filesystem_root)), "/");
+        if ($relative === "") {
+            return;
+        }
+
+        $current = $real_filesystem_root;
+        foreach (explode("/", $relative) as $part) {
             if ($part === "") {
-                if ($i === 0 && $is_absolute) {
-                    $current = "/";
-                }
                 continue;
             }
+            $current .= "/" . $part;
 
-            // Build path incrementally
-            if ($current === "") {
-                $current = $part;
-            } elseif ($current === "/") {
-                $current = "/" . $part;
-            } else {
-                $current .= "/" . $part;
+            if (is_link($current)) {
+                throw new RuntimeException(
+                    "Security: Refusing to traverse symlink while creating directory: {$current}",
+                );
             }
 
             // Remove file if blocking directory creation
@@ -4275,6 +4460,13 @@ class ImportClient
                     );
                 }
             }
+
+            $resolved = realpath($current);
+            if ($resolved === false || !path_is_within_root($resolved, $real_filesystem_root)) {
+                throw new RuntimeException(
+                    "Security: Refusing to create directory outside filesystem-root: {$current}",
+                );
+            }
         }
     }
 
@@ -4285,10 +4477,10 @@ class ImportClient
     {
         $headers = $chunk["headers"];
         $raw_header = $headers["x-directory-path"] ?? "";
-        $path = base64_decode($raw_header);
+        $path = base64_decode($raw_header, true);
         $ctime = (int) ($headers["x-directory-ctime"] ?? 0);
 
-        if (!$path) {
+        if ($path === false || $path === "") {
             if ($raw_header !== "") {
                 $this->audit_log(
                     "Warning: base64_decode failed for x-directory-path header: " .
@@ -4299,15 +4491,7 @@ class ImportClient
             return;
         }
 
-        // Security: path must be absolute (start with /)
-        if ($path[0] !== "/") {
-            throw new RuntimeException(
-                "Security: Directory path must be absolute: {$path}",
-            );
-        }
-
-        // Use full path under filesystem-root
-        $local_path = $this->local_path . "/filesystem-root" . $path;
+        $local_path = $this->remote_path_to_local_path_within_import_root($path);
 
         // Create directory, removing any files that block the path
         $this->ensure_directory_path($local_path);
@@ -4320,23 +4504,28 @@ class ImportClient
     }
 
     /**
-     * Handle a symlink chunk (recreate symlink in filesystem).
+     * Recreates a symlink from the export stream in the local filesystem.
      *
-     * Symlinks are safely recreated because we download the complete directory
-     * tree including all symlink targets. The paths are relative to the
-     * filesystem root which prevents directory traversal outside the import directory.
+     * Decodes the base64-encoded path and target from the chunk headers,
+     * validates that the target stays within the filesystem root (preventing
+     * directory traversal), then creates the symlink.  Failures are logged
+     * to the audit log and reported as symlink_error progress events — they
+     * do not halt the import.
+     *
+     * @param array $chunk Multipart chunk with x-symlink-path, x-symlink-target,
+     *                     and x-symlink-ctime headers (all base64-encoded).
      */
     private function handle_symlink_chunk(array $chunk): void
     {
         $headers = $chunk["headers"];
         $raw_path = $headers["x-symlink-path"] ?? "";
-        $path = base64_decode($raw_path);
-        $target = base64_decode($headers["x-symlink-target"] ?? "");
+        $path = base64_decode($raw_path, true);
+        $target = base64_decode($headers["x-symlink-target"] ?? "", true);
         $ctime = (int) ($headers["x-symlink-ctime"] ?? 0);
 
         // Skip if path or target is missing/empty
-        if (!$path || $target === false || $target === "") {
-            if ($raw_path !== "" && !$path) {
+        if ($path === false || $path === "" || $target === false || $target === "") {
+            if ($raw_path !== "" && ($path === false || $path === "")) {
                 $this->audit_log(
                     "Warning: base64_decode failed for x-symlink-path header: " .
                         substr($raw_path, 0, 100),
@@ -4346,19 +4535,26 @@ class ImportClient
             return;
         }
 
-        // Security: path must be absolute (start with /)
-        if ($path[0] !== "/") {
-            throw new RuntimeException(
-                "Security: Symlink path must be absolute: {$path}",
-            );
-        }
+        $local_path = $this->remote_path_to_local_path_within_import_root($path);
 
-        // Use full path under filesystem-root
-        $root = realpath($this->local_path . "/filesystem-root");
-        if ($root === false) {
+        // Validate that the symlink target doesn't escape the filesystem root.
+        $root = $this->get_filesystem_root_path();
+        try {
+            $this->assert_symlink_target_within_root(
+                dirname($local_path),
+                $target,
+                $root
+            );
+        } catch (RuntimeException $e) {
+            $this->audit_log($e->getMessage(), true);
+            $this->output_progress([
+                "type" => "symlink_error",
+                "path" => $path,
+                "target" => $target,
+                "error" => $e->getMessage(),
+            ]);
             return;
         }
-        $local_path = $root . $path;
 
         // Remove existing file/symlink if present
         if (file_exists($local_path) || is_link($local_path)) {
@@ -4368,7 +4564,9 @@ class ImportClient
         // Create parent directory
         $dir = dirname($local_path);
         if (!is_dir($dir)) {
-            if (!mkdir($dir, 0755, true) && !is_dir($dir)) {
+            try {
+                $this->ensure_directory_path($dir);
+            } catch (RuntimeException $e) {
                 // Log error and skip this symlink
                 $this->audit_log(
                     "Failed to create directory for symlink: {$dir}",
@@ -4507,8 +4705,7 @@ class ImportClient
     private function build_url(
         string $endpoint,
         ?string $cursor,
-        array $params = [],
-        ?string $session_id = null
+        array $params = []
     ): string {
         $url = $this->remote_url;
         $separator = strpos($url, "?") === false ? "?" : "&";
@@ -4518,12 +4715,6 @@ class ImportClient
             // Also include cursor in query params as a fallback when headers are stripped.
             $params["cursor"] = $cursor;
         }
-
-        // Add session_id for server to load client state
-        if ($session_id) {
-            $params["session_id"] = $session_id;
-        }
-
         $params["_cache_bust"] = time() . "-" . rand(0, 999999);
 
         return $url . $separator . http_build_query($params);
@@ -4559,33 +4750,6 @@ class ImportClient
         return $dirs;
     }
 
-    private function get_root_directories_from_url(): array
-    {
-        $parts = parse_url($this->remote_url);
-        $query = $parts["query"] ?? "";
-        if ($query === "") {
-            return [];
-        }
-        $params = [];
-        parse_str($query, $params);
-        $dirs = $params["directory"] ?? [];
-        if (!is_array($dirs)) {
-            $dirs = [$dirs];
-        }
-        $normalized = [];
-        foreach ($dirs as $dir) {
-            if (!is_string($dir)) {
-                continue;
-            }
-            $dir = rtrim($dir, "/");
-            if ($dir === "") {
-                continue;
-            }
-            $normalized[] = $dir;
-        }
-        return array_values(array_unique($normalized));
-    }
-
     /**
      * Check if a function is available (not disabled).
      */
@@ -4602,33 +4766,20 @@ class ImportClient
         return !in_array($name, $list, true);
     }
 
-    /**
-     * Parse a PHP memory_limit value (e.g. "128M", "1G", "-1") into bytes.
-     * Returns 0 for unlimited (-1) or unparseable values.
-     */
-    private function parse_memory_limit(string $value): int
-    {
-        $value = trim($value);
-        if ($value === "-1" || $value === "" || $value === "0") {
-            return 0;
-        }
-        $last = strtolower($value[strlen($value) - 1]);
-        $bytes = (int) $value;
-        switch ($last) {
-            case "g":
-                $bytes *= 1024;
-                // fall through
-            case "m":
-                $bytes *= 1024;
-                // fall through
-            case "k":
-                $bytes *= 1024;
-        }
-        return $bytes;
-    }
 
     /**
-     * Sort an index file by path (first column).
+     * Sorts an index file by path and removes duplicate entries.
+     *
+     * Tries the fast path first: prepends a hex-encoded sort key to each line,
+     * shells out to `sort(1)`, then strips the keys.  This handles arbitrarily
+     * large files with no PHP memory pressure.  If exec() is unavailable or
+     * the sort command fails, falls back to an in-memory usort() — which
+     * requires roughly 5x the file size in available memory.
+     *
+     * Duplicates arise from overlapping symlink targets that index the same
+     * files; they are removed during the final write pass.
+     *
+     * @param string $path The JSONL index file to sort in place.
      */
     private function sort_index_file(string $path): void
     {
@@ -4640,7 +4791,15 @@ class ImportClient
         }
 
         $tmp = $path . ".sorted";
-        if ($this->function_available("exec")) {
+
+        // Try the fast path first: shell out to `sort` for O(n log n) with
+        // no memory pressure.  If anything goes wrong, fall through to the
+        // PHP-native sorting below.
+        do {
+            if (!$this->function_available("exec")) {
+                break;
+            }
+
             $keyed = $path . ".keyed";
             $sorted_keyed = $path . ".keyed.sorted";
             $in = fopen($path, "r");
@@ -4652,7 +4811,8 @@ class ImportClient
                 if ($out) {
                     fclose($out);
                 }
-                throw new RuntimeException("Failed to prepare index file for sorting");
+                $this->audit_log("Failed to prepare keyed index file, falling back to PHP sort");
+                break;
             }
             while (($line = fgets($in)) !== false) {
                 $line = rtrim($line, "\r\n");
@@ -4680,8 +4840,10 @@ class ImportClient
             if ($code !== 0) {
                 @unlink($keyed);
                 @unlink($sorted_keyed);
-                throw new RuntimeException("Failed to sort index file");
+                $this->audit_log("exec() sort failed (exit code {$code}), falling back to PHP sort");
+                break;
             }
+
             $sorted_in = fopen($sorted_keyed, "r");
             $sorted_out = fopen($tmp, "w");
             if (!$sorted_in || !$sorted_out) {
@@ -4693,8 +4855,10 @@ class ImportClient
                 }
                 @unlink($keyed);
                 @unlink($sorted_keyed);
-                throw new RuntimeException("Failed to finalize sorted index file");
+                $this->audit_log("Failed to open sorted index files, falling back to PHP sort");
+                break;
             }
+
             $prev_key = null;
             while (($line = fgets($sorted_in)) !== false) {
                 $pos = strpos($line, "\t");
@@ -4722,11 +4886,14 @@ class ImportClient
                 throw new RuntimeException("Failed to replace sorted index file");
             }
             return;
-        }
+        } while (false);
 
         // Estimate how much memory we can use: 60% of whatever headroom
         // remains between current usage and the PHP memory limit.
-        $mem_limit = $this->parse_memory_limit(ini_get("memory_limit"));
+        $mem_limit_raw = ini_get("memory_limit");
+        $mem_limit = ($mem_limit_raw === "-1" || $mem_limit_raw === "" || $mem_limit_raw === "0")
+            ? 0
+            : parse_size($mem_limit_raw);
         $mem_used = memory_get_usage(true);
         $available = $mem_limit > 0
             ? (int) (($mem_limit - $mem_used) * 0.6)
@@ -5477,11 +5644,11 @@ class ImportClient
         $state = $this->normalize_state($state);
 
         // Write to temp file first, then atomic rename
-        $tmp_file = $this->state_file . '.tmp';
         $json = json_encode($state, JSON_PRETTY_PRINT);
         if ($json === false) {
             throw new RuntimeException("Failed to encode state: " . json_last_error_msg());
         }
+        $tmp_file = $this->state_file . '.tmp';
         $bytes = file_put_contents($tmp_file, $json);
         if ($bytes === false) {
             throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");

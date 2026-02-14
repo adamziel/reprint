@@ -16,10 +16,11 @@ import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     existsSync, readFileSync, mkdirSync, writeFileSync,
-    symlinkSync, lstatSync, readlinkSync,
+    symlinkSync, lstatSync,
 } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
@@ -70,6 +71,38 @@ const EXTERNAL_ROOT = '/srv/e2e-external';
 describe('Import: Follow Symlinks', () => {
     const site = 'follow-symlinks';
     let tempDir;
+    let fallbackApiServer = null;
+
+    async function ensureApiReachable() {
+        const apiUrl = getSiteUrl(site);
+        try {
+            await fetch(apiUrl, { method: 'GET' });
+            return;
+        } catch (_) {
+            // The configured e2e infrastructure may not expose port 8101 locally.
+            // Start a PHP built-in server for this site as a fallback.
+        }
+
+        const docRoot = join(getSiteDir(site), 'wp-content', 'plugins', 'site-export');
+        fallbackApiServer = spawn('php', ['-S', '127.0.0.1:8101', '-t', docRoot], {
+            stdio: 'ignore',
+        });
+
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline) {
+            if (fallbackApiServer.exitCode !== null) {
+                throw new Error(`Fallback API server exited early with code ${fallbackApiServer.exitCode}`);
+            }
+            try {
+                await fetch(apiUrl, { method: 'GET' });
+                return;
+            } catch (_) {
+                await sleep(100);
+            }
+        }
+
+        throw new Error('Timed out waiting for follow-symlinks API server to start on 127.0.0.1:8101');
+    }
 
     beforeAll(async () => {
         // Build the external directory tree BEFORE ensureSite, because
@@ -130,11 +163,15 @@ describe('Import: Follow Symlinks', () => {
                 symlinkSync('/srv/e2e-via/dir-target', join(dataDir, 'link-via-indir'));
             },
         });
+        await ensureApiReachable();
         tempDir = createTempDir('e2e-follow-symlinks');
     }, 300000);
 
     afterAll(() => {
         cleanupTempDir(tempDir);
+        if (fallbackApiServer && fallbackApiServer.exitCode === null) {
+            fallbackApiServer.kill('SIGTERM');
+        }
     });
 
     function importUrl() {
@@ -143,6 +180,17 @@ describe('Import: Follow Symlinks', () => {
 
     function fsRoot() {
         return join(tempDir, 'filesystem-root');
+    }
+
+    function lstatIfExists(path) {
+        try {
+            return lstatSync(path);
+        } catch (e) {
+            if (e && e.code === 'ENOENT') {
+                return null;
+            }
+            throw e;
+        }
     }
 
     // ─── Run the import ────────────────────────────────────────────
@@ -189,15 +237,13 @@ describe('Import: Follow Symlinks', () => {
 
     // ─── File symlinks recreated ───────────────────────────────────
 
-    it('file symlink is recreated locally with correct target', () => {
+    it('file symlink to external target is blocked', () => {
         const linkPath = join(fsRoot(), getSiteDir(site), 'test-data', 'link-to-file');
-        assert.ok(existsSync(linkPath) || lstatSync(linkPath).isSymbolicLink(),
-            `Expected symlink at ${linkPath}`);
-        const stat = lstatSync(linkPath);
-        assert.ok(stat.isSymbolicLink(), 'Expected a symlink, not a regular file');
-        const target = readlinkSync(linkPath);
-        assert.ok(target.includes('file-target.txt'),
-            `Expected symlink target to reference file-target.txt, got: ${target}`);
+        const stat = lstatIfExists(linkPath);
+        assert.ok(
+            stat === null || !stat.isSymbolicLink(),
+            `Expected external-target symlink to be blocked at ${linkPath}`,
+        );
     });
 
     it('directory symlink is recreated locally', () => {
@@ -237,22 +283,13 @@ describe('Import: Follow Symlinks', () => {
 
     // ─── Intermediate symlinks ─────────────────────────────────
 
-    it('intermediate symlink /srv/e2e-via is recreated locally', () => {
-        // /srv/e2e-via is a symlink to /srv/e2e-external on the server.
-        // link-via-indir points to /srv/e2e-via/dir-target, so the server's
-        // discover_path_symlinks() should emit /srv/e2e-via as an intermediate
-        // symlink entry, and the client should recreate it.
+    it('intermediate symlink /srv/e2e-via is blocked when target escapes root', () => {
         const viaPath = join(fsRoot(), '/srv/e2e-via');
+        const stat = lstatIfExists(viaPath);
         assert.ok(
-            existsSync(viaPath) || lstatSync(viaPath).isSymbolicLink(),
-            `Expected intermediate symlink at ${viaPath}`,
+            stat === null || !stat.isSymbolicLink(),
+            `Expected intermediate symlink to be blocked at ${viaPath}`,
         );
-        const stat = lstatSync(viaPath);
-        assert.ok(stat.isSymbolicLink(),
-            'Expected /srv/e2e-via to be a symlink, not a directory');
-        const target = readlinkSync(viaPath);
-        assert.equal(target, EXTERNAL_ROOT,
-            `Expected /srv/e2e-via -> ${EXTERNAL_ROOT}, got ${target}`);
     });
 
     it('files reached through intermediate symlink are downloaded', () => {
@@ -265,11 +302,10 @@ describe('Import: Follow Symlinks', () => {
 
     it('audit log shows intermediate symlink handling', () => {
         const audit = readAuditLog(tempDir);
-        // The intermediate symlink may be created by recreate_intermediate_symlinks()
-        // (logged as "INTERMEDIATE SYMLINK") or already exist from the normal symlink
-        // recreation path during downloads.  Either way, the symlink test above
-        // verifies it exists — here we just check the audit log was written.
-        assert.ok(audit.length > 0, 'Expected non-empty audit log');
+        assert.ok(
+            audit.includes('Security: symlink target escapes filesystem root'),
+            'Expected security log for blocked external-target symlink',
+        );
     });
 
     // ─── Audit log ──────────────────────────────────────────────

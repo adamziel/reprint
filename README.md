@@ -62,7 +62,18 @@ php import.php preflight "$URL" "$DIR" --secret="$SECRET"
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
 
-All other commands check that a preflight has been completed and refuse to start without one. Use `preflight-assert` instead if you only need a pass/fail exit code.
+All other commands check that a preflight has been completed and refuse to start without one.
+
+To run very basic diagnostics that confirms the remote server replied and it has a
+sound-looking filesystem and a database connection, run:
+
+```bash
+php import.php preflight-assert "$URL" "$DIR" --secret="$SECRET"
+```
+
+For hosting platform-specific checks, such as database version compatibility or
+php version compatibility, you might need your own custom logic. See the 
+[Status files](#status-files) section for more details.
 
 #### Step 2 — Download files.
 
@@ -73,6 +84,14 @@ It can be interrupted and resumed at any time — just re-run the same command:
 php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
 ```
 
+The command returns one of three exit codes:
+
+- 0: sync completed
+- 1: failure
+- 2: partial completion, needs re-running
+
+Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
+
 #### Step 3 — Download the database.
 
 This streams a SQL dump into `db.sql`:
@@ -80,6 +99,12 @@ This streams a SQL dump into `db.sql`:
 ```bash
 php import.php db-sync "$URL" "$DIR" --secret="$SECRET"
 ```
+
+The command returns one of three exit codes:
+
+- 0: sync completed
+- 1: failure
+- 2: partial completion, needs re-running
 
 #### Step 4 — Download files delta.
 
@@ -100,11 +125,29 @@ since the initial sync, and apply that delta in the local directory:
 php import.php files-sync "$URL" "$DIR" --secret="$SECRET"
 ```
 
+The command returns one of three exit codes:
+
+- 0: sync completed
+- 1: failure
+- 2: partial completion, needs re-running
+
 #### Shoehorning the site onto your platform
 
 You've got a copy of the remote files in `$DIR/filesystem-root/` and
 the database in `$DIR/db.sql`. From here, you need to figure out how
 to run that on your platform.
+
+The `db.sql` file will contain the relevant `DELETE TABLE IF EXISTS`
+statements to make sure it can always succeed. You might want to,
+before the first run, clean up any tables that may have been already 
+created by your environment. We won't need them. Furthermore, they may
+not get deleted during the database import if the site doesn't use
+the same table prefix as your environment.
+
+At the moment, there is no convenient way of piping the downloaded
+SQL straight into MySQL while it's still being downloaded. This would
+be a useful feature that will likely be added later on. Today, though,
+you just need to download the entire SQL dump and only pipe it then.
 
 ### Status files
 
@@ -213,6 +256,49 @@ If the JSON is invalid on load, the importer renames it to
 still running, completed, or needs resuming. The `command` + `status` fields
 tell you where the pipeline is. The `stage` field gives finer granularity
 (e.g., `"scanning"`, `"sorting"`, `"streaming"` for file sync).
+
+#### `.import-volatile-files.json` — files that changed during sync
+
+During `files-sync`, a file on the source may be modified while the importer is
+streaming it. When that happens, the server returns a different content hash than
+expected and the importer records the file in `.import-volatile-files.json`
+instead of failing.
+
+The file is a flat JSON object mapping paths to the number of times each file
+was detected as changed:
+
+```json
+{
+  "/srv/htdocs/wp-content/debug.log": 4,
+  "/srv/htdocs/wp-content/cache/object-cache.tmp": 2
+}
+```
+
+At the end of `files-sync`, the importer prints a summary of volatile files so
+the caller can decide what to do — re-run the sync, ignore them, or ask the user.
+Files that are subsequently downloaded successfully are automatically removed
+from the tracker. The file is deleted entirely once all entries are cleared.
+
+#### `.import-audit.log` — append-only event log
+
+Every significant event during import is recorded in `.import-audit.log` as a
+timestamped line. This includes file downloads, deletions, volatile file
+detections, errors, and state transitions. The log is append-only — it's never
+truncated or rotated, so it provides a complete history of the migration.
+
+```
+[2025-01-15 10:30:01] VOLATILE | path=/srv/htdocs/wp-content/debug.log | count=1
+[2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
+[2025-01-15 10:31:12] FILE DELETE | .import-index-updates.jsonl
+```
+
+Pass `--verbose` to also print audit log entries to the console as they happen.
+This is useful for debugging but noisy for production use.
+
+### Gotchas
+
+* `import.php` requires some files from the `wordpress-plugin` so you'll need both
+  on the importing end. This will be sorted out soon.
 
 ### Other CLI Commands
 

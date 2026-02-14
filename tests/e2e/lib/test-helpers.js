@@ -220,6 +220,39 @@ function parseMultipart(body, boundary) {
  */
 export function runImporter(url, outputDir, command, options = {}) {
     const secret = options.secret || '';
+    const maxResumeAttempts = options.maxResumeAttempts || 100;
+    const runWithResume = options.autoResume !== false;
+
+    function runImporterOnce(cmd, extraArgs = []) {
+        const args = [
+            IMPORTER_PATH,
+            cmd,
+            url,
+            outputDir,
+        ];
+        if (secret) {
+            args.push(`--secret=${secret}`);
+        }
+        if (extraArgs.length > 0) {
+            args.push(...extraArgs);
+        }
+
+        try {
+            const result = execFileSync('php', args, {
+                timeout: options.timeout || 60000,
+                encoding: 'utf-8',
+                env: { ...process.env },
+                maxBuffer: 50 * 1024 * 1024,
+            });
+            return { stdout: result, stderr: '', exitCode: 0 };
+        } catch (e) {
+            return {
+                stdout: e.stdout || '',
+                stderr: e.stderr || '',
+                exitCode: e.status || 1,
+            };
+        }
+    }
 
     // Non-preflight commands require a prior preflight run.
     // Automatically run one if the state file doesn't already have preflight data.
@@ -235,38 +268,51 @@ export function runImporter(url, outputDir, command, options = {}) {
             // No state file or invalid JSON — need preflight
         }
         if (needsPreflight) {
-            runImporter(url, outputDir, 'preflight', { ...options, skipPreflight: true });
+            const preflightResult = runImporterOnce('preflight');
+            if (preflightResult.exitCode !== 0) {
+                return preflightResult;
+            }
         }
     }
 
-    const args = [
-        IMPORTER_PATH,
-        command,
-        url,
-        outputDir,
-    ];
-    if (secret) {
-        args.push(`--secret=${secret}`);
-    }
-    if (options.extraArgs) {
-        args.push(...options.extraArgs);
+    const commandExtraArgs = options.extraArgs || [];
+    const wallTimeout = options.wallTimeout || 120000; // 2 minutes total wall-clock
+    const wallStart = Date.now();
+    let result = runImporterOnce(command, commandExtraArgs);
+    if (
+        runWithResume &&
+        command !== 'preflight' &&
+        command !== 'preflight-assert'
+    ) {
+        let attempts = 0;
+        while (result.exitCode === 2 && attempts < maxResumeAttempts) {
+            if (Date.now() - wallStart > wallTimeout) {
+                result = {
+                    ...result,
+                    exitCode: 1,
+                    stderr: `${result.stderr}\nWall-clock timeout (${wallTimeout}ms) after ${attempts} resume attempts.`,
+                };
+                break;
+            }
+            attempts += 1;
+            const next = runImporterOnce(command, commandExtraArgs);
+            result = {
+                stdout: `${result.stdout}${next.stdout}`,
+                stderr: `${result.stderr}${next.stderr}`,
+                exitCode: next.exitCode,
+            };
+        }
+
+        if (result.exitCode === 2) {
+            result = {
+                ...result,
+                exitCode: 1,
+                stderr: `${result.stderr}\nExceeded max resume attempts (${maxResumeAttempts}) while command remained partial.`,
+            };
+        }
     }
 
-    try {
-        const result = execFileSync('php', args, {
-            timeout: options.timeout || 60000,
-            encoding: 'utf-8',
-            env: { ...process.env },
-            maxBuffer: 50 * 1024 * 1024,
-        });
-        return { stdout: result, stderr: '', exitCode: 0 };
-    } catch (e) {
-        return {
-            stdout: e.stdout || '',
-            stderr: e.stderr || '',
-            exitCode: e.status || 1,
-        };
-    }
+    return result;
 }
 
 /**

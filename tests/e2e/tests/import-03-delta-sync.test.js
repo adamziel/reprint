@@ -85,6 +85,7 @@ describe('Import: Delta Sync', () => {
         try {
             const result = runImporter(importUrl(), freshDir, 'files-sync', {
                 secret: getSiteSecret(site),
+                skipPreflight: true,
             });
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code');
             const output = result.stdout + result.stderr;

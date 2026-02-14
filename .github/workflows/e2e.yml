@@ -33,12 +33,39 @@ jobs:
         working-directory: tests/e2e
         run: npm install
 
+      - name: Provision basic site and smoke-test API
+        working-directory: tests/e2e
+        run: |
+          # Download WP-CLI (normally done by Vitest globalSetup, but we need it here)
+          if [ ! -f /tmp/wp-cli.phar ]; then
+            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
+            chmod +x /tmp/wp-cli.phar
+          fi
+
+          # Provision the "basic" site
+          node --input-type=module <<'NODESCRIPT'
+          import { ensureSite } from "./lib/site-setup.js";
+          await ensureSite("basic");
+          console.log("Basic site provisioned");
+          NODESCRIPT
+
+          # Quick smoke test: use the importer CLI to hit the export API.
+          SECRET="test-secret-basic"
+          BASE="http://127.0.0.1:8081/api.php"
+          DIR="/srv/e2e-sites/basic"
+
+          echo "=== Importer preflight ==="
+          timeout 30 php ../../importer/import.php preflight "${BASE}?directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+
+          echo "=== Importer files-sync ==="
+          timeout 30 php ../../importer/import.php files-sync "${BASE}?directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+
       - name: Run E2E tests
         working-directory: tests/e2e
         run: npx vitest run
 
-      - name: Debug logs on failure
-        if: failure()
+      - name: Debug logs
+        if: always()
         run: |
           echo "--- Listening ports ---"
           sudo ss -tlnp 2>/dev/null || true
@@ -54,3 +81,5 @@ jobs:
           sudo journalctl -u nginx --no-pager -n 30 2>/dev/null || true
           echo "--- MariaDB journal ---"
           sudo journalctl -u mariadb --no-pager -n 30 2>/dev/null || true
+          echo "--- PHP processes ---"
+          ps aux | grep php || true
