@@ -24,7 +24,7 @@ On the **migration target** side:
 This project consists of two parts:
 
 * A `./wordpress-plugin` that must be installed in the **migration source** (the remote site we want to migrate).
-* A `./importer/import.php` script, that must run on the **migration target** hosting account (the "local" site we are migrating to).
+* A `./importer/import.php` script, that must run on the **migration target** hosting account (the "local" site we are migrating to). Note that `import.php` requires some files from the `wordpress-plugin` so you'll need both on the importing end. This will be sorted out soon.
 
 Both must share the same secret string. The plugin has a UI screen where the user can paste the secret, and then
 the import.php script will have to be fed the same secret string (more details below). Alternatively, the plugin
@@ -294,11 +294,6 @@ truncated or rotated, so it provides a complete history of the migration.
 
 Pass `--verbose` to also print audit log entries to the console as they happen.
 This is useful for debugging but noisy for production use.
-
-### Gotchas
-
-* `import.php` requires some files from the `wordpress-plugin` so you'll need both
-  on the importing end. This will be sorted out soon.
 
 ### Other CLI Commands
 
