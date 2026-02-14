@@ -950,16 +950,16 @@ class ImportClient
         if (!is_file($this->index_file)) {
             return 0;
         }
-        $h = fopen($this->index_file, "r");
-        if ($h === false) {
+        $handle = fopen($this->index_file, "r");
+        if (!$handle) {
             return 0;
         }
-        $c = 0;
-        while (fgets($h) !== false) {
-            $c++;
+        $count = 0;
+        while (fgets($handle) !== false) {
+            $count++;
         }
-        fclose($h);
-        return $c;
+        fclose($handle);
+        return $count;
     }
 
     /**
@@ -3566,6 +3566,7 @@ class ImportClient
                     "FILE DELETE | {$this->index_updates_file} | no updates to merge",
                 );
             }
+            $this->index_updates_count = 0;
             return;
         }
 
@@ -3661,6 +3662,7 @@ class ImportClient
 
         @unlink($updates_path);
         $this->audit_log("FILE DELETE | {$updates_path} | updates merged");
+        $this->index_updates_count = 0;
     }
 
     /**
