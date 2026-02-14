@@ -2407,6 +2407,11 @@ function endpoint_file_index(
     int $max_memory,
     float $memory_threshold
 ): array {
+    // This endpoint may run repeatedly in the same PHP process (e.g. PHP built-in
+    // server, long-lived workers). Clear stale stat/realpath cache from previous
+    // requests so path type transitions (symlink/file/dir) are seen correctly.
+    clearstatcache(true);
+
     $directories = resolve_directories($config);
     $batch_size = $config["batch_size"] ?? 5000;
     $batch_size = require_int_range(
@@ -2471,6 +2476,7 @@ function endpoint_file_index(
             throw new InvalidArgumentException("list_dir is required for file_index");
         }
 
+        clearstatcache(true, $list_dir);
         $list_dir_real = realpath($list_dir);
         if ($list_dir_real === false || !is_dir($list_dir_real)) {
             throw new InvalidArgumentException(
@@ -2593,6 +2599,7 @@ function endpoint_file_index(
             $current_dir = $frame["dir"];
             $current_after = $frame["after"] ?? null;
 
+            clearstatcache(true, $current_dir);
             $current_real = realpath($current_dir);
             if ($current_real === false || !is_dir($current_real)) {
                 $abort_payload = [
@@ -2667,6 +2674,7 @@ function endpoint_file_index(
             // This keeps root dirs and symlink-followed dirs consistent.
             $stack[$frame_index]["dir"] = $current_real;
             $current_dir = $current_real;
+            clearstatcache(true, $current_real);
             $entries = @scandir($current_real, SCANDIR_SORT_ASCENDING);
             if ($entries === false) {
                 $abort_payload = [
@@ -2725,6 +2733,7 @@ function endpoint_file_index(
 
                 $stack[$frame_index]["after"] = $entry;
                 $path = $current_dir . "/" . $entry;
+                clearstatcache(true, $path);
                 $stat = @lstat($path);
                 if ($stat === false) {
                     if (
@@ -2759,6 +2768,7 @@ function endpoint_file_index(
                     // uses targets to discover additional directories to index,
                     // so file symlink targets are not useful.
                     // @TODO: Understand this thoroughly.
+                    clearstatcache(true, $path);
                     $resolved_target = @realpath($path);
                     if (
                         $resolved_target !== false &&
@@ -2997,6 +3007,10 @@ function endpoint_file_fetch(
     int $max_memory,
     float $memory_threshold
 ): array {
+    // Same rationale as endpoint_file_index(): avoid stale path metadata across
+    // requests in long-lived PHP processes.
+    clearstatcache(true);
+
     $directories = resolve_directories($config);
 
     $list_path = $config["file_list_path"] ?? null;
