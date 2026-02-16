@@ -44,7 +44,7 @@ function build_pdo_dsn(string $db_host, string $db_name): string
     $host   = $db_host;
     $port   = '';
 
-    if (str_starts_with($db_host, '/')) {
+    if (str_starts_with($db_host, '/') && file_exists($db_host)) {
         // Bare socket path: "/var/run/mysqld/mysqld.sock"
         $socket = $db_host;
         $host   = '';
@@ -55,16 +55,23 @@ function build_pdo_dsn(string $db_host, string $db_name): string
         // Bracketed IPv6: "[::1]", "[::1]:3306", "[::1]:/path/to/socket"
         $host = substr($db_host, 1, $bracket_end - 1);
         $after = substr($db_host, $bracket_end + 1);
-        if (str_starts_with($after, ':/')) {
-            $socket = substr($after, 1);
+        $candidate_socket = str_starts_with($after, ':/') ? substr($after, 1) : '';
+        if ($candidate_socket !== '' && file_exists($candidate_socket)) {
+            $socket = $candidate_socket;
         } elseif (str_starts_with($after, ':')) {
             $port = substr($after, 1);
         }
     } elseif (($socket_pos = strpos($db_host, ':/')) !== false) {
         // "host:/path/to/socket" — check before general colon split
         // to avoid misinterpreting IPv6 addresses as host:port
-        $host   = substr($db_host, 0, $socket_pos);
-        $socket = substr($db_host, $socket_pos + 1);
+        $candidate_socket = substr($db_host, $socket_pos + 1);
+        if (file_exists($candidate_socket)) {
+            $host   = substr($db_host, 0, $socket_pos);
+            $socket = $candidate_socket;
+        } elseif (substr_count($db_host, ':') === 1) {
+            // Single colon but not a socket — treat as host:port
+            [$host, $port] = explode(':', $db_host, 2);
+        }
     } elseif (
         str_contains($db_host, ':') &&
         substr_count($db_host, ':') === 1

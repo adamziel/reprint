@@ -8,6 +8,20 @@ use PHPUnit\Framework\TestCase;
 
 class BuildPdoDsnTest extends TestCase
 {
+    private string $tmpSocket;
+
+    protected function setUp(): void
+    {
+        $this->tmpSocket = tempnam(sys_get_temp_dir(), 'sock_');
+    }
+
+    protected function tearDown(): void
+    {
+        if (file_exists($this->tmpSocket)) {
+            unlink($this->tmpSocket);
+        }
+    }
+
     public function testPlainHostname(): void
     {
         $dsn = build_pdo_dsn('localhost', 'wp_db');
@@ -22,14 +36,26 @@ class BuildPdoDsnTest extends TestCase
 
     public function testHostnameWithSocket(): void
     {
-        $dsn = build_pdo_dsn('localhost:/var/run/mysqld/mysqld.sock', 'wp_db');
-        $this->assertSame('mysql:unix_socket=/var/run/mysqld/mysqld.sock;dbname=wp_db;charset=utf8mb4', $dsn);
+        $dsn = build_pdo_dsn("localhost:{$this->tmpSocket}", 'wp_db');
+        $this->assertSame("mysql:unix_socket={$this->tmpSocket};dbname=wp_db;charset=utf8mb4", $dsn);
+    }
+
+    public function testHostnameWithNonexistentSocketTreatedAsPort(): void
+    {
+        $dsn = build_pdo_dsn('localhost:/no/such/file.sock', 'wp_db');
+        $this->assertSame('mysql:host=localhost;port=/no/such/file.sock;dbname=wp_db;charset=utf8mb4', $dsn);
     }
 
     public function testBareSocketPath(): void
     {
-        $dsn = build_pdo_dsn('/var/run/mysqld/mysqld.sock', 'wp_db');
-        $this->assertSame('mysql:unix_socket=/var/run/mysqld/mysqld.sock;dbname=wp_db;charset=utf8mb4', $dsn);
+        $dsn = build_pdo_dsn($this->tmpSocket, 'wp_db');
+        $this->assertSame("mysql:unix_socket={$this->tmpSocket};dbname=wp_db;charset=utf8mb4", $dsn);
+    }
+
+    public function testBareNonexistentPathTreatedAsHost(): void
+    {
+        $dsn = build_pdo_dsn('/no/such/mysql.sock', 'wp_db');
+        $this->assertSame('mysql:host=/no/such/mysql.sock;dbname=wp_db;charset=utf8mb4', $dsn);
     }
 
     public function testIpAddressWithPort(): void
@@ -64,8 +90,14 @@ class BuildPdoDsnTest extends TestCase
 
     public function testBracketedIpv6WithSocket(): void
     {
-        $dsn = build_pdo_dsn('[::1]:/var/run/mysqld/mysqld.sock', 'wp_db');
-        $this->assertSame('mysql:unix_socket=/var/run/mysqld/mysqld.sock;dbname=wp_db;charset=utf8mb4', $dsn);
+        $dsn = build_pdo_dsn("[::1]:{$this->tmpSocket}", 'wp_db');
+        $this->assertSame("mysql:unix_socket={$this->tmpSocket};dbname=wp_db;charset=utf8mb4", $dsn);
+    }
+
+    public function testBracketedIpv6WithNonexistentSocketTreatedAsPort(): void
+    {
+        $dsn = build_pdo_dsn('[::1]:/no/such/file.sock', 'wp_db');
+        $this->assertSame('mysql:host=::1;port=/no/such/file.sock;dbname=wp_db;charset=utf8mb4', $dsn);
     }
 
     public function testFullIpv6Address(): void
