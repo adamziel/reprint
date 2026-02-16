@@ -162,7 +162,12 @@ class MySQLDumpProducer
     /** @var int */
     private $current_statement_size = 0;
 
-    public function __construct(PDO $db, $options = [])
+    /**
+     * @param PDO $db Database connection — either a real PDO (MySQL) or a
+     *        PDO-compatible adapter (SQLite sites). No type hint because the
+     *        adapter isn't a PDO subclass and PHP 7.4 lacks union types.
+     */
+    public function __construct($db, $options = [])
     {
         $this->db = $db;
         $this->tables_to_process = $options["tables_to_process"] ?? null;

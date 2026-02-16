@@ -213,8 +213,13 @@ if ($wp_root !== null && !defined('DB_HOST')) {
     if (is_readable($wp_config_path)) {
         $config_contents = @file_get_contents($wp_config_path);
         if ($config_contents !== false) {
-            // Extract define('CONSTANT', 'value') patterns
-            foreach (['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'] as $const) {
+            // Extract define('CONSTANT', 'value') patterns for MySQL credentials
+            // and SQLite-related constants.
+            $constants_to_extract = [
+                'DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD',
+                'DB_ENGINE', 'DB_DIR', 'DB_FILE',
+            ];
+            foreach ($constants_to_extract as $const) {
                 if (!defined($const) && preg_match(
                     '/define\s*\(\s*[\'"]' . preg_quote($const, '/') . '[\'"]\s*,\s*[\'"]([^\'"]*)[\'"]\s*\)/',
                     $config_contents,
@@ -231,6 +236,48 @@ if ($wp_root !== null && !defined('DB_HOST')) {
             )) {
                 $GLOBALS['table_prefix'] = $m[1];
             }
+        }
+    }
+}
+
+// Detect the database backend by inspecting wp-config.php constants and the
+// wp-content/db.php drop-in. This tells export.php whether it's talking to
+// MySQL, SQLite, or HyperDB.
+if ($wp_root !== null && !defined('DB_ENGINE')) {
+    $detected_engine = 'mysql';
+
+    // Check the db.php drop-in — its contents reveal the active backend.
+    $db_dropin = $wp_root . '/wp-content/db.php';
+    if (file_exists($db_dropin) && is_readable($db_dropin)) {
+        $db_dropin_contents = @file_get_contents($db_dropin);
+        if ($db_dropin_contents !== false) {
+            $dropin_lower = strtolower($db_dropin_contents);
+            if (
+                strpos($dropin_lower, 'sqlite') !== false ||
+                strpos($dropin_lower, 'wp_sqlite_driver') !== false
+            ) {
+                $detected_engine = 'sqlite';
+            } elseif (
+                strpos($dropin_lower, 'hyperdb') !== false ||
+                strpos($dropin_lower, 'hyper-db') !== false
+            ) {
+                $detected_engine = 'hyperdb';
+            }
+        }
+    }
+
+    define('DB_ENGINE', $detected_engine);
+
+    // For SQLite sites, resolve the database file path. The plugin uses
+    // FQDB (full-qualified database path) and FQDBDIR conventions.
+    if ($detected_engine === 'sqlite') {
+        if (!defined('FQDBDIR')) {
+            $db_dir = defined('DB_DIR') ? DB_DIR : $wp_root . '/wp-content/database';
+            define('FQDBDIR', rtrim($db_dir, '/') . '/');
+        }
+        if (!defined('FQDB')) {
+            $db_file = defined('DB_FILE') ? DB_FILE : '.ht.sqlite';
+            define('FQDB', FQDBDIR . $db_file);
         }
     }
 }
