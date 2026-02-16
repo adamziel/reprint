@@ -565,6 +565,17 @@ export. All files are written with the default ownership and permissions of
 the importing process. You need to set the correct ownership and permissions
 on your hosting platform after import.
 
+### Tables without primary keys
+
+For tables without a primary key, two things happen. First, the producer uses
+OFFSET-based pagination, which is vulnerable to drift: if rows are inserted or
+deleted during the export, you'll get duplicated or missing rows. Second,
+oversized rows in PK-less tables cause a hard failure — the producer throws an
+exception because it has no stable row identifier for the chunked
+`UPDATE ... CONCAT()` fallback. WordPress core tables all have primary keys,
+but plugin-created tables frequently don't — logging tables, analytics tables,
+queue tables, and custom relationship tables are common offenders.
+
 ### Views, Triggers, Stored Procedures, Events, and Functions
 
 Only table data is exported. MySQL views, triggers, stored procedures,
