@@ -5650,6 +5650,8 @@ class ImportClient
             "cursor" => null,
             "stage" => null,
             "preflight" => null,
+            "remote_protocol_version" => null,
+            "remote_protocol_min_version" => null,
             "version" => null,
             "follow_symlinks" => false,
             "max_allowed_packet" => null,
