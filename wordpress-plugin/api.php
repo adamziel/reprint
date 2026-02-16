@@ -2,8 +2,11 @@
 /**
  * Standalone Site Export API endpoint.
  *
- * This file handles export requests WITHOUT loading WordPress.
- * It performs HMAC authentication and delegates to the export library.
+ * This file handles export requests without loading WordPress. It performs
+ * HMAC authentication and delegates to the export library. For MySQL sites,
+ * DB credentials are parsed from wp-config.php as text. For SQLite sites,
+ * WordPress is loaded with SHORTINIT to bootstrap the database layer (the
+ * sqlite-database-integration plugin's db.php drop-in sets up $wpdb).
  */
 
 // Buffer output so stray warnings don't corrupt the JSON response
@@ -202,6 +205,24 @@ $wp_root = site_export_find_wp_root();
 
 if (!isset($_GET['directory']) && !isset($_POST['directory']) && $wp_root !== null) {
     $_GET['directory'] = $wp_root;
+}
+
+// Detect SQLite sites by checking the db.php drop-in for sqlite references.
+// SQLite sites need WordPress's $wpdb->dbh (set up by the sqlite-database-
+// integration plugin's db.php drop-in) as the database connection. We load
+// WordPress with SHORTINIT to bootstrap just the database layer — this loads
+// the drop-in and creates $wpdb with the SQLite driver, without loading
+// plugins, themes, or the full stack.
+if ($wp_root !== null && !defined('DB_HOST')) {
+    $db_php_path = $wp_root . '/wp-content/db.php';
+    if (is_readable($db_php_path)) {
+        $db_php_contents = @file_get_contents($db_php_path);
+        if ($db_php_contents !== false && stripos($db_php_contents, 'sqlite') !== false) {
+            define('SHORTINIT', true);
+            define('WP_USE_THEMES', false);
+            require_once $wp_root . '/wp-load.php';
+        }
+    }
 }
 
 // When running standalone (not inside WordPress), load DB credentials from

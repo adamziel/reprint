@@ -4,6 +4,7 @@ let
   # PHP with required extensions
   phpPackage = pkgs.php82.withExtensions ({ enabled, all }: enabled ++ [
     all.pdo_mysql
+    all.pdo_sqlite
     all.zlib
     all.curl
     all.mbstring
