@@ -15,6 +15,11 @@ ini_set("display_startup_errors", 1);
 
 require_once __DIR__ . "/../wordpress-plugin/generic/utils.php";
 
+// Protocol version for compatibility checks between export plugin and importer.
+// Increment IMPORT_PROTOCOL_VERSION on any breaking wire-protocol change.
+define('IMPORT_PROTOCOL_VERSION', 1);
+define('IMPORT_PROTOCOL_MIN_VERSION', 1);
+
 register_shutdown_function(function () {
     $error = error_get_last();
     if ($error === null) {
@@ -1474,6 +1479,14 @@ class ImportClient
             $this->state["version"] = $wp_version;
         }
 
+        // Store remote protocol version for compatibility checks
+        if (isset($payload["protocol_version"])) {
+            $this->state["remote_protocol_version"] = (int) $payload["protocol_version"];
+        }
+        if (isset($payload["protocol_min_version"])) {
+            $this->state["remote_protocol_min_version"] = (int) $payload["protocol_min_version"];
+        }
+
         $this->save_state($this->state);
 
         $this->audit_log(
@@ -1588,7 +1601,32 @@ class ImportClient
             $all_pass = false;
         }
 
-        // 3. Filesystem accessible
+        // 3. Protocol version compatibility
+        $remote_ver = $this->state["remote_protocol_version"] ?? null;
+        $remote_min = $this->state["remote_protocol_min_version"] ?? null;
+        if ($remote_ver === null) {
+            $proto_ok = false;
+            $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
+        } elseif ($remote_ver < IMPORT_PROTOCOL_MIN_VERSION) {
+            $proto_ok = false;
+            $proto_detail = "Remote protocol v{$remote_ver} is too old (client requires >= v" . IMPORT_PROTOCOL_MIN_VERSION . "). Update the export plugin.";
+        } elseif (IMPORT_PROTOCOL_VERSION < $remote_min) {
+            $proto_ok = false;
+            $proto_detail = "Client protocol v" . IMPORT_PROTOCOL_VERSION . " is too old (remote requires >= v{$remote_min}). Update the importer.";
+        } else {
+            $proto_ok = true;
+            $proto_detail = "remote v{$remote_ver}, client v" . IMPORT_PROTOCOL_VERSION;
+        }
+        $checks[] = [
+            "label" => "Protocol compatible",
+            "pass" => $proto_ok,
+            "detail" => $proto_detail,
+        ];
+        if (!$proto_ok) {
+            $all_pass = false;
+        }
+
+        // 4. Filesystem accessible
         $fs = $data["filesystem"] ?? null;
         $fs_ok = is_array($fs) && !empty($fs["ok"]);
         $checks[] = [
@@ -1602,14 +1640,14 @@ class ImportClient
             $all_pass = false;
         }
 
-        // 4. Database accessible
+        // 5. Database accessible
         $db = $data["database"] ?? null;
         $db_ok = is_array($db) && !empty($db["connected"]);
         $checks[] = [
             "label" => "Database accessible",
             "pass" => $db_ok,
             "detail" => $db_ok
-                ? ($db["server_version"] ?? "connected")
+                ? ($db["version"] ?? "connected")
                 : ($db["error"] ?? "database check failed"),
         ];
         if (!$db_ok) {

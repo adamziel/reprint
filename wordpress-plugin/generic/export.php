@@ -10,6 +10,11 @@ if (!ob_get_level()) {
 }
 
 
+// Protocol version for compatibility checks between export plugin and importer.
+// Increment EXPORT_PROTOCOL_VERSION on any breaking wire-protocol change.
+define('EXPORT_PROTOCOL_VERSION', 1);
+define('EXPORT_PROTOCOL_MIN_VERSION', 1);
+
 // File type mask + file type values (top bits of st_mode)
 define('STAT_TYPE_MASK',   0170000);
 define('STAT_TYPE_SOCKET', 0140000);
@@ -1866,6 +1871,8 @@ function endpoint_preflight(array $config): array
         "ok" => $ok,
         "error" => $preflight_error,
         "timestamp" => time(),
+        "protocol_version" => EXPORT_PROTOCOL_VERSION,
+        "protocol_min_version" => EXPORT_PROTOCOL_MIN_VERSION,
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),
             "searched" => $wp_detect["searched"],
