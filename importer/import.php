@@ -15,10 +15,30 @@ ini_set("display_startup_errors", 1);
 
 require_once __DIR__ . "/../wordpress-plugin/generic/utils.php";
 
-// Protocol version for compatibility checks between export plugin and importer.
-// Increment IMPORT_PROTOCOL_VERSION on any breaking wire-protocol change.
+/**
+ * The wire-protocol version this importer speaks.
+ *
+ * Both the export plugin (server) and the importer (client) are deployed
+ * independently.  These two constants let them detect incompatibility at
+ * preflight time instead of producing silent corruption.
+ *
+ * Bump this whenever a change to the wire protocol (cursor encoding,
+ * multipart structure, header names, endpoint parameters, response format)
+ * would break an older export plugin.
+ */
 define('IMPORT_PROTOCOL_VERSION', 1);
-define('IMPORT_PROTOCOL_MIN_VERSION', 1);
+
+/**
+ * The oldest *export plugin* protocol version this importer can talk to.
+ *
+ * During preflight-assert the importer checks that the remote's
+ * protocol_version is >= this value; if not, it tells the user to
+ * update the export plugin.
+ *
+ * Raise this when you drop backward-compatibility with old export plugins.
+ * Keep it equal to IMPORT_PROTOCOL_VERSION if no backward compat is needed.
+ */
+define('IMPORT_MIN_EXPORT_VERSION', 1);
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -1607,9 +1627,9 @@ class ImportClient
         if ($remote_ver === null) {
             $proto_ok = false;
             $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
-        } elseif ($remote_ver < IMPORT_PROTOCOL_MIN_VERSION) {
+        } elseif ($remote_ver < IMPORT_MIN_EXPORT_VERSION) {
             $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} is too old (client requires >= v" . IMPORT_PROTOCOL_MIN_VERSION . "). Update the export plugin.";
+            $proto_detail = "Remote protocol v{$remote_ver} is too old (client requires >= v" . IMPORT_MIN_EXPORT_VERSION . "). Update the export plugin.";
         } elseif (IMPORT_PROTOCOL_VERSION < $remote_min) {
             $proto_ok = false;
             $proto_detail = "Client protocol v" . IMPORT_PROTOCOL_VERSION . " is too old (remote requires >= v{$remote_min}). Update the importer.";
