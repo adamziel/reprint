@@ -48,17 +48,17 @@ function build_pdo_dsn(string $db_host, string $db_name): string
         // Bare socket path: "/var/run/mysqld/mysqld.sock"
         $socket = $db_host;
         $host   = '';
-    } elseif (str_starts_with($db_host, '[')) {
+    } elseif (
+        str_starts_with($db_host, '[') &&
+        ($bracket_end = strpos($db_host, ']')) !== false
+    ) {
         // Bracketed IPv6: "[::1]", "[::1]:3306", "[::1]:/path/to/socket"
-        $bracket_end = strpos($db_host, ']');
-        if ($bracket_end !== false) {
-            $host = substr($db_host, 1, $bracket_end - 1);
-            $after = substr($db_host, $bracket_end + 1);
-            if (str_starts_with($after, ':/')) {
-                $socket = substr($after, 1);
-            } elseif (str_starts_with($after, ':')) {
-                $port = substr($after, 1);
-            }
+        $host = substr($db_host, 1, $bracket_end - 1);
+        $after = substr($db_host, $bracket_end + 1);
+        if (str_starts_with($after, ':/')) {
+            $socket = substr($after, 1);
+        } elseif (str_starts_with($after, ':')) {
+            $port = substr($after, 1);
         }
     } elseif (($socket_pos = strpos($db_host, ':/')) !== false) {
         // "host:/path/to/socket" — check before general colon split
