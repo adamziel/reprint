@@ -549,6 +549,50 @@ Why not the git protocol? We're effectively exchanging diffs here. Git already d
 recover from a broken exchange — you need to start from scratch. Also, the git protocol is complex.
 Multipart is simple and native to HTTP clients.
 
+## Known Limitations
+
+### Multisite
+
+WordPress Multisite networks are all-or-nothing. You can't export a single
+site from a multisite network — the export includes the entire database and
+filesystem, which covers all sites in the network. There is no mechanism to
+filter tables or uploads by blog ID.
+
+### File permissions and ownership
+
+File ownership (`chown`) and permissions (`chmod`) are not preserved during
+export. All files are written with the default ownership and permissions of
+the importing process. You need to set the correct ownership and permissions
+on your hosting platform after import.
+
+### Tables without primary keys
+
+For tables without a primary key, two things happen. First, the producer uses
+OFFSET-based pagination, which is vulnerable to drift: if rows are inserted or
+deleted during the export, you'll get duplicated or missing rows. Second,
+oversized rows in PK-less tables cause a hard failure — the producer throws an
+exception because it has no stable row identifier for the chunked
+`UPDATE ... CONCAT()` fallback. WordPress core tables all have primary keys,
+but plugin-created tables frequently don't — logging tables, analytics tables,
+queue tables, and custom relationship tables are common offenders.
+
+### Views, Triggers, Stored Procedures, Events, and Functions
+
+Only table data is exported. MySQL views, triggers, stored procedures,
+scheduled events, and user-defined functions are not included in the export.
+
+### No consistency guarantee between files and database
+
+The migration is a multi-step process: download files, then download the
+database, then download a file delta. But there's no point-in-time snapshot.
+The database dump starts after the file sync begins, meaning the database may
+reference uploaded media files that changed or were deleted during the file
+sync window. On active sites (e-commerce stores processing orders, membership
+sites, forums), this race condition can produce a fundamentally inconsistent
+state — the database references files that don't exist, or files exist that
+the database doesn't know about. For sites with significant write traffic,
+consider freezing writes or enabling maintenance mode during the migration.
+
 ## Next steps
 
 * Possibly run more checks in `preflight-assert`. What would they be?
