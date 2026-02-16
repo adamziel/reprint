@@ -565,6 +565,23 @@ export. All files are written with the default ownership and permissions of
 the importing process. You need to set the correct ownership and permissions
 on your hosting platform after import.
 
+### Views, Triggers, Stored Procedures, Events, and Functions
+
+Only table data is exported. MySQL views, triggers, stored procedures,
+scheduled events, and user-defined functions are not included in the export.
+
+### No consistency guarantee between files and database
+
+The migration is a multi-step process: download files, then download the
+database, then download a file delta. But there's no point-in-time snapshot.
+The database dump starts after the file sync begins, meaning the database may
+reference uploaded media files that changed or were deleted during the file
+sync window. On active sites (e-commerce stores processing orders, membership
+sites, forums), this race condition can produce a fundamentally inconsistent
+state — the database references files that don't exist, or files exist that
+the database doesn't know about. For sites with significant write traffic,
+consider freezing writes or enabling maintenance mode during the migration.
+
 ## Next steps
 
 * Possibly run more checks in `preflight-assert`. What would they be?
