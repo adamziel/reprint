@@ -21,6 +21,54 @@ define('STAT_TYPE_CHAR',   0020000);
 define('STAT_TYPE_FIFO',   0010000);
 
 /**
+ * Tracks time and memory limits for a single API request.
+ *
+ * Every export endpoint runs under resource constraints — a maximum
+ * execution time and a memory ceiling.  Rather than threading four
+ * separate values through every function signature and every
+ * should_continue() call, this class bundles them into a single
+ * object with a simple has_remaining() check.
+ */
+class ResourceBudget
+{
+    /** @var float */
+    public $start_time;
+    /** @var int */
+    public $max_time;
+    /** @var int */
+    public $max_memory;
+    /** @var float */
+    public $memory_threshold;
+
+    public function __construct(
+        float $start_time,
+        int $max_time,
+        int $max_memory,
+        float $memory_threshold
+    ) {
+        $this->start_time = $start_time;
+        $this->max_time = $max_time;
+        $this->max_memory = $max_memory;
+        $this->memory_threshold = $memory_threshold;
+    }
+
+    /** Returns false when the request should yield due to time or memory pressure. */
+    public function has_remaining(): bool
+    {
+        if (microtime(true) - $this->start_time >= $this->max_time) {
+            return false;
+        }
+
+        $memory_used = memory_get_usage(true);
+        if ($memory_used >= $this->max_memory * $this->memory_threshold) {
+            return false;
+        }
+
+        return true;
+    }
+}
+
+/**
  * Global streaming context. When set, the error handlers emit error chunks
  * into the active gzip multipart stream instead of sending plain JSON
  * (which would corrupt the compressed response).
@@ -611,10 +659,7 @@ function detect_wp_roots(array $start_paths): array
  */
 function endpoint_sql_chunk(
     array $config,
-    float $script_start,
-    int $max_execution_time,
-    int $max_memory,
-    float $memory_threshold
+    ResourceBudget $budget
 ): array {
     prepare_streaming_response();
     $creds = resolve_db_credentials();
@@ -688,7 +733,7 @@ function endpoint_sql_chunk(
     }
 
     if (!empty($config["db_query_time_limit"])) {
-        $execution_budget_ms = (int) ($max_execution_time * 1000 * 0.8);
+        $execution_budget_ms = (int) ($budget->max_time * 1000 * 0.8);
         $query_time_limit = require_int_range(
             "db_query_time_limit",
             (int) $config["db_query_time_limit"],
@@ -734,12 +779,7 @@ function endpoint_sql_chunk(
 
     try {
         while (
-            should_continue(
-                $script_start,
-                $max_execution_time,
-                $max_memory,
-                $memory_threshold,
-            )
+            $budget->has_remaining()
         ) {
             $sql = [];
 
@@ -753,12 +793,7 @@ function endpoint_sql_chunk(
                 }
 
                 if (
-                    !should_continue(
-                        $script_start,
-                        $max_execution_time,
-                        $max_memory,
-                        $memory_threshold,
-                    )
+                    !$budget->has_remaining()
                 ) {
                     break;
                 }
@@ -817,8 +852,8 @@ function endpoint_sql_chunk(
             "X-Batches-Processed: {$batches_processed}\r\n" .
             "X-SQL-Bytes: {$sql_bytes_processed}\r\n" .
             "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
-            "X-Memory-Limit: " . $max_memory . "\r\n" .
-            "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
+            "X-Memory-Limit: " . $budget->max_memory . "\r\n" .
+            "X-Time-Elapsed: " . (microtime(true) - $budget->start_time) . "\r\n" .
             "\r\n" .
             "\r\n" .
             "--{$boundary}--\r\n",
@@ -834,7 +869,7 @@ function endpoint_sql_chunk(
             "batches_processed" => $batches_processed,
             "sql_bytes" => $sql_bytes_processed,
             "memory_used" => memory_get_peak_usage(true),
-            "time_elapsed" => microtime(true) - $script_start,
+            "time_elapsed" => microtime(true) - $budget->start_time,
         ],
     ];
 }
@@ -844,10 +879,7 @@ function endpoint_sql_chunk(
  */
 function endpoint_db_index(
     array $config,
-    float $script_start,
-    int $max_execution_time,
-    int $max_memory,
-    float $memory_threshold
+    ResourceBudget $budget
 ): array {
     prepare_streaming_response();
 
@@ -892,12 +924,7 @@ function endpoint_db_index(
 
     try {
         while (
-            should_continue(
-                $script_start,
-                $max_execution_time,
-                $max_memory,
-                $memory_threshold,
-            )
+            $budget->has_remaining()
         ) {
             $sql =
                 "SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, ENGINE, " .
@@ -982,8 +1009,8 @@ function endpoint_db_index(
             "X-Tables-Processed: {$tables_processed}\r\n" .
             "X-Rows-Estimated: {$rows_estimated}\r\n" .
             "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
-            "X-Memory-Limit: " . $max_memory . "\r\n" .
-            "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
+            "X-Memory-Limit: " . $budget->max_memory . "\r\n" .
+            "X-Time-Elapsed: " . (microtime(true) - $budget->start_time) . "\r\n" .
             "\r\n" .
             "\r\n" .
             "--{$boundary}--\r\n",
@@ -999,7 +1026,7 @@ function endpoint_db_index(
             "tables_processed" => $tables_processed,
             "rows_estimated" => $rows_estimated,
             "memory_used" => memory_get_peak_usage(true),
-            "time_elapsed" => microtime(true) - $script_start,
+            "time_elapsed" => microtime(true) - $budget->start_time,
         ],
     ];
 }
@@ -1933,10 +1960,7 @@ function endpoint_preflight(array $config): array
  */
 function stream_file_producer(
     $producer,
-    float $script_start,
-    int $max_execution_time,
-    int $max_memory,
-    float $memory_threshold,
+    ResourceBudget $budget,
     array $config = []
 ): array {
     prepare_streaming_response();
@@ -1982,12 +2006,7 @@ function stream_file_producer(
         $gz->sync();
         while (true) {
             if (
-                !should_continue(
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                )
+                !$budget->has_remaining()
             ) {
                 break;
             }
@@ -2222,8 +2241,8 @@ function stream_file_producer(
             "X-Files-Completed: {$files_completed}\r\n" .
             "X-Bytes-Processed: {$bytes_processed}\r\n" .
             "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
-            "X-Memory-Limit: " . $max_memory . "\r\n" .
-            "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
+            "X-Memory-Limit: " . $budget->max_memory . "\r\n" .
+            "X-Time-Elapsed: " . (microtime(true) - $budget->start_time) . "\r\n" .
             "\r\n" .
             "\r\n" .
             "--{$boundary}--\r\n",
@@ -2242,7 +2261,7 @@ function stream_file_producer(
             "files_completed" => $files_completed,
             "bytes_processed" => $bytes_processed,
             "memory_used" => memory_get_peak_usage(true),
-            "time_elapsed" => microtime(true) - $script_start,
+            "time_elapsed" => microtime(true) - $budget->start_time,
         ],
     ];
 }
@@ -2402,10 +2421,7 @@ function encode_index_batch(array $batch_items): array
  */
 function endpoint_file_index(
     array $config,
-    float $script_start,
-    int $max_execution_time,
-    int $max_memory,
-    float $memory_threshold
+    ResourceBudget $budget
 ): array {
     // This endpoint may run repeatedly in the same PHP process (e.g. PHP built-in
     // server, long-lived workers). Clear stale stat/realpath cache from previous
@@ -2737,12 +2753,7 @@ function endpoint_file_index(
                 $stat = @lstat($path);
                 if ($stat === false) {
                     if (
-                        !should_continue(
-                            $script_start,
-                            $max_execution_time,
-                            $max_memory,
-                            $memory_threshold,
-                        )
+                        !$budget->has_remaining()
                     ) {
                         $status = "partial";
                         $stop = true;
@@ -2870,12 +2881,7 @@ function endpoint_file_index(
                 }
 
                 if (
-                    !should_continue(
-                        $script_start,
-                        $max_execution_time,
-                        $max_memory,
-                        $memory_threshold,
-                    )
+                    !$budget->has_remaining()
                 ) {
                     $status = "partial";
                     $stop = true;
@@ -2888,12 +2894,7 @@ function endpoint_file_index(
             }
 
             if (
-                !should_continue(
-                    $script_start,
-                    $max_execution_time,
-                    $max_memory,
-                    $memory_threshold,
-                )
+                !$budget->has_remaining()
             ) {
                 $status = "partial";
                 break;
@@ -2975,8 +2976,8 @@ function endpoint_file_index(
             "X-Batches-Emitted: {$batches_emitted}\r\n" .
             "X-Total-Entries: {$total_entries}\r\n" .
             "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
-            "X-Memory-Limit: " . $max_memory . "\r\n" .
-            "X-Time-Elapsed: " . (microtime(true) - $script_start) . "\r\n" .
+            "X-Memory-Limit: " . $budget->max_memory . "\r\n" .
+            "X-Time-Elapsed: " . (microtime(true) - $budget->start_time) . "\r\n" .
             "\r\n" .
             "\r\n" .
             "--{$boundary}--\r\n",
@@ -2992,7 +2993,7 @@ function endpoint_file_index(
             "batches_emitted" => $batches_emitted,
             "total_entries" => $total_entries,
             "memory_used" => memory_get_peak_usage(true),
-            "time_elapsed" => microtime(true) - $script_start,
+            "time_elapsed" => microtime(true) - $budget->start_time,
         ],
     ];
 }
@@ -3002,10 +3003,7 @@ function endpoint_file_index(
  */
 function endpoint_file_fetch(
     array $config,
-    float $script_start,
-    int $max_execution_time,
-    int $max_memory,
-    float $memory_threshold
+    ResourceBudget $budget
 ): array {
     // Same rationale as endpoint_file_index(): avoid stale path metadata across
     // requests in long-lived PHP processes.
@@ -3067,10 +3065,7 @@ function endpoint_file_fetch(
     $producer = new FileTreeProducer($directories, $sync_options);
     return stream_file_producer(
         $producer,
-        $script_start,
-        $max_execution_time,
-        $max_memory,
-        $memory_threshold,
+        $budget,
         $config,
     );
 }
@@ -3107,27 +3102,6 @@ function require_float_range(
         );
     }
     return $value;
-}
-
-/**
- * Returns false when the request should yield due to time or memory pressure.
- */
-function should_continue(
-    float $start_time,
-    int $max_time,
-    int $max_mem,
-    float $threshold
-): bool {
-    if (microtime(true) - $start_time >= $max_time) {
-        return false;
-    }
-
-    $memory_used = memory_get_usage(true);
-    if ($memory_used >= $max_mem * $threshold) {
-        return false;
-    }
-
-    return true;
 }
 
 /**

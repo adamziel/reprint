@@ -298,23 +298,28 @@ try {
         $max_memory = parse_size($memory_limit);
     }
 
-    $script_start = microtime(true);
+    $budget = new ResourceBudget(
+        microtime(true),
+        $max_execution_time,
+        $max_memory,
+        $memory_threshold,
+    );
 
     switch ($endpoint) {
         case 'file_index':
-            endpoint_file_index($config, $script_start, $max_execution_time, $max_memory, $memory_threshold);
+            endpoint_file_index($config, $budget);
             break;
 
         case 'file_fetch':
-            endpoint_file_fetch($config, $script_start, $max_execution_time, $max_memory, $memory_threshold);
+            endpoint_file_fetch($config, $budget);
             break;
 
         case 'sql_chunk':
-            endpoint_sql_chunk($config, $script_start, $max_execution_time, $max_memory, $memory_threshold);
+            endpoint_sql_chunk($config, $budget);
             break;
 
         case 'db_index':
-            endpoint_db_index($config, $script_start, $max_execution_time, $max_memory, $memory_threshold);
+            endpoint_db_index($config, $budget);
             break;
 
         case 'preflight':
