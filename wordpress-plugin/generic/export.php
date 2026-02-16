@@ -213,6 +213,21 @@ function resolve_db_credentials(): array
     $wp_config_path = null;
     $table_prefix = $GLOBALS['table_prefix'] ?? null;
 
+    // On SQLite sites, the driver is already loaded by WordPress via the
+    // db.php drop-in. We just need to confirm it's available and skip the
+    // MySQL credential requirements.
+    if (is_sqlite_site()) {
+        return [
+            "db_engine" => "sqlite",
+            "db_host" => "",
+            "db_name" => $db_name ?: "wordpress",
+            "db_user" => "",
+            "db_password" => "",
+            "wp_config_path" => $wp_config_path,
+            "table_prefix" => $table_prefix,
+        ];
+    }
+
     $missing = [];
     if (!$db_host) { $missing[] = "db_host"; }
     if (!$db_name) { $missing[] = "db_name"; }
@@ -229,6 +244,7 @@ function resolve_db_credentials(): array
     }
 
     return [
+        "db_engine" => "mysql",
         "db_host" => $db_host,
         "db_name" => $db_name,
         "db_user" => $db_user,
@@ -236,6 +252,102 @@ function resolve_db_credentials(): array
         "wp_config_path" => $wp_config_path,
         "table_prefix" => $table_prefix,
     ];
+}
+
+/**
+ * Returns true when the current WordPress site uses the SQLite backend.
+ *
+ * Detection is based on the WP_SQLite_Driver class being loaded and
+ * $wpdb->dbh being an instance of it. This is set up automatically by
+ * the sqlite-database-integration plugin's db.php drop-in when WordPress
+ * boots.
+ */
+function is_sqlite_site(): bool
+{
+    global $wpdb;
+    return isset($wpdb)
+        && class_exists('WP_SQLite_Driver', false)
+        && $wpdb->dbh instanceof WP_SQLite_Driver;
+}
+
+/**
+ * Creates a database connection appropriate for the detected backend.
+ *
+ * For MySQL sites, returns a standard PDO connection.
+ * For SQLite sites, wraps the WP_SQLite_Driver that WordPress already
+ * loaded (via $wpdb->dbh) in a PDO-compatible adapter. The driver's
+ * AST-based translator converts every MySQL query to SQLite on the fly,
+ * so MySQLDumpProducer sees MySQL-shaped results and produces valid
+ * MySQL SQL output.
+ *
+ * @param array $creds   Credentials from resolve_db_credentials().
+ * @param array $options PDO options (only used for MySQL connections).
+ * @return PDO A real PDO for MySQL, or a PDO-compatible adapter for SQLite.
+ */
+function create_db_connection(array $creds, array $options = [])
+{
+    if (($creds["db_engine"] ?? "mysql") === "sqlite") {
+        return create_sqlite_pdo_adapter();
+    }
+
+    // MySQL path (also works for HyperDB — wp-config.php credentials
+    // point to the write master).
+    $default_options = [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    ];
+    $merged_options = $options + $default_options;
+
+    return new PDO(
+        "mysql:host={$creds['db_host']};dbname={$creds['db_name']};charset=utf8mb4",
+        $creds["db_user"],
+        $creds["db_password"],
+        $merged_options,
+    );
+}
+
+/**
+ * Wraps the already-loaded WP_SQLite_Driver in a PDO-compatible adapter.
+ *
+ * Validates that the sqlite-database-integration plugin version is in the
+ * supported range, then extracts the driver and raw PDO from $wpdb->dbh.
+ *
+ * @return object PDO-compatible adapter (SqliteDriverPDO).
+ * @throws RuntimeException If the driver is not available or unsupported.
+ */
+function create_sqlite_pdo_adapter()
+{
+    global $wpdb;
+
+    /**
+     * Minimum sqlite-database-integration version that exposes the API we
+     * depend on: WP_SQLite_Driver::query(), get_query_results(),
+     * get_connection()->get_pdo().
+     */
+    $min_version = '2.1.0';
+
+    require_once __DIR__ . "/class-sqlite-driver-pdo.php";
+
+    if (!isset($wpdb) || !($wpdb->dbh instanceof WP_SQLite_Driver)) {
+        throw new RuntimeException(
+            "SQLite export requires WordPress loaded with the " .
+            "sqlite-database-integration plugin active."
+        );
+    }
+
+    // Verify the plugin version is in the supported range.
+    if (defined('SQLITE_DRIVER_VERSION')) {
+        if (version_compare(SQLITE_DRIVER_VERSION, $min_version, '<')) {
+            throw new RuntimeException(
+                "sqlite-database-integration plugin version " . SQLITE_DRIVER_VERSION .
+                " is too old. Minimum required: " . $min_version
+            );
+        }
+    }
+
+    $driver = $wpdb->dbh;
+    $raw_pdo = $driver->get_connection()->get_pdo();
+
+    return new SqliteDriverPDO($driver, $raw_pdo);
 }
 
 require_once __DIR__ . "/utils.php";
@@ -663,10 +775,6 @@ function endpoint_sql_chunk(
 ): array {
     prepare_streaming_response();
     $creds = resolve_db_credentials();
-    $db_host = $creds["db_host"];
-    $db_name = $creds["db_name"];
-    $db_user = $creds["db_user"];
-    $db_password = $creds["db_password"];
 
     // -- Parse request parameters --
     $fragments_per_batch = $config["fragments_per_batch"] ?? 1000;
@@ -677,25 +785,11 @@ function endpoint_sql_chunk(
         10000,
     );
 
-    $pdo_options = [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-    ];
+    $pdo_options = [];
     if (!empty($config["db_unbuffered"])) {
         $pdo_options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = false;
     }
-    /**
-     * Use a separate connection to avoid going through any $wpdb
-     * hooks. Granted, this will fail on sites using the
-     * sqlite-database-integration plugin. Once that plugin exposes
-     * a PDO-compatible interface, we'll be able to easily support
-     * both.
-     */
-    $mysql = new PDO(
-        build_pdo_dsn($db_host, $db_name),
-        $db_user,
-        $db_password,
-        $pdo_options,
-    );
+    $mysql = create_db_connection($creds, $pdo_options);
 
     $producer_options = [
         "create_table_query" => $config["create_table_query"] ?? true,
@@ -884,10 +978,6 @@ function endpoint_db_index(
     prepare_streaming_response();
 
     $creds = resolve_db_credentials();
-    $db_host = $creds["db_host"];
-    $db_name = $creds["db_name"];
-    $db_user = $creds["db_user"];
-    $db_password = $creds["db_password"];
 
     $tables_per_batch = $config["tables_per_batch"] ?? 1000;
     $tables_per_batch = require_int_range(
@@ -908,12 +998,7 @@ function endpoint_db_index(
     }
     $last_table = $cursor["last_table"] ?? "";
 
-    $mysql = new PDO(
-        build_pdo_dsn($db_host, $db_name),
-        $db_user,
-        $db_password,
-        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
-    );
+    $mysql = create_db_connection($creds);
 
     ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
 
@@ -1358,6 +1443,7 @@ function endpoint_preflight(array $config): array
     // If WordPress is loadable, also read options like active_plugins,
     // theme, siteurl, multisite config, and WP constants.
     $db = [
+        "db_engine" => is_sqlite_site() ? "sqlite" : "mysql",
         "credentials_found" => false,
         "connected" => false,
         "can_query" => false,
@@ -1408,22 +1494,19 @@ function endpoint_preflight(array $config): array
         $creds = resolve_db_credentials();
         $db["wp"]["wp_config_path"] = $creds["wp_config_path"];
         $db["wp"]["table_prefix"] = $creds["table_prefix"];
+        $db["db_engine"] = $creds["db_engine"] ?? $db["db_engine"];
         $db["credentials_found"] = true;
     } catch (InvalidArgumentException $e) {
         $db["error"] = $e->getMessage();
     }
 
     if ($creds !== null) {
-        if (!extension_loaded("pdo_mysql")) {
-            $db["error"] = "pdo_mysql extension not loaded";
+        $required_ext = ($creds["db_engine"] ?? "mysql") === "sqlite" ? "pdo_sqlite" : "pdo_mysql";
+        if (!extension_loaded($required_ext)) {
+            $db["error"] = "{$required_ext} extension not loaded";
         } else {
             try {
-                $mysql = new PDO(
-                    build_pdo_dsn($creds['db_host'], $creds['db_name']),
-                    $creds["db_user"],
-                    $creds["db_password"],
-                    [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
-                );
+                $mysql = create_db_connection($creds);
                 $db["connected"] = true;
 
                 $version = $mysql->query("SELECT VERSION()")->fetchColumn();
@@ -1688,35 +1771,43 @@ function endpoint_preflight(array $config): array
                     }
                 }
 
-                $vars = $mysql
-                    ->query(
-                        "SELECT @@character_set_database AS db_charset, " .
-                            "@@collation_database AS db_collation, " .
-                            "@@character_set_server AS server_charset, " .
-                            "@@collation_server AS server_collation, " .
-                            "@@character_set_connection AS connection_charset, " .
-                            "@@collation_connection AS connection_collation, " .
-                            "@@max_allowed_packet AS max_allowed_packet, " .
-                            "@@sql_mode AS sql_mode, " .
-                            "@@lower_case_table_names AS lower_case_table_names",
-                    )
-                    ->fetch(PDO::FETCH_ASSOC);
-                if (is_array($vars)) {
-                    $db["db_charset"] = $vars["db_charset"] ?? null;
-                    $db["db_collation"] = $vars["db_collation"] ?? null;
-                    $db["server_charset"] = $vars["server_charset"] ?? null;
-                    $db["server_collation"] = $vars["server_collation"] ?? null;
-                    $db["connection_charset"] = $vars["connection_charset"] ?? null;
-                    $db["connection_collation"] = $vars["connection_collation"] ?? null;
-                    $db["max_allowed_packet"] = isset($vars["max_allowed_packet"])
-                        ? (int) $vars["max_allowed_packet"]
-                        : null;
-                    $db["sql_mode"] = $vars["sql_mode"] ?? null;
-                    $db["lower_case_table_names"] = isset(
-                        $vars["lower_case_table_names"],
-                    )
-                        ? (int) $vars["lower_case_table_names"]
-                        : null;
+                // MySQL server variables — these don't apply to SQLite,
+                // so wrap in a separate try/catch to avoid losing WP data
+                // gathered earlier if the query fails.
+                try {
+                    $vars = $mysql
+                        ->query(
+                            "SELECT @@character_set_database AS db_charset, " .
+                                "@@collation_database AS db_collation, " .
+                                "@@character_set_server AS server_charset, " .
+                                "@@collation_server AS server_collation, " .
+                                "@@character_set_connection AS connection_charset, " .
+                                "@@collation_connection AS connection_collation, " .
+                                "@@max_allowed_packet AS max_allowed_packet, " .
+                                "@@sql_mode AS sql_mode, " .
+                                "@@lower_case_table_names AS lower_case_table_names",
+                        )
+                        ->fetch(PDO::FETCH_ASSOC);
+                    if (is_array($vars)) {
+                        $db["db_charset"] = $vars["db_charset"] ?? null;
+                        $db["db_collation"] = $vars["db_collation"] ?? null;
+                        $db["server_charset"] = $vars["server_charset"] ?? null;
+                        $db["server_collation"] = $vars["server_collation"] ?? null;
+                        $db["connection_charset"] = $vars["connection_charset"] ?? null;
+                        $db["connection_collation"] = $vars["connection_collation"] ?? null;
+                        $db["max_allowed_packet"] = isset($vars["max_allowed_packet"])
+                            ? (int) $vars["max_allowed_packet"]
+                            : null;
+                        $db["sql_mode"] = $vars["sql_mode"] ?? null;
+                        $db["lower_case_table_names"] = isset(
+                            $vars["lower_case_table_names"],
+                        )
+                            ? (int) $vars["lower_case_table_names"]
+                            : null;
+                    }
+                } catch (Exception $e) {
+                    // Expected for SQLite — these MySQL system variables
+                    // don't exist. The null defaults are correct.
                 }
 
                 try {

@@ -9,6 +9,7 @@ parameters:
         - importer
     excludePaths:
         - wordpress-plugin/generic/secrets.php
+        - wordpress-plugin/generic/class-sqlite-driver-pdo.php
         - wordpress-plugin/wordpress/
         - wordpress-plugin/index.php
     treatPhpDocTypesAsCertain: false
