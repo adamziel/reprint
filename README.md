@@ -558,6 +558,13 @@ site from a multisite network — the export includes the entire database and
 filesystem, which covers all sites in the network. There is no mechanism to
 filter tables or uploads by blog ID.
 
+### File permissions and ownership
+
+File ownership (`chown`) and permissions (`chmod`) are not preserved during
+export. All files are written with the default ownership and permissions of
+the importing process. You need to set the correct ownership and permissions
+on your hosting platform after import.
+
 ## Next steps
 
 * Possibly run more checks in `preflight-assert`. What would they be?
