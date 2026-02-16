@@ -2265,35 +2265,6 @@ function encode_index_stack(array $stack): array
 }
 
 /**
- * Given a path, such as `/srv/wordpress/wp-content/plugins/akismet/assets`, returns
- * a list of all the parent paths that are symlinks. It will check `/srv`,
- * `/srv/wordpress`, `/srv/wordpress/wp-content`, etc.
- * 
- * For example, given the following filesystem layout:
- * 
- *     /srv/wordpress/wp-content -> /htdocs/wp-content
- *     /srv/wordpress/wp-content/plugins/akismet -> /wordpress/plugins/akismet/latest
- *     /wordpress/plugins/akismet/latest -> /wordpress/plugins/akismet/5.0.5
- * 
- * Calling
- * 
- *     find_parents_symlinks("/srv/wordpress/wp-content/plugins/akismet/assets")
- * 
- * will return the following symlinks:
- * 
- * ['path' => '/srv/wordpress/wp-content', 'target' => '/htdocs/wp-content']
- * ['path' => '/htdocs/wp-content/plugins/akismet', 'target' => '/wordpress/plugins/akismet/latest']
- *
- * Note:
- * 
- * * Every found `path` is a resolved realpath(), which means that all the parents are
- *   regular directories, not symlinks.
- * * It is intentionally not recursive. That last `akismet/latest` -> `akismet/5.0.5`
- *   symlink was not returned. The client is free to recursively request the files from
- *   any additional directories outside of the initial content root based on the parent
- *   symlinks resolved by this function.
- */
-/**
  * Resolve "." and ".." segments in a path without resolving symlinks.
  *
  * Unlike realpath(), this only performs textual normalization — it collapses
@@ -2325,10 +2296,80 @@ function normalize_dot_segments(string $path): string
     return implode("/", $normalized);
 }
 
-function find_parents_symlinks(string $path): array
+/**
+ * Convert a potentially relative path to an absolute path.
+ * 
+ * @param string $path The path to convert.
+ * @param string $base The base path to resolve against.
+ * @return string The absolute path.
+ */
+function to_absolute_path(string $path, string $base): string
+{
+    if(!strlen($path)) {
+        return $base;
+    }
+
+	// If it's not an absolute path already, make it absolute by prepending
+	// the base path
+    if ($path[0] !== '/') {
+        $path = rtrim($base, '/') . '/' . $path;
+    }
+
+	// If we have '..' or '.' segments, normalize them out.
+    $path = normalize_dot_segments($path);
+
+	// An empty path after normalization means we've got to the root or
+	// tried to go even higher than the root.
+    if($path === '') {
+        return '/';
+    }
+
+	return $path;
+}
+
+/**
+ * Given a path, such as `/srv/wordpress/wp-content/plugins/akismet/assets`, returns
+ * a list of all the parent paths that are symlinks. It will check `/srv`,
+ * `/srv/wordpress`, `/srv/wordpress/wp-content`, etc.
+ * 
+ * For example, given the following filesystem layout:
+ * 
+ *     /srv/wordpress/wp-content -> /htdocs/wp-content
+ *     /srv/wordpress/wp-content/plugins/akismet -> /wordpress/plugins/akismet/latest
+ *     /wordpress/plugins/akismet/latest -> /wordpress/plugins/akismet/5.0.5
+ * 
+ * Calling
+ * 
+ *     find_parents_symlinks("/srv/wordpress/wp-content/plugins/akismet/assets")
+ * 
+ * will return the following symlinks:
+ * 
+ * ['path' => '/srv/wordpress/wp-content', 'target' => '/htdocs/wp-content']
+ * ['path' => '/htdocs/wp-content/plugins/akismet', 'target' => '/wordpress/plugins/akismet/latest']
+ *
+ * Note:
+ * 
+ * * Every found `path` is a resolved realpath(), which means that all the parents are
+ *   regular directories, not symlinks.
+ * * It is intentionally not recursive. That last `akismet/latest` -> `akismet/5.0.5`
+ *   symlink was not returned. The client is free to recursively request the files from
+ *   any additional directories outside of the initial content root based on the parent
+ *   symlinks resolved by this function.
+ * 
+ * @param string $absolute_path An absolute path to a file or directory.
+ * @return array An array of symlinks found in the path.
+ * Each array element is an associative array with the following keys:
+ * - "path": The path to the symlink.
+ * - "ctime": The creation time of the symlink.
+ * - "size": The size of the symlink.
+ * - "type": The type of the symlink.
+ * - "target": The target of the symlink.
+ * - "intermediate": Whether the symlink is an intermediate symlink.
+ */
+function find_parents_symlinks(string $absolute_path): array
 {
     $entries = [];
-    $parts = explode("/", $path);
+    $parts = explode('/', $absolute_path);
     $current = "";
     // Walk through /srv, /srv/wordpress, /srv/wordpress/wp-content, etc.
     foreach ($parts as $part) {
@@ -2366,6 +2407,64 @@ function find_parents_symlinks(string $path): array
         }
     }
     return $entries;
+}
+
+/**
+ * Resolves a symlink's target to a canonical path for the file index.
+ *
+ * On many WordPress hosts (wp.com, SiteGround, etc.), the filesystem
+ * contains chains of symlinks.  For example, /srv might point to /,
+ * /srv/wordpress might point to /wordpress, and readlink() returns
+ * relative paths like "../wordpress/core/latest" that still contain
+ * intermediate symlinks.  realpath() cuts through all of this and
+ * returns the final canonical path — e.g. /htdocs instead of /srv/htdocs.
+ *
+ * The client uses symlink targets to discover additional directories to
+ * index, so only directory symlinks get a resolved target.  File symlink
+ * targets are ignored because the client doesn't need to recurse into them.
+ *
+ * Also walks the raw readlink() path to find intermediate symlinks that
+ * realpath() skips.  For example, if readlink() returns a relative path
+ * like "../../../wordpress/plugins/akismet/latest", the absolute form
+ * might be /srv/wordpress/plugins/akismet/latest — and /srv/wordpress is
+ * itself a symlink to /wordpress.  realpath() jumps straight to
+ * /wordpress/..., so we'd never record the /srv/wordpress intermediate.
+ * find_parents_symlinks() catches those.
+ *
+ * @param string $path  Absolute path to the symlink.
+ * @return array{target: string|null, intermediates: array} The resolved
+ *               canonical target (null for file symlinks or unresolvable
+ *               paths), and any intermediate symlink entries found.
+ */
+function resolve_symlink_target(string $path): array
+{
+    clearstatcache(true, $path);
+    $resolved_target = @realpath($path);
+
+    // Only directory symlinks matter — the client uses targets to discover
+    // additional directories to index.  Also skip unresolvable symlinks
+    // and self-referencing paths.
+    if (
+        $resolved_target === false ||
+        $resolved_target === $path ||
+        !is_dir($resolved_target)
+    ) {
+        return ['target' => null, 'intermediates' => []];
+    }
+
+    $intermediates = [];
+    $raw_target = @readlink($path);
+    if ($raw_target !== false && $raw_target !== "") {
+        if ($raw_target[0] !== "/") {
+            $raw_target = dirname($path) . "/" . $raw_target;
+        }
+        $abs_raw = normalize_dot_segments($raw_target);
+        if ($abs_raw !== "" && $abs_raw[0] === "/" && $abs_raw !== $resolved_target) {
+            $intermediates = find_parents_symlinks($abs_raw);
+        }
+    }
+
+    return ['target' => $resolved_target, 'intermediates' => $intermediates];
 }
 
 /**
@@ -2756,54 +2855,10 @@ function endpoint_file_index(
                 $link_target = null;
                 if ($mode === STAT_TYPE_LINK) {
                     $type = "link";
-                    // Use realpath() to resolve the symlink target into the
-                    // canonical path.  On hosts like wp.com, /srv is a symlink
-                    // to / and /srv/wordpress is a symlink to /wordpress, so
-                    // readlink() returns relative paths like "../wordpress/core/
-                    // latest" that contain intermediate symlinks.  realpath()
-                    // resolves everything consistently: /srv/htdocs → /htdocs,
-                    // /srv/wordpress/themes/iotix → /wordpress/themes/iotix.
-                    //
-                    // Only record the target for directory symlinks — the client
-                    // uses targets to discover additional directories to index,
-                    // so file symlink targets are not useful.
-                    // @TODO: Understand this thoroughly.
-                    clearstatcache(true, $path);
-                    $resolved_target = @realpath($path);
-                    if (
-                        $resolved_target !== false &&
-                        $resolved_target !== $path &&
-                        is_dir($resolved_target)
-                    ) {
-                        $link_target = $resolved_target;
-
-                        // @TODO: Review this in details and understand / make it a bit more
-                        // readable. It's so opaque
-
-                        // Discover intermediate symlinks along the raw readlink()
-                        // path.  For example, readlink() may return a relative path
-                        // like "../../../wordpress/plugins/akismet/latest" which
-                        // resolves to /srv/wordpress/plugins/akismet/latest.  The
-                        // /srv/wordpress component is itself a symlink to /wordpress.
-                        // realpath() jumps straight to /wordpress/..., so we'd never
-                        // record the /srv/wordpress intermediate symlink.  By walking
-                        // the raw readlink path, find_parents_symlinks() finds it.
-                        // @TODO: Understand this thoroughly.
-                        if ($follow_symlinks) {
-                            $raw_target = @readlink($path);
-                            if ($raw_target !== false && $raw_target !== "") {
-                                if ($raw_target[0] !== "/") {
-                                    $raw_target = dirname($path) . "/" . $raw_target;
-                                }
-                                $abs_raw = normalize_dot_segments($raw_target);
-                                if ($abs_raw !== "" && $abs_raw[0] === "/" && $abs_raw !== $link_target) {
-                                    $intermediates = find_parents_symlinks($abs_raw);
-                                    foreach ($intermediates as $intermediate) {
-                                        $batch_items[] = $intermediate;
-                                    }
-                                }
-                            }
-                        }
+                    $resolved = resolve_symlink_target($path);
+                    $link_target = $resolved['target'];
+                    if ($follow_symlinks && !empty($resolved['intermediates'])) {
+                        $batch_items = array_merge($batch_items, $resolved['intermediates']);
                     }
                 } elseif ($mode === STAT_TYPE_DIR) {
                     $type = "dir";

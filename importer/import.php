@@ -4480,9 +4480,18 @@ class ImportClient
             $current .= "/" . $part;
 
             if (is_link($current)) {
-                throw new RuntimeException(
-                    "Security: Refusing to traverse symlink while creating directory: {$current}",
+                $this->audit_log(
+                    "Removing symlink blocking directory: {$current}",
+                    true,
                 );
+                if (!unlink($current)) {
+                    throw new RuntimeException(
+                        "Failed to remove symlink blocking directory: {$current}",
+                    );
+                }
+                // Clear cached realpath so the subsequent realpath() check
+                // sees the new directory instead of the removed symlink.
+                clearstatcache(true, $current);
             }
 
             // Remove file if blocking directory creation
