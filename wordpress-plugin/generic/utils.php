@@ -22,10 +22,14 @@ if (!function_exists('str_contains')) {
  *
  * WordPress's DB_HOST supports several non-standard formats that shared
  * hosts commonly use:
- *   - "localhost"             → standard hostname
- *   - "db.host.com:3307"     → hostname with port
- *   - "localhost:/path/sock"  → hostname with Unix socket
- *   - "/path/to/mysql.sock"  → bare Unix socket path
+ *   - "localhost"              → standard hostname
+ *   - "db.host.com:3307"      → hostname with port
+ *   - "localhost:/path/sock"   → hostname with Unix socket
+ *   - "/path/to/mysql.sock"   → bare Unix socket path
+ *   - "::1"                   → IPv6 address
+ *   - "[::1]"                 → bracketed IPv6
+ *   - "[::1]:3306"            → bracketed IPv6 with port
+ *   - "[::1]:/path/to/socket" → bracketed IPv6 with Unix socket
  *
  * PDO needs these broken out into separate DSN parameters (host, port,
  * unix_socket), so we parse the value the same way WordPress core does.
@@ -44,15 +48,32 @@ function build_pdo_dsn(string $db_host, string $db_name): string
         // Bare socket path: "/var/run/mysqld/mysqld.sock"
         $socket = $db_host;
         $host   = '';
-    } elseif (str_contains($db_host, ':')) {
-        // "host:port" or "host:/path/to/socket"
-        [$host, $after_colon] = explode(':', $db_host, 2);
-        if (str_starts_with($after_colon, '/')) {
-            $socket = $after_colon;
-        } else {
-            $port = $after_colon;
+    } elseif (str_starts_with($db_host, '[')) {
+        // Bracketed IPv6: "[::1]", "[::1]:3306", "[::1]:/path/to/socket"
+        $bracket_end = strpos($db_host, ']');
+        if ($bracket_end !== false) {
+            $host = substr($db_host, 1, $bracket_end - 1);
+            $after = substr($db_host, $bracket_end + 1);
+            if (str_starts_with($after, ':/')) {
+                $socket = substr($after, 1);
+            } elseif (str_starts_with($after, ':')) {
+                $port = substr($after, 1);
+            }
         }
+    } elseif (($socket_pos = strpos($db_host, ':/')) !== false) {
+        // "host:/path/to/socket" — check before general colon split
+        // to avoid misinterpreting IPv6 addresses as host:port
+        $host   = substr($db_host, 0, $socket_pos);
+        $socket = substr($db_host, $socket_pos + 1);
+    } elseif (
+        str_contains($db_host, ':') &&
+        substr_count($db_host, ':') === 1
+    ) {
+        // Exactly one colon: "host:port" — not IPv6
+        [$host, $port] = explode(':', $db_host, 2);
     }
+    // Otherwise (multiple colons, no socket marker): bare IPv6 like "::1"
+    // — $host stays as the full value.
 
     if ($socket !== '') {
         return "mysql:unix_socket={$socket};dbname={$db_name};charset=utf8mb4";
