@@ -11,6 +11,14 @@ if (!ob_get_level()) {
     ob_start();
 }
 
+// Clear PHP's stat and realpath caches to ensure fresh filesystem state.
+// PHP-FPM workers cache realpath() results for 120 seconds across requests.
+// If the same worker handles both an initial file_index scan and a delta scan
+// within that window, stale cached paths can cause wrong type information
+// (e.g., a symlink that was replaced by a directory still resolves as the
+// old symlink target). This is cheap and prevents non-deterministic failures.
+clearstatcache(true);
+
 set_error_handler(function ($errno, $errstr, $errfile, $errline) {
     $error = [
         'error' => "PHP Error: $errstr",
