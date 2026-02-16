@@ -16,6 +16,9 @@
         <testsuite name="Import Tests">
             <directory>Import</directory>
         </testsuite>
+        <testsuite name="Export Utility Tests">
+            <file>BuildPdoDsnTest.php</file>
+        </testsuite>
     </testsuites>
     <php>
         <env name="DB_HOST" value="127.0.0.1"/>

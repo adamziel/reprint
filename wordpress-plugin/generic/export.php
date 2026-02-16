@@ -691,7 +691,7 @@ function endpoint_sql_chunk(
      * both.
      */
     $mysql = new PDO(
-        "mysql:host={$db_host};dbname={$db_name};charset=utf8mb4",
+        build_pdo_dsn($db_host, $db_name),
         $db_user,
         $db_password,
         $pdo_options,
@@ -909,7 +909,7 @@ function endpoint_db_index(
     $last_table = $cursor["last_table"] ?? "";
 
     $mysql = new PDO(
-        "mysql:host={$db_host};dbname={$db_name};charset=utf8mb4",
+        build_pdo_dsn($db_host, $db_name),
         $db_user,
         $db_password,
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
@@ -1419,7 +1419,7 @@ function endpoint_preflight(array $config): array
         } else {
             try {
                 $mysql = new PDO(
-                    "mysql:host={$creds['db_host']};dbname={$creds['db_name']};charset=utf8mb4",
+                    build_pdo_dsn($creds['db_host'], $creds['db_name']),
                     $creds["db_user"],
                     $creds["db_password"],
                     [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
