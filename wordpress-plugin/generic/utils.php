@@ -10,6 +10,62 @@ if (!function_exists('str_starts_with')) {
     }
 }
 
+// Polyfill for PHP 7.4 which lacks str_contains().
+if (!function_exists('str_contains')) {
+    function str_contains(string $haystack, string $needle): bool {
+        return $needle === '' || strpos($haystack, $needle) !== false;
+    }
+}
+
+/**
+ * Builds a PDO DSN string from a WordPress DB_HOST value.
+ *
+ * WordPress's DB_HOST supports several non-standard formats that shared
+ * hosts commonly use:
+ *   - "localhost"             → standard hostname
+ *   - "db.host.com:3307"     → hostname with port
+ *   - "localhost:/path/sock"  → hostname with Unix socket
+ *   - "/path/to/mysql.sock"  → bare Unix socket path
+ *
+ * PDO needs these broken out into separate DSN parameters (host, port,
+ * unix_socket), so we parse the value the same way WordPress core does.
+ *
+ * @param string $db_host  Raw DB_HOST value.
+ * @param string $db_name  Database name.
+ * @return string PDO DSN string.
+ */
+function build_pdo_dsn(string $db_host, string $db_name): string
+{
+    $socket = '';
+    $host   = $db_host;
+    $port   = '';
+
+    if (str_starts_with($db_host, '/')) {
+        // Bare socket path: "/var/run/mysqld/mysqld.sock"
+        $socket = $db_host;
+        $host   = '';
+    } elseif (str_contains($db_host, ':')) {
+        // "host:port" or "host:/path/to/socket"
+        [$host, $after_colon] = explode(':', $db_host, 2);
+        if (str_starts_with($after_colon, '/')) {
+            $socket = $after_colon;
+        } else {
+            $port = $after_colon;
+        }
+    }
+
+    if ($socket !== '') {
+        return "mysql:unix_socket={$socket};dbname={$db_name};charset=utf8mb4";
+    }
+
+    $dsn = "mysql:host={$host}";
+    if ($port !== '') {
+        $dsn .= ";port={$port}";
+    }
+    $dsn .= ";dbname={$db_name};charset=utf8mb4";
+    return $dsn;
+}
+
 /**
  * Parse a human-readable size string (e.g. "16M", "1G", "512K") into bytes.
  * Accepts plain integers as well.
