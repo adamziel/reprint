@@ -549,6 +549,15 @@ Why not the git protocol? We're effectively exchanging diffs here. Git already d
 recover from a broken exchange — you need to start from scratch. Also, the git protocol is complex.
 Multipart is simple and native to HTTP clients.
 
+## Known Limitations
+
+### Multisite
+
+WordPress Multisite networks are all-or-nothing. You can't export a single
+site from a multisite network — the export includes the entire database and
+filesystem, which covers all sites in the network. There is no mechanism to
+filter tables or uploads by blog ID.
+
 ## Next steps
 
 * Possibly run more checks in `preflight-assert`. What would they be?
