@@ -24,7 +24,7 @@ describe('Import: Custom WP Content', () => {
                 const customPlugin = join(siteDir, 'custom-content', 'plugins', 'site-export', 'generic');
                 const srcPlugin = join(siteDir, 'wp-content', 'plugins', 'site-export');
                 mkdirSync(customPlugin, { recursive: true });
-                copyFileSync(join(srcPlugin, 'api.php'), join(customPlugin, '..', 'api.php'));
+                copyFileSync(join(srcPlugin, 'index.php'), join(customPlugin, '..', 'index.php'));
                 for (const f of readdirSync(join(srcPlugin, 'generic')).filter(f => f.endsWith('.php'))) {
                     copyFileSync(join(srcPlugin, 'generic', f), join(customPlugin, f));
                 }
@@ -39,7 +39,7 @@ describe('Import: Custom WP Content', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('files-sync completes', () => {

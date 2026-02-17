@@ -82,7 +82,7 @@ CREATE TABLE wp_edge_cases (
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('db-sync completes', () => {

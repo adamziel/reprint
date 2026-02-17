@@ -44,3 +44,18 @@ parameters:
 			message: "#^Strict comparison using \\!\\=\\= between null and null will always evaluate to false\\.$#"
 			count: 1
 			path: wordpress-plugin/generic/class-file-tree-producer.php
+
+		-
+			message: "#^Class WP_SQLite_Driver not found\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Call to method get_connection\\(\\) on an unknown class WP_SQLite_Driver\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Instantiated class SqliteDriverPDO not found\\.$#"
+			count: 1
+			path: wordpress-plugin/generic/export.php

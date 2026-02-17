@@ -1248,7 +1248,7 @@ class ImportClient
 
         // Initialize HMAC authentication if a shared secret was provided.
         // When set, every outgoing HTTP request will include X-Auth-Signature,
-        // X-Auth-Nonce, and X-Auth-Timestamp headers so api.php can verify
+        // X-Auth-Nonce, and X-Auth-Timestamp headers so the export API can verify
         // the caller without a SECRET_KEY in the URL.
         if (!empty($options["secret"])) {
             // TODO: Distribute with the importer script somehow. Phar? Co-locate? A build script?
@@ -6283,7 +6283,7 @@ if (
                 "Options:\n" .
                 "  --abort          Abort current sync and exit (keeps files and index)\n" .
                 "  --follow-symlinks  Follow symlinks pointing outside root directories\n" .
-                "  --secret=TOKEN     HMAC shared secret for api.php authentication\n" .
+                "  --secret=TOKEN     HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v      Show detailed request/response logs\n" .
                 "\n" .
                 "Output files:\n" .
@@ -6302,7 +6302,7 @@ if (
                 "\n" .
                 "Options:\n" .
                 "  --abort        Clear state and output, then exit\n" .
-                "  --secret=TOKEN   HMAC shared secret for api.php authentication\n" .
+                "  --secret=TOKEN   HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v    Show detailed request/response logs\n",
         ],
         "db-sync" => [
@@ -6313,7 +6313,7 @@ if (
                 "\n" .
                 "Options:\n" .
                 "  --abort                   Clear state and output, then exit\n" .
-                "  --secret=TOKEN              HMAC shared secret for api.php authentication\n" .
+                "  --secret=TOKEN              HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v               Show detailed request/response logs\n" .
                 "  --max-allowed-packet=SIZE   Client max_allowed_packet (e.g. 16M, 64M)\n" .
                 "\n" .
@@ -6328,7 +6328,7 @@ if (
                 "\n" .
                 "Options:\n" .
                 "  --abort        Clear state and output, then exit\n" .
-                "  --secret=TOKEN   HMAC shared secret for api.php authentication\n" .
+                "  --secret=TOKEN   HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v    Show detailed request/response logs\n" .
                 "\n" .
                 "Output files:\n" .
@@ -6345,7 +6345,7 @@ if (
                 "Exits 0 if the server reported OK, 1 otherwise.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --secret=TOKEN   HMAC shared secret for api.php authentication\n",
+                "  --secret=TOKEN   HMAC shared secret for export API authentication\n",
         ],
         "preflight-assert" => [
             "short" => "Check if migration is feasible (exits 0 or 1)",
@@ -6361,7 +6361,7 @@ if (
                 "Prints a PASS/FAIL summary and exits 0 if all checks pass, 1 if not.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --secret=TOKEN   HMAC shared secret for api.php authentication\n",
+                "  --secret=TOKEN   HMAC shared secret for export API authentication\n",
         ],
     ];
 
@@ -6378,7 +6378,7 @@ if (
         echo "Run 'php import.php <command> --help' for command-specific help.\n";
         echo "\n";
         echo "Global options:\n";
-        echo "  --secret=TOKEN       HMAC shared secret for api.php authentication\n";
+        echo "  --secret=TOKEN       HMAC shared secret for export API authentication\n";
         echo "  --abort            Abort current sync and exit (preserves downloaded files)\n";
         echo "  --follow-symlinks    Follow symlinks pointing outside root directories\n";
         echo "  --verbose, -v        Show detailed request/response logs\n";

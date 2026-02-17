@@ -38,7 +38,7 @@ describe('Import: Large Directory', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('files-sync completes', { timeout: 120000 }, () => {

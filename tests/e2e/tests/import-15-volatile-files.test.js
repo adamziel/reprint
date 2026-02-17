@@ -61,7 +61,7 @@ describe('Import: Volatile Files', () => {
         });
 
         it('file sync completes', () => {
-            const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 timeout: 120000,
@@ -147,7 +147,7 @@ describe('Import: Volatile Files', () => {
         });
 
         it('file sync completes', () => {
-            const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
             });

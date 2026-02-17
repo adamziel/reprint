@@ -123,8 +123,7 @@ PHPUnit tests automatically create/drop test databases. The naming convention is
 ## File Organization
 
 - wordpress-plugin/: Self-contained WordPress plugin directory
-  - index.php: Thin WordPress plugin loader (plugin header, constants)
-  - api.php: Standalone HTTP entry point (no WordPress dependency)
+  - index.php: Plugin entry point — intercepts `?site-export-api` requests during plugin load, handles HMAC auth and export dispatch
   - generic/: Core export engine (export.php, producers, HMAC client, secrets)
   - wordpress/: WordPress admin UI (site-export.php)
 - importer/: Import client (import.php)

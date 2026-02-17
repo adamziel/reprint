@@ -19,7 +19,7 @@ describe('Import: Preflight state path encoding', () => {
     let tempDir;
 
     function importUrlWithDirectory() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     function assertEncoded(value, label) {

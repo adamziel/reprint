@@ -22,7 +22,7 @@ describe('Import: State Corruption', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     describe('corrupted JSON in state file', () => {

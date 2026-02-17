@@ -175,7 +175,7 @@ describe('Import: Follow Symlinks', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     function fsRoot() {

@@ -50,7 +50,7 @@ describe('Import: Unicode Paths', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('files-sync completes', () => {

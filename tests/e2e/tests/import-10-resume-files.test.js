@@ -39,7 +39,7 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('files-sync completes via multiple resumable requests', () => {

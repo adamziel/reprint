@@ -51,14 +51,14 @@ jobs:
 
           # Quick smoke test: use the importer CLI to hit the export API.
           SECRET="test-secret-basic"
-          BASE="http://127.0.0.1:8081/api.php"
+          BASE="http://127.0.0.1:8081/?site-export-api"
           DIR="/srv/e2e-sites/basic"
 
           echo "=== Importer preflight ==="
-          timeout 30 php ../../importer/import.php preflight "${BASE}?directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+          timeout 30 php ../../importer/import.php preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
 
           echo "=== Importer files-sync ==="
-          timeout 30 php ../../importer/import.php files-sync "${BASE}?directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+          timeout 30 php ../../importer/import.php files-sync "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
 
       - name: Run E2E tests
         working-directory: tests/e2e

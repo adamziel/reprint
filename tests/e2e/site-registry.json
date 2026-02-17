@@ -25,6 +25,7 @@
     "buffered":          { "port": 8098, "nginx": "buffered" },
     "error-chunks":      { "port": 8099 },
     "import-failures":   { "port": 8100 },
-    "follow-symlinks":   { "port": 8101 }
+    "follow-symlinks":   { "port": 8101 },
+    "sqlite":            { "port": 8102 }
   }
 }

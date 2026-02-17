@@ -3,8 +3,8 @@
  * Admin interface for Site Export plugin.
  *
  * This plugin provides a WordPress admin UI for configuring the export API.
- * The actual API endpoint (api.php) runs WITHOUT loading WordPress for
- * performance and stability - it reads the secret directly from secret.php.
+ * The export API is triggered via `?site-export-api` during plugin load,
+ * before WordPress finishes booting. It reads the secret from secret.php.
  *
  * Authentication uses HMAC signatures: the importing side generates a secret,
  * the user enters it here, and all requests must include a valid signature

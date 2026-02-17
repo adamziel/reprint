@@ -28,7 +28,7 @@ describe('Import: Basic File Sync', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('files-sync completes successfully', () => {

@@ -4,6 +4,7 @@ let
   # PHP with required extensions
   phpPackage = pkgs.php82.withExtensions ({ enabled, all }: enabled ++ [
     all.pdo_mysql
+    all.pdo_sqlite
     all.zlib
     all.curl
     all.mbstring
@@ -32,15 +33,15 @@ let
     name = "e2e-${name}";
     value = {
       listen = [{ addr = "127.0.0.1"; port = cfg.port; }];
-      root = "${siteRoot}/${name}/wp-content/plugins/site-export";
+      root = "${siteRoot}/${name}";
       locations = {
         "/" = {
-          tryFiles = "$uri $uri/ /api.php?$query_string";
+          tryFiles = "$uri $uri/ /index.php?$query_string";
         };
         "~ \\.php$" = {
           extraConfig = ''
             fastcgi_pass unix:${config.services.phpfpm.pools.e2e.socket};
-            fastcgi_index api.php;
+            fastcgi_index index.php;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             include ${pkgs.nginx}/conf/fastcgi_params;
             fastcgi_param SITE_EXPORT_TEST_MODE "1";
@@ -57,15 +58,15 @@ let
     name = "e2e-${name}";
     value = {
       listen = [{ addr = "127.0.0.1"; port = cfg.port; }];
-      root = "${siteRoot}/${name}/wp-content/plugins/site-export";
+      root = "${siteRoot}/${name}";
       locations = {
         "/" = {
-          tryFiles = "$uri $uri/ /api.php?$query_string";
+          tryFiles = "$uri $uri/ /index.php?$query_string";
         };
         "~ \\.php$" = {
           extraConfig = ''
             fastcgi_pass unix:${config.services.phpfpm.pools.e2e.socket};
-            fastcgi_index api.php;
+            fastcgi_index index.php;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             include ${pkgs.nginx}/conf/fastcgi_params;
             fastcgi_param SITE_EXPORT_TEST_MODE "1";

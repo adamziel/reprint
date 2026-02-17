@@ -27,7 +27,7 @@ describe('Import: Files Index', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('files-index produces .import-remote-index.jsonl', () => {

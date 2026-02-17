@@ -22,7 +22,7 @@ describe('Import: Protocol Version Mismatch', () => {
     const stateFileName = '.import-state.json';
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     function stateFilePath() {

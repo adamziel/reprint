@@ -36,7 +36,7 @@ describe('Import: SQL Sync', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('db-sync completes and produces db.sql', () => {
