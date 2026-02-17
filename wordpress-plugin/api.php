@@ -207,52 +207,6 @@ if (!isset($_GET['directory']) && !isset($_POST['directory']) && $wp_root !== nu
     $_GET['directory'] = $wp_root;
 }
 
-// When a db.php drop-in exists, load WordPress with SHORTINIT to bootstrap
-// the database layer. This is required for SQLite sites (where the drop-in
-// sets up $wpdb with the WP_SQLite_Driver), and harmless for other drop-ins
-// (HyperDB, Query Monitor) since SHORTINIT also defines DB_HOST and friends
-// from wp-config.php, making the regex parsing block below unnecessary.
-if ($wp_root !== null && !defined('DB_HOST')) {
-    $db_php_path = $wp_root . '/wp-content/db.php';
-    if (is_readable($db_php_path)) {
-        define('SHORTINIT', true);
-        define('WP_USE_THEMES', false);
-
-        // Temporarily relax error handling during WordPress bootstrap.
-        // SHORTINIT loads functions.php and other files that may trigger
-        // harmless warnings. Our strict error handler would catch them.
-        set_error_handler(function () { return false; });
-        require_once $wp_root . '/wp-load.php';
-        restore_error_handler();
-
-        // Check if the drop-in activated a SQLite backend by inspecting
-        // $wpdb->dbh — the same check used by is_sqlite_site() in export.php.
-        $is_sqlite = isset($GLOBALS['wpdb']->dbh)
-            && $GLOBALS['wpdb']->dbh instanceof WP_SQLite_Driver;
-
-        if ($is_sqlite) {
-            // SHORTINIT stops before wp_plugin_directory_constants() runs,
-            // leaving WP_CONTENT_URL and friends undefined. WordPress
-            // functions loaded during SHORTINIT (e.g., in functions.php) may
-            // reference these constants later during export. On PHP 7.4,
-            // undefined constants become strings with a warning; on PHP 8.0+
-            // it's a fatal error. Define safe defaults to prevent both.
-            if (!defined('WP_CONTENT_URL')) {
-                define('WP_CONTENT_URL', '');
-            }
-            if (!defined('WP_CONTENT_DIR')) {
-                define('WP_CONTENT_DIR', $wp_root . '/wp-content');
-            }
-            if (!defined('WP_PLUGIN_DIR')) {
-                define('WP_PLUGIN_DIR', $wp_root . '/wp-content/plugins');
-            }
-            if (!defined('WP_PLUGIN_URL')) {
-                define('WP_PLUGIN_URL', '');
-            }
-        }
-    }
-}
-
 // When running standalone (not inside WordPress), load DB credentials from
 // wp-config.php so that resolve_db_credentials() can find them as constants.
 // We parse the file as text rather than including it, since the full config

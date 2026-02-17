@@ -267,7 +267,7 @@ function is_sqlite_site(): bool
     global $wpdb;
     return isset($wpdb)
         && class_exists('WP_SQLite_Driver', false)
-        && $wpdb->dbh instanceof WP_SQLite_Driver;
+        && $wpdb instanceof \WP_SQLite_Driver;
 }
 
 /**
