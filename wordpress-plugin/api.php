@@ -206,11 +206,34 @@ if (!isset($_GET['directory']) && !isset($_POST['directory']) && $wp_root !== nu
 
 // When running standalone (not inside WordPress), load DB credentials from
 // wp-config.php so that resolve_db_credentials() can find them as constants.
-// We parse the file as text rather than including it, since the full config
-// loads wp-settings.php which bootstraps all of WordPress.
+//
+// For MySQL sites we parse wp-config.php as text to avoid bootstrapping all
+// of WordPress. For SQLite sites we MUST bootstrap WordPress, because the
+// WP_SQLite_Driver (the PDO-compatible adapter we use for export) is
+// initialized by the sqlite-database-integration plugin's db.php drop-in
+// during WordPress startup. Without it, there's no database connection to
+// export from.
 if ($wp_root !== null && !defined('DB_HOST')) {
     $wp_config_path = $wp_root . '/wp-config.php';
-    if (is_readable($wp_config_path)) {
+    $is_sqlite = false;
+
+    // Detect SQLite: the sqlite-database-integration plugin installs a
+    // wp-content/db.php drop-in that defines SQLITE_DB_DROPIN_VERSION.
+    // If that file exists and mentions SQLite, the site runs on SQLite.
+    $db_dropin = $wp_root . '/wp-content/db.php';
+    if (file_exists($db_dropin)) {
+        $dropin_contents = @file_get_contents($db_dropin);
+        if ($dropin_contents !== false && stripos($dropin_contents, 'SQLITE_DB_DROPIN_VERSION') !== false) {
+            $is_sqlite = true;
+        }
+    }
+
+    if ($is_sqlite) {
+        // Bootstrap WordPress so the db.php drop-in loads the SQLite
+        // driver and sets up $wpdb->dbh as a WP_SQLite_Driver instance.
+        define('ABSPATH', $wp_root . '/');
+        require_once $wp_config_path;
+    } elseif (is_readable($wp_config_path)) {
         $config_contents = @file_get_contents($wp_config_path);
         if ($config_contents !== false) {
             // Extract define('CONSTANT', 'value') patterns

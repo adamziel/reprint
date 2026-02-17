@@ -44,7 +44,7 @@ class SqliteDriverPDO
      */
     public function prepare(string $sql): SqliteDriverPDOStatement
     {
-        return new SqliteDriverPDOStatement($this->driver, $sql);
+        return new SqliteDriverPDOStatement($this->driver, $this->raw_pdo, $sql);
     }
 
     /**
@@ -52,7 +52,7 @@ class SqliteDriverPDO
      */
     public function query(string $sql): SqliteDriverPDOStatement
     {
-        $stmt = new SqliteDriverPDOStatement($this->driver, $sql);
+        $stmt = new SqliteDriverPDOStatement($this->driver, $this->raw_pdo, $sql);
         $stmt->execute();
         return $stmt;
     }
@@ -78,6 +78,9 @@ class SqliteDriverPDOStatement
     /** @var WP_SQLite_Driver */
     private $driver;
 
+    /** @var PDO The raw SQLite PDO for quote() delegation. */
+    private $raw_pdo;
+
     /** @var string */
     private $sql;
 
@@ -90,9 +93,10 @@ class SqliteDriverPDOStatement
     /** @var array|null Parameters bound via bindValue(). */
     private $bound_params = null;
 
-    public function __construct(WP_SQLite_Driver $driver, string $sql)
+    public function __construct(WP_SQLite_Driver $driver, PDO $raw_pdo, string $sql)
     {
         $this->driver = $driver;
+        $this->raw_pdo = $raw_pdo;
         $this->sql = $sql;
     }
 
