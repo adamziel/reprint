@@ -163,7 +163,7 @@ describe('Import: SQLite Export', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('preflight reports SQLite engine', async () => {

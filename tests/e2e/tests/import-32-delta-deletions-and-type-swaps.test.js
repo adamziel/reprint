@@ -40,7 +40,7 @@ describe('Import: Delta deletions and type swaps', () => {
     const writeText = (path, content) => `printf %b ${sh(content)} > ${sh(path)}`;
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     function localScenarioRoot() {

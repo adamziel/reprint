@@ -53,7 +53,7 @@ describe('Import: Request Cutoff', () => {
     });
 
     it('first importer run fails due to cutoff', () => {
-        const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const result = runImporter(url, tempDir, 'files-sync', {
             secret: getSiteSecret(site),
             extraArgs: ['--max-exec=10'],
@@ -72,7 +72,7 @@ describe('Import: Request Cutoff', () => {
         // Remove the crashing hook so subsequent requests succeed
         removeTestHooks(site);
 
-        const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         // Run the importer again — it should resume from saved state
         const result = runImporter(url, tempDir, 'files-sync', {
             secret: getSiteSecret(site),

@@ -48,7 +48,7 @@ describe('Import: Error Chunks', () => {
         });
 
         it('file sync completes despite unreadable file', () => {
-            const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
             });
@@ -112,7 +112,7 @@ describe('Import: Error Chunks', () => {
         });
 
         it('file sync completes despite changed file', () => {
-            const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 timeout: 120000,
@@ -182,7 +182,7 @@ describe('Import: Error Chunks', () => {
         });
 
         it('file sync completes despite missing file', () => {
-            const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 timeout: 120000,

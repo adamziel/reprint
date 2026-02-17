@@ -38,7 +38,7 @@ describe('Import: Delta Sync with Deletions', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('initial sync includes the extra files', () => {

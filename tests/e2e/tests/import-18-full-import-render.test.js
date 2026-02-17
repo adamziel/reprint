@@ -46,7 +46,7 @@ describe('Import: Full Round-Trip', () => {
     });
 
     it('files-sync completes', () => {
-        const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const result = runImporter(url, tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });
@@ -58,7 +58,7 @@ describe('Import: Full Round-Trip', () => {
     });
 
     it('db-sync completes', () => {
-        const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const result = runImporter(url, tempDir, 'db-sync', {
             secret: getSiteSecret(site),
         });

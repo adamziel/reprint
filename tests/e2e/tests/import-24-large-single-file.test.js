@@ -38,7 +38,7 @@ describe('Import: Large Single File', { timeout: 180000 }, () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('files-sync completes', () => {

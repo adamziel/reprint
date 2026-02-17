@@ -13,11 +13,7 @@ When a request arrives at `https://example.com/?site-export-api`, the plugin:
 1. Detects `$_GET['site-export-api']` during plugin file load
 2. Reverts WordPress error display settings (`display_errors`, `html_errors`) that `wp_debug_mode()` may have turned on
 3. Clears any output buffering WordPress started
-4. Hands off to `api.php`, which sets up its own error handlers, HMAC auth, and runs the export endpoint
+4. Sets up error handlers, HMAC auth, and runs the export endpoint
 5. Calls `exit` — WordPress never finishes booting
 
 This gives us a clean execution environment while using WordPress's front controller as the entry point.
-
-### Direct access (TODO)
-
-On hosts that allow direct PHP execution in `wp-content/plugins/`, `api.php` can be called directly for lower latency (bypasses WordPress entirely). The `?site-export-api` route is the universal fallback that works everywhere.

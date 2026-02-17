@@ -17,6 +17,12 @@ define('SITE_EXPORT_VERSION', '1.0.0');
 define('SITE_EXPORT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
 
+/**
+ * Maximum age of a request timestamp in seconds.
+ * Requests older than this are rejected to prevent replay attacks.
+ */
+define('SITE_EXPORT_TIMESTAMP_TOLERANCE', 300);
+
 // Intercept export API requests as early as possible.
 // WordPress loads plugin files before firing `plugins_loaded`,
 // so this runs before almost anything else in the WordPress stack.
@@ -245,12 +251,6 @@ function _site_export_get_header(string $name): ?string {
 
     return null;
 }
-
-/**
- * Maximum age of a request timestamp in seconds.
- * Requests older than this are rejected to prevent replay attacks.
- */
-define('SITE_EXPORT_TIMESTAMP_TOLERANCE', 300);
 
 /**
  * Verify HMAC authentication.

@@ -41,7 +41,7 @@ describe('Import: Permission Errors', () => {
         });
 
         function importUrl() {
-            return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         }
 
         it('file sync completes', () => {
@@ -101,7 +101,7 @@ INSERT INTO wp_secret_table VALUES (1, 'top secret');
         });
 
         function importUrl() {
-            return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         }
 
         it('db-sync completes', () => {

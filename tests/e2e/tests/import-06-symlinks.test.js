@@ -41,7 +41,7 @@ describe('Import: Symlinks', () => {
         });
 
         function importUrl() {
-            return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         }
 
         it('file sync completes', () => {
@@ -93,7 +93,7 @@ describe('Import: Symlinks', () => {
         });
 
         function importUrl() {
-            return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         }
 
         it('file sync completes within timeout (no infinite loop)', () => {

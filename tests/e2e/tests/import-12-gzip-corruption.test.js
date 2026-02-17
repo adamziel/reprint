@@ -38,7 +38,7 @@ describe('Import: Gzip Corruption', () => {
     it('db-sync detects gzip corruption and fails gracefully', () => {
         const tempDir = createTempDir('e2e-import-gzip-sql');
         try {
-            const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'db-sync', {
                 secret: getSiteSecret(site),
                 timeout: 30000,
@@ -68,7 +68,7 @@ describe('Import: Gzip Corruption', () => {
     it('file sync detects gzip corruption and fails gracefully', () => {
         const tempDir = createTempDir('e2e-import-gzip-files');
         try {
-            const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+            const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 timeout: 30000,

@@ -25,7 +25,7 @@ describe('Import: Error Messages', () => {
 
     it('wrong HMAC secret produces auth error', () => {
         const site = 'hmac-errors';
-        const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const dir = createTempDir('e2e-import-wrong-hmac');
         try {
             const result = runImporter(url, dir, 'files-sync', {
@@ -63,7 +63,7 @@ describe('Import: Error Messages', () => {
 
     it('invalid command produces error', () => {
         const site = 'basic';
-        const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const dir = createTempDir('e2e-import-bad-cmd');
         try {
             const result = runImporter(url, dir, 'not-a-real-command', {
@@ -82,7 +82,7 @@ describe('Import: Error Messages', () => {
 
     it('files-sync without preflight fails with useful error', () => {
         const site = 'basic';
-        const url = `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const dir = createTempDir('e2e-import-delta-no-initial');
         try {
             const result = runImporter(url, dir, 'files-sync', {

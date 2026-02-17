@@ -35,7 +35,7 @@ describe('Import: Resume SQL', { timeout: 120000 }, () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('db-sync completes via multiple resumable requests', () => {
