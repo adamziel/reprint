@@ -137,7 +137,7 @@ class SqliteDriverPDOStatement
                 if (!array_key_exists($i, $params)) {
                     continue;
                 }
-                $quoted = $this->quote_value($params[$i]);
+                $quoted = $this->raw_pdo->quote($params[$i]);
                 $sql = substr_replace($sql, $quoted, $positions[$i], 1);
             }
 
@@ -146,7 +146,7 @@ class SqliteDriverPDOStatement
                 if (!is_string($key)) {
                     continue;
                 }
-                $sql = str_replace($key, $this->quote_value($value), $sql);
+                $sql = str_replace($key, $this->raw_pdo->quote($value), $sql);
             }
         }
 
@@ -228,34 +228,4 @@ class SqliteDriverPDOStatement
         return true;
     }
 
-    /**
-     * Quotes a value for inline SQL substitution.
-     *
-     * String escaping follows MySQL conventions used by the sqlite-database-
-     * integration plugin's quote_mysql_utf8_string_literal(): single quotes,
-     * backslashes, NUL bytes, newlines, and carriage returns are all escaped.
-     * Uses strtr() rather than str_replace() to avoid chained replacements
-     * (str_replace applies replacements sequentially, so escaping '\' first
-     * would cause the next pass to double-escape the result).
-     *
-     * @param mixed $value
-     * @return string
-     */
-    private function quote_value($value): string
-    {
-        if ($value === null) {
-            return 'NULL';
-        }
-        if (is_int($value) || is_float($value)) {
-            return (string) $value;
-        }
-        $backslash = chr(92);
-        return "'" . strtr((string) $value, [
-            "'"        => "''",
-            $backslash => $backslash . $backslash,
-            chr(0)     => $backslash . '0',
-            chr(10)    => $backslash . 'n',
-            chr(13)    => $backslash . 'r',
-        ]) . "'";
-    }
 }
