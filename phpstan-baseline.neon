@@ -48,11 +48,6 @@ parameters:
 		-
 			message: "#^Class WP_SQLite_Driver not found\\.$#"
 			count: 1
-			path: wordpress-plugin/api.php
-
-		-
-			message: "#^Class WP_SQLite_Driver not found\\.$#"
-			count: 1
 			path: wordpress-plugin/generic/export.php
 
 		-
