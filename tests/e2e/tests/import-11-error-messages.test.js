@@ -43,7 +43,7 @@ describe('Import: Error Messages', () => {
     });
 
     it('unreachable server produces connection error', () => {
-        const url = 'http://127.0.0.1:19999/api.php?directory=/tmp';
+        const url = 'http://127.0.0.1:19999/?site-export-api&directory=/tmp';
         const dir = createTempDir('e2e-import-unreachable');
         try {
             const result = runImporter(url, dir, 'files-sync', {

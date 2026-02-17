@@ -158,6 +158,19 @@ function wpCoreInstall(siteDir, siteUrl, siteName) {
 }
 
 /**
+ * Activate a WordPress plugin via WP-CLI.
+ */
+function wpPluginActivate(siteDir, pluginSlug) {
+    const allowRoot = process.getuid?.() === 0 ? ' --allow-root' : '';
+    execSync(
+        `php ${WP_CLI_PATH} plugin activate ${pluginSlug}` +
+        ` --path=${JSON.stringify(siteDir)}` +
+        allowRoot,
+        { timeout: 30000, stdio: 'pipe' }
+    );
+}
+
+/**
  * Create standard sample test files using Node fs APIs.
  */
 export function createSampleFiles(siteDir) {
@@ -255,14 +268,25 @@ export async function ensureSite(name, options = {}) {
 
     // Copy plugin source files
     safeCopyFile(
-        join(PLUGIN_SRC, 'api.php'),
-        join(siteDir, 'wp-content', 'plugins', 'site-export', 'api.php')
+        join(PLUGIN_SRC, 'index.php'),
+        join(siteDir, 'wp-content', 'plugins', 'site-export', 'index.php')
     );
     for (const f of readdirSync(join(PLUGIN_SRC, 'generic')).filter(f => f.endsWith('.php'))) {
         safeCopyFile(
             join(PLUGIN_SRC, 'generic', f),
             join(siteDir, 'wp-content', 'plugins', 'site-export', 'generic', f)
         );
+    }
+    // Copy wordpress/ subdirectory (admin settings page)
+    const wpSubdir = join(PLUGIN_SRC, 'wordpress');
+    if (existsSync(wpSubdir)) {
+        mkdirSync(join(siteDir, 'wp-content', 'plugins', 'site-export', 'wordpress'), { recursive: true });
+        for (const f of readdirSync(wpSubdir).filter(f => f.endsWith('.php'))) {
+            safeCopyFile(
+                join(wpSubdir, f),
+                join(siteDir, 'wp-content', 'plugins', 'site-export', 'wordpress', f)
+            );
+        }
     }
     log('Files copied');
 
@@ -282,6 +306,9 @@ export async function ensureSite(name, options = {}) {
         wpCoreInstall(siteDir, siteUrl, name);
         log('wp core install done');
 
+        // Activate the site-export plugin so WordPress loads index.php on requests.
+        wpPluginActivate(siteDir, 'site-export');
+
         // Run customDb hook to add extra tables on top of real WP
         if (options.customDb) {
             log('Running customDb hook...');
@@ -296,16 +323,13 @@ export async function ensureSite(name, options = {}) {
         }
     }
 
-    // Rewrite wp-config.php: minimal version for the export plugin
-    // (the full config was only needed for wp core install above)
+    // Rewrite wp-config.php with custom credentials if requested.
     if (options.wpConfig) {
         const wpDbUser = options.wpConfig.DB_USER || DB_USER;
         const wpDbPass = options.wpConfig.DB_PASSWORD || DB_PASS;
         const wpDbName = options.wpConfig.DB_NAME || dbName;
         const wpDbHost = options.wpConfig.DB_HOST || DB_HOST;
-        writeMinimalWpConfig(siteDir, wpDbHost, wpDbName, wpDbUser, wpDbPass);
-    } else {
-        writeMinimalWpConfig(siteDir, DB_HOST, dbName, DB_USER, DB_PASS);
+        writeFullWpConfig(siteDir, wpDbHost, wpDbName, wpDbUser, wpDbPass);
     }
 
     // Create sample files (pure Node fs)

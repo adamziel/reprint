@@ -37,7 +37,7 @@ describe('Import: Delta type swaps cache invalidation', () => {
     };
 
     async function startApiServer() {
-        const docRoot = join(getSiteDir(site), 'wp-content', 'plugins', 'site-export');
+        const docRoot = getSiteDir(site);
         apiServer = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', docRoot], {
             stdio: 'ignore',
         });
@@ -48,7 +48,7 @@ describe('Import: Delta type swaps cache invalidation', () => {
                 throw new Error(`Built-in API server exited early with code ${apiServer.exitCode}`);
             }
             try {
-                const res = await fetch(`http://127.0.0.1:${port}/api.php`, { method: 'GET' });
+                const res = await fetch(`http://127.0.0.1:${port}/`, { method: 'GET' });
                 if (res.status >= 200) {
                     return;
                 }
@@ -68,7 +68,7 @@ describe('Import: Delta type swaps cache invalidation', () => {
     }
 
     function importUrl() {
-        return `http://127.0.0.1:${port}/api.php?directory=${getSiteDir(site)}`;
+        return `http://127.0.0.1:${port}/?site-export-api&directory=${getSiteDir(site)}`;
     }
 
     function setupInitialRemoteLayout() {

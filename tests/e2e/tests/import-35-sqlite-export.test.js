@@ -136,6 +136,14 @@ describe('Import: SQLite Export', () => {
                     allowRoot,
                     { timeout: 60000, stdio: 'pipe' },
                 );
+
+                // Activate the site-export plugin.
+                execSync(
+                    `php /tmp/wp-cli.phar plugin activate site-export` +
+                    ` --path=${JSON.stringify(siteDir)}` +
+                    allowRoot,
+                    { timeout: 30000, stdio: 'pipe' },
+                );
             },
         });
 

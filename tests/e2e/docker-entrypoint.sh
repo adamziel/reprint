@@ -85,16 +85,18 @@ NGINXCONF
 
 rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 
-# Standard sites
+# Standard sites — serve from WordPress root so that index.php
+# bootstraps WordPress and the site-export plugin handles the request.
 jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port; do
     cat > "/etc/nginx/conf.d/e2e-${site}.conf" <<VHOST
 server {
     listen 127.0.0.1:${port};
-    root ${SITE_ROOT}/${site}/wp-content/plugins/site-export;
-    location / { try_files \$uri \$uri/ /api.php?\$query_string; }
+    root ${SITE_ROOT}/${site};
+    index index.php;
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location ~ \\.php\$ {
         fastcgi_pass unix:${FPM_SOCKET};
-        fastcgi_index api.php;
+        fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
         fastcgi_param SITE_EXPORT_TEST_MODE "1";
@@ -120,11 +122,12 @@ jq -r '.sites | to_entries[] | select(.value.nginx == "buffered") | "\(.key) \(.
     cat > "/etc/nginx/conf.d/e2e-${site}.conf" <<VHOST
 server {
     listen 127.0.0.1:${port};
-    root ${SITE_ROOT}/${site}/wp-content/plugins/site-export;
-    location / { try_files \$uri \$uri/ /api.php?\$query_string; }
+    root ${SITE_ROOT}/${site};
+    index index.php;
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location ~ \\.php\$ {
         fastcgi_pass unix:${FPM_SOCKET};
-        fastcgi_index api.php;
+        fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
         fastcgi_param SITE_EXPORT_TEST_MODE "1";

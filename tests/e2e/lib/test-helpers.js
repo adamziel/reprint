@@ -27,7 +27,7 @@ const DB_PASS = REGISTRY.dbPass;
 export function getSiteUrl(siteName, port = null) {
     const p = port || REGISTRY.sites[siteName]?.port;
     if (!p) throw new Error(`Unknown site: ${siteName}`);
-    return `http://127.0.0.1:${p}/api.php`;
+    return `http://127.0.0.1:${p}/?site-export-api`;
 }
 
 /**

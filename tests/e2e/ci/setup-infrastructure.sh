@@ -123,15 +123,16 @@ jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard"
     cat <<VHOST | sudo tee "/etc/nginx/conf.d/e2e-${site}.conf" >/dev/null
 server {
     listen 127.0.0.1:${port};
-    root ${SITE_ROOT}/${site}/wp-content/plugins/site-export;
+    root ${SITE_ROOT}/${site};
+    index index.php;
 
     location / {
-        try_files \$uri \$uri/ /api.php?\$query_string;
+        try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
     location ~ \\.php\$ {
         fastcgi_pass unix:${FPM_SOCKET};
-        fastcgi_index api.php;
+        fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
         fastcgi_param SITE_EXPORT_TEST_MODE "1";
@@ -155,19 +156,20 @@ VHOST
 done
 
 # Buffered sites
-jq -r '.sites | to_entries[] | select(.value.nginx == "buffered") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port; do
+jq -r '.sites | to_entries[] | select(.value.nginx == "buffered") | "\(.key) \(.value.port)"' "$REGISTRY" | while read site port target; do
     cat <<VHOST | sudo tee "/etc/nginx/conf.d/e2e-${site}.conf" >/dev/null
 server {
     listen 127.0.0.1:${port};
-    root ${SITE_ROOT}/${site}/wp-content/plugins/site-export;
+    root ${SITE_ROOT}/${site};
+    index index.php;
 
     location / {
-        try_files \$uri \$uri/ /api.php?\$query_string;
+        try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
     location ~ \\.php\$ {
         fastcgi_pass unix:${FPM_SOCKET};
-        fastcgi_index api.php;
+        fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
         fastcgi_param SITE_EXPORT_TEST_MODE "1";
