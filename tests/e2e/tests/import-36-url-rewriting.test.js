@@ -23,7 +23,7 @@ describe('Import: URL Rewriting', () => {
     const importDb = 'e2e_url_rewriting_import_36';
     let tempDir;
     // Must match what wp core install sets (http://127.0.0.1:PORT)
-    const SOURCE_DOMAIN = 'http://127.0.0.1:8102';
+    const SOURCE_DOMAIN = 'http://127.0.0.1:8104';
     const TARGET_DOMAIN = 'https://target.example.com';
 
     beforeAll(async () => {
@@ -84,7 +84,7 @@ describe('Import: URL Rewriting', () => {
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}?directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     it('db-sync completes and produces db.sql', () => {
@@ -106,8 +106,8 @@ describe('Import: URL Rewriting', () => {
         assert.ok(Array.isArray(domains), 'Expected domains to be an array');
         assert.ok(domains.length > 0, 'Expected at least one domain');
         assert.ok(
-            domains.some(d => d.includes('127.0.0.1:8102')),
-            `Expected to find 127.0.0.1:8102 in domains, got: ${JSON.stringify(domains)}`
+            domains.some(d => d.includes('127.0.0.1:8104')),
+            `Expected to find 127.0.0.1:8104 in domains, got: ${JSON.stringify(domains)}`
         );
     });
 
@@ -153,7 +153,7 @@ describe('Import: URL Rewriting', () => {
             `Expected home to contain target domain, got: ${home.option_value}`
         );
         assert.ok(
-            !siteurl.option_value.includes('127.0.0.1:8102'),
+            !siteurl.option_value.includes('127.0.0.1:8104'),
             `Expected siteurl to NOT contain source domain, got: ${siteurl.option_value}`
         );
     });
@@ -175,7 +175,7 @@ describe('Import: URL Rewriting', () => {
             `Expected rewritten img src, got: ${row.option_value}`
         );
         assert.ok(
-            !row.option_value.includes('127.0.0.1:8102'),
+            !row.option_value.includes('127.0.0.1:8104'),
             `Expected no source domain in HTML, got: ${row.option_value}`
         );
     });
@@ -190,7 +190,7 @@ describe('Import: URL Rewriting', () => {
         assert.ok(row, 'Expected serialized_option row');
         // Serialized PHP should still contain the source domain
         assert.ok(
-            row.option_value.includes('127.0.0.1:8102'),
+            row.option_value.includes('127.0.0.1:8104'),
             `Expected serialized PHP to still contain source domain (unchanged), got: ${row.option_value}`
         );
         // Verify it still starts with serialized PHP format
@@ -213,7 +213,7 @@ describe('Import: URL Rewriting', () => {
             `Expected block markup to contain target domain, got: ${row.post_content}`
         );
         assert.ok(
-            !row.post_content.includes('127.0.0.1:8102'),
+            !row.post_content.includes('127.0.0.1:8104'),
             `Expected block markup to NOT contain source domain, got: ${row.post_content}`
         );
     });
