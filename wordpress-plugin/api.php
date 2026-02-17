@@ -3,10 +3,7 @@
  * Standalone Site Export API endpoint.
  *
  * This file handles export requests without loading WordPress. It performs
- * HMAC authentication and delegates to the export library. For MySQL sites,
- * DB credentials are parsed from wp-config.php as text. For SQLite sites,
- * WordPress is loaded with SHORTINIT to bootstrap the database layer (the
- * sqlite-database-integration plugin's db.php drop-in sets up $wpdb).
+ * HMAC authentication and delegates to the export library.
  */
 
 // Buffer output so stray warnings don't corrupt the JSON response
