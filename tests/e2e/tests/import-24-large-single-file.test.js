@@ -17,7 +17,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Large Single File', { timeout: 180000 }, () => {
-    const site = 'import-failures';
+    const site = 'large-single-file';
     let tempDir;
     const largeName = 'test-data/large-12mb.bin';
 

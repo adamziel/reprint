@@ -26,6 +26,7 @@
     "error-chunks":      { "port": 8099 },
     "import-failures":   { "port": 8100 },
     "follow-symlinks":   { "port": 8101 },
-    "sqlite":            { "port": 8102 }
+    "sqlite":            { "port": 8102 },
+    "large-single-file": { "port": 8103 }
   }
 }

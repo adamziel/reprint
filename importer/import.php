@@ -2768,6 +2768,26 @@ class ImportClient
         $context->file_path = null;
         $context->file_ctime = null;
 
+        // Resume recovery: if a file was partially downloaded in a previous
+        // request, re-open it in append mode so continuation chunks (where
+        // is_first=false) can still be written.  Without this, the context
+        // starts with file_handle=null and non-first chunks are silently dropped.
+        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+            $context->file_handle = fopen($tracked_file, "ab");
+            if ($context->file_handle) {
+                $context->file_path = $tracked_file;
+                $context->file_bytes_written = $tracked_bytes;
+                $this->audit_log(
+                    sprintf(
+                        "RESUME FILE | Re-opened %s at %d bytes for continued download",
+                        $tracked_file,
+                        $tracked_bytes,
+                    ),
+                    true,
+                );
+            }
+        }
+
         $context->on_chunk = function ($chunk) use (
             &$cursor,
             &$complete,
