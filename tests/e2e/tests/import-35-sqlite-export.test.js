@@ -161,9 +161,9 @@ describe('Import: SQLite Export', () => {
     it('preflight reports SQLite engine', async () => {
         const response = await apiRequest(site, 'preflight');
         assert.equal(response.status, 200, `Preflight failed: ${JSON.stringify(response.json || response.text)}`);
-        assert.equal(response.json.db.db_engine, 'sqlite');
-        assert.equal(response.json.db.connected, true);
-        assert.equal(response.json.db.can_query, true);
+        assert.equal(response.json.database.db_engine, 'sqlite');
+        assert.equal(response.json.database.connected, true);
+        assert.equal(response.json.database.can_query, true);
     });
 
     it('db-sync produces valid MySQL dump from SQLite source', () => {
@@ -192,10 +192,18 @@ describe('Import: SQLite Export', () => {
         await adminConn.query(`CREATE DATABASE \`${importDb}\``);
         await adminConn.end();
 
-        // Import the SQL dump into MySQL
+        // The SQLite driver's SHOW CREATE TABLE uses MySQL 8.0 collation
+        // names (utf8mb4_0900_ai_ci) which MariaDB doesn't support.
+        // Replace with utf8mb4_unicode_ci for the import test.
         const sqlFile = join(tempDir, 'db.sql');
+        const sql = readFileSync(sqlFile, 'utf-8');
+        const fixedSql = sql.replace(/utf8mb4_0900_ai_ci/g, 'utf8mb4_unicode_ci');
+        const fixedSqlFile = join(tempDir, 'db-fixed.sql');
+        writeFileSync(fixedSqlFile, fixedSql);
+
+        // Import the collation-adjusted dump into MariaDB
         execSync(
-            `mysql -u e2e_admin -pe2e_password -h 127.0.0.1 ${importDb} < ${JSON.stringify(sqlFile)}`,
+            `mysql -u e2e_admin -pe2e_password -h 127.0.0.1 ${importDb} < ${JSON.stringify(fixedSqlFile)}`,
             { timeout: 30000, stdio: 'pipe' },
         );
 
