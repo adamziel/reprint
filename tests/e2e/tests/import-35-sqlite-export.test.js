@@ -192,16 +192,23 @@ describe('Import: SQLite Export', () => {
         await adminConn.query(`CREATE DATABASE \`${importDb}\``);
         await adminConn.end();
 
-        // The SQLite driver's SHOW CREATE TABLE uses MySQL 8.0 collation
-        // names (utf8mb4_0900_ai_ci) which MariaDB doesn't support.
-        // Replace with utf8mb4_unicode_ci for the import test.
+        // Two compatibility adjustments for importing SQLite-exported SQL
+        // into MariaDB:
+        // 1. The SQLite driver's SHOW CREATE TABLE uses MySQL 8.0 collation
+        //    names (utf8mb4_0900_ai_ci) which MariaDB doesn't support.
+        // 2. SQLite doesn't enforce NOT NULL constraints, so columns like
+        //    comment_author_IP may contain NULL in the dump. Remove NOT NULL
+        //    from CREATE TABLE statements so MariaDB accepts the NULLs.
+        //    (AUTO_INCREMENT columns stay implicitly NOT NULL regardless.)
         const sqlFile = join(tempDir, 'db.sql');
         const sql = readFileSync(sqlFile, 'utf-8');
-        const fixedSql = sql.replace(/utf8mb4_0900_ai_ci/g, 'utf8mb4_unicode_ci');
+        const fixedSql = sql
+            .replace(/utf8mb4_0900_ai_ci/g, 'utf8mb4_unicode_ci')
+            .replace(/ NOT NULL/g, '');
         const fixedSqlFile = join(tempDir, 'db-fixed.sql');
         writeFileSync(fixedSqlFile, fixedSql);
 
-        // Import the collation-adjusted dump into MariaDB
+        // Import the adjusted dump into MariaDB
         execSync(
             `mysql -u e2e_admin -pe2e_password -h 127.0.0.1 ${importDb} < ${JSON.stringify(fixedSqlFile)}`,
             { timeout: 30000, stdio: 'pipe' },

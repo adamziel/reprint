@@ -231,6 +231,13 @@ class SqliteDriverPDOStatement
     /**
      * Quotes a value for inline SQL substitution.
      *
+     * String escaping follows MySQL conventions used by the sqlite-database-
+     * integration plugin's quote_mysql_utf8_string_literal(): single quotes,
+     * backslashes, NUL bytes, newlines, and carriage returns are all escaped.
+     * Uses strtr() rather than str_replace() to avoid chained replacements
+     * (str_replace applies replacements sequentially, so escaping '\' first
+     * would cause the next pass to double-escape the result).
+     *
      * @param mixed $value
      * @return string
      */
@@ -242,6 +249,13 @@ class SqliteDriverPDOStatement
         if (is_int($value) || is_float($value)) {
             return (string) $value;
         }
-        return "'" . str_replace("'", "''", (string) $value) . "'";
+        $backslash = chr(92);
+        return "'" . strtr((string) $value, [
+            "'"        => "''",
+            $backslash => $backslash . $backslash,
+            chr(0)     => $backslash . '0',
+            chr(10)    => $backslash . 'n',
+            chr(13)    => $backslash . 'r',
+        ]) . "'";
     }
 }
