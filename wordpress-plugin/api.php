@@ -204,10 +204,9 @@ if (!isset($_GET['directory']) && !isset($_POST['directory']) && $wp_root !== nu
     $_GET['directory'] = $wp_root;
 }
 
-// When running standalone (not inside WordPress), bootstrap WordPress so
-// that DB credentials, $table_prefix, and the database layer are all
-// available. For SQLite sites this also loads the db.php drop-in which
-// initializes the WP_SQLite_Driver that our export code wraps.
+// Bootstrap WordPress so that DB credentials, $table_prefix, and the
+// database layer are all available. For SQLite sites this also loads the
+// db.php drop-in which initializes the WP_SQLite_Driver.
 if ($wp_root !== null && !defined('DB_HOST')) {
     $wp_config_path = $wp_root . '/wp-config.php';
     if (is_readable($wp_config_path)) {
