@@ -265,9 +265,8 @@ function resolve_db_credentials(): array
 function is_sqlite_site(): bool
 {
     global $wpdb;
-    return isset($wpdb)
-        && class_exists('WP_SQLite_Driver', false)
-        && $wpdb instanceof \WP_SQLite_Driver;
+    // @TODO: Actually check for the WP_SQLite_Driver class being used here.
+    return defined('SQLITE_DB_DROPIN_VERSION') && isset($GLOBALS['@pdo']);
 }
 
 /**
