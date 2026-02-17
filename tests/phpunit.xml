@@ -16,6 +16,9 @@
         <testsuite name="Import Tests">
             <directory>Import</directory>
         </testsuite>
+        <testsuite name="URL Rewriting Tests">
+            <directory>UrlRewriting</directory>
+        </testsuite>
         <testsuite name="Export Utility Tests">
             <file>BuildPdoDsnTest.php</file>
         </testsuite>
