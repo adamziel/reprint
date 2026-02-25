@@ -48,16 +48,17 @@ All commands below use the same base invocation. We'll use `$URL` and `$DIR` as 
 
 ```bash
 URL="https://example.com/?site-export-api"
-DIR="./local-directory-where-all-the-files-will-be-created"
+STATE_DIR="./local-directory-where-the-migration-state-will-be-tracked"
+DOCROOT="./local-directory-where-the-remote-site-files-will-be-recreated"
 SECRET="your-shared-secret"
 ```
 
 #### Step 1 — Preflight.
 
-First, wel'l makes sure the server is reachable and the environment is in a good shape:
+First, we'll make sure the server is reachable and the environment is in a good shape:
 
 ```bash
-php importer/import.php preflight "$URL" --state-dir="$DIR" --docroot="$DIR/docroot" --secret="$SECRET"
+php importer/import.php preflight "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
@@ -68,7 +69,7 @@ To run very basic diagnostics that confirms the remote server replied and it has
 sound-looking filesystem and a database connection, run:
 
 ```bash
-php importer/import.php preflight-assert "$URL" --state-dir="$DIR" --docroot="$DIR/docroot" --secret="$SECRET"
+php importer/import.php preflight-assert "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 For hosting platform-specific checks, such as database version compatibility or
@@ -81,7 +82,7 @@ This first builds a full index of the remote directory tree, then streams every 
 It can be interrupted and resumed at any time — just re-run the same command:
 
 ```bash
-php importer/import.php files-sync "$URL" --state-dir="$DIR" --docroot="$DIR/docroot" --secret="$SECRET"
+php importer/import.php files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -97,7 +98,7 @@ Which is to say, you'll need to wrap it in a loop that runs until failure or ful
 This streams a SQL dump into `db.sql`:
 
 ```bash
-php importer/import.php db-sync "$URL" --state-dir="$DIR" --docroot="$DIR/docroot" --secret="$SECRET"
+php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -114,7 +115,7 @@ First, we must abort the previous files-sync. Otherwise, it would just
 tell us it's completed and refuse to proceed:
 
 ```bash
-php importer/import.php files-sync "$URL" --state-dir="$DIR" --docroot="$DIR/docroot" --secret="$SECRET" --abort
+php importer/import.php files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" --abort
 ```
 
 From here, we can run the `files-sync` command again. It will index
@@ -122,7 +123,7 @@ the remote filesystem once again, compute which files have changed
 since the initial sync, and apply that delta in the local directory:
 
 ```bash
-php importer/import.php files-sync "$URL" --state-dir="$DIR" --docroot="$DIR/docroot" --secret="$SECRET"
+php importer/import.php files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
