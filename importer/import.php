@@ -796,8 +796,11 @@ class ImportClient
     /** @var string Export server URL. */
     private $remote_url;
 
-    /** @var string Local directory for all import artifacts (state files, filesystem-root/, db.sql, etc.). */
-    private $local_path;
+    /** @var string Directory for import state files (.import-state.json, db.sql, etc.). */
+    private $state_dir;
+
+    /** @var string Directory where downloaded site files are written (no filesystem-root/ wrapper). */
+    private $docroot;
 
     /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
@@ -926,21 +929,22 @@ class ImportClient
      */
     public $exit_code = 0;
 
-    public function __construct(string $remote_url, string $local_path)
+    public function __construct(string $remote_url, string $state_dir, string $docroot)
     {
         $this->remote_url = rtrim($remote_url, "?&");
-        $this->local_path = rtrim($local_path, "/");
-        $this->state_file = $this->local_path . "/.import-state.json";
-        $this->index_file = $this->local_path . "/.import-index.jsonl";
+        $this->state_dir = rtrim($state_dir, "/");
+        $this->docroot = rtrim($docroot, "/");
+        $this->state_file = $this->state_dir . "/.import-state.json";
+        $this->index_file = $this->state_dir . "/.import-index.jsonl";
         $this->index_updates_file =
-            $this->local_path . "/.import-index-updates.jsonl";
+            $this->state_dir . "/.import-index-updates.jsonl";
         $this->remote_index_file =
-            $this->local_path . "/.import-remote-index.jsonl";
+            $this->state_dir . "/.import-remote-index.jsonl";
         $this->download_list_file =
-            $this->local_path . "/.import-download-list.jsonl";
-        $this->audit_log = $this->local_path . "/.import-audit.log";
-        $this->volatile_files_file = $this->local_path . "/.import-volatile-files.json";
-        $this->status_file = $this->local_path . "/.import-status.json";
+            $this->state_dir . "/.import-download-list.jsonl";
+        $this->audit_log = $this->state_dir . "/.import-audit.log";
+        $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
+        $this->status_file = $this->state_dir . "/.import-status.json";
 
         // Detect TTY for progress display
         $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
@@ -956,14 +960,14 @@ class ImportClient
         }
 
         // Create directories
-        if (!is_dir($this->local_path)) {
-            if (!mkdir($this->local_path, 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->local_path}");
+        if (!is_dir($this->state_dir)) {
+            if (!mkdir($this->state_dir, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->state_dir}");
             }
         }
-        if (!is_dir($this->local_path . "/filesystem-root")) {
-            if (!mkdir($this->local_path . "/filesystem-root", 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->local_path}/filesystem-root");
+        if (!is_dir($this->docroot)) {
+            if (!mkdir($this->docroot, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->docroot}");
             }
         }
     }
@@ -1407,14 +1411,14 @@ class ImportClient
                 $this->reset_state();
                 $this->save_state($this->state);
 
-                $sql_file = $this->local_path . "/db.sql";
+                $sql_file = $this->state_dir . "/db.sql";
                 if (file_exists($sql_file)) {
                     unlink($sql_file);
                     $this->audit_log(
                         "FILE DELETE | {$sql_file} | abort db-sync",
                     );
                 }
-                $tables_file = $this->local_path . "/db-tables.jsonl";
+                $tables_file = $this->state_dir . "/db-tables.jsonl";
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
@@ -1431,7 +1435,7 @@ class ImportClient
                 $this->reset_state();
                 $this->save_state($this->state);
 
-                $tables_file = $this->local_path . "/db-tables.jsonl";
+                $tables_file = $this->state_dir . "/db-tables.jsonl";
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
@@ -1847,9 +1851,8 @@ class ImportClient
             return;
         }
 
-        $filesystem_root = $this->local_path . "/filesystem-root";
         $is_empty =
-            !is_dir($filesystem_root) || count(scandir($filesystem_root)) <= 2; // only . and ..
+            !is_dir($this->docroot) || count(scandir($this->docroot)) <= 2; // only . and ..
 
         // Resuming an in-progress sync
         if ($has_progress) {
@@ -2389,8 +2392,8 @@ class ImportClient
      *
      * Since the server indexes everything under realpath()-resolved paths,
      * the files are already downloaded to the target location (e.g.
-     * filesystem-root/wordpress/...).  We just need to create the symlink
-     * (e.g. filesystem-root/srv/wordpress -> /wordpress) so the directory
+     * docroot/wordpress/...).  We just need to create the symlink
+     * (e.g. docroot/srv/wordpress -> /wordpress) so the directory
      * layout matches the server.
      */
     private function recreate_intermediate_symlinks(): void
@@ -2534,7 +2537,7 @@ class ImportClient
     private function run_db_sync(): void
     {
         $state_command = $this->state["command"] ?? null;
-        $sql_file = $this->local_path . "/db.sql";
+        $sql_file = $this->state_dir . "/db.sql";
 
         $has_progress =
             $state_command === "db-sync" &&
@@ -2644,7 +2647,7 @@ class ImportClient
     private function run_db_index(): void
     {
         $state_command = $this->state["command"] ?? null;
-        $tables_file = $this->local_path . "/db-tables.jsonl";
+        $tables_file = $this->state_dir . "/db-tables.jsonl";
 
         $has_cursor =
             $state_command === "db-index" &&
@@ -3455,7 +3458,7 @@ class ImportClient
     }
 
     /**
-     * Delete a local file path safely under filesystem-root.
+     * Delete a local file path safely under the docroot.
      */
     private function delete_local_file_path(string $path): void
     {
@@ -3909,7 +3912,7 @@ class ImportClient
     {
         $cursor = $this->state["cursor"] ?? null;
         $complete = false;
-        $sql_file = $this->local_path . "/db.sql";
+        $sql_file = $this->state_dir . "/db.sql";
 
         // Crash recovery: if SQL file is larger than expected, truncate it.
         // This happens if we crashed after writing but before saving the new cursor.
@@ -4078,7 +4081,7 @@ class ImportClient
     {
         $cursor = $this->state["cursor"] ?? null;
         $complete = false;
-        $tables_file = $this->local_path . "/db-tables.jsonl";
+        $tables_file = $this->state_dir . "/db-tables.jsonl";
 
         $stats = $this->state["db_index"] ?? [];
         $tables_written = (int) ($stats["tables"] ?? 0);
@@ -4269,23 +4272,22 @@ class ImportClient
     }
 
     /**
-     * Return canonical filesystem-root path, creating it if it doesn't exist.
+     * Return canonical docroot path, creating it if it doesn't exist.
      */
     private function get_filesystem_root_path(): string
     {
-        $filesystem_root_base = $this->local_path . "/filesystem-root";
-        if (!is_dir($filesystem_root_base)) {
-            if (!mkdir($filesystem_root_base, 0755, true) && !is_dir($filesystem_root_base)) {
+        if (!is_dir($this->docroot)) {
+            if (!mkdir($this->docroot, 0755, true) && !is_dir($this->docroot)) {
                 throw new RuntimeException(
-                    "Failed to create filesystem-root directory: {$filesystem_root_base}",
+                    "Failed to create docroot directory: {$this->docroot}",
                 );
             }
         }
 
-        $real = realpath($filesystem_root_base);
+        $real = realpath($this->docroot);
         if ($real === false) {
             throw new RuntimeException(
-                "Failed to resolve filesystem-root path: {$filesystem_root_base}",
+                "Failed to resolve docroot path: {$this->docroot}",
             );
         }
 
@@ -4294,12 +4296,12 @@ class ImportClient
 
 
     /**
-     * Resolve a remote absolute path into a local path under filesystem-root.
+     * Resolve a remote absolute path into a local path under the docroot.
      *
      * Maps a remote absolute path (e.g. "/wp-content/uploads/photo.jpg") to a
-     * local path under the import directory's filesystem-root/. Performs symlink
-     * traversal security checks to prevent directory traversal attacks that could
-     * write files outside the import root.
+     * local path under the import docroot. Performs symlink traversal security
+     * checks to prevent directory traversal attacks that could write files
+     * outside the import root.
      */
     private function remote_path_to_local_path_within_import_root(
         string $path
@@ -4507,7 +4509,7 @@ class ImportClient
      */
     private function ensure_directory_path(string $dir): void
     {
-        // Security: Ensure path is under filesystem-root
+        // Security: Ensure path is under the docroot
         $real_filesystem_root = $this->get_filesystem_root_path();
 
         // Resolve the target path (or what it would be)
@@ -4527,7 +4529,7 @@ class ImportClient
                 !path_is_within_root($real_check, $real_filesystem_root)
             ) {
                 throw new RuntimeException(
-                    "Security: Refusing to create directory outside filesystem-root: {$dir}",
+                    "Security: Refusing to create directory outside docroot: {$dir}",
                 );
             }
         }
@@ -4541,7 +4543,7 @@ class ImportClient
             !str_starts_with($dir, $real_filesystem_root . "/")
         ) {
             throw new RuntimeException(
-                "Security: Refusing to create directory outside filesystem-root: {$dir}",
+                "Security: Refusing to create directory outside docroot: {$dir}",
             );
         }
 
@@ -4599,7 +4601,7 @@ class ImportClient
             $resolved = realpath($current);
             if ($resolved === false || !path_is_within_root($resolved, $real_filesystem_root)) {
                 throw new RuntimeException(
-                    "Security: Refusing to create directory outside filesystem-root: {$current}",
+                    "Security: Refusing to create directory outside docroot: {$current}",
                 );
             }
         }
@@ -4812,7 +4814,7 @@ class ImportClient
             true,
         );
         if ($path !== "" && $is_file_error) {
-            $local_path = $this->local_path . "/filesystem-root" . $path;
+            $local_path = $this->docroot . $path;
             if ($context->file_handle && $context->file_path === $local_path) {
                 fclose($context->file_handle);
                 $context->file_handle = null;
@@ -6293,7 +6295,7 @@ if (
         "files-sync" => [
             "short" => "Sync files (auto-detects initial vs delta)",
             "detail" =>
-                "Streams files from the remote server into <local-path>/filesystem-root/.\n" .
+                "Streams files from the remote server into the --docroot directory.\n" .
                 "Auto-detects whether to run an initial or delta sync based on state:\n" .
                 "\n" .
                 "  - No prior sync: downloads the full directory tree (initial)\n" .
@@ -6307,7 +6309,7 @@ if (
                 "  --verbose, -v      Show detailed request/response logs\n" .
                 "\n" .
                 "Output files:\n" .
-                "  filesystem-root/              Downloaded files\n" .
+                "  (docroot)/                    Downloaded files\n" .
                 "  .import-index.jsonl           Local file index\n" .
                 "  .import-remote-index.jsonl    Remote index snapshot\n" .
                 "  .import-download-list.jsonl   Files pending download\n" .
@@ -6328,7 +6330,7 @@ if (
         "db-sync" => [
             "short" => "Download the database as a SQL dump",
             "detail" =>
-                "Streams the full database dump into <local-path>/db.sql.\n" .
+                "Streams the full database dump into --state-dir/db.sql.\n" .
                 "Automatically resumes from the last cursor if interrupted.\n" .
                 "\n" .
                 "Options:\n" .
@@ -6344,7 +6346,7 @@ if (
             "short" => "Index database tables and their statistics",
             "detail" =>
                 "Streams table metadata (name, estimated rows, data size) into\n" .
-                "<local-path>/db-tables.jsonl. Useful for planning and diagnostics.\n" .
+                "--state-dir/db-tables.jsonl. Useful for planning and diagnostics.\n" .
                 "\n" .
                 "Options:\n" .
                 "  --abort        Clear state and output, then exit\n" .
@@ -6387,7 +6389,7 @@ if (
 
     // Show main help when invoked with no arguments or just --help
     if ($argc < 2 || (isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]))) {
-        echo "Usage: php import.php <command> <remote-url> <local-path> [options]\n";
+        echo "Usage: php import.php <command> <remote-url> --state-dir=DIR --docroot=DIR [options]\n";
         echo "\n";
         echo "Commands:\n";
         $max_len = max(array_map('strlen', array_keys($command_help)));
@@ -6396,6 +6398,10 @@ if (
         }
         echo "\n";
         echo "Run 'php import.php <command> --help' for command-specific help.\n";
+        echo "\n";
+        echo "Required options:\n";
+        echo "  --state-dir=DIR      Directory for import state files and SQL dumps\n";
+        echo "  --docroot=DIR        Directory where downloaded site files are written\n";
         echo "\n";
         echo "Global options:\n";
         echo "  --secret=TOKEN       HMAC shared secret for export API authentication\n";
@@ -6411,7 +6417,7 @@ if (
         echo "  2  Partial progress — run the same command again to continue\n";
         echo "  1  Error\n";
         echo "\n";
-        echo "State is stored in <local-path>/.import-state.json. Interrupted\n";
+        echo "State is stored in --state-dir/.import-state.json. Interrupted\n";
         echo "commands automatically resume. Use --abort to abort the current\n";
         echo "sync and exit — downloaded files are preserved.\n";
         exit(1);
@@ -6422,7 +6428,7 @@ if (
     // Per-command --help (can be requested before providing url/path)
     if (in_array("--help", array_slice($argv, 2)) || in_array("-h", array_slice($argv, 2))) {
         if (isset($command_help[$command])) {
-            echo "Usage: php import.php {$command} <remote-url> <local-path> [options]\n";
+            echo "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n";
             echo "\n";
             echo $command_help[$command]["detail"] . "\n";
         } else {
@@ -6432,21 +6438,16 @@ if (
     }
 
     $remote_url = $argv[2] ?? null;
-    $local_path = $argv[3] ?? null;
 
     if (!$remote_url) {
         fwrite(STDERR, "Error: <remote-url> is required\n");
-        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> <local-path> [options]\n");
+        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
         exit(1);
     }
 
-    if (!$local_path) {
-        fwrite(STDERR, "Error: <local-path> is required\n");
-        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> <local-path> [options]\n");
-        exit(1);
-    }
-
-    // Parse options
+    // Parse options (--state-dir and --docroot are required named options)
+    $state_dir = null;
+    $docroot = null;
     $options = [
         "command" => $command,
         "abort" => false,
@@ -6455,8 +6456,12 @@ if (
         "tuning_config" => [],
     ];
 
-    for ($i = 4; $i < $argc; $i++) {
-        if (strpos($argv[$i], "--secret=") === 0) {
+    for ($i = 3; $i < $argc; $i++) {
+        if (strpos($argv[$i], "--state-dir=") === 0) {
+            $state_dir = substr($argv[$i], strlen("--state-dir="));
+        } elseif (strpos($argv[$i], "--docroot=") === 0) {
+            $docroot = substr($argv[$i], strlen("--docroot="));
+        } elseif (strpos($argv[$i], "--secret=") === 0) {
             $options["secret"] = substr($argv[$i], strlen("--secret="));
         } elseif ($argv[$i] === "--abort") {
             $options["abort"] = true;
@@ -6641,8 +6646,20 @@ if (
         }
     }
 
+    if (!$state_dir) {
+        fwrite(STDERR, "Error: --state-dir=DIR is required\n");
+        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
+        exit(1);
+    }
+
+    if (!$docroot) {
+        fwrite(STDERR, "Error: --docroot=DIR is required\n");
+        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
+        exit(1);
+    }
+
     try {
-        $client = new ImportClient($remote_url, $local_path);
+        $client = new ImportClient($remote_url, $state_dir, $docroot);
         $client->run($options);
         exit($client->exit_code);
     } catch (\Throwable $e) {

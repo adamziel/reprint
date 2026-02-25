@@ -11,6 +11,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -46,10 +47,10 @@ describe('Import: Basic File Sync', () => {
         assert.equal(state.status, 'complete');
     });
 
-    it('filesystem-root file hashes match source site directory', () => {
-        // The importer stores files at filesystem-root/<absolute-path>,
-        // so the site dir content ends up at filesystem-root/srv/e2e-sites/<site>/
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+    it('docroot file hashes match source site directory', () => {
+        // The importer stores files at docroot/<absolute-path>,
+        // so the site dir content ends up at docroot/srv/e2e-sites/<site>/
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assert.ok(existsSync(importedRoot), `Expected ${importedRoot} to exist`);
 
         assertTreesMatch(getSiteDir(site), importedRoot);
@@ -67,7 +68,7 @@ describe('Import: Basic File Sync', () => {
     });
 
     it('imported files form a valid WordPress site mirror', () => {
-        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
+        assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
     });
 
     it('re-running after completion triggers a delta sync', () => {

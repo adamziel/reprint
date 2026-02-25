@@ -9,7 +9,7 @@
  * thinks it's on its original domain.
  *
  * Usage:
- *   node preview.js <export-dir> [--url=<original-url>] [--port=<port>]
+ *   node preview.js --state-dir=DIR --docroot=DIR [--url=<original-url>] [--port=<port>]
  *
  * Environment variables (all optional):
  *   DB_HOST          MySQL host          (default: 127.0.0.1)
@@ -27,26 +27,30 @@ import http from 'node:http';
 // ── CLI args ────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-let exportDir = null;
+let stateDir = null;
+let docroot = null;
 let urlOverride = null;
 let port = null;
 
 for (const arg of args) {
-	if (arg.startsWith('--url=')) {
+	if (arg.startsWith('--state-dir=')) {
+		stateDir = arg.slice('--state-dir='.length);
+	} else if (arg.startsWith('--docroot=')) {
+		docroot = arg.slice('--docroot='.length);
+	} else if (arg.startsWith('--url=')) {
 		urlOverride = arg.slice('--url='.length);
 	} else if (arg.startsWith('--port=')) {
 		port = arg.slice('--port='.length);
-	} else if (!arg.startsWith('--')) {
-		exportDir = arg;
 	}
 }
 
-if (!exportDir) {
-	console.error('Usage: node preview.js <export-dir> [--url=<original-url>] [--port=<port>]');
+if (!stateDir || !docroot) {
+	console.error('Usage: node preview.js --state-dir=DIR --docroot=DIR [--url=<original-url>] [--port=<port>]');
 	process.exit(1);
 }
 
-exportDir = path.resolve(exportDir);
+stateDir = path.resolve(stateDir);
+docroot = path.resolve(docroot);
 
 const DB_HOST = process.env.DB_HOST || '127.0.0.1';
 const DB_USER = process.env.DB_USER || 'root';
@@ -106,9 +110,8 @@ function findDir(root, name, maxDepth = 6) {
 
 // ── Layout detection ────────────────────────────────────────────────
 
-const fsRoot = path.join(exportDir, 'filesystem-root');
-if (!fs.existsSync(fsRoot)) {
-	console.error(`Error: filesystem-root not found in ${exportDir}`);
+if (!fs.existsSync(docroot)) {
+	console.error(`Error: docroot not found: ${docroot}`);
 	process.exit(1);
 }
 
@@ -116,8 +119,8 @@ if (!fs.existsSync(fsRoot)) {
 // (__wp__ contains core, wp-config.php lives in the parent htdocs dir).
 // Check for standard layout first — a standard WP install might contain
 // a stray __wp__ directory inside a plugin or cache.
-const wpConfigFile = findFile(fsRoot, 'wp-config.php');
-const wpCoreDir = findDir(fsRoot, '__wp__');
+const wpConfigFile = findFile(docroot, 'wp-config.php');
+const wpCoreDir = findDir(docroot, '__wp__');
 const isWpcom = !!wpCoreDir && (!wpConfigFile || path.dirname(wpConfigFile) === path.dirname(wpCoreDir));
 
 let wpRoot;     // standard: dir containing wp-config.php; wpcom: __wp__ dir
@@ -137,21 +140,21 @@ if (isWpcom) {
 	console.log('Detected standard WordPress layout');
 	console.log(`  root: ${wpRoot}`);
 } else {
-	console.error(`Error: Could not detect WordPress layout under ${fsRoot}`);
+	console.error(`Error: Could not detect WordPress layout under ${docroot}`);
 	console.error('  No wp-config.php or __wp__ directory found.');
 	process.exit(1);
 }
 
 // ── 1. Create database ─────────────────────────────────────────────
 
-const dirBasename = path.basename(exportDir);
+const dirBasename = path.basename(stateDir);
 const dbName = `import_${dirBasename}`;
 console.log(`\nCreating database ${dbName}...`);
 mysqlExec(`DROP DATABASE IF EXISTS \`${dbName}\`; CREATE DATABASE \`${dbName}\`;`);
 
 // ── 2. Import SQL ───────────────────────────────────────────────────
 
-const sqlFile = path.join(exportDir, 'db.sql');
+const sqlFile = path.join(stateDir, 'db.sql');
 if (!fs.existsSync(sqlFile)) {
 	console.error(`Error: ${sqlFile} not found.`);
 	process.exit(1);

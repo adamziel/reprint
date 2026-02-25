@@ -14,6 +14,7 @@ import {
     hashDirectory, assertTreesMatch, readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -83,7 +84,7 @@ describe('Import: Volatile Files', () => {
 
         it('downloaded files have correct hashes (no corruption)', () => {
             const siteDir = getSiteDir(site);
-            const importedRoot = join(tempDir, 'filesystem-root', siteDir);
+            const importedRoot = join(docrootDir(tempDir), siteDir);
             // allowMissing: hook's sleep(1) slows export, so sync may be incomplete
             assertTreesMatch(siteDir, importedRoot, { exclude: ['large-volatile.bin'], allowMissing: true });
         });
@@ -159,7 +160,7 @@ describe('Import: Volatile Files', () => {
         });
 
         it('readable files are still downloaded', () => {
-            const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+            const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
             const hashes = hashDirectory(importedRoot);
             assert.ok(hashes.size > 0, 'Expected at least some files downloaded');
 
@@ -173,7 +174,7 @@ describe('Import: Volatile Files', () => {
             // The hook deleted test-data/subdir during the directory scan.
             // The scanner silently skips entries that no longer stat, so
             // files from subdir should not be indexed or downloaded.
-            const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+            const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
             const allFiles = [...hashDirectory(importedRoot).keys()];
             const subdirFiles = allFiles.filter(p => p.includes('subdir'));
             assert.equal(

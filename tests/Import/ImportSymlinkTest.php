@@ -18,7 +18,7 @@ class ImportSymlinkTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/import-symlink-test-' . uniqid();
         mkdir($this->tempDir, 0755, true);
-        mkdir($this->tempDir . '/filesystem-root', 0755, true);
+        mkdir($this->tempDir . '/docroot', 0755, true);
     }
 
     protected function tearDown(): void
@@ -56,7 +56,7 @@ class ImportSymlinkTest extends TestCase
 
     public function testSymlinkIsCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -71,7 +71,7 @@ class ImportSymlinkTest extends TestCase
 
         $method->invoke($client, $chunk);
 
-        $symlinkPath = $this->tempDir . '/filesystem-root/test/link';
+        $symlinkPath = $this->tempDir . '/docroot/test/link';
         $this->assertTrue(is_link($symlinkPath), 'Symlink should be created');
         $this->assertEquals('target', readlink($symlinkPath), 'Symlink target should match');
     }
@@ -79,11 +79,11 @@ class ImportSymlinkTest extends TestCase
     /**
      * A relative symlink that escapes the filesystem root should be rejected.
      * Path /a/link with target ../../../escape resolves to
-     * filesystem-root/a/../../escape = filesystem-root/../escape — outside root.
+     * docroot/a/../../escape = docroot/../escape — outside root.
      */
     public function testRelativeSymlinkEscapingRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -98,7 +98,7 @@ class ImportSymlinkTest extends TestCase
 
         $method->invoke($client, $chunk);
 
-        $symlinkPath = $this->tempDir . '/filesystem-root/a/link';
+        $symlinkPath = $this->tempDir . '/docroot/a/link';
         $this->assertFalse(is_link($symlinkPath), 'Symlink escaping root should not be created');
     }
 
@@ -109,7 +109,7 @@ class ImportSymlinkTest extends TestCase
      */
     public function testChainedSymlinksEscapingRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -127,7 +127,7 @@ class ImportSymlinkTest extends TestCase
         ];
         $method->invoke($client, $chunk1);
 
-        $link1 = $this->tempDir . '/filesystem-root/site/__wp__';
+        $link1 = $this->tempDir . '/docroot/site/__wp__';
         $this->assertFalse(is_link($link1), 'Symlink escaping root should not be created');
 
         // Second symlink references a path within root — should succeed
@@ -140,7 +140,7 @@ class ImportSymlinkTest extends TestCase
         ];
         $method->invoke($client, $chunk2);
 
-        $link2 = $this->tempDir . '/filesystem-root/site/wp-load.php';
+        $link2 = $this->tempDir . '/docroot/site/wp-load.php';
         $this->assertTrue(is_link($link2), 'Symlink staying within root should be created');
         $this->assertEquals('__wp__/wp-load.php', readlink($link2));
     }
@@ -151,7 +151,7 @@ class ImportSymlinkTest extends TestCase
      */
     public function testAbsoluteSymlinkOutsideRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -166,7 +166,7 @@ class ImportSymlinkTest extends TestCase
 
         $method->invoke($client, $chunk);
 
-        $symlinkPath = $this->tempDir . '/filesystem-root/bin-link';
+        $symlinkPath = $this->tempDir . '/docroot/bin-link';
         $this->assertFalse(is_link($symlinkPath), 'Absolute symlink outside root should not be created');
     }
 
@@ -176,7 +176,7 @@ class ImportSymlinkTest extends TestCase
      */
     public function testRelativeSymlinkWithinRootCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -191,7 +191,7 @@ class ImportSymlinkTest extends TestCase
 
         $method->invoke($client, $chunk);
 
-        $symlinkPath = $this->tempDir . '/filesystem-root/wp-content/link';
+        $symlinkPath = $this->tempDir . '/docroot/wp-content/link';
         $this->assertTrue(is_link($symlinkPath), 'Symlink within root should be created');
         $this->assertEquals('../uploads/file.txt', readlink($symlinkPath));
     }
@@ -202,8 +202,8 @@ class ImportSymlinkTest extends TestCase
      */
     public function testAbsoluteSymlinkWithinRootCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
-        $root = realpath($this->tempDir . '/filesystem-root');
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
+        $root = realpath($this->tempDir . '/docroot');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -225,7 +225,7 @@ class ImportSymlinkTest extends TestCase
 
     public function testSymlinkWithMissingDataSkipped()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -263,10 +263,10 @@ class ImportSymlinkTest extends TestCase
 
     public function testSymlinkReplacesExistingFile()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
         // Create a regular file
-        $filePath = $this->tempDir . '/filesystem-root/test/link';
+        $filePath = $this->tempDir . '/docroot/test/link';
         mkdir(dirname($filePath), 0755, true);
         file_put_contents($filePath, 'content');
         $this->assertTrue(is_file($filePath));

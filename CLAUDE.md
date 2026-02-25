@@ -94,7 +94,7 @@ Override with environment variables if needed.
 
 ### Symlink Security
 
-Symlinks ARE automatically recreated during import. This is safe because all paths are relative to the import directory's `filesystem-root/`, preventing directory traversal outside it. Errors are logged to the audit log.
+Symlinks ARE automatically recreated during import. This is safe because all paths are relative to the `--docroot` directory, preventing directory traversal outside it. Errors are logged to the audit log.
 
 ### SQL Dump Batching
 
@@ -165,12 +165,14 @@ Always consult these when working on the respective components.
 
 ### Progress Computation
 
-Progress is computed client-side by reading state files:
+Progress is computed client-side by reading state files (all in `--state-dir`):
 - `.import-state.json`: Current command, status, cursor, stage
 - `.import-index.jsonl`: Local file index (line count = files indexed)
 - `.import-remote-index.jsonl`: Remote file index (for delta comparison)
 - `.import-download-list.jsonl`: Files pending download
-- `filesystem-root/`: Actual downloaded files (recursive size/count)
 - `db.sql`: SQL dump file size
+
+And from `--docroot`:
+- Actual downloaded files (recursive size/count)
 
 This keeps the protocol minimal while enabling rich progress visualization.

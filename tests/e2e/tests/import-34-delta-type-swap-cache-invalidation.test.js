@@ -15,6 +15,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteSecret, getSiteDir,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -127,7 +128,7 @@ chown -R nginx:nginx ${sh(remoteRoot)}
     it('delta keeps symlink->file transition', () => {
         const tempDir = runScenarioOnce('e2e-delta-cache-type-swaps-file');
         try {
-            const root = join(tempDir, 'filesystem-root', remoteRoot);
+            const root = join(docrootDir(tempDir), remoteRoot);
             const symlinkToDirToFile = join(root, 'symlink-to-dir-to-file');
             assert.ok(lstatSync(symlinkToDirToFile).isFile(), 'Expected symlink-to-dir-to-file to become a regular file');
             assert.equal(readFileSync(symlinkToDirToFile, 'utf-8'), 'became-file\n');
@@ -139,7 +140,7 @@ chown -R nginx:nginx ${sh(remoteRoot)}
     it('delta keeps symlink->directory transition with nested data', () => {
         const tempDir = runScenarioOnce('e2e-delta-cache-type-swaps-dir');
         try {
-            const root = join(tempDir, 'filesystem-root', remoteRoot);
+            const root = join(docrootDir(tempDir), remoteRoot);
             const nestedFile = join(root, 'symlink-to-file-to-dir', 'x', 'y', 'z', 'value.txt');
             assert.ok(existsSync(nestedFile), `Expected nested file at ${nestedFile}`);
             assert.equal(readFileSync(nestedFile, 'utf-8'), 'became-directory\n');

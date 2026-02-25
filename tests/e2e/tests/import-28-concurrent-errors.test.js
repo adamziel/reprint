@@ -17,6 +17,7 @@ import {
     assertTreesMatch, readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -118,7 +119,7 @@ describe('Import: Concurrent Errors', { timeout: 180000 }, () => {
     });
 
     it('non-error files are still downloaded correctly', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         // allowMissing: multiple hooks with sleep(1) slow export, so sync may be incomplete
         assertTreesMatch(getSiteDir(site), importedRoot, {
             exclude: ['concurrent-unreadable.txt', 'concurrent-volatile.bin', 'concurrent-deletable.bin'],
