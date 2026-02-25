@@ -12,6 +12,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, readAuditLog,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -54,7 +55,7 @@ describe('Import: Permission Errors', () => {
         it('readable files are downloaded and match source', () => {
             // hashDirectory skips unreadable files on both sides,
             // so this verifies all readable files match exactly
-            const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+            const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
             assertTreesMatch(getSiteDir(site), importedRoot);
         });
 

@@ -20,6 +20,7 @@ import {
     readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -64,7 +65,7 @@ describe('Import: Error Chunks', () => {
 
         it('downloaded files have correct hashes (no corruption)', () => {
             const siteDir = getSiteDir(site);
-            const importedRoot = join(tempDir, 'filesystem-root', siteDir);
+            const importedRoot = join(docrootDir(tempDir), siteDir);
             assertTreesMatch(siteDir, importedRoot);
         });
     });
@@ -137,7 +138,7 @@ describe('Import: Error Chunks', () => {
 
         it('downloaded files have correct hashes (no corruption)', () => {
             const siteDir = getSiteDir(site);
-            const importedRoot = join(tempDir, 'filesystem-root', siteDir);
+            const importedRoot = join(docrootDir(tempDir), siteDir);
             // allowMissing: hook's sleep(1) slows export, so sync may be incomplete
             assertTreesMatch(siteDir, importedRoot, { exclude: ['large-volatile.bin'], allowMissing: true });
         });
@@ -207,7 +208,7 @@ describe('Import: Error Chunks', () => {
 
         it('downloaded files have correct hashes (no corruption)', () => {
             const siteDir = getSiteDir(site);
-            const importedRoot = join(tempDir, 'filesystem-root', siteDir);
+            const importedRoot = join(docrootDir(tempDir), siteDir);
             // allowMissing: hook deletes file mid-stream, which can cause incomplete sync
             assertTreesMatch(siteDir, importedRoot, { exclude: ['large-deletable.bin'], allowMissing: true });
         });

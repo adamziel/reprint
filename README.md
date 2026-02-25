@@ -48,16 +48,17 @@ All commands below use the same base invocation. We'll use `$URL` and `$DIR` as 
 
 ```bash
 URL="https://example.com/?site-export-api"
-DIR="./local-directory-where-all-the-files-will-be-created"
+STATE_DIR="./local-directory-where-the-migration-state-will-be-tracked"
+DOCROOT="./local-directory-where-the-remote-site-files-will-be-recreated"
 SECRET="your-shared-secret"
 ```
 
 #### Step 1 — Preflight.
 
-First, wel'l makes sure the server is reachable and the environment is in a good shape:
+First, we'll make sure the server is reachable and the environment is in a good shape:
 
 ```bash
-php importer/import.php preflight "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php preflight "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
@@ -68,7 +69,7 @@ To run very basic diagnostics that confirms the remote server replied and it has
 sound-looking filesystem and a database connection, run:
 
 ```bash
-php importer/import.php preflight-assert "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php preflight-assert "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 For hosting platform-specific checks, such as database version compatibility or
@@ -81,7 +82,7 @@ This first builds a full index of the remote directory tree, then streams every 
 It can be interrupted and resumed at any time — just re-run the same command:
 
 ```bash
-php importer/import.php files-sync "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -97,7 +98,7 @@ Which is to say, you'll need to wrap it in a loop that runs until failure or ful
 This streams a SQL dump into `db.sql`:
 
 ```bash
-php importer/import.php db-sync "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -114,7 +115,7 @@ First, we must abort the previous files-sync. Otherwise, it would just
 tell us it's completed and refuse to proceed:
 
 ```bash
-php importer/import.php files-sync "$URL" "$DIR" --secret="$SECRET --abort"
+php importer/import.php files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" --abort
 ```
 
 From here, we can run the `files-sync` command again. It will index
@@ -122,7 +123,7 @@ the remote filesystem once again, compute which files have changed
 since the initial sync, and apply that delta in the local directory:
 
 ```bash
-php importer/import.php files-sync "$URL" "$DIR" --secret="$SECRET"
+php importer/import.php files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -133,8 +134,8 @@ The command returns one of three exit codes:
 
 #### Shoehorning the site onto your platform
 
-You've got a copy of the remote files in `$DIR/filesystem-root/` and
-the database in `$DIR/db.sql`. From here, you need to figure out how
+You've got a copy of the remote files in the `--docroot` directory and
+the database in `--state-dir/db.sql`. From here, you need to figure out how
 to run that on your platform.
 
 The `db.sql` file will contain the relevant `DELETE TABLE IF EXISTS`
@@ -241,7 +242,7 @@ If the JSON is invalid on load, the importer renames it to
 
   // Crash recovery: if the importer dies mid-write, these let it
   // truncate the partially-written file back to its last good state.
-  "current_file": "filesystem-root/wp-content/uploads/photo.jpg",
+  "current_file": "wp-content/uploads/photo.jpg",
   "current_file_bytes": 1048576,  // expected size after last complete write
   "sql_bytes": 524288,            // expected db.sql size
 
@@ -300,7 +301,7 @@ This is useful for debugging but noisy for production use.
 The importer client (`import.php`) accepts the following commands:
 
 ```
-php importer/import.php <command> <URL> <local-path> [options]
+php importer/import.php <command> <URL> --state-dir=DIR --docroot=DIR [options]
 ```
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
@@ -417,7 +418,7 @@ the **migration target** chooses how to handle it. A few choices are:
 
 Symlinks are automatically recreated during import. The importer receives symlink chunks from the
 export stream and calls `symlink()` to recreate them locally. This is safe because all paths are
-constrained to the import directory's `filesystem-root/`.
+constrained to the `--docroot` directory.
 
 Some symlinks may point to places on the remote filesystem that are
 outside of the requested directory root. When that happens, they're
@@ -425,7 +426,7 @@ not recreated unless you use the `--follow-symlinks` option.
 
 With the `--follow-symlinks`, the importer will create local
 symlinks even if they point ourside of the directory root. They're
-still constrained within the confines of the `filesystem-root/`
+still constrained within the confines of the `--docroot`
 
 ## Database synchronization
 

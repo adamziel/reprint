@@ -11,6 +11,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -39,7 +40,7 @@ describe('Import: Buffered Response', () => {
     });
 
     it('files are correct', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
@@ -48,7 +49,7 @@ describe('Import: Buffered Response', () => {
     });
 
     it('imported files form a valid WordPress site mirror', () => {
-        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
+        assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
     });
 
     it('db-sync through buffered proxy completes', () => {

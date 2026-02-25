@@ -15,11 +15,12 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Delta deletions and type swaps', () => {
-    const site = 'file-changes';
+    const site = 'file-type-swaps';
     const scenarioName = 'delta-rigorous';
     const preserveName = 'delta-rigorous-preserve';
     const remoteScenarioRoot = join(getSiteDir(site), 'test-data', scenarioName);
@@ -44,11 +45,11 @@ describe('Import: Delta deletions and type swaps', () => {
     }
 
     function localScenarioRoot() {
-        return join(tempDir, 'filesystem-root', getSiteDir(site), 'test-data', scenarioName);
+        return join(docrootDir(tempDir), getSiteDir(site), 'test-data', scenarioName);
     }
 
     function localPreserveFile() {
-        return join(tempDir, 'filesystem-root', getSiteDir(site), 'test-data', preserveName, 'keep.txt');
+        return join(docrootDir(tempDir), getSiteDir(site), 'test-data', preserveName, 'keep.txt');
     }
 
     function lstatIfExists(path) {

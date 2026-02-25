@@ -12,6 +12,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -52,7 +53,7 @@ describe('Import: Symlinks', () => {
         });
 
         it('regular files are downloaded and match source', () => {
-            const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+            const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
             assertTreesMatch(getSiteDir(site), importedRoot);
         });
 
@@ -61,7 +62,7 @@ describe('Import: Symlinks', () => {
         });
 
         it('imported files form a valid WordPress site mirror', () => {
-            assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
+            assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
         });
 
         it('sync completed without error despite symlinks', () => {
@@ -105,7 +106,7 @@ describe('Import: Symlinks', () => {
         });
 
         it('regular files are downloaded and match source', () => {
-            const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+            const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
             assertTreesMatch(getSiteDir(site), importedRoot);
         });
     });

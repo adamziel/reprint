@@ -11,6 +11,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, readAuditLog,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -65,7 +66,7 @@ describe('Import: State Corruption', () => {
         });
 
         it('files match source after recovery', () => {
-            const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+            const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
             assertTreesMatch(getSiteDir(site), importedRoot);
         });
     });
@@ -142,7 +143,7 @@ describe('Import: State Corruption', () => {
         });
 
         it('files match source after restart', () => {
-            const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+            const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
             assertTreesMatch(getSiteDir(site), importedRoot);
         });
     });

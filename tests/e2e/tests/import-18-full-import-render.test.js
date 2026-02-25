@@ -15,6 +15,7 @@ import {
     assertTreesMatch,
     assertSiteMirror, createMysqlConnection,
     compareDatabases, getDbName,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -72,12 +73,12 @@ describe('Import: Full Round-Trip', () => {
     });
 
     it('imported files form a valid WordPress site', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assertSiteMirror(importedRoot);
     });
 
     it('imported files match source site', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 

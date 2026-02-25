@@ -21,7 +21,7 @@ class TypeSwapTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/import-typeswap-test-' . uniqid();
         mkdir($this->tempDir, 0755, true);
-        mkdir($this->tempDir . '/filesystem-root', 0755, true);
+        mkdir($this->tempDir . '/docroot', 0755, true);
     }
 
     protected function tearDown(): void
@@ -61,14 +61,14 @@ class TypeSwapTest extends TestCase
      */
     public function testEnsureDirectoryPathRemovesBlockingSymlink()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('ensure_directory_path');
 
-        // Resolve the filesystem-root path so it matches the realpath() check
+        // Resolve the docroot path so it matches the realpath() check
         // inside ensure_directory_path (on macOS, /var -> /private/var).
-        $fsRoot = realpath($this->tempDir . '/filesystem-root');
+        $fsRoot = realpath($this->tempDir . '/docroot');
 
         // Create a symlink at a path where we want a real directory
         $symlinkPath = $fsRoot . '/some-dir';
@@ -90,9 +90,9 @@ class TypeSwapTest extends TestCase
      */
     public function testFileChunkReplacesSymlinkToDirectory()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
-        $fsRoot = $this->tempDir . '/filesystem-root';
+        $fsRoot = $this->tempDir . '/docroot';
 
         // Create a real directory and a symlink pointing to it
         $realDir = $fsRoot . '/real-target-dir';
@@ -134,9 +134,9 @@ class TypeSwapTest extends TestCase
      */
     public function testDirectoryChunkReplacesSymlinkToFile()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
-        $fsRoot = $this->tempDir . '/filesystem-root';
+        $fsRoot = $this->tempDir . '/docroot';
 
         // Create a real file and a symlink pointing to it
         $realFile = $fsRoot . '/real-target-file';
@@ -170,9 +170,9 @@ class TypeSwapTest extends TestCase
      */
     public function testFileChunkUnderFormerSymlink()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
-        $fsRoot = $this->tempDir . '/filesystem-root';
+        $fsRoot = $this->tempDir . '/docroot';
 
         // Create a symlink at the path
         $realFile = $fsRoot . '/target-file';
@@ -223,11 +223,11 @@ class TypeSwapTest extends TestCase
      */
     public function testNestedFileUnderExistingSymlinkViaEnsureDirectory()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir);
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/docroot');
 
-        // Resolve the filesystem-root path so it matches the realpath() check
+        // Resolve the docroot path so it matches the realpath() check
         // inside ensure_directory_path (on macOS, /var -> /private/var).
-        $fsRoot = realpath($this->tempDir . '/filesystem-root');
+        $fsRoot = realpath($this->tempDir . '/docroot');
 
         // Create a symlink at the top-level path component
         $targetDir = $fsRoot . '/real-target';

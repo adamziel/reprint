@@ -11,6 +11,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
     assertFileCount, assertSiteMirror,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -61,7 +62,7 @@ describe('Import: Unicode Paths', () => {
     });
 
     it('files with emoji, accented chars, spaces, and Chinese chars exist', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assert.ok(existsSync(importedRoot), `Expected ${importedRoot} to exist`);
 
         // Check for files with special names
@@ -91,7 +92,7 @@ describe('Import: Unicode Paths', () => {
     });
 
     it('file hashes match source', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
@@ -100,7 +101,7 @@ describe('Import: Unicode Paths', () => {
     });
 
     it('imported files form a valid WordPress site mirror', () => {
-        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
+        assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
     });
 
     it('db-sync completes with valid dump', () => {

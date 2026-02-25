@@ -15,6 +15,7 @@ import {
     readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -86,7 +87,7 @@ describe('Import: Request Cutoff', () => {
     });
 
     it('all file hashes match source after resume', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 

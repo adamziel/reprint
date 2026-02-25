@@ -10,7 +10,7 @@
  * - Chained symlinks (target dir contains more symlinks) are followed recursively
  * - Circular symlinks don't cause infinite loops
  * - Multiple symlinks to the same target don't cause duplicate downloads
- * - The local filesystem-root mirrors the server's directory layout
+ * - The local docroot mirrors the server's directory layout
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -25,6 +25,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     readAuditLog,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -179,7 +180,7 @@ describe('Import: Follow Symlinks', () => {
     }
 
     function fsRoot() {
-        return join(tempDir, 'filesystem-root');
+        return docrootDir(tempDir);
     }
 
     function lstatIfExists(path) {
@@ -351,13 +352,13 @@ describe('Import: Follow Symlinks', () => {
 
     // ─── Layout correctness ────────────────────────────────────────
 
-    it('filesystem-root mirrors the server directory layout', () => {
-        // The site root should be under filesystem-root/<site-dir>
+    it('docroot mirrors the server directory layout', () => {
+        // The site root should be under docroot/<site-dir>
         const siteRoot = join(fsRoot(), getSiteDir(site));
         assert.ok(existsSync(siteRoot),
             `Expected site root at ${siteRoot}`);
 
-        // External content should be under filesystem-root/<external-root>
+        // External content should be under docroot/<external-root>
         const externalRoot = join(fsRoot(), EXTERNAL_ROOT);
         assert.ok(existsSync(externalRoot),
             `Expected external root at ${externalRoot}`);
@@ -365,7 +366,7 @@ describe('Import: Follow Symlinks', () => {
         // Both should share the same top-level prefix (/srv)
         const srvDir = join(fsRoot(), 'srv');
         assert.ok(existsSync(srvDir),
-            `Expected /srv directory in filesystem-root`);
+            `Expected /srv directory in docroot`);
     });
 
     it('WordPress core files are present alongside symlink targets', () => {

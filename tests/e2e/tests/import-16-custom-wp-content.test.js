@@ -11,6 +11,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -50,7 +51,7 @@ describe('Import: Custom WP Content', () => {
     });
 
     it('files downloaded correctly', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assert.ok(existsSync(importedRoot), `Expected ${importedRoot} to exist`);
 
         assertTreesMatch(getSiteDir(site), importedRoot);
@@ -61,7 +62,7 @@ describe('Import: Custom WP Content', () => {
     });
 
     it('imported files form a valid WordPress site mirror', () => {
-        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
+        assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
     });
 
     it('db-sync completes with valid dump', () => {

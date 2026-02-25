@@ -11,6 +11,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
     assertFileCount, assertSiteMirror,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -49,8 +50,8 @@ describe('Import: Large Directory', () => {
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
 
-    it('filesystem-root has 2000+ files', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+    it('docroot has 2000+ files', () => {
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assert.ok(existsSync(importedRoot), `Expected ${importedRoot} to exist`);
 
         const hashes = hashDirectory(importedRoot);
@@ -62,16 +63,16 @@ describe('Import: Large Directory', () => {
     });
 
     it('imported files form a valid WordPress site mirror', () => {
-        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
+        assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
     });
 
     it('all file hashes match source', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
     it('spot-check file content matches content-NNNN pattern', () => {
-        const importedRoot = join(tempDir, 'filesystem-root', getSiteDir(site));
+        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
         // Check a few specific files
         for (const num of ['0001', '0500', '1000', '1999']) {
             const filePath = join(importedRoot, 'test-data', 'many-files', `file-${num}.txt`);

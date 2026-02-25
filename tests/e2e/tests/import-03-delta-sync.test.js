@@ -12,6 +12,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
+    docrootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -48,7 +49,7 @@ describe('Import: Delta Sync', () => {
     });
 
     it('imported files form a valid WordPress site mirror', () => {
-        assertSiteMirror(join(tempDir, 'filesystem-root', getSiteDir(site)));
+        assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
     });
 
     it('files-sync with no changes completes', () => {
@@ -58,7 +59,7 @@ describe('Import: Delta Sync', () => {
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
         // Hashes should still match
-        assertTreesMatch(getSiteDir(site), join(tempDir, 'filesystem-root', getSiteDir(site)));
+        assertTreesMatch(getSiteDir(site), join(docrootDir(tempDir), getSiteDir(site)));
     });
 
     it('files-sync picks up new file via delta', () => {
@@ -73,7 +74,7 @@ describe('Import: Delta Sync', () => {
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
         // The new file should appear in the output
-        const importedPath = join(tempDir, 'filesystem-root', getSiteDir(site), 'test-data', 'delta-test-added.txt');
+        const importedPath = join(docrootDir(tempDir), getSiteDir(site), 'test-data', 'delta-test-added.txt');
         assert.ok(existsSync(importedPath), 'Expected delta-test-added.txt in output');
 
         // Clean up added file
