@@ -20,7 +20,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Delta type swaps cache invalidation', () => {
-    const site = 'file-changes';
+    const site = 'file-type-cache';
     const port = 8112;
     const scenarioName = 'delta-cache-type-swaps';
     const remoteRoot = join(getSiteDir(site), 'test-data', scenarioName);

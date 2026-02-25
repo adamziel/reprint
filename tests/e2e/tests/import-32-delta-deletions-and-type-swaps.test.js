@@ -20,7 +20,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Delta deletions and type swaps', () => {
-    const site = 'file-changes';
+    const site = 'file-type-swaps';
     const scenarioName = 'delta-rigorous';
     const preserveName = 'delta-rigorous-preserve';
     const remoteScenarioRoot = join(getSiteDir(site), 'test-data', scenarioName);

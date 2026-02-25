@@ -17,7 +17,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Delta Sync with Deletions', () => {
-    const site = 'file-changes';
+    const site = 'file-deletions';
     let tempDir;
     const extraFile1 = join(getSiteDir(site), 'test-data', 'will-be-deleted-1.txt');
     const extraFile2 = join(getSiteDir(site), 'test-data', 'will-be-deleted-2.txt');

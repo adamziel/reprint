@@ -27,6 +27,9 @@
     "import-failures":   { "port": 8100 },
     "follow-symlinks":   { "port": 8101 },
     "sqlite":            { "port": 8102 },
-    "large-single-file": { "port": 8103 }
+    "large-single-file": { "port": 8103 },
+    "file-deletions":    { "port": 8104 },
+    "file-type-swaps":   { "port": 8105 },
+    "file-type-cache":   { "port": 8106 }
   }
 }
