@@ -95,11 +95,36 @@ Which is to say, you'll need to wrap it in a loop that runs until failure or ful
 
 #### Step 3 — Download the database.
 
-This streams a SQL dump into `db.sql`:
+By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
 
 ```bash
 php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
+
+You can also pipe the SQL directly to stdout or stream it into a MySQL server
+without writing a file to disk. Use `--sql-output` to choose the mode:
+
+```bash
+# Pipe to stdout — useful for feeding into mysql CLI or another tool
+php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+    --sql-output=stdout | mysql -u root my_database
+
+# Stream directly into MySQL — no intermediate file, no pipe
+php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+    --sql-output=mysql --db-name=my_database --db-host=127.0.0.1 --db-user=root --db-pass=secret
+```
+
+The three modes:
+
+| Mode | What happens | Output file |
+|------|-------------|-------------|
+| `file` (default) | Writes SQL to `$STATE_DIR/db.sql` | `db.sql` |
+| `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
+| `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
+
+The `mysql` mode requires `--db-name` and accepts `--db-host`, `--db-user`, and
+`--db-pass` (or the `DB_PASS` environment variable). The host string supports
+the same `host:port` and `host:/path/to/socket` formats as WordPress `DB_HOST`.
 
 The command returns one of three exit codes:
 
@@ -140,15 +165,14 @@ to run that on your platform.
 
 The `db.sql` file will contain the relevant `DELETE TABLE IF EXISTS`
 statements to make sure it can always succeed. You might want to,
-before the first run, clean up any tables that may have been already 
+before the first run, clean up any tables that may have been already
 created by your environment. We won't need them. Furthermore, they may
 not get deleted during the database import if the site doesn't use
 the same table prefix as your environment.
 
-At the moment, there is no convenient way of piping the downloaded
-SQL straight into MySQL while it's still being downloaded. This would
-be a useful feature that will likely be added later on. Today, though,
-you just need to download the entire SQL dump and only pipe it then.
+If you used `--sql-output=mysql`, the SQL was already executed — there's
+no `db.sql` to import. For `--sql-output=stdout`, the SQL was piped to
+whatever tool was reading stdout (typically `mysql` CLI).
 
 ### Status files
 
@@ -245,6 +269,7 @@ If the JSON is invalid on load, the importer renames it to
   "current_file": "wp-content/uploads/photo.jpg",
   "current_file_bytes": 1048576,  // expected size after last complete write
   "sql_bytes": 524288,            // expected db.sql size
+  "sql_output": "file",           // "file" | "stdout" | "mysql"
 
   "tuning": {
     "config": { ... },            // AIMD parameters
@@ -309,7 +334,7 @@ php importer/import.php <command> <URL> --state-dir=DIR --docroot=DIR [options]
 * `files-sync` — Sync files. Auto-detects initial vs delta based on state: downloads the full tree on first run, only changes on subsequent runs.
 * `files-index` — Optional. It's a standalone command to index the full remote file index without fetching file contents. `files-sync` does it implicitly
                   so this is mostly useful for testing and diagnostics.
-* `db-sync` — Downloads the database as a SQL dump to `db.sql`.
+* `db-sync` — Downloads the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 
 All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-sync`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-sync` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
