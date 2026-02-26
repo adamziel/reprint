@@ -111,7 +111,7 @@ php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCR
 
 # Stream directly into MySQL — no intermediate file, no pipe
 php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
-    --sql-output=mysql --db-name=my_database --db-host=127.0.0.1 --db-user=root --db-pass=secret
+    --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=root --mysql-password=secret
 ```
 
 The three modes:
@@ -122,9 +122,11 @@ The three modes:
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
 | `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
 
-The `mysql` mode requires `--db-name` and accepts `--db-host`, `--db-user`, and
-`--db-pass` (or the `DB_PASS` environment variable). The host string supports
-the same `host:port` and `host:/path/to/socket` formats as WordPress `DB_HOST`.
+The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
+`--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
+environment variable). The host string also supports `host:port` and
+`host:/path/to/socket` formats (same as WordPress `DB_HOST`), but
+`--mysql-port` takes precedence when both are specified.
 
 The command returns one of three exit codes:
 
