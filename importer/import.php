@@ -31,7 +31,8 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 require_once __DIR__ . '/lib/Base64ValueScanner.php';
 require_once __DIR__ . '/lib/ContentClassifier.php';
 require_once __DIR__ . '/lib/DomainCollector.php';
-require_once __DIR__ . '/lib/SqlValueUrlRewriter.php';
+require_once __DIR__ . '/lib/PhpSerializedStringWalker.php';
+require_once __DIR__ . '/lib/StructuredDataUrlRewriter.php';
 require_once __DIR__ . '/lib/SqlStatementRewriter.php';
 
 /**
@@ -2924,7 +2925,7 @@ class ImportClient
         $stmt_rewriter = null;
         if (!empty($url_mapping)) {
             $stmt_rewriter = new SqlStatementRewriter(
-                new SqlValueUrlRewriter($url_mapping),
+                new StructuredDataUrlRewriter($url_mapping),
             );
             $this->audit_log(
                 sprintf(

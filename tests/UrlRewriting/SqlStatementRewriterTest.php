@@ -6,7 +6,8 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../importer/lib/wp-stubs.php';
 require_once __DIR__ . '/../../importer/lib/Base64ValueScanner.php';
 require_once __DIR__ . '/../../importer/lib/ContentClassifier.php';
-require_once __DIR__ . '/../../importer/lib/SqlValueUrlRewriter.php';
+require_once __DIR__ . '/../../importer/lib/PhpSerializedStringWalker.php';
+require_once __DIR__ . '/../../importer/lib/StructuredDataUrlRewriter.php';
 require_once __DIR__ . '/../../importer/lib/SqlStatementRewriter.php';
 
 class SqlStatementRewriterTest extends TestCase
@@ -14,7 +15,7 @@ class SqlStatementRewriterTest extends TestCase
     private function createRewriter(?array $mapping = null): SqlStatementRewriter
     {
         return new SqlStatementRewriter(
-            new SqlValueUrlRewriter($mapping ?? [
+            new StructuredDataUrlRewriter($mapping ?? [
                 'https://old-site.com' => 'https://new-site.com',
             ])
         );
@@ -50,17 +51,20 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertEquals($sql, $rewriter->rewrite($sql));
     }
 
-    public function testSkipsSerializedPhpValues(): void
+    public function testRewritesSerializedPhpValues(): void
     {
         $rewriter = $this->createRewriter();
-        $serialized = serialize(['siteurl' => 'https://old-site.com']);
+        $serialized = serialize(['siteurl' => 'https://old-site.com/site']);
         $encoded = base64_encode($serialized);
         $sql = "INSERT INTO `wp_options` VALUES(1, FROM_BASE64('{$encoded}'));";
 
         $result = $rewriter->rewrite($sql);
 
-        // Should be unchanged — serialized PHP is skipped
-        $this->assertEquals($sql, $result);
+        // Serialized PHP should now be rewritten with updated s:N: prefixes
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $unserialized = unserialize($matches[0]['value']);
+        $this->assertSame('https://new-site.com/site', $unserialized['siteurl']);
     }
 
     public function testRewritesJsonValues(): void
@@ -84,7 +88,7 @@ class SqlStatementRewriterTest extends TestCase
         $rewriter = $this->createRewriter();
 
         $html = '<p>Visit <a href="https://old-site.com">us</a></p>';
-        $serialized = serialize(['url' => 'https://old-site.com']);
+        $serialized = serialize(['url' => 'https://old-site.com/home']);
         $plain = 'https://old-site.com/about';
 
         $sql = sprintf(
@@ -102,8 +106,9 @@ class SqlStatementRewriterTest extends TestCase
         // HTML should be rewritten
         $this->assertStringContainsString('new-site.com', $matches[0]['value']);
 
-        // Serialized PHP should be unchanged
-        $this->assertEquals($serialized, $matches[1]['value']);
+        // Serialized PHP should be rewritten with URLs updated
+        $unserialized = unserialize($matches[1]['value']);
+        $this->assertSame('https://new-site.com/home', $unserialized['url']);
 
         // Plain text should be rewritten
         $this->assertStringContainsString('new-site.com', $matches[2]['value']);

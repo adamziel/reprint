@@ -2,28 +2,29 @@
 
 require_once __DIR__ . '/wp-stubs.php';
 
-use WordPress\DataLiberation\URL\URLInTextProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 use function WordPress\DataLiberation\URL\wp_rewrite_urls;
-use function WordPress\DataLiberation\URL\is_child_url_of;
 
 /**
- * Rewrites URLs in a single decoded database value using the appropriate
- * structured processor from wp-php-toolkit/data-liberation.
+ * Rewrites URLs in a single decoded database value by detecting the data
+ * format and applying the appropriate rewriting strategy.
  *
- * Content type determines the rewriting strategy:
- * - Serialized PHP: returned unchanged (rewriting would break s:N: length prefixes)
- * - JSON: recursively walks string values, rewrites URLs with URLInTextProcessor
+ * Formats are handled recursively — a serialized PHP array can contain a
+ * base64-encoded JSON string that embeds block markup with URLs, and each
+ * layer is decoded, rewritten, and re-encoded correctly.
+ *
+ * Supported formats:
+ * - Serialized PHP: walks string values with PhpSerializedStringWalker,
+ *   recursively classifying and rewriting each one
+ * - JSON: recursively walks string values, classifying and rewriting each one
+ * - Base64: decodes, recursively rewrites the inner content, re-encodes
  * - Text/HTML/Block markup: uses wp_rewrite_urls() which handles HTML attributes,
  *   block comment JSON, text nodes, and CSS url() in style attributes
  */
-class SqlValueUrlRewriter
+class StructuredDataUrlRewriter
 {
     /** @var array<string, string> URL mapping: source_url => target_url */
     private array $url_mapping;
-
-    /** @var array Parsed mapping: [{from_url: URL, to_url: URL}] */
-    private array $parsed_mapping;
 
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
@@ -31,13 +32,6 @@ class SqlValueUrlRewriter
     public function __construct(array $url_mapping)
     {
         $this->url_mapping = $url_mapping;
-        $this->parsed_mapping = [];
-        foreach ($url_mapping as $from => $to) {
-            $this->parsed_mapping[] = [
-                'from_url' => WPURL::parse($from),
-                'to_url' => WPURL::parse($to),
-            ];
-        }
     }
 
     /**
@@ -56,11 +50,13 @@ class SqlValueUrlRewriter
 
         switch ($type) {
             case ContentClassifier::TYPE_SERIALIZED_PHP:
-                // Skip serialized PHP — rewriting would break s:N: length prefixes
-                return $value;
+                return $this->rewrite_serialized_php($value);
 
             case ContentClassifier::TYPE_JSON:
                 return $this->rewrite_json($value);
+
+            case ContentClassifier::TYPE_BASE64:
+                return $this->rewrite_base64($value);
 
             case ContentClassifier::TYPE_TEXT:
             default:
@@ -69,7 +65,35 @@ class SqlValueUrlRewriter
     }
 
     /**
+     * Rewrite URLs in a PHP serialized value by walking all string values.
+     *
+     * Each string value is recursively classified and rewritten — this handles
+     * nested serialization (double-serialized WordPress options), JSON inside
+     * serialized PHP, and HTML inside serialized PHP.
+     *
+     * Falls back to text rewriting if the serialized data is malformed.
+     */
+    private function rewrite_serialized_php(string $value): string
+    {
+        $result = PhpSerializedStringWalker::walk_strings($value, function (string $s): string {
+            return $this->rewrite($s);
+        });
+
+        // If the walker returns false, the input was malformed.
+        // Fall back to treating it as text so we still attempt URL replacement
+        // rather than silently passing corrupted data through.
+        if ($result === false) {
+            return $this->rewrite_text($value);
+        }
+
+        return $result;
+    }
+
+    /**
      * Rewrite URLs in a JSON value by recursively walking all string values.
+     *
+     * Each string value is passed back through rewrite() so nested formats
+     * (serialized PHP inside JSON, base64 inside JSON, etc.) are handled.
      */
     private function rewrite_json(string $json): string
     {
@@ -91,6 +115,10 @@ class SqlValueUrlRewriter
     /**
      * Recursively walk a JSON-decoded structure and rewrite URLs in string values.
      *
+     * String values are routed through rewrite() for full format detection,
+     * so a JSON string containing serialized PHP, base64, or nested JSON
+     * will be handled correctly.
+     *
      * @param mixed $data    The JSON-decoded data.
      * @param bool  $changed Set to true if any value was changed.
      * @return mixed The walked data with URLs rewritten.
@@ -98,7 +126,7 @@ class SqlValueUrlRewriter
     private function walk_json($data, bool &$changed)
     {
         if (is_string($data)) {
-            $rewritten = $this->rewrite_urls_in_text($data);
+            $rewritten = $this->rewrite($data);
             if ($rewritten !== $data) {
                 $changed = true;
                 return $rewritten;
@@ -116,6 +144,29 @@ class SqlValueUrlRewriter
     }
 
     /**
+     * Rewrite URLs in base64-encoded data.
+     *
+     * Decodes the value, recursively rewrites the inner content (which may
+     * be serialized PHP, JSON, HTML, or any other supported format), then
+     * re-encodes. Returns the original if nothing changed or decode fails.
+     */
+    private function rewrite_base64(string $value): string
+    {
+        $decoded = base64_decode($value, true);
+        if ($decoded === false) {
+            return $this->rewrite_text($value);
+        }
+
+        $rewritten = $this->rewrite($decoded);
+
+        if ($rewritten === $decoded) {
+            return $value;
+        }
+
+        return base64_encode($rewritten);
+    }
+
+    /**
      * Rewrite URLs in text/HTML/block markup using wp_rewrite_urls().
      * This handles HTML attributes, block comment JSON, text nodes, and CSS url().
      */
@@ -125,34 +176,5 @@ class SqlValueUrlRewriter
             'block_markup' => $value,
             'url-mapping' => $this->url_mapping,
         ]);
-    }
-
-    /**
-     * Rewrite URLs in a plain text string using URLInTextProcessor.
-     * Always produces absolute URLs (not relative) since database values
-     * should contain complete URLs.
-     */
-    private function rewrite_urls_in_text(string $text): string
-    {
-        $p = new URLInTextProcessor($text);
-        while ($p->next_url()) {
-            $parsed_url = $p->get_parsed_url();
-            if (!$parsed_url) {
-                continue;
-            }
-            foreach ($this->parsed_mapping as $mapping) {
-                if (is_child_url_of($parsed_url, $mapping['from_url'])) {
-                    $result = WPURL::replace_base_url($parsed_url, [
-                        'old_base_url' => $mapping['from_url'],
-                        'new_base_url' => $mapping['to_url'],
-                    ]);
-                    if ($result !== false) {
-                        $p->set_raw_url($result->new_raw_url);
-                    }
-                    break;
-                }
-            }
-        }
-        return $p->get_updated_text();
     }
 }

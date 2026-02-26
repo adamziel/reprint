@@ -1,18 +1,19 @@
 <?php
 
 /**
- * Combines Base64ValueScanner and SqlValueUrlRewriter to rewrite URLs
+ * Combines Base64ValueScanner and StructuredDataUrlRewriter to rewrite URLs
  * in an entire SQL statement.
  *
  * Only modifies INSERT and UPDATE statements containing FROM_BASE64() expressions.
  * DDL statements (CREATE TABLE, ALTER TABLE, etc.) pass through unchanged.
- * Serialized PHP values are detected and skipped to avoid breaking s:N: length prefixes.
+ * All value types (text, JSON, serialized PHP) are passed to StructuredDataUrlRewriter
+ * which classifies each value and applies the appropriate rewriting strategy.
  */
 class SqlStatementRewriter
 {
-    private SqlValueUrlRewriter $url_rewriter;
+    private StructuredDataUrlRewriter $url_rewriter;
 
-    public function __construct(SqlValueUrlRewriter $url_rewriter)
+    public function __construct(StructuredDataUrlRewriter $url_rewriter)
     {
         $this->url_rewriter = $url_rewriter;
     }
@@ -41,14 +42,9 @@ class SqlStatementRewriter
 
         foreach ($matches as $match) {
             $value = $match['value'];
-            $type = ContentClassifier::classify($value);
 
-            // Skip serialized PHP
-            if ($type === ContentClassifier::TYPE_SERIALIZED_PHP) {
-                continue;
-            }
-
-            // Rewrite URLs in the value
+            // Rewrite URLs in the value — StructuredDataUrlRewriter classifies the
+            // content type and applies the right strategy for each.
             $rewritten = $this->url_rewriter->rewrite($value);
 
             // Only replace if the value actually changed
