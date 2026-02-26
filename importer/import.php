@@ -4094,9 +4094,10 @@ class ImportClient
                 true,
             );
 
-            // Crash recovery: reload any partial query that was buffered to disk
-            // before the previous run ended. Without this, the cursor points past
-            // bytes the server won't re-send, and we'd execute a truncated query.
+            // Open a persistent buffer file so partial queries survive crashes.
+            // Each SQL chunk is appended to this file as it arrives; when the
+            // query completes and executes, the file is truncated. If the process
+            // dies at any point, the next run reloads whatever was accumulated.
             $buffer_file = $this->state_dir . "/.sql-buffer";
             if (file_exists($buffer_file)) {
                 $sql_buffer = file_get_contents($buffer_file);
@@ -4104,6 +4105,12 @@ class ImportClient
                     sprintf("CRASH RECOVERY | Restored %d bytes from .sql-buffer", strlen($sql_buffer)),
                     true,
                 );
+            }
+            // Open in write mode (truncate) if we loaded nothing, append if we
+            // have a partial query to continue accumulating into.
+            $buffer_handle = fopen($buffer_file, $sql_buffer !== "" ? "a" : "w");
+            if (!$buffer_handle) {
+                throw new RuntimeException("Cannot open SQL buffer file: {$buffer_file}");
             }
         }
 
@@ -4132,6 +4139,7 @@ class ImportClient
                     &$complete,
                     &$sql_handle,
                     $mysql_conn,
+                    &$buffer_handle,
                     &$sql_buffer,
                     &$sql_bytes_written,
                     $context
@@ -4196,6 +4204,11 @@ class ImportClient
                                 break;
 
                             case "mysql":
+                                // Append to disk immediately so the buffer survives
+                                // even if the process is killed mid-chunk.
+                                fwrite($buffer_handle, $data);
+                                fflush($buffer_handle);
+
                                 $sql_buffer .= $data;
                                 $sql_bytes_written += strlen($data);
 
@@ -4213,6 +4226,9 @@ class ImportClient
                                         }
                                     } while ($mysql_conn->more_results() && $mysql_conn->next_result());
 
+                                    // Query executed — truncate the buffer file and reset.
+                                    ftruncate($buffer_handle, 0);
+                                    rewind($buffer_handle);
                                     $sql_buffer = "";
                                 }
                                 break;
@@ -4274,18 +4290,6 @@ class ImportClient
                     fflush($sql_handle);
                 }
 
-                // In mysql mode, persist any partial query to disk before saving
-                // the cursor. If we crash between requests, the next run loads
-                // this file so the partial query isn't lost.
-                if ($mysql_conn) {
-                    $buffer_file = $this->state_dir . "/.sql-buffer";
-                    if ($sql_buffer !== "") {
-                        file_put_contents($buffer_file, $sql_buffer);
-                    } elseif (file_exists($buffer_file)) {
-                        unlink($buffer_file);
-                    }
-                }
-
                 $this->state["cursor"] = $cursor;
                 // Clear sql_bytes when complete, otherwise save current position
                 $this->state["sql_bytes"] = $complete ? null : $sql_bytes_written;
@@ -4294,6 +4298,10 @@ class ImportClient
         } finally {
             if ($sql_handle) {
                 fclose($sql_handle);
+            }
+            if (isset($buffer_handle) && $buffer_handle) {
+                fclose($buffer_handle);
+                $buffer_handle = null;
             }
             if ($mysql_conn) {
                 $pending = $sql_buffer;
