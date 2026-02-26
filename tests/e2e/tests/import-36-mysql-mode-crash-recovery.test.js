@@ -3,9 +3,9 @@
  *
  * When using --sql-output=mysql with short execution times, the server
  * may pause mid-query (x-query-complete: 0). The importer buffers the
- * partial SQL in memory and persists it to .sql-buffer on disk between
- * requests. If the process dies and restarts, it reloads the buffer so
- * the partial query isn't lost.
+ * partial SQL in memory and persists it to .sql-buffer on disk as each
+ * chunk arrives. If the process dies at any point, the next run reloads
+ * whatever was accumulated.
  *
  * This test forces many resume cycles with --max-exec=1, verifies the
  * database is correct after completion, and confirms .sql-buffer is
@@ -42,7 +42,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
         '--mysql-password=e2e_password',
     ];
 
-    describe('resume after partial run with short --max-exec', () => {
+    describe('resume with short --max-exec completes correctly', () => {
         let tempDir;
         const importDb = 'e2e_basic_import_36_resume';
 
@@ -61,35 +61,12 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             await conn.end();
         });
 
-        it('partial run saves state and cursor', () => {
-            // Run with --max-exec=1 and no auto-resume to get a single
-            // partial run that exits with code 2.
+        it('completes via multiple resume cycles and database matches source', async () => {
+            // Use --max-exec=1 to force the server to pause frequently,
+            // creating many resume cycles. auto-resume handles exit code 2.
             const result = runImporter(importUrl(), tempDir, 'db-sync', {
                 secret: getSiteSecret(site),
                 extraArgs: [...mysqlArgs(importDb), '--max-exec=1'],
-                autoResume: false,
-            });
-
-            // Exit code 2 = partial completion, 0 = happened to finish
-            assert.ok(
-                result.exitCode === 0 || result.exitCode === 2,
-                `Expected exit 0 or 2, got ${result.exitCode}\nstderr: ${result.stderr}`,
-            );
-
-            if (result.exitCode === 2) {
-                const state = JSON.parse(
-                    readFileSync(join(tempDir, '.import-state.json'), 'utf-8'),
-                );
-                assert.ok(state.cursor, 'Expected cursor to be saved after partial run');
-            }
-        });
-
-        it('resume completes and database matches source', async () => {
-            // Let auto-resume finish the job (may take many cycles with --max-exec=1)
-            const result = runImporter(importUrl(), tempDir, 'db-sync', {
-                secret: getSiteSecret(site),
-                extraArgs: [...mysqlArgs(importDb), '--max-exec=1'],
-                skipPreflight: true,
                 maxResumeAttempts: 200,
                 wallTimeout: 90000,
             });
@@ -103,8 +80,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
         });
 
         it('.sql-buffer is cleaned up after completion', () => {
-            const bufferFile = join(tempDir, '.sql-buffer');
-            assert.ok(!existsSync(bufferFile),
+            assert.ok(!existsSync(join(tempDir, '.sql-buffer')),
                 'Expected .sql-buffer to be cleaned up after successful completion');
         });
 

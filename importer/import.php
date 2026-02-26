@@ -4022,6 +4022,7 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
+        $buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
 
@@ -4206,8 +4207,10 @@ class ImportClient
                             case "mysql":
                                 // Append to disk immediately so the buffer survives
                                 // even if the process is killed mid-chunk.
-                                fwrite($buffer_handle, $data);
-                                fflush($buffer_handle);
+                                if ($buffer_handle) {
+                                    fwrite($buffer_handle, $data);
+                                    fflush($buffer_handle);
+                                }
 
                                 $sql_buffer .= $data;
                                 $sql_bytes_written += strlen($data);
@@ -4227,8 +4230,10 @@ class ImportClient
                                     } while ($mysql_conn->more_results() && $mysql_conn->next_result());
 
                                     // Query executed — truncate the buffer file and reset.
-                                    ftruncate($buffer_handle, 0);
-                                    rewind($buffer_handle);
+                                    if ($buffer_handle) {
+                                        ftruncate($buffer_handle, 0);
+                                        rewind($buffer_handle);
+                                    }
                                     $sql_buffer = "";
                                 }
                                 break;
@@ -4299,7 +4304,7 @@ class ImportClient
             if ($sql_handle) {
                 fclose($sql_handle);
             }
-            if (isset($buffer_handle) && $buffer_handle) {
+            if ($buffer_handle) {
                 fclose($buffer_handle);
                 $buffer_handle = null;
             }
