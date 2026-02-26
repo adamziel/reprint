@@ -4009,19 +4009,11 @@ class ImportClient
         $mode = $this->sql_output_mode;
 
         // ── Set up write strategy based on output mode ──────────────
-        //
-        // Each mode provides three closures:
-        //   $write_sql($data)  — emit one SQL chunk
-        //   $flush_sink()      — flush buffered output (file mode only)
-        //   $close_sink()      — release resources
 
         $sql_handle = null;
         $mysql_conn = null;
         $sql_bytes_written = 0;
-        $has_pending_sql = false;
-        $write_sql = null;
-        $flush_sink = null;
-        $close_sink = null;
+        $sql_buffer = "";
 
         if ($mode === "file") {
             $sql_file = $this->state_dir . "/db.sql";
@@ -4056,44 +4048,9 @@ class ImportClient
                 throw new RuntimeException("Cannot open SQL file: {$sql_file}");
             }
 
-            $write_sql = function (string $data, bool $query_complete = true) use ($sql_handle, &$sql_bytes_written) {
-                $bytes = fwrite($sql_handle, $data);
-                if ($bytes === false || $bytes !== strlen($data)) {
-                    throw new RuntimeException(
-                        "SQL write failed: wrote " . ($bytes === false ? "0" : $bytes) .
-                        "/" . strlen($data) . " bytes (disk full?)"
-                    );
-                }
-                $sql_bytes_written += $bytes;
-            };
-            $flush_sink = function () use ($sql_handle) {
-                fflush($sql_handle);
-            };
-            $close_sink = function () use (&$sql_handle) {
-                if ($sql_handle) {
-                    fclose($sql_handle);
-                    $sql_handle = null;
-                }
-            };
         } elseif ($mode === "stdout") {
             $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
 
-            $write_sql = function (string $data, bool $query_complete = true) use (&$sql_bytes_written) {
-                $bytes = @fwrite(STDOUT, $data);
-                if ($bytes === false) {
-                    // Broken pipe — save state and exit cleanly so the
-                    // pipe reader (e.g. `mysql`) can finish on its own.
-                    $this->save_state($this->state);
-                    exit(0);
-                }
-                $sql_bytes_written += $bytes;
-            };
-            $flush_sink = function () {
-                // fwrite(STDOUT) is unbuffered — nothing to flush.
-            };
-            $close_sink = function () {
-                // nothing to close
-            };
         } elseif ($mode === "mysql") {
             $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
 
@@ -4124,49 +4081,6 @@ class ImportClient
                 "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
                 true,
             );
-
-            $sql_buffer = "";
-
-            $write_sql = function (string $data, bool $query_complete = true) use (
-                $mysql_conn, &$sql_buffer, &$sql_bytes_written, &$has_pending_sql
-            ) {
-                $sql_buffer .= $data;
-                $sql_bytes_written += strlen($data);
-
-                if (!$query_complete) {
-                    $has_pending_sql = true;
-                    return;
-                }
-
-                if (!$mysql_conn->multi_query($sql_buffer)) {
-                    throw new RuntimeException("MySQL execution failed: " . $mysql_conn->error);
-                }
-                // Drain all result sets from multi_query before sending the
-                // next chunk — mysqli requires this.
-                do {
-                    $result = $mysql_conn->store_result();
-                    if ($result) { $result->free(); }
-                    if ($mysql_conn->errno) {
-                        throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
-                    }
-                } while ($mysql_conn->more_results() && $mysql_conn->next_result());
-
-                $sql_buffer = "";
-                $has_pending_sql = false;
-            };
-            $flush_sink = function () { };
-            $close_sink = function () use (&$mysql_conn, &$sql_buffer) {
-                if (!$mysql_conn) { return; }
-                $pending = $sql_buffer;
-                $mysql_conn->close();
-                $mysql_conn = null;
-                if ($pending !== "") {
-                    throw new RuntimeException(
-                        "Buffered SQL was never executed (" . strlen($pending) .
-                        " bytes) — incomplete export?"
-                    );
-                }
-            };
         }
 
         // Log current progress at start of request
@@ -4189,12 +4103,13 @@ class ImportClient
                 $context = new StreamingContext();
                 $context->chunk_fingerprints = [];
                 $context->on_chunk = function ($chunk) use (
+                    $mode,
                     &$cursor,
                     &$complete,
+                    &$sql_handle,
+                    $mysql_conn,
+                    &$sql_buffer,
                     &$sql_bytes_written,
-                    &$has_pending_sql,
-                    $write_sql,
-                    $flush_sink,
                     $context
                 ) {
                     // Check if shutdown was requested
@@ -4216,9 +4131,11 @@ class ImportClient
                     $this->chunks_since_save++;
                     if (
                         $this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
-                        && !$has_pending_sql
+                        && $sql_buffer === ""
                     ) {
-                        $flush_sink();
+                        if ($sql_handle) {
+                            fflush($sql_handle);
+                        }
                         $this->state["cursor"] = $cursor;
                         $this->state["sql_bytes"] = $sql_bytes_written;
                         $this->save_state($this->state);
@@ -4229,7 +4146,53 @@ class ImportClient
 
                     if ($chunk_type === "sql") {
                         $query_complete = ($chunk["headers"]["x-query-complete"] ?? "1") === "1";
-                        $write_sql($chunk["body"], $query_complete);
+                        $data = $chunk["body"];
+
+                        switch ($mode) {
+                            case "file":
+                                $bytes = fwrite($sql_handle, $data);
+                                if ($bytes === false || $bytes !== strlen($data)) {
+                                    throw new RuntimeException(
+                                        "SQL write failed: wrote " . ($bytes === false ? "0" : $bytes) .
+                                        "/" . strlen($data) . " bytes (disk full?)"
+                                    );
+                                }
+                                $sql_bytes_written += $bytes;
+                                break;
+
+                            case "stdout":
+                                $bytes = @fwrite(STDOUT, $data);
+                                if ($bytes === false) {
+                                    // Broken pipe — save state and exit cleanly so the
+                                    // pipe reader (e.g. `mysql`) can finish on its own.
+                                    $this->save_state($this->state);
+                                    exit(0);
+                                }
+                                $sql_bytes_written += $bytes;
+                                break;
+
+                            case "mysql":
+                                $sql_buffer .= $data;
+                                $sql_bytes_written += strlen($data);
+
+                                if ($query_complete) {
+                                    if (!$mysql_conn->multi_query($sql_buffer)) {
+                                        throw new RuntimeException("MySQL execution failed: " . $mysql_conn->error);
+                                    }
+                                    // Drain all result sets from multi_query before sending the
+                                    // next chunk — mysqli requires this.
+                                    do {
+                                        $result = $mysql_conn->store_result();
+                                        if ($result) { $result->free(); }
+                                        if ($mysql_conn->errno) {
+                                            throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
+                                        }
+                                    } while ($mysql_conn->more_results() && $mysql_conn->next_result());
+
+                                    $sql_buffer = "";
+                                }
+                                break;
+                        }
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
                     } elseif ($chunk_type === "completion") {
@@ -4283,14 +4246,29 @@ class ImportClient
                 );
 
                 // Save cursor for resumption (keep it even when complete for reference)
-                $flush_sink();
+                if ($sql_handle) {
+                    fflush($sql_handle);
+                }
                 $this->state["cursor"] = $cursor;
                 // Clear sql_bytes when complete, otherwise save current position
                 $this->state["sql_bytes"] = $complete ? null : $sql_bytes_written;
                 $this->save_state($this->state);
             }
         } finally {
-            $close_sink();
+            if ($sql_handle) {
+                fclose($sql_handle);
+            }
+            if ($mysql_conn) {
+                $pending = $sql_buffer;
+                $mysql_conn->close();
+                $mysql_conn = null;
+                if ($pending !== "") {
+                    throw new RuntimeException(
+                        "Buffered SQL was never executed (" . strlen($pending) .
+                        " bytes) — incomplete export?"
+                    );
+                }
+            }
         }
     }
 
