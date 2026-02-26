@@ -92,10 +92,10 @@ describe('Import: SQL Output Modes', () => {
                     secret: getSiteSecret(site),
                     extraArgs: [
                         '--sql-output=mysql',
-                        `--db-name=${importDb}`,
-                        '--db-host=127.0.0.1',
-                        '--db-user=e2e_admin',
-                        '--db-pass=e2e_password',
+                        `--mysql-database=${importDb}`,
+                        '--mysql-host=127.0.0.1',
+                        '--mysql-user=e2e_admin',
+                        '--mysql-password=e2e_password',
                     ],
                 },
             );

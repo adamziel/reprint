@@ -927,16 +927,19 @@ class ImportClient
     private $sql_output_mode = 'file';
 
     /** @var string|null MySQL host for --sql-output=mysql. */
-    private $sql_db_host;
+    private $mysql_host;
+
+    /** @var int|null MySQL port for --sql-output=mysql. */
+    private $mysql_port;
 
     /** @var string|null MySQL user for --sql-output=mysql. */
-    private $sql_db_user;
+    private $mysql_user;
 
     /** @var string|null MySQL password for --sql-output=mysql. */
-    private $sql_db_pass;
+    private $mysql_password;
 
     /** @var string|null MySQL database for --sql-output=mysql. */
-    private $sql_db_name;
+    private $mysql_database;
 
     /** @var resource File descriptor for progress output — STDOUT normally, STDERR in stdout mode. */
     private $progress_fd;
@@ -1269,7 +1272,7 @@ class ImportClient
 
         // Persist sql_output_mode in state so it survives across resume invocations.
         // The password is NOT persisted — it must be supplied on every run (or via
-        // the DB_PASS environment variable).
+        // the MYSQL_PASSWORD environment variable).
         if (isset($options["sql_output"])) {
             $mode = $options["sql_output"];
             if (!in_array($mode, ["file", "stdout", "mysql"])) {
@@ -1291,40 +1294,47 @@ class ImportClient
         }
 
         // MySQL connection parameters for --sql-output=mysql.
-        if (isset($options["sql_db_host"])) {
-            $this->sql_db_host = $options["sql_db_host"];
-            $this->state["sql_db_host"] = $this->sql_db_host;
-        } elseif (isset($this->state["sql_db_host"])) {
-            $this->sql_db_host = $this->state["sql_db_host"];
+        if (isset($options["mysql_host"])) {
+            $this->mysql_host = $options["mysql_host"];
+            $this->state["mysql_host"] = $this->mysql_host;
+        } elseif (isset($this->state["mysql_host"])) {
+            $this->mysql_host = $this->state["mysql_host"];
         }
 
-        if (isset($options["sql_db_user"])) {
-            $this->sql_db_user = $options["sql_db_user"];
-            $this->state["sql_db_user"] = $this->sql_db_user;
-        } elseif (isset($this->state["sql_db_user"])) {
-            $this->sql_db_user = $this->state["sql_db_user"];
+        if (isset($options["mysql_port"])) {
+            $this->mysql_port = (int) $options["mysql_port"];
+            $this->state["mysql_port"] = $this->mysql_port;
+        } elseif (isset($this->state["mysql_port"])) {
+            $this->mysql_port = (int) $this->state["mysql_port"];
         }
 
-        if (isset($options["sql_db_name"])) {
-            $this->sql_db_name = $options["sql_db_name"];
-            $this->state["sql_db_name"] = $this->sql_db_name;
-        } elseif (isset($this->state["sql_db_name"])) {
-            $this->sql_db_name = $this->state["sql_db_name"];
+        if (isset($options["mysql_user"])) {
+            $this->mysql_user = $options["mysql_user"];
+            $this->state["mysql_user"] = $this->mysql_user;
+        } elseif (isset($this->state["mysql_user"])) {
+            $this->mysql_user = $this->state["mysql_user"];
+        }
+
+        if (isset($options["mysql_database"])) {
+            $this->mysql_database = $options["mysql_database"];
+            $this->state["mysql_database"] = $this->mysql_database;
+        } elseif (isset($this->state["mysql_database"])) {
+            $this->mysql_database = $this->state["mysql_database"];
         }
 
         $this->save_state($this->state);
 
         // Password is never persisted — must be supplied each run or via env.
-        if (isset($options["sql_db_pass"])) {
-            $this->sql_db_pass = $options["sql_db_pass"];
-        } elseif (getenv("DB_PASS") !== false) {
-            $this->sql_db_pass = getenv("DB_PASS");
+        if (isset($options["mysql_password"])) {
+            $this->mysql_password = $options["mysql_password"];
+        } elseif (getenv("MYSQL_PASSWORD") !== false) {
+            $this->mysql_password = getenv("MYSQL_PASSWORD");
         }
 
         // Validate mysql mode requirements.
-        if ($this->sql_output_mode === "mysql" && empty($this->sql_db_name)) {
+        if ($this->sql_output_mode === "mysql" && empty($this->mysql_database)) {
             throw new InvalidArgumentException(
-                "--db-name is required when using --sql-output=mysql",
+                "--mysql-database is required when using --sql-output=mysql",
             );
         }
 
@@ -2727,7 +2737,7 @@ class ImportClient
             } elseif ($this->sql_output_mode === "stdout") {
                 fwrite($this->progress_fd, "SQL written to stdout\n");
             } elseif ($this->sql_output_mode === "mysql") {
-                fwrite($this->progress_fd, "SQL imported into {$this->sql_db_name}\n");
+                fwrite($this->progress_fd, "SQL imported into {$this->mysql_database}\n");
             }
             fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
@@ -4054,19 +4064,21 @@ class ImportClient
         } elseif ($mode === "mysql") {
             $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
 
-            $host = $this->sql_db_host ?? "127.0.0.1";
-            $user = $this->sql_db_user ?? "root";
-            $pass = $this->sql_db_pass ?? "";
-            $name = $this->sql_db_name;
+            $host = $this->mysql_host ?? "127.0.0.1";
+            $user = $this->mysql_user ?? "root";
+            $pass = $this->mysql_password ?? "";
+            $name = $this->mysql_database;
 
-            // Parse host for port/socket (same format as WordPress DB_HOST)
-            $port = 3306;
+            // Parse host for port/socket (same format as WordPress DB_HOST).
+            // An explicit --mysql-port takes precedence over a port embedded
+            // in the host string.
+            $port = $this->mysql_port ?? 3306;
             $socket = null;
             if (strpos($host, ":") !== false) {
                 list($host, $port_or_socket) = explode(":", $host, 2);
                 if ($port_or_socket[0] === "/") {
                     $socket = $port_or_socket;
-                } else {
+                } elseif ($this->mysql_port === null) {
                     $port = (int) $port_or_socket;
                 }
             }
@@ -5921,6 +5933,11 @@ class ImportClient
             "sql_bytes" => null,           // Expected SQL file size
             // SQL output mode (file, stdout, mysql) — persisted for resume
             "sql_output" => null,
+            // MySQL connection parameters — persisted for resume (password excluded)
+            "mysql_host" => null,
+            "mysql_port" => null,
+            "mysql_user" => null,
+            "mysql_database" => null,
             // Adaptive tuning state/config
             "tuning" => [
                 "config" => [],
@@ -6534,10 +6551,11 @@ if (
                 "  --verbose, -v               Show detailed request/response logs\n" .
                 "  --max-allowed-packet=SIZE   Client max_allowed_packet (e.g. 16M, 64M)\n" .
                 "  --sql-output=MODE           Output mode: file (default), stdout, mysql\n" .
-                "  --db-host=HOST              MySQL host (default: 127.0.0.1, for --sql-output=mysql)\n" .
-                "  --db-user=USER              MySQL user (default: root, for --sql-output=mysql)\n" .
-                "  --db-pass=PASS              MySQL password (for --sql-output=mysql; or set DB_PASS env)\n" .
-                "  --db-name=DB                MySQL database (required for --sql-output=mysql)\n" .
+                "  --mysql-host=HOST           MySQL host (default: 127.0.0.1, for --sql-output=mysql)\n" .
+                "  --mysql-port=PORT           MySQL port (default: 3306, for --sql-output=mysql)\n" .
+                "  --mysql-user=USER           MySQL user (default: root, for --sql-output=mysql)\n" .
+                "  --mysql-password=PASS       MySQL password (or set MYSQL_PASSWORD env)\n" .
+                "  --mysql-database=DB         MySQL database (required for --sql-output=mysql)\n" .
                 "\n" .
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
@@ -6844,14 +6862,16 @@ if (
             $options["pipeline_steps"] = (int) substr($argv[$i], strlen("--steps="));
         } elseif (strpos($argv[$i], "--sql-output=") === 0) {
             $options["sql_output"] = substr($argv[$i], strlen("--sql-output="));
-        } elseif (strpos($argv[$i], "--db-host=") === 0) {
-            $options["sql_db_host"] = substr($argv[$i], strlen("--db-host="));
-        } elseif (strpos($argv[$i], "--db-user=") === 0) {
-            $options["sql_db_user"] = substr($argv[$i], strlen("--db-user="));
-        } elseif (strpos($argv[$i], "--db-pass=") === 0) {
-            $options["sql_db_pass"] = substr($argv[$i], strlen("--db-pass="));
-        } elseif (strpos($argv[$i], "--db-name=") === 0) {
-            $options["sql_db_name"] = substr($argv[$i], strlen("--db-name="));
+        } elseif (strpos($argv[$i], "--mysql-host=") === 0) {
+            $options["mysql_host"] = substr($argv[$i], strlen("--mysql-host="));
+        } elseif (strpos($argv[$i], "--mysql-port=") === 0) {
+            $options["mysql_port"] = substr($argv[$i], strlen("--mysql-port="));
+        } elseif (strpos($argv[$i], "--mysql-user=") === 0) {
+            $options["mysql_user"] = substr($argv[$i], strlen("--mysql-user="));
+        } elseif (strpos($argv[$i], "--mysql-password=") === 0) {
+            $options["mysql_password"] = substr($argv[$i], strlen("--mysql-password="));
+        } elseif (strpos($argv[$i], "--mysql-database=") === 0) {
+            $options["mysql_database"] = substr($argv[$i], strlen("--mysql-database="));
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
