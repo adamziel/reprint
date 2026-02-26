@@ -5919,6 +5919,8 @@ class ImportClient
             "current_file_bytes" => null,  // Expected bytes written so far
             // Crash recovery: track SQL file size
             "sql_bytes" => null,           // Expected SQL file size
+            // SQL output mode (file, stdout, mysql) — persisted for resume
+            "sql_output" => null,
             // Adaptive tuning state/config
             "tuning" => [
                 "config" => [],
