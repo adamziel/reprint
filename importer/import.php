@@ -4022,6 +4022,7 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
+        $buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
 
@@ -4093,6 +4094,25 @@ class ImportClient
                 "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
                 true,
             );
+
+            // Open a persistent buffer file so partial queries survive crashes.
+            // Each SQL chunk is appended to this file as it arrives; when the
+            // query completes and executes, the file is truncated. If the process
+            // dies at any point, the next run reloads whatever was accumulated.
+            $buffer_file = $this->state_dir . "/.sql-buffer";
+            if (file_exists($buffer_file)) {
+                $sql_buffer = file_get_contents($buffer_file);
+                $this->audit_log(
+                    sprintf("CRASH RECOVERY | Restored %d bytes from .sql-buffer", strlen($sql_buffer)),
+                    true,
+                );
+            }
+            // Open in write mode (truncate) if we loaded nothing, append if we
+            // have a partial query to continue accumulating into.
+            $buffer_handle = fopen($buffer_file, $sql_buffer !== "" ? "a" : "w");
+            if (!$buffer_handle) {
+                throw new RuntimeException("Cannot open SQL buffer file: {$buffer_file}");
+            }
         }
 
         // Log current progress at start of request
@@ -4120,6 +4140,7 @@ class ImportClient
                     &$complete,
                     &$sql_handle,
                     $mysql_conn,
+                    &$buffer_handle,
                     &$sql_buffer,
                     &$sql_bytes_written,
                     $context
@@ -4184,6 +4205,13 @@ class ImportClient
                                 break;
 
                             case "mysql":
+                                // Append to disk immediately so the buffer survives
+                                // even if the process is killed mid-chunk.
+                                if ($buffer_handle) {
+                                    fwrite($buffer_handle, $data);
+                                    fflush($buffer_handle);
+                                }
+
                                 $sql_buffer .= $data;
                                 $sql_bytes_written += strlen($data);
 
@@ -4201,6 +4229,11 @@ class ImportClient
                                         }
                                     } while ($mysql_conn->more_results() && $mysql_conn->next_result());
 
+                                    // Query executed — truncate the buffer file and reset.
+                                    if ($buffer_handle) {
+                                        ftruncate($buffer_handle, 0);
+                                        rewind($buffer_handle);
+                                    }
                                     $sql_buffer = "";
                                 }
                                 break;
@@ -4261,6 +4294,7 @@ class ImportClient
                 if ($sql_handle) {
                     fflush($sql_handle);
                 }
+
                 $this->state["cursor"] = $cursor;
                 // Clear sql_bytes when complete, otherwise save current position
                 $this->state["sql_bytes"] = $complete ? null : $sql_bytes_written;
@@ -4270,10 +4304,20 @@ class ImportClient
             if ($sql_handle) {
                 fclose($sql_handle);
             }
+            if ($buffer_handle) {
+                fclose($buffer_handle);
+                $buffer_handle = null;
+            }
             if ($mysql_conn) {
                 $pending = $sql_buffer;
                 $mysql_conn->close();
                 $mysql_conn = null;
+                // Clean up buffer file — if we got here with an empty buffer,
+                // all queries were executed successfully.
+                $buffer_file = $this->state_dir . "/.sql-buffer";
+                if ($pending === "" && file_exists($buffer_file)) {
+                    unlink($buffer_file);
+                }
                 if ($pending !== "") {
                     throw new RuntimeException(
                         "Buffered SQL was never executed (" . strlen($pending) .
