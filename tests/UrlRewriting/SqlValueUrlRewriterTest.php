@@ -8,7 +8,7 @@ require_once __DIR__ . '/../../importer/lib/SqlValueUrlRewriter.php';
 
 class SqlValueUrlRewriterTest extends TestCase
 {
-    private function createRewriter(array $mapping = null): SqlValueUrlRewriter
+    private function createRewriter(?array $mapping = null): SqlValueUrlRewriter
     {
         return new SqlValueUrlRewriter($mapping ?? [
             'https://old-site.com' => 'https://new-site.com',

@@ -4507,6 +4507,20 @@ class ImportClient
             : null;
         $domains_file = $this->state_dir . "/.import-domains.json";
 
+        // Auto-detect the source site domain from the export URL so it
+        // always appears in .import-domains.json even if the SQL dump
+        // hasn't been fully scanned yet.
+        if ($domain_collector) {
+            $parsed_url = parse_url($this->remote_url);
+            if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
+                $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
+                if (!empty($parsed_url['port'])) {
+                    $source_origin .= ':' . $parsed_url['port'];
+                }
+                $domain_collector->merge([$source_origin]);
+            }
+        }
+
         // Load previously discovered domains (from earlier partial downloads)
         if ($domain_collector && file_exists($domains_file)) {
             $prev = json_decode(file_get_contents($domains_file), true);
@@ -4544,7 +4558,8 @@ class ImportClient
                     &$sql_bytes_written,
                     $context,
                     $query_stream,
-                    $domain_collector
+                    $domain_collector,
+                    $domains_file
                 ) {
                     // Check if shutdown was requested
                     if ($this->shutdown_requested) {
@@ -4574,6 +4589,20 @@ class ImportClient
                         $this->state["sql_bytes"] = $sql_bytes_written;
                         $this->save_state($this->state);
                         $this->chunks_since_save = 0;
+
+                        // Also persist discovered domains so they survive crashes.
+                        // On resume, the SQL download picks up from the cursor,
+                        // skipping already-downloaded data — so domains from that
+                        // earlier data would be lost without periodic saves.
+                        if ($domain_collector) {
+                            $domains = $domain_collector->get_domains();
+                            if (!empty($domains)) {
+                                file_put_contents(
+                                    $domains_file,
+                                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+                                );
+                            }
+                        }
                     }
 
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";

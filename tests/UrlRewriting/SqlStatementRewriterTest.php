@@ -11,7 +11,7 @@ require_once __DIR__ . '/../../importer/lib/SqlStatementRewriter.php';
 
 class SqlStatementRewriterTest extends TestCase
 {
-    private function createRewriter(array $mapping = null): SqlStatementRewriter
+    private function createRewriter(?array $mapping = null): SqlStatementRewriter
     {
         return new SqlStatementRewriter(
             new SqlValueUrlRewriter($mapping ?? [
