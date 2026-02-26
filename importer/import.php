@@ -923,6 +923,24 @@ class ImportClient
     /** @var string Path to .import-status.json — machine-readable status for external progress readers. */
     private $status_file;
 
+    /** @var string SQL output mode: 'file' (default), 'stdout', or 'mysql'. */
+    private $sql_output_mode = 'file';
+
+    /** @var string|null MySQL host for --sql-output=mysql. */
+    private $sql_db_host;
+
+    /** @var string|null MySQL user for --sql-output=mysql. */
+    private $sql_db_user;
+
+    /** @var string|null MySQL password for --sql-output=mysql. */
+    private $sql_db_pass;
+
+    /** @var string|null MySQL database for --sql-output=mysql. */
+    private $sql_db_name;
+
+    /** @var resource File descriptor for progress output — STDOUT normally, STDERR in stdout mode. */
+    private $progress_fd;
+
     /**
      * @var int Process exit code. 0 = import complete, 2 = partial progress
      * (caller should invoke again to continue).
@@ -946,8 +964,10 @@ class ImportClient
         $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
         $this->status_file = $this->state_dir . "/.import-status.json";
 
-        // Detect TTY for progress display
+        // Detect TTY for progress display. In stdout mode this is re-evaluated
+        // against STDERR in run() once we know the output mode.
         $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
+        $this->progress_fd = STDOUT;
 
         // Register signal handlers for graceful shutdown
         if (function_exists("pcntl_signal")) {
@@ -1041,7 +1061,7 @@ class ImportClient
 
         // Output to console if verbose mode or if explicitly requested
         if ($to_console && $this->verbose_mode) {
-            echo $log_line;
+            fwrite($this->progress_fd, $log_line);
         }
     }
 
@@ -1126,7 +1146,7 @@ class ImportClient
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "{$count} file(s) changed during sync and need re-syncing (run files-sync again):\n";
+            fwrite($this->progress_fd, "{$count} file(s) changed during sync and need re-syncing (run files-sync again):\n");
         }
 
         foreach ($files as $path => $changes) {
@@ -1135,7 +1155,7 @@ class ImportClient
                 : " (changed {$changes} time" . ($changes > 1 ? "s" : "") . ")";
             $this->audit_log("  VOLATILE FILE | path={$path} | count={$changes}");
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "  {$path}{$suffix}\n";
+                fwrite($this->progress_fd, "  {$path}{$suffix}\n");
             }
         }
 
@@ -1173,8 +1193,7 @@ class ImportClient
             }
 
             // Clear line and write progress
-            echo "\r\033[K" . $message;
-            flush();
+            fwrite($this->progress_fd, "\r\033[K" . $message);
         }
     }
 
@@ -1184,7 +1203,7 @@ class ImportClient
     private function clear_progress_line(): void
     {
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "\r\033[K";
+            fwrite($this->progress_fd, "\r\033[K");
         }
     }
 
@@ -1246,6 +1265,67 @@ class ImportClient
             $this->save_state($this->state);
         } elseif (isset($this->state["max_allowed_packet"])) {
             $this->max_allowed_packet = (int) $this->state["max_allowed_packet"];
+        }
+
+        // Persist sql_output_mode in state so it survives across resume invocations.
+        // The password is NOT persisted — it must be supplied on every run (or via
+        // the DB_PASS environment variable).
+        if (isset($options["sql_output"])) {
+            $mode = $options["sql_output"];
+            if (!in_array($mode, ["file", "stdout", "mysql"])) {
+                throw new InvalidArgumentException(
+                    "Invalid --sql-output mode: {$mode}. Valid modes: file, stdout, mysql",
+                );
+            }
+            $this->sql_output_mode = $mode;
+            $this->state["sql_output"] = $mode;
+        } elseif (isset($this->state["sql_output"])) {
+            $this->sql_output_mode = $this->state["sql_output"];
+        }
+
+        // In stdout mode, SQL goes to STDOUT, so progress/status output must
+        // go to STDERR to keep the streams separate.
+        if ($this->sql_output_mode === "stdout") {
+            $this->progress_fd = STDERR;
+            $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
+        }
+
+        // MySQL connection parameters for --sql-output=mysql.
+        if (isset($options["sql_db_host"])) {
+            $this->sql_db_host = $options["sql_db_host"];
+            $this->state["sql_db_host"] = $this->sql_db_host;
+        } elseif (isset($this->state["sql_db_host"])) {
+            $this->sql_db_host = $this->state["sql_db_host"];
+        }
+
+        if (isset($options["sql_db_user"])) {
+            $this->sql_db_user = $options["sql_db_user"];
+            $this->state["sql_db_user"] = $this->sql_db_user;
+        } elseif (isset($this->state["sql_db_user"])) {
+            $this->sql_db_user = $this->state["sql_db_user"];
+        }
+
+        if (isset($options["sql_db_name"])) {
+            $this->sql_db_name = $options["sql_db_name"];
+            $this->state["sql_db_name"] = $this->sql_db_name;
+        } elseif (isset($this->state["sql_db_name"])) {
+            $this->sql_db_name = $this->state["sql_db_name"];
+        }
+
+        $this->save_state($this->state);
+
+        // Password is never persisted — must be supplied each run or via env.
+        if (isset($options["sql_db_pass"])) {
+            $this->sql_db_pass = $options["sql_db_pass"];
+        } elseif (getenv("DB_PASS") !== false) {
+            $this->sql_db_pass = getenv("DB_PASS");
+        }
+
+        // Validate mysql mode requirements.
+        if ($this->sql_output_mode === "mysql" && empty($this->sql_db_name)) {
+            throw new InvalidArgumentException(
+                "--db-name is required when using --sql-output=mysql",
+            );
         }
 
         $this->initialize_tuner($options);
@@ -1411,12 +1491,14 @@ class ImportClient
                 $this->reset_state();
                 $this->save_state($this->state);
 
-                $sql_file = $this->state_dir . "/db.sql";
-                if (file_exists($sql_file)) {
-                    unlink($sql_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$sql_file} | abort db-sync",
-                    );
+                if ($this->sql_output_mode === "file") {
+                    $sql_file = $this->state_dir . "/db.sql";
+                    if (file_exists($sql_file)) {
+                        unlink($sql_file);
+                        $this->audit_log(
+                            "FILE DELETE | {$sql_file} | abort db-sync",
+                        );
+                    }
                 }
                 $tables_file = $this->state_dir . "/db-tables.jsonl";
                 if (file_exists($tables_file)) {
@@ -1446,7 +1528,7 @@ class ImportClient
         }
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "State cleared for {$command}.\n";
+            fwrite($this->progress_fd, "State cleared for {$command}.\n");
         }
 
         $this->output_progress(["status" => "aborted"]);
@@ -1870,9 +1952,9 @@ class ImportClient
             );
 
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Resuming files-sync\n";
-                echo "  Stage: {$stage}\n";
-                echo "  Already indexed: {$index_size} files\n";
+                fwrite($this->progress_fd, "Resuming files-sync\n");
+                fwrite($this->progress_fd, "  Stage: {$stage}\n");
+                fwrite($this->progress_fd, "  Already indexed: {$index_size} files\n");
             }
         } else {
             // Starting fresh — validate that target directory is empty
@@ -1894,7 +1976,7 @@ class ImportClient
             $this->audit_log("START files-sync", true);
 
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Starting files-sync\n";
+                fwrite($this->progress_fd, "Starting files-sync\n");
             }
         }
 
@@ -1920,8 +2002,8 @@ class ImportClient
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "files-sync complete: {$index_size} files indexed\n";
-            echo "Audit log: {$this->audit_log}\n";
+            fwrite($this->progress_fd, "files-sync complete: {$index_size} files indexed\n");
+            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
 
         $this->report_volatile_files();
@@ -1960,9 +2042,9 @@ class ImportClient
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "Starting files-sync (delta)\n";
-            echo "  Index contains: {$index_size} files\n";
-            echo "  Stage: {$stage}\n";
+            fwrite($this->progress_fd, "Starting files-sync (delta)\n");
+            fwrite($this->progress_fd, "  Index contains: {$index_size} files\n");
+            fwrite($this->progress_fd, "  Stage: {$stage}\n");
         }
 
         $this->run_files_sync_pipeline();
@@ -1983,8 +2065,8 @@ class ImportClient
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "files-sync (delta) complete: {$index_size} files indexed\n";
-            echo "Audit log: {$this->audit_log}\n";
+            fwrite($this->progress_fd, "files-sync (delta) complete: {$index_size} files indexed\n");
+            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
 
         $this->report_volatile_files();
@@ -2107,7 +2189,7 @@ class ImportClient
             $this->save_state($this->state);
             $this->audit_log("START files-index", true);
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Starting files-index\n";
+                fwrite($this->progress_fd, "Starting files-index\n");
             }
         } else {
             $cursor = $this->state["index"]["cursor"] ?? null;
@@ -2119,7 +2201,7 @@ class ImportClient
                 true,
             );
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Resuming files-index\n";
+                fwrite($this->progress_fd, "Resuming files-index\n");
             }
         }
 
@@ -2184,9 +2266,9 @@ class ImportClient
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "files-index complete: {$count} entries indexed\n";
-            echo "Remote index: {$this->remote_index_file}\n";
-            echo "Audit log: {$this->audit_log}\n";
+            fwrite($this->progress_fd, "files-index complete: {$count} entries indexed\n");
+            fwrite($this->progress_fd, "Remote index: {$this->remote_index_file}\n");
+            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
     }
 
@@ -2238,7 +2320,7 @@ class ImportClient
                 true,
             );
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Following symlink target: {$dir}\n";
+                fwrite($this->progress_fd, "Following symlink target: {$dir}\n");
             }
 
             // Reset the index cursor so download_remote_index starts fresh
@@ -2271,7 +2353,7 @@ class ImportClient
                             true,
                         );
                         if ($this->is_tty && !$this->verbose_mode) {
-                            echo "  Skipped (server rejected): {$dir}\n";
+                            fwrite($this->progress_fd, "  Skipped (server rejected): {$dir}\n");
                         }
                         continue 2;
                     }
@@ -2546,17 +2628,23 @@ class ImportClient
             $state_command === "db-sync"
                 ? $this->state["status"] ?? null
                 : null;
-        $sql_exists = file_exists($sql_file);
 
         // Check if already completed
         if ($current_status === "complete") {
-            if ($sql_exists) {
-                throw new RuntimeException(
-                    "db-sync already completed and db.sql exists. Use --abort flag to start over.",
-                );
+            if ($this->sql_output_mode === "file") {
+                $sql_exists = file_exists($sql_file);
+                if ($sql_exists) {
+                    throw new RuntimeException(
+                        "db-sync already completed and db.sql exists. Use --abort flag to start over.",
+                    );
+                } else {
+                    throw new RuntimeException(
+                        "db-sync marked complete but db.sql is missing. Use --abort flag to re-sync.",
+                    );
+                }
             } else {
                 throw new RuntimeException(
-                    "db-sync marked complete but db.sql is missing. Use --abort flag to re-sync.",
+                    "db-sync already completed. Use --abort flag to start over.",
                 );
             }
         }
@@ -2575,7 +2663,7 @@ class ImportClient
             );
 
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Resuming db-sync (stage: {$stage})\n";
+                fwrite($this->progress_fd, "Resuming db-sync (stage: {$stage})\n");
             }
         } else {
             // Starting fresh
@@ -2590,7 +2678,7 @@ class ImportClient
             $this->audit_log("START db-sync", true);
 
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Starting db-sync\n";
+                fwrite($this->progress_fd, "Starting db-sync\n");
             }
         }
 
@@ -2633,9 +2721,15 @@ class ImportClient
         $this->audit_log("db-sync complete", true);
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "db-sync complete\n";
-            echo "SQL file: {$sql_file}\n";
-            echo "Audit log: {$this->audit_log}\n";
+            fwrite($this->progress_fd, "db-sync complete\n");
+            if ($this->sql_output_mode === "file") {
+                fwrite($this->progress_fd, "SQL file: {$sql_file}\n");
+            } elseif ($this->sql_output_mode === "stdout") {
+                fwrite($this->progress_fd, "SQL written to stdout\n");
+            } elseif ($this->sql_output_mode === "mysql") {
+                fwrite($this->progress_fd, "SQL imported into {$this->sql_db_name}\n");
+            }
+            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
     }
 
@@ -2681,7 +2775,7 @@ class ImportClient
 
             $this->audit_log("START db-index", true);
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Starting db-index\n";
+                fwrite($this->progress_fd, "Starting db-index\n");
             }
         } else {
             $this->audit_log(
@@ -2692,7 +2786,7 @@ class ImportClient
                 true,
             );
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "Resuming db-index\n";
+                fwrite($this->progress_fd, "Resuming db-index\n");
             }
         }
 
@@ -2716,9 +2810,9 @@ class ImportClient
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "db-index complete: {$tables} tables\n";
-            echo "Table stats: {$tables_file}\n";
-            echo "Audit log: {$this->audit_log}\n";
+            fwrite($this->progress_fd, "db-index complete: {$tables} tables\n");
+            fwrite($this->progress_fd, "Table stats: {$tables_file}\n");
+            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
     }
 
@@ -3912,53 +4006,94 @@ class ImportClient
     {
         $cursor = $this->state["cursor"] ?? null;
         $complete = false;
-        $sql_file = $this->state_dir . "/db.sql";
+        $mode = $this->sql_output_mode;
 
-        // Crash recovery: if SQL file is larger than expected, truncate it.
-        // This happens if we crashed after writing but before saving the new cursor.
-        $tracked_bytes = $this->state["sql_bytes"] ?? null;
-        if ($tracked_bytes !== null && file_exists($sql_file)) {
-            $actual_size = filesize($sql_file);
-            if ($actual_size > $tracked_bytes) {
-                $this->audit_log(
-                    sprintf(
-                        "CRASH RECOVERY | Truncating db.sql from %d to %d bytes",
-                        $actual_size,
-                        $tracked_bytes,
-                    ),
-                    true,
-                );
-                $handle = fopen($sql_file, "r+");
-                if ($handle) {
-                    ftruncate($handle, $tracked_bytes);
-                    fclose($handle);
+        // ── Set up write strategy based on output mode ──────────────
+
+        $sql_handle = null;
+        $mysql_conn = null;
+        $sql_bytes_written = 0;
+        $sql_buffer = "";
+
+        if ($mode === "file") {
+            $sql_file = $this->state_dir . "/db.sql";
+
+            // Crash recovery: if SQL file is larger than expected, truncate it.
+            // This happens if we crashed after writing but before saving the new cursor.
+            $tracked_bytes = $this->state["sql_bytes"] ?? null;
+            if ($tracked_bytes !== null && file_exists($sql_file)) {
+                $actual_size = filesize($sql_file);
+                if ($actual_size > $tracked_bytes) {
+                    $this->audit_log(
+                        sprintf(
+                            "CRASH RECOVERY | Truncating db.sql from %d to %d bytes",
+                            $actual_size,
+                            $tracked_bytes,
+                        ),
+                        true,
+                    );
+                    $handle = fopen($sql_file, "r+");
+                    if ($handle) {
+                        ftruncate($handle, $tracked_bytes);
+                        fclose($handle);
+                    }
                 }
             }
+
+            $sql_bytes_written = file_exists($sql_file) ? filesize($sql_file) : 0;
+
+            // Open in write mode if no cursor (starting fresh), append mode if resuming
+            $sql_handle = fopen($sql_file, $cursor ? "a" : "w");
+            if (!$sql_handle) {
+                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+            }
+
+        } elseif ($mode === "stdout") {
+            $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
+
+        } elseif ($mode === "mysql") {
+            $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
+
+            $host = $this->sql_db_host ?? "127.0.0.1";
+            $user = $this->sql_db_user ?? "root";
+            $pass = $this->sql_db_pass ?? "";
+            $name = $this->sql_db_name;
+
+            // Parse host for port/socket (same format as WordPress DB_HOST)
+            $port = 3306;
+            $socket = null;
+            if (strpos($host, ":") !== false) {
+                list($host, $port_or_socket) = explode(":", $host, 2);
+                if ($port_or_socket[0] === "/") {
+                    $socket = $port_or_socket;
+                } else {
+                    $port = (int) $port_or_socket;
+                }
+            }
+
+            $mysql_conn = new \mysqli($host, $user, $pass, $name, $port, $socket);
+            if ($mysql_conn->connect_error) {
+                throw new RuntimeException("MySQL connection failed: " . $mysql_conn->connect_error);
+            }
+            $mysql_conn->set_charset("utf8mb4");
+
+            $this->audit_log(
+                "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
+                true,
+            );
         }
 
         // Log current progress at start of request
-        $sql_size = file_exists($sql_file)
-            ? filesize($sql_file)
-            : 0;
         $has_cursor = $cursor !== null;
         $this->audit_log(
             sprintf(
-                "START SQL REQUEST | cursor=%s | sql_size=%s",
+                "START SQL REQUEST | mode=%s | cursor=%s | bytes_written=%s",
+                $mode,
                 $has_cursor ? "YES" : "NO",
-                number_format($sql_size) . " bytes",
+                number_format($sql_bytes_written) . " bytes",
             ),
             false,
         );
-
-        // Track bytes written for crash recovery
-        $sql_bytes_written = $sql_size;
-
-        // Open in write mode if no cursor (starting fresh), append mode if resuming
-        $sql_handle = fopen($sql_file, $cursor ? "a" : "w");
-
-        if (!$sql_handle) {
-            throw new RuntimeException("Cannot open SQL file: {$sql_file}");
-        }
 
         try {
             while (!$complete) {
@@ -3966,13 +4101,15 @@ class ImportClient
                 $url = $this->build_url("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
-                $context->sql_handle = $sql_handle;
                 $context->chunk_fingerprints = [];
                 $context->on_chunk = function ($chunk) use (
+                    $mode,
                     &$cursor,
                     &$complete,
+                    &$sql_handle,
+                    $mysql_conn,
+                    &$sql_buffer,
                     &$sql_bytes_written,
-                    $sql_handle,
                     $context
                 ) {
                     // Check if shutdown was requested
@@ -3987,11 +4124,18 @@ class ImportClient
 
                     $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
 
-                    // Save cursor periodically (every 50 chunks)
+                    // Save cursor periodically (every 50 chunks).
+                    // Skip saving when there's buffered SQL waiting for a
+                    // complete statement — crash recovery would replay the
+                    // cursor but miss the buffered bytes.
                     $this->chunks_since_save++;
-                    if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                        // Flush to ensure bytes are on disk before saving state
-                        fflush($sql_handle);
+                    if (
+                        $this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
+                        && $sql_buffer === ""
+                    ) {
+                        if ($sql_handle) {
+                            fflush($sql_handle);
+                        }
                         $this->state["cursor"] = $cursor;
                         $this->state["sql_bytes"] = $sql_bytes_written;
                         $this->save_state($this->state);
@@ -4001,15 +4145,54 @@ class ImportClient
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                     if ($chunk_type === "sql") {
+                        $query_complete = ($chunk["headers"]["x-query-complete"] ?? "1") === "1";
                         $data = $chunk["body"];
-                        $bytes = fwrite($sql_handle, $data);
-                        if ($bytes === false || $bytes !== strlen($data)) {
-                            throw new RuntimeException(
-                                "SQL write failed: wrote " . ($bytes === false ? "0" : $bytes) .
-                                "/" . strlen($data) . " bytes (disk full?)"
-                            );
+
+                        switch ($mode) {
+                            case "file":
+                                $bytes = fwrite($sql_handle, $data);
+                                if ($bytes === false || $bytes !== strlen($data)) {
+                                    throw new RuntimeException(
+                                        "SQL write failed: wrote " . ($bytes === false ? "0" : $bytes) .
+                                        "/" . strlen($data) . " bytes (disk full?)"
+                                    );
+                                }
+                                $sql_bytes_written += $bytes;
+                                break;
+
+                            case "stdout":
+                                $bytes = @fwrite(STDOUT, $data);
+                                if ($bytes === false) {
+                                    // Broken pipe — save state and exit cleanly so the
+                                    // pipe reader (e.g. `mysql`) can finish on its own.
+                                    $this->save_state($this->state);
+                                    exit(0);
+                                }
+                                $sql_bytes_written += $bytes;
+                                break;
+
+                            case "mysql":
+                                $sql_buffer .= $data;
+                                $sql_bytes_written += strlen($data);
+
+                                if ($query_complete) {
+                                    if (!$mysql_conn->multi_query($sql_buffer)) {
+                                        throw new RuntimeException("MySQL execution failed: " . $mysql_conn->error);
+                                    }
+                                    // Drain all result sets from multi_query before sending the
+                                    // next chunk — mysqli requires this.
+                                    do {
+                                        $result = $mysql_conn->store_result();
+                                        if ($result) { $result->free(); }
+                                        if ($mysql_conn->errno) {
+                                            throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
+                                        }
+                                    } while ($mysql_conn->more_results() && $mysql_conn->next_result());
+
+                                    $sql_buffer = "";
+                                }
+                                break;
                         }
-                        $sql_bytes_written += $bytes;
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
                     } elseif ($chunk_type === "completion") {
@@ -4063,14 +4246,29 @@ class ImportClient
                 );
 
                 // Save cursor for resumption (keep it even when complete for reference)
-                fflush($sql_handle);
+                if ($sql_handle) {
+                    fflush($sql_handle);
+                }
                 $this->state["cursor"] = $cursor;
                 // Clear sql_bytes when complete, otherwise save current position
                 $this->state["sql_bytes"] = $complete ? null : $sql_bytes_written;
                 $this->save_state($this->state);
             }
         } finally {
-            fclose($sql_handle);
+            if ($sql_handle) {
+                fclose($sql_handle);
+            }
+            if ($mysql_conn) {
+                $pending = $sql_buffer;
+                $mysql_conn->close();
+                $mysql_conn = null;
+                if ($pending !== "") {
+                    throw new RuntimeException(
+                        "Buffered SQL was never executed (" . strlen($pending) .
+                        " bytes) — incomplete export?"
+                    );
+                }
+            }
         }
     }
 
@@ -5530,13 +5728,12 @@ class ImportClient
 
                     // Only output progress_check in verbose mode or non-TTY
                     if ($this->verbose_mode || !$this->is_tty) {
-                        echo json_encode([
+                        fwrite($this->progress_fd, json_encode([
                             "progress_check" => true,
                             "bytes_received" => $bytes_received,
                             "bytes_last_5s" => $bytes_since_check,
                             "rate_bps" => round($rate),
-                        ]) . "\n";
-                        flush();
+                        ]) . "\n");
                     }
 
                     // If we're receiving less than 1KB/s for 5 seconds, something is wrong
@@ -5554,11 +5751,10 @@ class ImportClient
                 // Output heartbeat every second (only in verbose/non-TTY mode)
                 if ($now - $last_heartbeat >= 1.0) {
                     if ($this->verbose_mode || !$this->is_tty) {
-                        echo json_encode([
+                        fwrite($this->progress_fd, json_encode([
                             "heartbeat" => true,
                             "bytes_received" => $bytes_received,
-                        ]) . "\n";
-                        flush();
+                        ]) . "\n");
                     }
                     $last_heartbeat = $now;
                 }
@@ -5723,6 +5919,8 @@ class ImportClient
             "current_file_bytes" => null,  // Expected bytes written so far
             // Crash recovery: track SQL file size
             "sql_bytes" => null,           // Expected SQL file size
+            // SQL output mode (file, stdout, mysql) — persisted for resume
+            "sql_output" => null,
             // Adaptive tuning state/config
             "tuning" => [
                 "config" => [],
@@ -6181,27 +6379,24 @@ class ImportClient
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "\nInterrupted - saving state...\n";
-            echo "  Command: {$current_command}\n";
-            echo "  Total files indexed: {$indexed}\n";
-            echo "  Files completed in this run: {$files_imported}\n";
-            flush();
+            fwrite($this->progress_fd, "\nInterrupted - saving state...\n");
+            fwrite($this->progress_fd, "  Command: {$current_command}\n");
+            fwrite($this->progress_fd, "  Total files indexed: {$indexed}\n");
+            fwrite($this->progress_fd, "  Files completed in this run: {$files_imported}\n");
         }
 
         // Save current state (with timeout protection)
         try {
             $this->save_state($this->state);
             if ($this->is_tty && !$this->verbose_mode) {
-                echo "✓ State saved successfully\n";
+                fwrite($this->progress_fd, "✓ State saved successfully\n");
             }
         } catch (Exception $e) {
-            echo "Warning: Failed to save state: " . $e->getMessage() . "\n";
-            flush();
+            fwrite($this->progress_fd, "Warning: Failed to save state: " . $e->getMessage() . "\n");
         }
 
         if ($this->is_tty && !$this->verbose_mode) {
-            echo "Exiting...\n";
-            flush();
+            fwrite($this->progress_fd, "Exiting...\n");
         }
 
         // CRITICAL: Use SIGKILL for immediate termination
@@ -6244,7 +6439,7 @@ class ImportClient
             $is_status_change ||
             $now - $this->last_progress_output >= $this->progress_throttle
         ) {
-            $written = @fwrite(STDOUT, json_encode($data) . "\n");
+            $written = @fwrite($this->progress_fd, json_encode($data) . "\n");
             if ($written === false) {
                 // Broken pipe — save state and exit cleanly
                 $this->save_state($this->state);
@@ -6262,7 +6457,6 @@ class ImportClient
 class StreamingContext
 {
     public $on_chunk = null;
-    public $sql_handle = null;
     public $file_handle = null;
     public $file_path = null;
     public $file_ctime = null;
@@ -6330,17 +6524,25 @@ if (
         "db-sync" => [
             "short" => "Download the database as a SQL dump",
             "detail" =>
-                "Streams the full database dump into --state-dir/db.sql.\n" .
+                "Streams the full database dump into --state-dir/db.sql (default),\n" .
+                "to stdout for piping, or directly into a MySQL connection.\n" .
                 "Automatically resumes from the last cursor if interrupted.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --abort                   Clear state and output, then exit\n" .
+                "  --abort                     Clear state and output, then exit\n" .
                 "  --secret=TOKEN              HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v               Show detailed request/response logs\n" .
                 "  --max-allowed-packet=SIZE   Client max_allowed_packet (e.g. 16M, 64M)\n" .
+                "  --sql-output=MODE           Output mode: file (default), stdout, mysql\n" .
+                "  --db-host=HOST              MySQL host (default: 127.0.0.1, for --sql-output=mysql)\n" .
+                "  --db-user=USER              MySQL user (default: root, for --sql-output=mysql)\n" .
+                "  --db-pass=PASS              MySQL password (for --sql-output=mysql; or set DB_PASS env)\n" .
+                "  --db-name=DB                MySQL database (required for --sql-output=mysql)\n" .
                 "\n" .
-                "Output files:\n" .
-                "  db.sql                SQL dump\n",
+                "Output modes:\n" .
+                "  file    Write to --state-dir/db.sql (default)\n" .
+                "  stdout  Write raw SQL to stdout; progress goes to stderr\n" .
+                "  mysql   Stream directly into a MySQL connection\n",
         ],
         "db-index" => [
             "short" => "Index database tables and their statistics",
@@ -6640,6 +6842,16 @@ if (
             $options["pipeline_step"] = (int) substr($argv[$i], strlen("--step="));
         } elseif (strpos($argv[$i], "--steps=") === 0) {
             $options["pipeline_steps"] = (int) substr($argv[$i], strlen("--steps="));
+        } elseif (strpos($argv[$i], "--sql-output=") === 0) {
+            $options["sql_output"] = substr($argv[$i], strlen("--sql-output="));
+        } elseif (strpos($argv[$i], "--db-host=") === 0) {
+            $options["sql_db_host"] = substr($argv[$i], strlen("--db-host="));
+        } elseif (strpos($argv[$i], "--db-user=") === 0) {
+            $options["sql_db_user"] = substr($argv[$i], strlen("--db-user="));
+        } elseif (strpos($argv[$i], "--db-pass=") === 0) {
+            $options["sql_db_pass"] = substr($argv[$i], strlen("--db-pass="));
+        } elseif (strpos($argv[$i], "--db-name=") === 0) {
+            $options["sql_db_name"] = substr($argv[$i], strlen("--db-name="));
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);

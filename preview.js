@@ -154,16 +154,31 @@ mysqlExec(`DROP DATABASE IF EXISTS \`${dbName}\`; CREATE DATABASE \`${dbName}\`;
 
 // ── 2. Import SQL ───────────────────────────────────────────────────
 
-const sqlFile = path.join(stateDir, 'db.sql');
-if (!fs.existsSync(sqlFile)) {
-	console.error(`Error: ${sqlFile} not found.`);
-	process.exit(1);
+// If db-sync used --sql-output=mysql, the SQL was already imported directly
+// into a database — skip the file-based import step.
+let skipSqlImport = false;
+try {
+	const stateJson = JSON.parse(fs.readFileSync(path.join(stateDir, '.import-state.json'), 'utf-8'));
+	if (stateJson.sql_output === 'mysql') {
+		skipSqlImport = true;
+		console.log('SQL was already imported via --sql-output=mysql, skipping SQL import.');
+	}
+} catch {
+	// No state file or invalid JSON — proceed with file-based import
 }
-console.log(`Importing ${sqlFile}...`);
-execFileSync('mysql', ['-h', DB_HOST, '-u', DB_USER, `-p${DB_PASS}`, `-D${dbName}`], {
-	input: fs.readFileSync(sqlFile),
-	stdio: ['pipe', 'pipe', 'pipe'],
-});
+
+if (!skipSqlImport) {
+	const sqlFile = path.join(stateDir, 'db.sql');
+	if (!fs.existsSync(sqlFile)) {
+		console.error(`Error: ${sqlFile} not found.`);
+		process.exit(1);
+	}
+	console.log(`Importing ${sqlFile}...`);
+	execFileSync('mysql', ['-h', DB_HOST, '-u', DB_USER, `-p${DB_PASS}`, `-D${dbName}`], {
+		input: fs.readFileSync(sqlFile),
+		stdio: ['pipe', 'pipe', 'pipe'],
+	});
+}
 
 // ── 3. Read original URL ────────────────────────────────────────────
 // Detect the table prefix — not always "wp_". Find the *_options table.
