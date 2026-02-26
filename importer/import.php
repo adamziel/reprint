@@ -1270,8 +1270,6 @@ class ImportClient
         // Persist sql_output_mode in state so it survives across resume invocations.
         // The password is NOT persisted — it must be supplied on every run (or via
         // the DB_PASS environment variable).
-        $sql_state_dirty = false;
-
         if (isset($options["sql_output"])) {
             $mode = $options["sql_output"];
             if (!in_array($mode, ["file", "stdout", "mysql"])) {
@@ -1281,7 +1279,6 @@ class ImportClient
             }
             $this->sql_output_mode = $mode;
             $this->state["sql_output"] = $mode;
-            $sql_state_dirty = true;
         } elseif (isset($this->state["sql_output"])) {
             $this->sql_output_mode = $this->state["sql_output"];
         }
@@ -1297,7 +1294,6 @@ class ImportClient
         if (isset($options["sql_db_host"])) {
             $this->sql_db_host = $options["sql_db_host"];
             $this->state["sql_db_host"] = $this->sql_db_host;
-            $sql_state_dirty = true;
         } elseif (isset($this->state["sql_db_host"])) {
             $this->sql_db_host = $this->state["sql_db_host"];
         }
@@ -1305,7 +1301,6 @@ class ImportClient
         if (isset($options["sql_db_user"])) {
             $this->sql_db_user = $options["sql_db_user"];
             $this->state["sql_db_user"] = $this->sql_db_user;
-            $sql_state_dirty = true;
         } elseif (isset($this->state["sql_db_user"])) {
             $this->sql_db_user = $this->state["sql_db_user"];
         }
@@ -1313,14 +1308,11 @@ class ImportClient
         if (isset($options["sql_db_name"])) {
             $this->sql_db_name = $options["sql_db_name"];
             $this->state["sql_db_name"] = $this->sql_db_name;
-            $sql_state_dirty = true;
         } elseif (isset($this->state["sql_db_name"])) {
             $this->sql_db_name = $this->state["sql_db_name"];
         }
 
-        if ($sql_state_dirty) {
-            $this->save_state($this->state);
-        }
+        $this->save_state($this->state);
 
         // Password is never persisted — must be supplied each run or via env.
         if (isset($options["sql_db_pass"])) {
@@ -4026,6 +4018,7 @@ class ImportClient
         $sql_handle = null;
         $mysql_conn = null;
         $sql_bytes_written = 0;
+        $has_pending_sql = false;
         $write_sql = null;
         $flush_sink = null;
         $close_sink = null;
@@ -4063,7 +4056,7 @@ class ImportClient
                 throw new RuntimeException("Cannot open SQL file: {$sql_file}");
             }
 
-            $write_sql = function (string $data) use ($sql_handle, &$sql_bytes_written) {
+            $write_sql = function (string $data, bool $query_complete = true) use ($sql_handle, &$sql_bytes_written) {
                 $bytes = fwrite($sql_handle, $data);
                 if ($bytes === false || $bytes !== strlen($data)) {
                     throw new RuntimeException(
@@ -4085,7 +4078,7 @@ class ImportClient
         } elseif ($mode === "stdout") {
             $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
 
-            $write_sql = function (string $data) use (&$sql_bytes_written) {
+            $write_sql = function (string $data, bool $query_complete = true) use (&$sql_bytes_written) {
                 $bytes = @fwrite(STDOUT, $data);
                 if ($bytes === false) {
                     // Broken pipe — save state and exit cleanly so the
@@ -4123,46 +4116,55 @@ class ImportClient
 
             $mysql_conn = new \mysqli($host, $user, $pass, $name, $port, $socket);
             if ($mysql_conn->connect_error) {
-                throw new RuntimeException(
-                    "MySQL connection failed: " . $mysql_conn->connect_error,
-                );
+                throw new RuntimeException("MySQL connection failed: " . $mysql_conn->connect_error);
             }
             $mysql_conn->set_charset("utf8mb4");
 
             $this->audit_log(
-                "SQL OUTPUT mysql | connected to {$user}@{$host}:{$port}/{$name}",
+                "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
                 true,
             );
 
-            $write_sql = function (string $data) use ($mysql_conn, &$sql_bytes_written) {
-                if (!$mysql_conn->multi_query($data)) {
-                    throw new RuntimeException(
-                        "MySQL execution failed: " . $mysql_conn->error,
-                    );
+            $sql_buffer = "";
+
+            $write_sql = function (string $data, bool $query_complete = true) use (
+                $mysql_conn, &$sql_buffer, &$sql_bytes_written, &$has_pending_sql
+            ) {
+                $sql_buffer .= $data;
+                $sql_bytes_written += strlen($data);
+
+                if (!$query_complete) {
+                    $has_pending_sql = true;
+                    return;
+                }
+
+                if (!$mysql_conn->multi_query($sql_buffer)) {
+                    throw new RuntimeException("MySQL execution failed: " . $mysql_conn->error);
                 }
                 // Drain all result sets from multi_query before sending the
                 // next chunk — mysqli requires this.
                 do {
                     $result = $mysql_conn->store_result();
-                    if ($result) {
-                        $result->free();
-                    }
+                    if ($result) { $result->free(); }
                     if ($mysql_conn->errno) {
-                        throw new RuntimeException(
-                            "MySQL statement error: " . $mysql_conn->error,
-                        );
+                        throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
                     }
                 } while ($mysql_conn->more_results() && $mysql_conn->next_result());
 
-                $sql_bytes_written += strlen($data);
+                $sql_buffer = "";
+                $has_pending_sql = false;
             };
-            $flush_sink = function () {
-                // nothing to flush
-            };
-            $close_sink = function () use (&$mysql_conn) {
-                if ($mysql_conn) {
-                    $mysql_conn->close();
-                    $mysql_conn = null;
+            $flush_sink = function () { };
+            $close_sink = function () use (&$mysql_conn, &$sql_buffer) {
+                if (!$mysql_conn) { return; }
+                $pending = $sql_buffer;
+                $mysql_conn->close();
+                $mysql_conn = null;
+                if ($pending !== "") {
+                    throw new RuntimeException(
+                        "Buffered SQL was never executed (" . strlen($pending) .
+                        " bytes) — incomplete export?"
+                    );
                 }
             };
         }
@@ -4190,6 +4192,7 @@ class ImportClient
                     &$cursor,
                     &$complete,
                     &$sql_bytes_written,
+                    &$has_pending_sql,
                     $write_sql,
                     $flush_sink,
                     $context
@@ -4206,9 +4209,15 @@ class ImportClient
 
                     $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
 
-                    // Save cursor periodically (every 50 chunks)
+                    // Save cursor periodically (every 50 chunks).
+                    // Skip saving when there's buffered SQL waiting for a
+                    // complete statement — crash recovery would replay the
+                    // cursor but miss the buffered bytes.
                     $this->chunks_since_save++;
-                    if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+                    if (
+                        $this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
+                        && !$has_pending_sql
+                    ) {
                         $flush_sink();
                         $this->state["cursor"] = $cursor;
                         $this->state["sql_bytes"] = $sql_bytes_written;
@@ -4219,7 +4228,8 @@ class ImportClient
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                     if ($chunk_type === "sql") {
-                        $write_sql($chunk["body"]);
+                        $query_complete = ($chunk["headers"]["x-query-complete"] ?? "1") === "1";
+                        $write_sql($chunk["body"], $query_complete);
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
                     } elseif ($chunk_type === "completion") {

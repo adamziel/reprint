@@ -920,6 +920,13 @@ function endpoint_sql_chunk(
             $sql = implode("", $sql);
             $sql_bytes_processed += strlen($sql);
 
+            // Does this chunk end on a complete statement boundary?
+            // The producer terminates complete statements with ";" and
+            // intermediate INSERT rows with ",", so checking the last
+            // character is sufficient.
+            $trimmed = rtrim($sql);
+            $query_complete = $trimmed !== "" && $trimmed[-1] === ";";
+
             // E2E test hook: before SQL batch is emitted
             if (getenv('SITE_EXPORT_TEST_MODE')) {
                 $cursor_for_hook = $reader->get_reentrancy_cursor();
@@ -933,6 +940,7 @@ function endpoint_sql_chunk(
                 "Content-Type: application/sql\r\n" .
                 "Content-Length: " . strlen($sql) . "\r\n" .
                 "X-Chunk-Type: sql\r\n" .
+                "X-Query-Complete: " . ($query_complete ? "1" : "0") . "\r\n" .
                 "X-Cursor: " . base64_encode($cursor) . "\r\n" .
                 "\r\n",
             );
