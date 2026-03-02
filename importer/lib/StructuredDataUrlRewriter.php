@@ -2,7 +2,6 @@
 
 require_once __DIR__ . '/wp-stubs.php';
 
-use WordPress\DataLiberation\URL\WPURL;
 use function WordPress\DataLiberation\URL\wp_rewrite_urls;
 
 /**
@@ -14,12 +13,23 @@ use function WordPress\DataLiberation\URL\wp_rewrite_urls;
  * layer is decoded, rewritten, and re-encoded correctly.
  *
  * Supported formats:
- * - Serialized PHP: walks string values with PhpSerializedStringWalker,
- *   recursively classifying and rewriting each one
+ * - Serialized PHP: uses PhpSerializationProcessor's cursor API to iterate
+ *   string values, recursively classifying and rewriting each one
  * - JSON: recursively walks string values, classifying and rewriting each one
  * - Base64: decodes, recursively rewrites the inner content, re-encodes
- * - Text/HTML/Block markup: uses wp_rewrite_urls() which handles HTML attributes,
+ * - Block markup: uses wp_rewrite_urls() which handles HTML attributes,
  *   block comment JSON, text nodes, and CSS url() in style attributes
+ * - Plain text: uses strtr() for simple string replacement (default for text)
+ *
+ * The caller can pass a $content_type hint to control how leaf text values
+ * are rewritten:
+ * - null (default): auto-detect format; use strtr() for TYPE_TEXT
+ * - 'block_markup': use wp_rewrite_urls() for TYPE_TEXT (for post_content etc.)
+ * - 'skip': return the value unchanged
+ *
+ * The hint propagates through recursive calls so that e.g. serialized PHP
+ * inside a block_markup column eventually reaches wp_rewrite_urls() for its
+ * leaf text strings.
  */
 class StructuredDataUrlRewriter
 {
@@ -37,12 +47,18 @@ class StructuredDataUrlRewriter
     /**
      * Rewrite URLs in a single decoded value.
      *
-     * @param string $value The decoded database value.
+     * @param string      $value        The decoded database value.
+     * @param string|null $content_type Content type hint: null (auto-detect, plain text default),
+     *                                  'block_markup' (use wp_rewrite_urls), or 'skip' (no-op).
      * @return string The rewritten value, or the original if no changes were made.
      */
-    public function rewrite(string $value): string
+    public function rewrite(string $value, ?string $content_type = null): string
     {
         if ($value === '') {
+            return $value;
+        }
+
+        if ($content_type === 'skip') {
             return $value;
         }
 
@@ -50,17 +66,20 @@ class StructuredDataUrlRewriter
 
         switch ($type) {
             case ContentClassifier::TYPE_SERIALIZED_PHP:
-                return $this->rewrite_serialized_php($value);
+                return $this->rewrite_serialized_php($value, $content_type);
 
             case ContentClassifier::TYPE_JSON:
-                return $this->rewrite_json($value);
+                return $this->rewrite_json($value, $content_type);
 
             case ContentClassifier::TYPE_BASE64:
-                return $this->rewrite_base64($value);
+                return $this->rewrite_base64($value, $content_type);
 
             case ContentClassifier::TYPE_TEXT:
             default:
-                return $this->rewrite_text($value);
+                if ($content_type === 'block_markup') {
+                    return $this->rewrite_block_markup($value);
+                }
+                return $this->rewrite_plain_text($value);
         }
     }
 
@@ -73,20 +92,28 @@ class StructuredDataUrlRewriter
      *
      * Falls back to text rewriting if the serialized data is malformed.
      */
-    private function rewrite_serialized_php(string $value): string
+    private function rewrite_serialized_php(string $value, ?string $content_type): string
     {
-        $result = PhpSerializedStringWalker::walk_strings($value, function (string $s): string {
-            return $this->rewrite($s);
-        });
-
-        // If the walker returns false, the input was malformed.
-        // Fall back to treating it as text so we still attempt URL replacement
-        // rather than silently passing corrupted data through.
-        if ($result === false) {
-            return $this->rewrite_text($value);
+        $p = new PhpSerializationProcessor($value);
+        while ($p->next_value()) {
+            $original = $p->get_value();
+            $rewritten = $this->rewrite($original, $content_type);
+            if ($rewritten !== $original) {
+                $p->set_value($rewritten);
+            }
         }
 
-        return $result;
+        // If the parser encountered malformed data, fall back to treating it
+        // as text so we still attempt URL replacement rather than silently
+        // passing corrupted data through.
+        if ($p->is_malformed()) {
+            if ($content_type === 'block_markup') {
+                return $this->rewrite_block_markup($value);
+            }
+            return $this->rewrite_plain_text($value);
+        }
+
+        return $p->get_updated_serialization();
     }
 
     /**
@@ -95,7 +122,7 @@ class StructuredDataUrlRewriter
      * Each string value is passed back through rewrite() so nested formats
      * (serialized PHP inside JSON, base64 inside JSON, etc.) are handled.
      */
-    private function rewrite_json(string $json): string
+    private function rewrite_json(string $json, ?string $content_type): string
     {
         $data = json_decode($json, true);
         if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
@@ -103,7 +130,7 @@ class StructuredDataUrlRewriter
         }
 
         $changed = false;
-        $data = $this->walk_json($data, $changed);
+        $data = $this->walk_json($data, $changed, $content_type);
 
         if (!$changed) {
             return $json;
@@ -119,14 +146,15 @@ class StructuredDataUrlRewriter
      * so a JSON string containing serialized PHP, base64, or nested JSON
      * will be handled correctly.
      *
-     * @param mixed $data    The JSON-decoded data.
-     * @param bool  $changed Set to true if any value was changed.
+     * @param mixed       $data         The JSON-decoded data.
+     * @param bool        $changed      Set to true if any value was changed.
+     * @param string|null $content_type Content type hint to propagate.
      * @return mixed The walked data with URLs rewritten.
      */
-    private function walk_json($data, bool &$changed)
+    private function walk_json($data, bool &$changed, ?string $content_type)
     {
         if (is_string($data)) {
-            $rewritten = $this->rewrite($data);
+            $rewritten = $this->rewrite($data, $content_type);
             if ($rewritten !== $data) {
                 $changed = true;
                 return $rewritten;
@@ -136,7 +164,7 @@ class StructuredDataUrlRewriter
 
         if (is_array($data)) {
             foreach ($data as $key => $value) {
-                $data[$key] = $this->walk_json($value, $changed);
+                $data[$key] = $this->walk_json($value, $changed, $content_type);
             }
         }
 
@@ -150,14 +178,17 @@ class StructuredDataUrlRewriter
      * be serialized PHP, JSON, HTML, or any other supported format), then
      * re-encodes. Returns the original if nothing changed or decode fails.
      */
-    private function rewrite_base64(string $value): string
+    private function rewrite_base64(string $value, ?string $content_type): string
     {
         $decoded = base64_decode($value, true);
         if ($decoded === false) {
-            return $this->rewrite_text($value);
+            if ($content_type === 'block_markup') {
+                return $this->rewrite_block_markup($value);
+            }
+            return $this->rewrite_plain_text($value);
         }
 
-        $rewritten = $this->rewrite($decoded);
+        $rewritten = $this->rewrite($decoded, $content_type);
 
         if ($rewritten === $decoded) {
             return $value;
@@ -170,11 +201,23 @@ class StructuredDataUrlRewriter
      * Rewrite URLs in text/HTML/block markup using wp_rewrite_urls().
      * This handles HTML attributes, block comment JSON, text nodes, and CSS url().
      */
-    private function rewrite_text(string $value): string
+    private function rewrite_block_markup(string $value): string
     {
         return wp_rewrite_urls([
             'block_markup' => $value,
             'url-mapping' => $this->url_mapping,
         ]);
+    }
+
+    /**
+     * Rewrite URLs in plain text using strtr().
+     *
+     * strtr() with an associative array replaces all keys simultaneously
+     * with longest match first, avoiding partial-match problems that can
+     * occur with ordered str_replace().
+     */
+    private function rewrite_plain_text(string $value): string
+    {
+        return strtr($value, $this->url_mapping);
     }
 }

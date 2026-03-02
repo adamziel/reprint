@@ -6,18 +6,19 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../importer/lib/wp-stubs.php';
 require_once __DIR__ . '/../../importer/lib/Base64ValueScanner.php';
 require_once __DIR__ . '/../../importer/lib/ContentClassifier.php';
-require_once __DIR__ . '/../../importer/lib/PhpSerializedStringWalker.php';
+require_once __DIR__ . '/../../importer/lib/PhpSerializationProcessor.php';
 require_once __DIR__ . '/../../importer/lib/StructuredDataUrlRewriter.php';
 require_once __DIR__ . '/../../importer/lib/SqlStatementRewriter.php';
 
 class SqlStatementRewriterTest extends TestCase
 {
-    private function createRewriter(?array $mapping = null): SqlStatementRewriter
+    private function createRewriter(?array $mapping = null, array $column_hints = []): SqlStatementRewriter
     {
         return new SqlStatementRewriter(
             new StructuredDataUrlRewriter($mapping ?? [
                 'https://old-site.com' => 'https://new-site.com',
-            ])
+            ]),
+            $column_hints
         );
     }
 
@@ -162,5 +163,197 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringEndsWith(');', $result);
         $this->assertStringContainsString("FROM_BASE64('", $result);
         $this->assertStringContainsString("')", $result);
+    }
+
+    // --- Column awareness: WordPress defaults ---
+
+    public function testPostContentColumnUsesBlockMarkupRewriting(): void
+    {
+        $rewriter = $this->createRewriter();
+        // Block markup in post_content — the WP default should trigger block_markup processing
+        $markup = '<!-- wp:paragraph --><p>Visit <a href="https://old-site.com/page">us</a></p><!-- /wp:paragraph -->';
+        $encoded = base64_encode($markup);
+        $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+        $this->assertStringNotContainsString('old-site.com', $matches[0]['value']);
+    }
+
+    public function testUnknownColumnUsesPlainTextReplacement(): void
+    {
+        $rewriter = $this->createRewriter();
+        // A plain URL in a non-block-markup column — should use strtr()
+        $value = 'https://old-site.com/api/endpoint';
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('" . base64_encode('siteurl') . "'), FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        // option_value should be rewritten via strtr
+        $this->assertStringContainsString('new-site.com/api/endpoint', $matches[1]['value']);
+    }
+
+    public function testWpDefaultsWorkWithCustomTablePrefix(): void
+    {
+        $rewriter = $this->createRewriter();
+        // Custom prefix — "mysite_posts" should match the "posts" suffix
+        $markup = '<a href="https://old-site.com/page">Link</a>';
+        $encoded = base64_encode($markup);
+        $sql = "INSERT INTO `mysite_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+    }
+
+    public function testCommentContentUsesBlockMarkup(): void
+    {
+        $rewriter = $this->createRewriter();
+        $markup = '<p>Check <a href="https://old-site.com/post">this post</a></p>';
+        $encoded = base64_encode($markup);
+        $sql = "INSERT INTO `wp_comments` (`comment_ID`, `comment_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $this->assertStringContainsString('new-site.com/post', $matches[0]['value']);
+    }
+
+    // --- Column awareness: consumer-provided hints ---
+
+    public function testConsumerHintOverridesDefault(): void
+    {
+        // Consumer says to skip post_content
+        $rewriter = $this->createRewriter(null, [
+            'posts' => ['post_content' => 'skip'],
+        ]);
+        $markup = '<a href="https://old-site.com/page">Link</a>';
+        $encoded = base64_encode($markup);
+        $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+
+        // Value should be unchanged because consumer said 'skip'
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $this->assertSame($markup, $matches[0]['value']);
+    }
+
+    public function testConsumerHintForCustomTable(): void
+    {
+        // Consumer declares a custom plugin table column as block_markup
+        $rewriter = $this->createRewriter(null, [
+            'my_plugin_data' => ['html_content' => 'block_markup'],
+        ]);
+        $markup = '<a href="https://old-site.com/page">Link</a>';
+        $encoded = base64_encode($markup);
+        $sql = "INSERT INTO `wp_my_plugin_data` (`id`, `html_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+    }
+
+    // --- Column awareness: INSERT without column list ---
+
+    public function testInsertWithoutColumnListFallsBackToAutoDetect(): void
+    {
+        $rewriter = $this->createRewriter();
+        // No column list — can't determine column position, falls back to null (auto-detect)
+        $value = 'https://old-site.com/page';
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO `wp_posts` VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+    }
+
+    // --- Column awareness: UPDATE statements ---
+
+    public function testUpdateStatementWithColumnAwareness(): void
+    {
+        $rewriter = $this->createRewriter();
+        $markup = '<a href="https://old-site.com/page">Link</a>';
+        $encoded = base64_encode($markup);
+        $sql = "UPDATE `wp_posts` SET `post_content` = FROM_BASE64('{$encoded}') WHERE `ID` = 1;";
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+    }
+
+    public function testUpdateConcatWithColumnAwareness(): void
+    {
+        $rewriter = $this->createRewriter();
+        $markup = '<a href="https://old-site.com/page">Link</a>';
+        $encoded = base64_encode($markup);
+        $sql = "UPDATE `wp_posts` SET `post_content` = CONCAT(`post_content`, FROM_BASE64('{$encoded}')) WHERE `ID` = 1;";
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+    }
+
+    // --- Column awareness: multi-row INSERT with mixed columns ---
+
+    public function testMultiRowInsertAppliesCorrectHintPerColumn(): void
+    {
+        $rewriter = $this->createRewriter();
+        // post_content gets block_markup, post_title gets auto-detect (plain text)
+        $title = 'Visit https://old-site.com/about';
+        $content = '<a href="https://old-site.com/page">Link</a>';
+
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(1, FROM_BASE64('%s'), FROM_BASE64('%s')), (2, FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode($title),
+            base64_encode($content),
+            base64_encode($title),
+            base64_encode($content)
+        );
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(4, $matches);
+
+        // All values should have URLs rewritten
+        foreach ($matches as $match) {
+            $this->assertStringContainsString('new-site.com', $match['value']);
+            $this->assertStringNotContainsString('old-site.com', $match['value']);
+        }
+    }
+
+    // --- Column awareness: CONVERT wrapper ---
+
+    public function testColumnAwarenessWorksWithConvertWrapper(): void
+    {
+        $rewriter = $this->createRewriter();
+        $json = json_encode(['url' => 'https://old-site.com/api'], JSON_UNESCAPED_SLASHES);
+        $encoded = base64_encode($json);
+        $sql = "INSERT INTO `wp_postmeta` (`meta_id`, `meta_value`) VALUES(1, CONVERT(FROM_BASE64('{$encoded}') USING utf8mb4));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $matches = Base64ValueScanner::scan($result);
+        $this->assertCount(1, $matches);
+        $decoded = json_decode($matches[0]['value'], true);
+        $this->assertStringContainsString('new-site.com', $decoded['url']);
     }
 }

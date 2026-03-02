@@ -4,7 +4,7 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../importer/lib/ContentClassifier.php';
-require_once __DIR__ . '/../../importer/lib/PhpSerializedStringWalker.php';
+require_once __DIR__ . '/../../importer/lib/PhpSerializationProcessor.php';
 require_once __DIR__ . '/../../importer/lib/StructuredDataUrlRewriter.php';
 
 class StructuredDataUrlRewriterTest extends TestCase
@@ -328,5 +328,112 @@ class StructuredDataUrlRewriterTest extends TestCase
         $result = $rewriter->rewrite($input);
         $this->assertStringContainsString('cdn.new-site.com', $result);
         $this->assertStringContainsString('new-site.com/page', $result);
+    }
+
+    // --- Content type hint: 'skip' ---
+
+    public function testSkipContentTypeReturnsValueUnchanged(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'https://old-site.com/page';
+        $result = $rewriter->rewrite($input, 'skip');
+        $this->assertSame($input, $result, "'skip' hint should return the value unchanged");
+    }
+
+    public function testSkipContentTypeWorksOnSerializedPhp(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = serialize(['url' => 'https://old-site.com/page']);
+        $result = $rewriter->rewrite($input, 'skip');
+        $this->assertSame($input, $result);
+    }
+
+    // --- Content type hint: 'block_markup' ---
+
+    public function testBlockMarkupHintUsesWpRewriteUrls(): void
+    {
+        $rewriter = $this->createRewriter();
+        // Block markup with JSON attribute — wp_rewrite_urls() handles the JSON
+        // inside the block comment, strtr() would not
+        $input = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $this->assertStringNotContainsString('old-site.com', $result);
+        $this->assertStringContainsString('new-site.com', $result);
+    }
+
+    public function testBlockMarkupHintRewritesHtmlAttributes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<a href="https://old-site.com/page">Link</a>';
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $this->assertStringContainsString('https://new-site.com/page', $result);
+    }
+
+    // --- Content type hint: null (default) uses plain text replacement ---
+
+    public function testDefaultHintUsesPlainTextReplacement(): void
+    {
+        $rewriter = $this->createRewriter();
+        // A plain URL string — strtr() handles this fine
+        $input = 'Visit https://old-site.com/about for more.';
+        $result = $rewriter->rewrite($input);
+        $this->assertStringContainsString('https://new-site.com/about', $result);
+        $this->assertStringNotContainsString('old-site.com', $result);
+    }
+
+    public function testDefaultHintStillHandlesSerializedPhp(): void
+    {
+        $rewriter = $this->createRewriter();
+        // Serialized PHP is auto-detected regardless of content type hint
+        $input = serialize(['url' => 'https://old-site.com/page']);
+        $result = $rewriter->rewrite($input);
+        $unserialized = unserialize($result);
+        $this->assertSame('https://new-site.com/page', $unserialized['url']);
+    }
+
+    public function testDefaultHintStillHandlesJson(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = json_encode(['url' => 'https://old-site.com/api'], JSON_UNESCAPED_SLASHES);
+        $result = $rewriter->rewrite($input);
+        $decoded = json_decode($result, true);
+        $this->assertSame('https://new-site.com/api', $decoded['url']);
+    }
+
+    // --- Content type hint propagation through nested formats ---
+
+    public function testBlockMarkupHintPropagatesThroughSerializedPhp(): void
+    {
+        $rewriter = $this->createRewriter();
+        // Serialized PHP containing a block markup string — the block_markup
+        // hint should propagate so the inner text gets wp_rewrite_urls()
+        $markup = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
+        $input = serialize(['content' => $markup]);
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $unserialized = unserialize($result);
+        $this->assertStringNotContainsString('old-site.com', $unserialized['content']);
+        $this->assertStringContainsString('new-site.com', $unserialized['content']);
+    }
+
+    public function testBlockMarkupHintPropagatesThroughJson(): void
+    {
+        $rewriter = $this->createRewriter();
+        $markup = '<a href="https://old-site.com/page">Link</a>';
+        $input = json_encode(['html' => $markup], JSON_UNESCAPED_SLASHES);
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $decoded = json_decode($result, true);
+        $this->assertStringContainsString('new-site.com/page', $decoded['html']);
+        $this->assertStringNotContainsString('old-site.com', $decoded['html']);
+    }
+
+    public function testBlockMarkupHintPropagatesThroughBase64(): void
+    {
+        $rewriter = $this->createRewriter();
+        $markup = '<img src="https://old-site.com/img.jpg"/>';
+        $input = base64_encode($markup);
+        $result = $rewriter->rewrite($input, 'block_markup');
+        $decoded = base64_decode($result);
+        $this->assertStringContainsString('new-site.com/img.jpg', $decoded);
+        $this->assertStringNotContainsString('old-site.com', $decoded);
     }
 }

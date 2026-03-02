@@ -2,24 +2,54 @@
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/lib/PhpSerializedStringWalker.php';
+require_once __DIR__ . '/../../importer/lib/PhpSerializationProcessor.php';
 
-class PhpSerializedStringWalkerTest extends TestCase
+class PhpSerializationProcessorTest extends TestCase
 {
     /**
-     * Identity callback — returns the value unchanged.
+     * Run the processor with a transform callback on each value.
+     * Returns the updated serialization.
      */
-    private function identity(): callable
+    private function processWithTransform(string $input, callable $transform): string
     {
-        return fn(string $v): string => $v;
+        $p = new PhpSerializationProcessor($input);
+        while ($p->next_value()) {
+            $original = $p->get_value();
+            $new = $transform($original);
+            if ($new !== $original) {
+                $p->set_value($new);
+            }
+        }
+        return $p->get_updated_serialization();
     }
 
     /**
-     * Uppercasing callback — makes changes easy to spot.
+     * Run the processor without modifying any values.
+     * Returns the updated serialization (should be byte-identical to input).
      */
-    private function toUpper(): callable
+    private function processIdentity(string $input): string
     {
-        return fn(string $v): string => strtoupper($v);
+        $p = new PhpSerializationProcessor($input);
+        while ($p->next_value()) {
+            // read but don't modify
+            $p->get_value();
+        }
+        return $p->get_updated_serialization();
+    }
+
+    /**
+     * Collect all string values the processor exposes, without modifying them.
+     *
+     * @return string[]
+     */
+    private function collectValues(string $input): array
+    {
+        $values = [];
+        $p = new PhpSerializationProcessor($input);
+        while ($p->next_value()) {
+            $values[] = $p->get_value();
+        }
+        return $values;
     }
 
     // ---------------------------------------------------------------
@@ -29,93 +59,89 @@ class PhpSerializedStringWalkerTest extends TestCase
     public function testIntegerPassthrough(): void
     {
         $input = serialize(42);
-        $this->assertSame($input, PhpSerializedStringWalker::walk_strings($input, $this->identity()));
+        $this->assertSame($input, $this->processIdentity($input));
     }
 
     public function testNegativeIntegerPassthrough(): void
     {
         $input = serialize(-7);
-        $this->assertSame($input, PhpSerializedStringWalker::walk_strings($input, $this->identity()));
+        $this->assertSame($input, $this->processIdentity($input));
     }
 
     public function testDoublePassthrough(): void
     {
         $input = serialize(3.14);
-        $this->assertSame($input, PhpSerializedStringWalker::walk_strings($input, $this->identity()));
+        $this->assertSame($input, $this->processIdentity($input));
     }
 
     public function testBooleanTruePassthrough(): void
     {
         $input = serialize(true);
-        $this->assertSame($input, PhpSerializedStringWalker::walk_strings($input, $this->identity()));
+        $this->assertSame($input, $this->processIdentity($input));
     }
 
     public function testBooleanFalsePassthrough(): void
     {
         $input = serialize(false);
-        $this->assertSame($input, PhpSerializedStringWalker::walk_strings($input, $this->identity()));
+        $this->assertSame($input, $this->processIdentity($input));
     }
 
     public function testNullPassthrough(): void
     {
         $input = serialize(null);
-        $this->assertSame($input, PhpSerializedStringWalker::walk_strings($input, $this->identity()));
+        $this->assertSame($input, $this->processIdentity($input));
+    }
+
+    public function testScalarTypesExposeNoValues(): void
+    {
+        $this->assertSame([], $this->collectValues(serialize(42)));
+        $this->assertSame([], $this->collectValues(serialize(true)));
+        $this->assertSame([], $this->collectValues(serialize(null)));
+        $this->assertSame([], $this->collectValues(serialize(3.14)));
     }
 
     // ---------------------------------------------------------------
-    // String callback: same-length and different-length values
+    // String value: same-length and different-length replacements
     // ---------------------------------------------------------------
 
-    public function testStringCallbackSameLength(): void
+    public function testStringReplacementSameLength(): void
     {
         $input = serialize('hello');
-        $result = PhpSerializedStringWalker::walk_strings($input, fn($v) => 'HELLO');
+        $result = $this->processWithTransform($input, fn($v) => 'HELLO');
         $this->assertSame(serialize('HELLO'), $result);
         $this->assertSame('HELLO', unserialize($result));
     }
 
-    public function testStringCallbackDifferentLength(): void
+    public function testStringReplacementLongerValue(): void
     {
         $input = serialize('hi');
-        $result = PhpSerializedStringWalker::walk_strings($input, fn($v) => 'hello world');
+        $result = $this->processWithTransform($input, fn($v) => 'hello world');
         $this->assertSame(serialize('hello world'), $result);
         $this->assertSame('hello world', unserialize($result));
     }
 
-    public function testStringCallbackShorterValue(): void
+    public function testStringReplacementShorterValue(): void
     {
         $input = serialize('hello world');
-        $result = PhpSerializedStringWalker::walk_strings($input, fn($v) => 'hi');
+        $result = $this->processWithTransform($input, fn($v) => 'hi');
         $this->assertSame(serialize('hi'), $result);
         $this->assertSame('hi', unserialize($result));
     }
 
     // ---------------------------------------------------------------
-    // Callback called for values, NOT for array keys or property names
+    // Only values are exposed — not array keys or property names
     // ---------------------------------------------------------------
 
-    public function testCallbackNotCalledForArrayKeys(): void
+    public function testOnlyValuesExposedNotArrayKeys(): void
     {
-        $called_with = [];
         $input = serialize(['key1' => 'value1', 'key2' => 'value2']);
-        PhpSerializedStringWalker::walk_strings($input, function (string $v) use (&$called_with): string {
-            $called_with[] = $v;
-            return $v;
-        });
-
-        $this->assertSame(['value1', 'value2'], $called_with);
+        $this->assertSame(['value1', 'value2'], $this->collectValues($input));
     }
 
-    public function testCallbackNotCalledForIntegerKeys(): void
+    public function testOnlyValuesExposedNotIntegerKeys(): void
     {
-        $called_with = [];
         $input = serialize(['alpha', 'beta']);
-        PhpSerializedStringWalker::walk_strings($input, function (string $v) use (&$called_with): string {
-            $called_with[] = $v;
-            return $v;
-        });
-
-        $this->assertSame(['alpha', 'beta'], $called_with);
+        $this->assertSame(['alpha', 'beta'], $this->collectValues($input));
     }
 
     // ---------------------------------------------------------------
@@ -125,20 +151,20 @@ class PhpSerializedStringWalkerTest extends TestCase
     public function testEmptyArray(): void
     {
         $input = serialize([]);
-        $this->assertSame($input, PhpSerializedStringWalker::walk_strings($input, $this->identity()));
+        $this->assertSame($input, $this->processIdentity($input));
     }
 
     public function testNumericKeyedArray(): void
     {
         $input = serialize(['a', 'b', 'c']);
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         $this->assertSame(['A', 'B', 'C'], unserialize($result));
     }
 
     public function testStringKeyedArray(): void
     {
         $input = serialize(['foo' => 'bar', 'baz' => 'qux']);
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         $unserialized = unserialize($result);
         // Keys preserved, values uppercased
         $this->assertSame(['foo' => 'BAR', 'baz' => 'QUX'], $unserialized);
@@ -152,7 +178,7 @@ class PhpSerializedStringWalkerTest extends TestCase
             ],
             'flat' => 'shallow',
         ]);
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         $unserialized = unserialize($result);
         $this->assertSame('DEEP_VALUE', $unserialized['level1']['level2']);
         $this->assertSame('SHALLOW', $unserialized['flat']);
@@ -167,7 +193,7 @@ class PhpSerializedStringWalkerTest extends TestCase
             'null' => null,
             'float' => 1.5,
         ]);
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         $unserialized = unserialize($result);
         $this->assertSame('HELLO', $unserialized['str']);
         $this->assertSame(42, $unserialized['int']);
@@ -187,25 +213,19 @@ class PhpSerializedStringWalkerTest extends TestCase
         $obj->url = 'https://example.com';
         $input = serialize($obj);
 
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         $unserialized = unserialize($result);
         $this->assertSame('TEST', $unserialized->name);
         $this->assertSame('HTTPS://EXAMPLE.COM', $unserialized->url);
     }
 
-    public function testCallbackNotCalledForObjectPropertyNames(): void
+    public function testOnlyValuesExposedNotObjectPropertyNames(): void
     {
         $obj = new \stdClass();
         $obj->propname = 'propvalue';
         $input = serialize($obj);
 
-        $called_with = [];
-        PhpSerializedStringWalker::walk_strings($input, function (string $v) use (&$called_with): string {
-            $called_with[] = $v;
-            return $v;
-        });
-
-        $this->assertSame(['propvalue'], $called_with);
+        $this->assertSame(['propvalue'], $this->collectValues($input));
     }
 
     public function testNestedObjectInsideArray(): void
@@ -214,7 +234,7 @@ class PhpSerializedStringWalkerTest extends TestCase
         $obj->value = 'inner';
         $input = serialize(['wrapper' => $obj]);
 
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         $unserialized = unserialize($result);
         $this->assertSame('INNER', $unserialized['wrapper']->value);
     }
@@ -230,8 +250,8 @@ class PhpSerializedStringWalkerTest extends TestCase
         // This is s:14:"\0MyClass\0secret"; as the property name.
         $input = 'O:7:"MyClass":1:{s:15:"' . "\0" . 'MyClass' . "\0" . 'secret";s:5:"hello";}';
 
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
-        $this->assertNotFalse($result);
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
+        $this->assertNotSame($input, $result); // value was changed
         // The property name should be unchanged, the value should be uppercased
         $this->assertStringContainsString('HELLO', $result);
         // Property name should still contain null bytes
@@ -243,8 +263,7 @@ class PhpSerializedStringWalkerTest extends TestCase
         // Protected properties are stored as: \0*\0propname
         $input = 'O:7:"MyClass":1:{s:9:"' . "\0" . '*' . "\0" . 'hidden";s:3:"val";}';
 
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
-        $this->assertNotFalse($result);
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         $this->assertStringContainsString('VAL', $result);
         $this->assertStringContainsString("\0" . '*' . "\0" . 'hidden', $result);
     }
@@ -257,16 +276,14 @@ class PhpSerializedStringWalkerTest extends TestCase
     {
         // r:N; reference
         $input = 'a:2:{i:0;s:5:"hello";i:1;r:2;}';
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->identity());
-        $this->assertSame($input, $result);
+        $this->assertSame($input, $this->processIdentity($input));
     }
 
     public function testPointerReferencePassthrough(): void
     {
         // R:N; reference
         $input = 'a:2:{i:0;s:5:"hello";i:1;R:2;}';
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->identity());
-        $this->assertSame($input, $result);
+        $this->assertSame($input, $this->processIdentity($input));
     }
 
     // ---------------------------------------------------------------
@@ -276,7 +293,7 @@ class PhpSerializedStringWalkerTest extends TestCase
     public function testCustomSerializablePassthrough(): void
     {
         $input = 'C:7:"MyClass":11:{hello world}';
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         // Custom serializable payload is opaque — passed through unchanged
         $this->assertSame($input, $result);
     }
@@ -290,11 +307,11 @@ class PhpSerializedStringWalkerTest extends TestCase
         $data = ['siteurl' => 'https://old-site.com'];
         $input = serialize($data);
 
-        $result = PhpSerializedStringWalker::walk_strings($input, function (string $v): string {
+        $result = $this->processWithTransform($input, function (string $v): string {
             return str_replace('https://old-site.com', 'https://new-site.example.com', $v);
         });
 
-        $this->assertNotFalse($result);
+        $this->assertNotSame($input, $result);
         $unserialized = unserialize($result);
         $this->assertSame('https://new-site.example.com', $unserialized['siteurl']);
         // Verify the s:N: prefix is correct (the new URL is longer)
@@ -305,16 +322,15 @@ class PhpSerializedStringWalkerTest extends TestCase
     {
         $input = serialize('https://old-site.com/page');
 
-        $result = PhpSerializedStringWalker::walk_strings($input, function (string $v): string {
+        $result = $this->processWithTransform($input, function (string $v): string {
             return str_replace('https://old-site.com', 'https://new-site.com', $v);
         });
 
-        $this->assertNotFalse($result);
         $this->assertSame('https://new-site.com/page', unserialize($result));
     }
 
     // ---------------------------------------------------------------
-    // Round-trip: unserialize(walk_strings(serialize($data))) matches
+    // Round-trip: unserialize(process(serialize($data))) matches
     // ---------------------------------------------------------------
 
     public function testRoundTripWithComplexStructure(): void
@@ -330,7 +346,7 @@ class PhpSerializedStringWalkerTest extends TestCase
         ];
 
         $input = serialize($data);
-        $result = PhpSerializedStringWalker::walk_strings($input, function (string $v): string {
+        $result = $this->processWithTransform($input, function (string $v): string {
             return str_replace('https://old-site.com', 'https://new-site.com', $v);
         });
 
@@ -353,50 +369,65 @@ class PhpSerializedStringWalkerTest extends TestCase
         ];
         $input = serialize($data);
 
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->identity());
+        $result = $this->processIdentity($input);
         $this->assertSame($input, $result, 'When no changes are made, output must be byte-identical to input');
     }
 
-    public function testNoChangeWithUrlCallbackThatDoesNotMatch(): void
+    public function testNoChangeWithUrlReplaceThatDoesNotMatch(): void
     {
         $data = ['site' => 'https://unmatched-domain.com'];
         $input = serialize($data);
 
-        // Callback that only replaces a specific domain that's not in the data
-        $result = PhpSerializedStringWalker::walk_strings($input, function (string $v): string {
+        // Transform that only replaces a specific domain that's not in the data
+        $result = $this->processWithTransform($input, function (string $v): string {
             return str_replace('https://old-site.com', 'https://new-site.com', $v);
         });
 
-        $this->assertSame($input, $result, 'When callback makes no changes, output must be byte-identical');
+        $this->assertSame($input, $result, 'When no values change, output must be byte-identical');
     }
 
     // ---------------------------------------------------------------
-    // Malformed input returns null
+    // Malformed input
     // ---------------------------------------------------------------
 
-    public function testMalformedInputReturnsFalse(): void
+    public function testMalformedInputIsMalformed(): void
     {
-        $this->assertFalse(PhpSerializedStringWalker::walk_strings('not serialized', $this->identity()));
+        $p = new PhpSerializationProcessor('not serialized');
+        $this->assertTrue($p->is_malformed());
+        $this->assertFalse($p->next_value());
     }
 
-    public function testTruncatedStringReturnsFalse(): void
+    public function testTruncatedStringIsMalformed(): void
     {
-        $this->assertFalse(PhpSerializedStringWalker::walk_strings('s:10:"short";', $this->identity()));
+        $p = new PhpSerializationProcessor('s:10:"short";');
+        $this->assertTrue($p->is_malformed());
+        $this->assertFalse($p->next_value());
     }
 
-    public function testMissingClosingBraceReturnsFalse(): void
+    public function testMissingClosingBraceIsMalformed(): void
     {
-        $this->assertFalse(PhpSerializedStringWalker::walk_strings('a:1:{i:0;s:3:"foo";', $this->identity()));
+        $p = new PhpSerializationProcessor('a:1:{i:0;s:3:"foo";');
+        $this->assertTrue($p->is_malformed());
     }
 
-    public function testTrailingGarbageReturnsFalse(): void
+    public function testTrailingGarbageIsMalformed(): void
     {
-        $this->assertFalse(PhpSerializedStringWalker::walk_strings('s:3:"foo";GARBAGE', $this->identity()));
+        $p = new PhpSerializationProcessor('s:3:"foo";GARBAGE');
+        $this->assertTrue($p->is_malformed());
     }
 
-    public function testEmptyStringReturnsFalse(): void
+    public function testEmptyStringIsMalformed(): void
     {
-        $this->assertFalse(PhpSerializedStringWalker::walk_strings('', $this->identity()));
+        $p = new PhpSerializationProcessor('');
+        $this->assertTrue($p->is_malformed());
+    }
+
+    public function testMalformedInputReturnsOriginalFromGetUpdatedSerialization(): void
+    {
+        $input = 'not serialized at all';
+        $p = new PhpSerializationProcessor($input);
+        $this->assertTrue($p->is_malformed());
+        $this->assertSame($input, $p->get_updated_serialization());
     }
 
     // ---------------------------------------------------------------
@@ -406,7 +437,7 @@ class PhpSerializedStringWalkerTest extends TestCase
     public function testStringWithEmbeddedQuotes(): void
     {
         $input = serialize('He said "hello" to her');
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->identity());
+        $result = $this->processIdentity($input);
         $this->assertSame($input, $result);
         $this->assertSame('He said "hello" to her', unserialize($result));
     }
@@ -414,7 +445,7 @@ class PhpSerializedStringWalkerTest extends TestCase
     public function testStringWithEmbeddedSemicolons(): void
     {
         $input = serialize('a:1:{fake;data;}');
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->identity());
+        $result = $this->processIdentity($input);
         $this->assertSame($input, $result);
         $this->assertSame('a:1:{fake;data;}', unserialize($result));
     }
@@ -423,7 +454,7 @@ class PhpSerializedStringWalkerTest extends TestCase
     {
         $value = "before\0after";
         $input = serialize($value);
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->identity());
+        $result = $this->processIdentity($input);
         $this->assertSame($input, $result);
         $this->assertSame($value, unserialize($result));
     }
@@ -433,7 +464,7 @@ class PhpSerializedStringWalkerTest extends TestCase
         // A string value that contains what looks like serialized PHP but is just text
         $value = 's:5:"inner";';
         $input = serialize($value);
-        $result = PhpSerializedStringWalker::walk_strings($input, $this->toUpper());
+        $result = $this->processWithTransform($input, fn($v) => strtoupper($v));
         $this->assertSame('S:5:"INNER";', unserialize($result));
     }
 }

@@ -31,7 +31,7 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 require_once __DIR__ . '/lib/Base64ValueScanner.php';
 require_once __DIR__ . '/lib/ContentClassifier.php';
 require_once __DIR__ . '/lib/DomainCollector.php';
-require_once __DIR__ . '/lib/PhpSerializedStringWalker.php';
+require_once __DIR__ . '/lib/PhpSerializationProcessor.php';
 require_once __DIR__ . '/lib/StructuredDataUrlRewriter.php';
 require_once __DIR__ . '/lib/SqlStatementRewriter.php';
 
