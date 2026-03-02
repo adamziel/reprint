@@ -5,7 +5,6 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../importer/lib/wp-stubs.php';
 require_once __DIR__ . '/../../importer/lib/Base64ValueScanner.php';
-require_once __DIR__ . '/../../importer/lib/ContentClassifier.php';
 require_once __DIR__ . '/../../importer/lib/PhpSerializationProcessor.php';
 require_once __DIR__ . '/../../importer/lib/StructuredDataUrlRewriter.php';
 require_once __DIR__ . '/../../importer/lib/SqlStatementRewriter.php';

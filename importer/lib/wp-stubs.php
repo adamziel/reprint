@@ -79,3 +79,13 @@ if (!function_exists('esc_attr')) {
         return htmlspecialchars((string) $text, ENT_QUOTES, 'UTF-8');
     }
 }
+
+if(!class_exists('WP_Error')) {
+    class WP_Error {
+        public function __construct($code, $message, $data = []) {
+            $this->code = $code;
+            $this->message = $message;
+            $this->data = $data;
+        }
+    }
+}

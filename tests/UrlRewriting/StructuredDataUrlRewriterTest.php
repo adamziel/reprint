@@ -3,7 +3,6 @@
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
-require_once __DIR__ . '/../../importer/lib/ContentClassifier.php';
 require_once __DIR__ . '/../../importer/lib/PhpSerializationProcessor.php';
 require_once __DIR__ . '/../../importer/lib/StructuredDataUrlRewriter.php';
 
@@ -176,7 +175,7 @@ class StructuredDataUrlRewriterTest extends TestCase
     public function testMalformedSerializedPhpFallsBackToText(): void
     {
         $rewriter = $this->createRewriter();
-        // ContentClassifier::is_serialized() triggers on 's:...' ending with ';'
+        // SerializedPhpFormat::is_serialized() triggers on 's:...' ending with ';'
         // but this is truncated/malformed — the walker will return false,
         // falling back to text rewriting
         $input = 's:999:"https://old-site.com";';

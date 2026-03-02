@@ -16,7 +16,7 @@ ini_set("display_startup_errors", 1);
 require_once __DIR__ . "/../wordpress-plugin/generic/utils.php";
 
 // Load composer autoloader for wp-php-toolkit dependencies
-$autoloader = __DIR__ . '/../vendor/autoload.php';
+$autoloader = __DIR__ . '/../vendor/autoload.php'; 
 if (file_exists($autoloader)) {
     require_once $autoloader;
 }
@@ -29,7 +29,6 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 
 // Load URL rewriting components
 require_once __DIR__ . '/lib/Base64ValueScanner.php';
-require_once __DIR__ . '/lib/ContentClassifier.php';
 require_once __DIR__ . '/lib/DomainCollector.php';
 require_once __DIR__ . '/lib/PhpSerializationProcessor.php';
 require_once __DIR__ . '/lib/StructuredDataUrlRewriter.php';
@@ -1249,7 +1248,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync, files-index, db-sync, db-index, db-apply, preflight, preflight-assert",
+                "Command is required. Valid commands: files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
             );
         }
 
@@ -1259,13 +1258,14 @@ class ImportClient
                 "files-index",
                 "db-sync",
                 "db-index",
+                "db-domains",
                 "db-apply",
                 "preflight",
                 "preflight-assert",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, db-sync, db-index, db-apply, preflight, preflight-assert",
+                "Invalid command: {$command}. Valid commands: files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
             );
         }
 
@@ -1380,7 +1380,11 @@ class ImportClient
             return;
         }
 
-        // db-apply is a local-only command that doesn't need a remote server.
+        // db-domains and db-apply are local-only commands that don't need a remote server.
+        if ($command === "db-domains") {
+            $this->run_db_domains();
+            return;
+        }
         if ($command === "db-apply") {
             if ($abort) {
                 $this->handle_abort($command);
@@ -2814,8 +2818,73 @@ class ImportClient
      * Reads db.sql, optionally rewrites URLs, and executes statements against
      * a target MySQL database. Supports resumption via statement count tracking.
      *
-     * @param array $options CLI options including target-* and url-mapping.
+     * @param array $options CLI options including target-* and rewrite-url.
      */
+    private function run_db_domains(): void
+    {
+        $domains_file = $this->state_dir . "/.import-domains.json";
+        $sql_file = $this->state_dir . "/db.sql";
+
+        if (file_exists($domains_file)) {
+            // Fast path: domains were already discovered during db-sync
+            $domains = json_decode(file_get_contents($domains_file), true);
+            if (!is_array($domains)) {
+                throw new RuntimeException(
+                    "Failed to parse {$domains_file}",
+                );
+            }
+        } elseif (file_exists($sql_file)) {
+            // Scan db.sql for domains using the same pipeline as db-sync
+            $query_stream = new \WP_MySQL_Naive_Query_Stream();
+            $domain_collector = new \DomainCollector();
+
+            $sql_handle = fopen($sql_file, "r");
+            if (!$sql_handle) {
+                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+            }
+
+            try {
+                $chunk_size = 64 * 1024;
+                while (!feof($sql_handle)) {
+                    $data = fread($sql_handle, $chunk_size);
+                    if ($data === false || $data === '') {
+                        break;
+                    }
+                    $query_stream->append_sql($data);
+                    $this->drain_query_stream_for_domains(
+                        $query_stream,
+                        $domain_collector,
+                    );
+                }
+
+                $query_stream->mark_input_complete();
+                $this->drain_query_stream_for_domains(
+                    $query_stream,
+                    $domain_collector,
+                );
+            } finally {
+                fclose($sql_handle);
+            }
+
+            $domains = $domain_collector->get_domains();
+
+            // Save for future calls
+            file_put_contents(
+                $domains_file,
+                json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+            );
+        } else {
+            throw new RuntimeException(
+                "No domain data found. Run db-sync first, or place a db.sql file in {$this->state_dir}.",
+            );
+        }
+
+        // Print one domain per line to stdout
+        foreach ($domains as $domain) {
+            echo $domain . "\n";
+        }
+    }
+
     private function run_db_apply(array $options): void
     {
         $sql_file = $this->state_dir . "/db.sql";
@@ -2840,15 +2909,9 @@ class ImportClient
 
         // Parse URL mapping
         $url_mapping = [];
-        if (!empty($options["url_mapping"])) {
-            foreach ($options["url_mapping"] as $mapping_str) {
-                $parts = explode("::", $mapping_str, 2);
-                if (count($parts) !== 2) {
-                    throw new InvalidArgumentException(
-                        "Invalid --url-mapping format: {$mapping_str}. Expected FROM::TO",
-                    );
-                }
-                $url_mapping[$parts[0]] = $parts[1];
+        if (!empty($options["rewrite_url"])) {
+            foreach ($options["rewrite_url"] as $pair) {
+                $url_mapping[$pair[0]] = $pair[1];
             }
         }
 
@@ -2904,7 +2967,7 @@ class ImportClient
             $this->state["status"] = "in_progress";
             $this->state["apply"] = $this->default_state()["apply"];
             if (!empty($url_mapping)) {
-                $this->state["apply"]["url_mapping"] = $url_mapping;
+                $this->state["apply"]["rewrite_url"] = $url_mapping;
             }
             $this->save_state($this->state);
             $statements_executed = 0;
@@ -2917,8 +2980,8 @@ class ImportClient
         }
 
         // On resume, use the persisted URL mapping if none provided on CLI
-        if (empty($url_mapping) && !empty($apply_state["url_mapping"])) {
-            $url_mapping = $apply_state["url_mapping"];
+        if (empty($url_mapping) && !empty($apply_state["rewrite_url"])) {
+            $url_mapping = $apply_state["rewrite_url"];
         }
 
         // Set up SQL statement rewriter if we have URL mappings
@@ -4499,11 +4562,11 @@ class ImportClient
             );
         }
 
-        // Domain discovery: scan SQL for URLs during download (file mode only)
-        $query_stream = ($mode === "file" && class_exists('WP_MySQL_Naive_Query_Stream'))
+        // Domain discovery: scan SQL for URLs during download
+        $query_stream = class_exists('WP_MySQL_Naive_Query_Stream')
             ? new \WP_MySQL_Naive_Query_Stream()
             : null;
-        $domain_collector = ($mode === "file" && class_exists('DomainCollector'))
+        $domain_collector = class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
         $domains_file = $this->state_dir . "/.import-domains.json";
@@ -4622,15 +4685,6 @@ class ImportClient
                                     );
                                 }
                                 $sql_bytes_written += $bytes;
-
-                                // Feed data to query stream for domain discovery
-                                if ($query_stream && $domain_collector) {
-                                    $query_stream->append_sql($data);
-                                    $this->drain_query_stream_for_domains(
-                                        $query_stream,
-                                        $domain_collector,
-                                    );
-                                }
                                 break;
 
                             case "stdout":
@@ -4665,6 +4719,15 @@ class ImportClient
                                     $sql_buffer = "";
                                 }
                                 break;
+                        }
+
+                        // Feed data to query stream for domain discovery
+                        if ($query_stream && $domain_collector) {
+                            $query_stream->append_sql($data);
+                            $this->drain_query_stream_for_domains(
+                                $query_stream,
+                                $domain_collector,
+                            );
                         }
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
@@ -4788,11 +4851,181 @@ class ImportClient
             if (strpos($query, "FROM_BASE64(") === false) {
                 continue;
             }
+
+            $table = self::extract_insert_table($query);
+            $is_options_table = substr($table, -8) === '_options';
+
             $matches = \Base64ValueScanner::scan($query);
             foreach ($matches as $match) {
-                $domain_collector->scan($match['value']);
+                // For _options tables, extract the option_name (second column)
+                // and skip transients — they contain ephemeral cached data
+                // that would pollute the domain list.
+                $option_name = null;
+                if ($is_options_table) {
+                    $option_name = self::extract_option_name($query, $match['offset']);
+                    if ($option_name !== null && (
+                        strpos($option_name, '_transient') === 0 ||
+                        strpos($option_name, '_site_transient') === 0
+                    )) {
+                        continue;
+                    }
+                }
+
+                $new_domains = $domain_collector->scan($match['value']);
+                if (!empty($new_domains)) {
+                    $row_id = self::extract_row_identifier($query, $match['offset']);
+
+                    $option_ctx = '';
+                    if ($option_name !== null) {
+                        $option_ctx = ' option=' . $option_name;
+                    }
+
+                    foreach ($new_domains as $domain) {
+                        $this->audit_log(
+                            sprintf(
+                                "NEW DOMAIN | %s | table=%s %s%s",
+                                $domain,
+                                $table,
+                                $row_id,
+                                $option_ctx,
+                            ),
+                            false,
+                        );
+                    }
+                }
             }
         }
+    }
+
+    /**
+     * Extract the table name from an INSERT INTO statement.
+     */
+    private static function extract_insert_table(string $query): string
+    {
+        if (preg_match('/INSERT\s+INTO\s+`([^`]+)`/i', $query, $m)) {
+            return $m[1];
+        }
+        return '?';
+    }
+
+    /**
+     * Extract a row identifier (PK value or offset) from the INSERT row
+     * containing the base64 expression at $offset.
+     *
+     * Scans backwards from $offset to find the row-opening parenthesis,
+     * then reads the first column value — typically the primary key.
+     */
+    private static function extract_row_identifier(string $query, int $offset): string
+    {
+        // Walk backwards from the match to find the row-opening '('.
+        // Track parenthesis depth so we skip inner '(' from FROM_BASE64()
+        // and CONVERT() wrappers.
+        $depth = 0;
+        $row_start = -1;
+        for ($i = $offset - 1; $i >= 0; $i--) {
+            $ch = $query[$i];
+            if ($ch === ')') {
+                $depth++;
+            } elseif ($ch === '(') {
+                if ($depth === 0) {
+                    $row_start = $i + 1;
+                    break;
+                }
+                $depth--;
+            }
+        }
+
+        if ($row_start < 0) {
+            return 'offset=?';
+        }
+
+        // Read the first value after the row-opening '('.
+        // Numeric PKs: (123, ...  or (-5, ...
+        $after = substr($query, $row_start, 40);
+        if (preg_match('/^(-?\d+)/', $after, $m)) {
+            return 'pk=' . $m[1];
+        }
+        // String PKs: ('some-uuid', ...
+        if (preg_match("/^'([^']{0,30})'/", $after, $m)) {
+            return "pk=" . $m[1];
+        }
+        if (preg_match('/^NULL/i', $after)) {
+            return 'pk=NULL';
+        }
+
+        return 'offset=?';
+    }
+
+    /**
+     * Extract the option_name (second column) from a wp_options INSERT row.
+     *
+     * WordPress options tables have columns: option_id, option_name, option_value, autoload.
+     * Given an offset inside the row, this finds the row-opening '(' and reads
+     * past the first column (option_id) to extract the second column (option_name).
+     */
+    private static function extract_option_name(string $query, int $offset): ?string
+    {
+        // Find the row-opening '(' by walking backwards, same as extract_row_identifier.
+        $depth = 0;
+        $row_start = -1;
+        for ($i = $offset - 1; $i >= 0; $i--) {
+            $ch = $query[$i];
+            if ($ch === ')') {
+                $depth++;
+            } elseif ($ch === '(') {
+                if ($depth === 0) {
+                    $row_start = $i + 1;
+                    break;
+                }
+                $depth--;
+            }
+        }
+
+        if ($row_start < 0) {
+            return null;
+        }
+
+        // Skip the first column value (option_id) and the comma separator,
+        // then read the second column value (option_name) which is a quoted string.
+        $after = substr($query, $row_start, 200);
+        // First column is typically a number: "123," or could be FROM_BASE64(...)
+        // Skip to the first comma that's outside parentheses.
+        $len = strlen($after);
+        $d = 0;
+        $comma_pos = -1;
+        for ($j = 0; $j < $len; $j++) {
+            $c = $after[$j];
+            if ($c === '(') { $d++; }
+            elseif ($c === ')') { $d--; }
+            elseif ($c === ',' && $d === 0) {
+                $comma_pos = $j;
+                break;
+            }
+        }
+
+        if ($comma_pos < 0) {
+            return null;
+        }
+
+        // After the comma, skip whitespace and read a quoted string or FROM_BASE64(...)
+        $rest = ltrim(substr($after, $comma_pos + 1));
+        // Simple quoted string: 'option_name'
+        if (isset($rest[0]) && $rest[0] === "'") {
+            if (preg_match("/^'([^']{0,80})'/", $rest, $m)) {
+                return $m[1];
+            }
+        }
+        // FROM_BASE64('...') wrapped value — decode it
+        if (strpos($rest, 'FROM_BASE64(') === 0) {
+            if (preg_match("/^FROM_BASE64\\('([A-Za-z0-9+\\/=]+)'\\)/", $rest, $m)) {
+                $decoded = base64_decode($m[1], true);
+                if ($decoded !== false) {
+                    return substr($decoded, 0, 80);
+                }
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -6468,7 +6701,7 @@ class ImportClient
             "apply" => [
                 "statements_executed" => 0,
                 "bytes_read" => 0,
-                "url_mapping" => null,
+                "rewrite_url" => null,
             ],
             // SQL output mode (file, stdout, mysql) — persisted for resume
             "sql_output" => null,
@@ -7121,6 +7354,20 @@ if (
                 "Output files:\n" .
                 "  db-tables.jsonl  One JSON object per table\n",
         ],
+        "db-domains" => [
+            "short" => "List domains discovered in the SQL dump",
+            "detail" =>
+                "Prints domains found in the SQL dump, one per line.\n" .
+                "\n" .
+                "If .import-domains.json exists (written by db-sync), it is read\n" .
+                "directly. Otherwise, db.sql is scanned for domains and the result\n" .
+                "is saved for future calls.\n" .
+                "\n" .
+                "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
+                "\n" .
+                "Example:\n" .
+                "  php import.php db-domains - --state-dir=/path/to/state\n",
+        ],
         "db-apply" => [
             "short" => "Apply SQL dump to a target MySQL database with URL rewriting",
             "detail" =>
@@ -7135,14 +7382,14 @@ if (
                 "  --target-user=USER         Target MySQL user (required)\n" .
                 "  --target-pass=PASS         Target MySQL password\n" .
                 "  --target-db=NAME           Target MySQL database (required)\n" .
-                "  --url-mapping=FROM::TO     URL mapping (repeatable)\n" .
+                "  --rewrite-url FROM TO      Rewrite FROM to TO (repeatable)\n" .
                 "  --abort                    Clear state and exit\n" .
                 "  --verbose, -v              Show detailed logs\n" .
                 "\n" .
                 "Example:\n" .
                 "  php import.php db-apply - /path/to/import \\\n" .
                 "    --target-user=root --target-db=wp_new \\\n" .
-                "    --url-mapping=https://old.com::https://new.com\n",
+                "    --rewrite-url https://old.com https://new.com\n",
         ],
         "preflight" => [
             "short" => "Run preflight check and print the full result as JSON",
@@ -7450,11 +7697,16 @@ if (
             $options["target_pass"] = substr($argv[$i], strlen("--target-pass="));
         } elseif (strpos($argv[$i], "--target-db=") === 0) {
             $options["target_db"] = substr($argv[$i], strlen("--target-db="));
-        } elseif (strpos($argv[$i], "--url-mapping=") === 0) {
-            if (!isset($options["url_mapping"])) {
-                $options["url_mapping"] = [];
+        } elseif ($argv[$i] === "--rewrite-url") {
+            if (!isset($argv[$i + 1]) || !isset($argv[$i + 2])) {
+                fwrite(STDERR, "--rewrite-url requires two arguments: FROM TO\n");
+                exit(1);
             }
-            $options["url_mapping"][] = substr($argv[$i], strlen("--url-mapping="));
+            if (!isset($options["rewrite_url"])) {
+                $options["rewrite_url"] = [];
+            }
+            $options["rewrite_url"][] = [$argv[$i + 1], $argv[$i + 2]];
+            $i += 2;
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
