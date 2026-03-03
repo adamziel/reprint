@@ -4,10 +4,10 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../importer/lib/wp-stubs.php';
-require_once __DIR__ . '/../../importer/lib/Base64ValueScanner.php';
-require_once __DIR__ . '/../../importer/lib/PhpSerializationProcessor.php';
-require_once __DIR__ . '/../../importer/lib/StructuredDataUrlRewriter.php';
-require_once __DIR__ . '/../../importer/lib/SqlStatementRewriter.php';
+require_once __DIR__ . '/../../importer/lib/url-rewrite/Base64ValueScanner.php';
+require_once __DIR__ . '/../../importer/lib/url-rewrite/PhpSerializationProcessor.php';
+require_once __DIR__ . '/../../importer/lib/url-rewrite/StructuredDataUrlRewriter.php';
+require_once __DIR__ . '/../../importer/lib/url-rewrite/SqlStatementRewriter.php';
 
 class SqlStatementRewriterTest extends TestCase
 {

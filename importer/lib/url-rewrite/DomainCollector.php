@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/structured-data/JsonStringIterator.php';
+
 use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
@@ -7,14 +9,19 @@ use WordPress\DataLiberation\URL\WPURL;
  * Scans decoded database values for HTTP/HTTPS URLs and collects unique
  * domain origins (scheme://host[:port]).
  *
- * Values are recursively classified by format before scanning:
+ * Values are recursively classified by format before scanning. Format
+ * detection is try-and-fail: construct the real parser, check if it
+ * accepted the input. No heuristic pre-checks.
  *
- * - Serialized PHP: each string value is extracted and recursed into
- * - JSON objects/arrays: each string value is extracted and recursed into
- * - HTML/block markup: URLs in media tags (img, video, audio, source,
- *   embed, track, object) and media blocks (wp:image, wp:cover, etc.)
- *   are collected. Links (<a href>, <link>, <script>) are skipped.
- * - Plain text: collected only if the entire string is a URL
+ * - Serialized PHP: construct PhpSerializationProcessor, iterate string
+ *   values and recurse
+ * - JSON objects/arrays: construct JsonStringIterator, iterate string
+ *   values and recurse
+ * - Leaf values: scan as HTML (BlockMarkupUrlProcessor finds URLs in
+ *   media tags/blocks) AND collect as plain URL (if the entire string
+ *   is a URL). These two don't overlap — the HTML scanner only finds
+ *   URLs inside tag attributes and block comments, while collectIfUrl
+ *   only matches bare URL strings.
  *
  * This avoids polluting the domain list with external link targets
  * (twitter.com, youtube.com, etc.) while capturing the site's own
@@ -58,7 +65,7 @@ class DomainCollector
     /**
      * Scan a decoded database value for HTTP/HTTPS URLs and collect their
      * domains. Recursively classifies the value by format (serialized PHP,
-     * JSON, HTML, plain URL) and applies appropriate filtering at each level.
+     * JSON) using the real parsers — no heuristic detection.
      *
      * Returns any domain origins that were discovered for the first time
      * during this call (not previously known). Callers can use this to
@@ -75,31 +82,30 @@ class DomainCollector
 
         $before = count($this->domains);
 
-        // Serialized PHP: iterate string values and recurse
-        if (SerializedPhpFormat::is_serialized($value)) {
-            $p = new PhpSerializationProcessor($value);
+        // Serialized PHP: the parser validates the entire structure in
+        // the constructor. If it's not malformed, iterate and recurse.
+        $p = new PhpSerializationProcessor($value);
+        if (!$p->is_malformed()) {
             while ($p->next_value()) {
                 $this->scan($p->get_value());
             }
             return $this->newDomainsSince($before);
         }
 
-        // JSON objects/arrays: walk string values and recurse
-        if (($value[0] === '{' || $value[0] === '[')) {
-            $decoded = json_decode($value, true);
-            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
-                $this->walkJson($decoded);
-                return $this->newDomainsSince($before);
+        // JSON: the iterator calls json_decode in the constructor. If
+        // it's not malformed, iterate and recurse.
+        $iter = new JsonStringIterator($value);
+        if (!$iter->is_malformed()) {
+            while ($iter->next_value()) {
+                $this->scan($iter->get_value());
             }
-        }
-
-        // HTML/block markup: scan with media tag/block filtering
-        if ($this->looksLikeHtml($value)) {
-            $this->scanHtml($value);
             return $this->newDomainsSince($before);
         }
 
-        // Plain text: only collect if the entire string is a URL
+        // Leaf: try both HTML scanning and plain URL collection.
+        // These don't overlap — scanHtml collects from media tags/blocks
+        // only, collectIfUrl matches bare URL strings only.
+        $this->scanHtml($value);
         $this->collectIfUrl($value);
         return $this->newDomainsSince($before);
     }
@@ -115,23 +121,6 @@ class DomainCollector
             return [];
         }
         return array_slice(array_keys($this->domains), $before);
-    }
-
-    /**
-     * Recursively walk a JSON-decoded structure and scan string values.
-     */
-    private function walkJson($data): void
-    {
-        if (is_string($data)) {
-            $this->scan($data);
-            return;
-        }
-
-        if (is_array($data)) {
-            foreach ($data as $item) {
-                $this->walkJson($item);
-            }
-        }
     }
 
     /**
@@ -212,14 +201,6 @@ class DomainCollector
         }
 
         $this->domains[$origin] = true;
-    }
-
-    /**
-     * Check if a string looks like it contains HTML markup.
-     */
-    private function looksLikeHtml(string $value): bool
-    {
-        return strpos($value, '<') !== false && preg_match('/<[a-zA-Z!]/', $value) === 1;
     }
 
     /**

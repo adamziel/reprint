@@ -28,11 +28,11 @@ require_once __DIR__ . '/lib/mysql-query-stream/load.php';
 require_once __DIR__ . '/lib/wp-stubs.php';
 
 // Load URL rewriting components
-require_once __DIR__ . '/lib/Base64ValueScanner.php';
-require_once __DIR__ . '/lib/DomainCollector.php';
-require_once __DIR__ . '/lib/PhpSerializationProcessor.php';
-require_once __DIR__ . '/lib/StructuredDataUrlRewriter.php';
-require_once __DIR__ . '/lib/SqlStatementRewriter.php';
+require_once __DIR__ . '/lib/url-rewrite/Base64ValueScanner.php';
+require_once __DIR__ . '/lib/url-rewrite/DomainCollector.php';
+require_once __DIR__ . '/lib/url-rewrite/PhpSerializationProcessor.php';
+require_once __DIR__ . '/lib/url-rewrite/StructuredDataUrlRewriter.php';
+require_once __DIR__ . '/lib/url-rewrite/SqlStatementRewriter.php';
 
 /**
  * The wire-protocol version this importer speaks.

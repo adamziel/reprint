@@ -5,8 +5,6 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../importer/lib/wp-stubs.php';
 require_once __DIR__ . '/../../importer/lib/PhpSerializationProcessor.php';
-require_once __DIR__ . '/../../importer/lib/structured-data/StructuredDataFormat.php';
-require_once __DIR__ . '/../../importer/lib/structured-data/SerializedPhpFormat.php';
 require_once __DIR__ . '/../../importer/lib/DomainCollector.php';
 
 class DomainCollectorTest extends TestCase
