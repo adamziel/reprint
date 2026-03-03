@@ -84,7 +84,7 @@ describe('Import: --preserve-local', () => {
     // is made read-only (chmod 555) so that files under symlinked dirs
     // cannot be written — matching real hosting constraints.
     // ----------------------------------------------------------------
-    function buildHostingStructure(docroot) {
+    function buildHostingStructureInLocalDocroot(docroot) {
         const siteRoot = join(docroot, siteDir);
         const wpShared = join(docroot, dirname(siteDir), 'wordpress');
 
@@ -196,7 +196,7 @@ describe('Import: --preserve-local', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-preserve-local-no-flag');
-            buildHostingStructure(docrootDir(tempDir));
+            buildHostingStructureInLocalDocroot(docrootDir(tempDir));
         });
 
         afterAll(() => {
@@ -227,7 +227,7 @@ describe('Import: --preserve-local', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-preserve-local-hosting');
-            const built = buildHostingStructure(docrootDir(tempDir));
+            const built = buildHostingStructureInLocalDocroot(docrootDir(tempDir));
             wpShared = built.wpShared;
             localSiteRoot = built.siteRoot;
         });
@@ -392,7 +392,7 @@ describe('Import: --preserve-local', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-preserve-local-resume');
-            const built = buildHostingStructure(docrootDir(tempDir));
+            const built = buildHostingStructureInLocalDocroot(docrootDir(tempDir));
             wpShared = built.wpShared;
             localSiteRoot = built.siteRoot;
         });
@@ -437,7 +437,7 @@ describe('Import: --preserve-local', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-preserve-local-delta');
-            const built = buildHostingStructure(docrootDir(tempDir));
+            const built = buildHostingStructureInLocalDocroot(docrootDir(tempDir));
             wpShared = built.wpShared;
             localSiteRoot = built.siteRoot;
         });
