@@ -897,10 +897,19 @@ class ImportClient
     private $follow_symlinks = false;
 
     /**
-     * @var string Controls behavior when the target directory is non-empty.
-     * 'error' (default): throw an error if the directory is non-empty.
-     * 'preserve-local': preserve existing local files, symlinks, and directories
-     * instead of overwriting them; non-writable directories are skipped gracefully.
+     * @var string Controls behavior when the docroot is non-empty at import start.
+     *
+     * 'error' (default): throw an error if the docroot is non-empty.
+     * 'preserve-local': preserve existing files, symlinks, and directories in the
+     * docroot instead of overwriting them; non-writable directories are skipped
+     * gracefully and logged to the audit log.
+     *
+     * On the first sync, existing docroot content is left untouched — files that
+     * collide with remote paths are skipped and never indexed. On subsequent delta
+     * syncs, those same paths reappear as "remote-only" in the diff (since they
+     * were never indexed), but the preserve-local check fires again and skips them,
+     * so local content stays preserved across all sync cycles.
+     *
      * Set via --on-docroot-nonempty, persisted in state so it survives across invocations.
      */
     private $docroot_nonempty_behavior = 'error';
