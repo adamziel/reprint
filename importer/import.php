@@ -905,11 +905,12 @@ class ImportClient
      * gracefully and logged to the audit log.
      *
      * On the first sync, existing docroot content is left untouched — files that
-     * collide with remote paths are skipped and never indexed. On subsequent delta
-     * syncs, the diff sees those paths in the remote index but not in the local
-     * index, so it adds them to the download list again. The preserve-local check
-     * fires again during download and skips them, so local content stays preserved
-     * across all sync cycles.
+     * collide with remote paths are skipped and never indexed.
+     * 
+     * On subsequent delta syncs, the diff sees those paths in the remote index but 
+     * not in the local index, so it adds them to the download list again. The
+     * preserve-local check fires again during download and skips them, so local
+     * content stays preserved across all sync cycles.
      *
      * Set via --on-docroot-nonempty, persisted in state so it survives across invocations.
      */
