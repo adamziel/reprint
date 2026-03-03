@@ -2814,7 +2814,6 @@ class ImportClient
      * Reads db.sql, optionally rewrites URLs, and executes statements against
      * a target MySQL database. Supports resumption via statement count tracking.
      *
-     * @param array $options CLI options including target-* and rewrite-url.
      */
     private function run_db_domains(): void
     {
