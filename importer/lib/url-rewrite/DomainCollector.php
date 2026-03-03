@@ -1,6 +1,6 @@
 <?php
 
-require_once __DIR__ . '/structured-data/JsonStringIterator.php';
+require_once __DIR__ . '/JsonStringIterator.php';
 
 use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 use WordPress\DataLiberation\URL\WPURL;

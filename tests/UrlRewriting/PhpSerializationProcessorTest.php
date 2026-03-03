@@ -2,7 +2,7 @@
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/lib/PhpSerializationProcessor.php';
+require_once __DIR__ . '/../../importer/lib/url-rewrite/PhpSerializationProcessor.php';
 
 class PhpSerializationProcessorTest extends TestCase
 {

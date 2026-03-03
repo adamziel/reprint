@@ -2,7 +2,7 @@
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/lib/Base64ValueScanner.php';
+require_once __DIR__ . '/../../importer/lib/url-rewrite/Base64ValueScanner.php';
 
 class Base64ValueScannerTest extends TestCase
 {
