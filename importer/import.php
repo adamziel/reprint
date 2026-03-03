@@ -4661,6 +4661,7 @@ class ImportClient
             if ($this->docroot_nonempty_behavior === 'preserve-local' && (file_exists($local_path) || is_link($local_path))) {
                 $context->skip_current_file = true;
                 $this->audit_log("PRESERVE-LOCAL skip file (exists): {$path}", true);
+                $this->show_progress_line("[skip] " . $this->display_path($path));
                 return;
             }
 
@@ -4673,11 +4674,13 @@ class ImportClient
                 if (is_dir($dir) && !is_writable($dir)) {
                     $context->skip_current_file = true;
                     $this->audit_log("PRESERVE-LOCAL skip file (dir not writable): {$path}", true);
+                    $this->show_progress_line("[skip] " . $this->display_path($path));
                     return;
                 }
                 if ($this->path_traverses_symlink($dir)) {
                     $context->skip_current_file = true;
                     $this->audit_log("PRESERVE-LOCAL skip file (symlink in path): {$path}", true);
+                    $this->show_progress_line("[skip] " . $this->display_path($path));
                     return;
                 }
             }
@@ -4715,18 +4718,8 @@ class ImportClient
                 false,
             );
 
-            // Show relative path (remove leading /)
-            $relative_path = ltrim($path, "/");
-
-            // Truncate from the left if too long (keep the end which is more distinctive)
-            $max_path_len = 60;
-            if (strlen($relative_path) > $max_path_len) {
-                $relative_path =
-                    "..." . substr($relative_path, -($max_path_len - 3));
-            }
-
             $this->show_progress_line(
-                sprintf("[%d files] %s", $this->files_imported, $relative_path),
+                sprintf("[%d files] %s", $this->files_imported, $this->display_path($path)),
             );
         }
 
@@ -4754,6 +4747,7 @@ class ImportClient
                 } catch (PreserveLocalSkipException $e) {
                     $context->skip_current_file = true;
                     $this->audit_log($e->getMessage(), true);
+                    $this->show_progress_line("[skip] " . $this->display_path($path));
                     return;
                 }
             }
@@ -4838,6 +4832,20 @@ class ImportClient
             $this->state["current_file"] = null;
             $this->state["current_file_bytes"] = null;
         }
+    }
+
+    /**
+     * Build a short display path for progress messages: strip leading slash,
+     * truncate from the left when too long.
+     */
+    private function display_path(string $path): string
+    {
+        $rel = ltrim($path, "/");
+        $max = 60;
+        if (strlen($rel) > $max) {
+            $rel = "..." . substr($rel, -($max - 3));
+        }
+        return $rel;
     }
 
     /**
@@ -5038,6 +5046,7 @@ class ImportClient
         if ($this->docroot_nonempty_behavior === 'preserve-local') {
             if (is_dir($local_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
+                $this->show_progress_line("[skip] " . $this->display_path($path));
                 if ($ctime > 0) {
                     $this->upsert_index_entry($path, $ctime, 0, "dir");
                 }
@@ -5045,6 +5054,7 @@ class ImportClient
             }
             if ($this->path_traverses_symlink($local_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$path}", true);
+                $this->show_progress_line("[skip] " . $this->display_path($path));
                 if ($ctime > 0) {
                     $this->upsert_index_entry($path, $ctime, 0, "dir");
                 }
@@ -5070,6 +5080,7 @@ class ImportClient
             $this->ensure_directory_path($local_path);
         } catch (PreserveLocalSkipException $e) {
             $this->audit_log($e->getMessage(), true);
+            $this->show_progress_line("[skip] " . $this->display_path($path));
             return;
         }
 
@@ -5121,10 +5132,12 @@ class ImportClient
         if ($this->docroot_nonempty_behavior === 'preserve-local') {
             if (file_exists($local_path) || is_link($local_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
+                $this->show_progress_line("[skip] " . $this->display_path($path));
                 return;
             }
             if ($this->path_traverses_symlink(dirname($local_path))) {
                 $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
+                $this->show_progress_line("[skip] " . $this->display_path($path));
                 return;
             }
         }
@@ -5174,6 +5187,7 @@ class ImportClient
                 $this->ensure_directory_path($dir);
             } catch (PreserveLocalSkipException $e) {
                 $this->audit_log($e->getMessage(), true);
+                $this->show_progress_line("[skip] " . $this->display_path($path));
                 return;
             } catch (RuntimeException $e) {
                 // Log error and skip this symlink
