@@ -228,7 +228,7 @@ describe('Import: --preserve-local', () => {
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.status, 'complete');
-            assert.equal(state.nonempty_mode, 'preserve-local');
+            assert.equal(state.docroot_nonempty_behavior, 'preserve-local');
         });
 
         // -- file symlinks preserved ----------------------------------
@@ -366,7 +366,7 @@ describe('Import: --preserve-local', () => {
 
         it('state preserves preserve_local across resume cycles', () => {
             const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-            assert.equal(state.nonempty_mode, 'preserve-local');
+            assert.equal(state.docroot_nonempty_behavior, 'preserve-local');
         });
     });
 
