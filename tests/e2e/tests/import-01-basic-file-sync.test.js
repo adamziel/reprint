@@ -77,9 +77,11 @@ describe('Import: Basic File Sync', () => {
             autoResume: false,
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        // In non-tty mode, the JSON output shows {"status":"complete"}
+        // confirming the importer detected the completed state and returned early.
         assert.ok(
-            result.stdout.includes('already complete') || result.stderr.includes('already complete'),
-            `Expected "already complete" message, got stdout: ${result.stdout}\nstderr: ${result.stderr}`,
+            result.stdout.includes('"status":"complete"') || result.stdout.includes('already complete'),
+            `Expected completed status in output, got stdout: ${result.stdout}\nstderr: ${result.stderr}`,
         );
     });
 

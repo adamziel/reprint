@@ -2023,8 +2023,10 @@ class ImportClient
                 fwrite($this->progress_fd, "  Already indexed: {$index_size} files\n");
             }
         } else {
-            // Starting fresh — validate that target directory is empty
-            if (!$is_empty && $this->docroot_nonempty_behavior === 'error') {
+            // Starting fresh — validate that target directory is empty.
+            // A delta sync ($is_delta) naturally has a non-empty docroot
+            // because we put those files there during the initial sync.
+            if (!$is_empty && !$is_delta && $this->docroot_nonempty_behavior === 'error') {
                 throw new RuntimeException(
                     "Target directory is not empty and no cursor found. " .
                         "Either clear the target directory, use --abort flag, or use --on-docroot-nonempty=preserve-local to sync while preserving the existing content.",
