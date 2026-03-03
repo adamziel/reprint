@@ -2011,7 +2011,7 @@ class ImportClient
             if (!$is_empty && $this->docroot_nonempty_behavior === 'error') {
                 throw new RuntimeException(
                     "Target directory is not empty and no cursor found. " .
-                        "Either clear the target directory or use --abort flag.",
+                        "Either clear the target directory, use --abort flag, or use --on-docroot-nonempty=preserve-local to sync while preserving the existing content.",
                 );
             }
 
