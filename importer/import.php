@@ -1202,14 +1202,7 @@ class ImportClient
     private function show_progress_line(string $message): void
     {
         if ($this->is_tty && !$this->verbose_mode) {
-            // Get terminal width (default 80 if can't detect)
-            $width = 80;
-            if (function_exists("exec")) {
-                $tput_cols = @exec("tput cols 2>/dev/null");
-                if ($tput_cols && is_numeric($tput_cols)) {
-                    $width = (int) $tput_cols;
-                }
-            }
+            $width = $this->get_terminal_width();
 
             // Truncate message if too long, leaving room for "..."
             if (strlen($message) > $width - 3) {
@@ -1219,6 +1212,24 @@ class ImportClient
             // Clear line and write progress
             fwrite($this->progress_fd, "\r\033[K" . $message);
         }
+    }
+
+    private ?int $terminal_width_cache = null;
+
+    private function get_terminal_width(): int
+    {
+        if ($this->terminal_width_cache !== null) {
+            return $this->terminal_width_cache;
+        }
+        $width = 80;
+        if (function_exists("exec")) {
+            $tput_cols = @exec("tput cols 2>/dev/null");
+            if ($tput_cols && is_numeric($tput_cols)) {
+                $width = (int) $tput_cols;
+            }
+        }
+        $this->terminal_width_cache = $width;
+        return $width;
     }
 
     /**
@@ -1502,17 +1513,6 @@ class ImportClient
                 }
                 $this->state["index"] = $this->default_state()["index"];
                 $this->state["fetch"] = $this->default_state()["fetch"];
-
-                // If we have a local index, mark the state as completed so the
-                // next run auto-detects delta mode instead of trying an initial
-                // sync into a non-empty directory.
-                $has_local_index =
-                    file_exists($this->index_file) &&
-                    filesize($this->index_file) > 0;
-                if ($has_local_index) {
-                    $this->state["command"] = "files-sync";
-                    $this->state["status"] = "complete";
-                }
 
                 $this->save_state($this->state);
                 break;
@@ -1977,14 +1977,30 @@ class ImportClient
 
         $this->recover_index_updates();
 
-        // Already completed → start a delta sync (re-index, diff, fetch changes)
+        // Already completed → refuse to proceed without --abort
         if ($current_status === "complete") {
-            $this->start_delta_sync();
+            $index_size = $this->index_count();
+            $this->clear_progress_line();
+            $this->audit_log(
+                sprintf("files-sync already complete: %d files indexed", $index_size),
+                true,
+            );
+
+            if ($this->is_tty && !$this->verbose_mode) {
+                fwrite($this->progress_fd, "files-sync already complete: {$index_size} files indexed\n");
+                fwrite($this->progress_fd, "To re-sync, run with --abort first to clear state.\n");
+            }
             return;
         }
 
         $is_empty =
             !is_dir($this->docroot) || count(scandir($this->docroot)) <= 2; // only . and ..
+
+        // A local index from a prior completed sync means the next run is a
+        // delta: re-index the remote, diff against local, fetch only changes.
+        $is_delta =
+            file_exists($this->index_file) &&
+            filesize($this->index_file) > 0;
 
         // Resuming an in-progress sync
         if ($has_progress) {
@@ -2023,13 +2039,28 @@ class ImportClient
             $this->state["fetch"] = $this->default_state()["fetch"];
             $this->save_state($this->state);
 
-            $this->audit_log(
-                "START files-sync ({$this->docroot_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
-                true,
-            );
+            if ($is_delta) {
+                $this->files_imported = 0;
+                $index_size = $this->index_count();
+                $this->audit_log(
+                    "START files-sync (delta) | index_files={$index_size}",
+                    true,
+                );
 
-            if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "Starting files-sync\n");
+                if ($this->is_tty && !$this->verbose_mode) {
+                    fwrite($this->progress_fd, "Starting files-sync (delta)\n");
+                    fwrite($this->progress_fd, "  Index contains: {$index_size} files\n");
+                    fwrite($this->progress_fd, "  Stage: index\n");
+                }
+            } else {
+                $this->audit_log(
+                    "START files-sync ({$this->docroot_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
+                    true,
+                );
+
+                if ($this->is_tty && !$this->verbose_mode) {
+                    fwrite($this->progress_fd, "Starting files-sync\n");
+                }
             }
         }
 
@@ -2049,76 +2080,15 @@ class ImportClient
 
         $this->clear_progress_line();
         $index_size = $this->index_count();
+        $label = $is_delta ? "files-sync (delta)" : "files-sync";
+
         $this->audit_log(
-            sprintf("files-sync complete: %d files indexed", $index_size),
+            sprintf("%s complete: %d files indexed", $label, $index_size),
             true,
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "files-sync complete: {$index_size} files indexed\n");
-            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
-        }
-
-        $this->report_volatile_files();
-    }
-
-    /**
-     * Start a delta sync after a previously completed files-sync.
-     *
-     * Clears the cursor and remote index so we re-index from scratch,
-     * then runs the same index → diff → fetch pipeline.
-     */
-    private function start_delta_sync(): void
-    {
-        // When starting the index stage fresh,
-        // clear the cursor so we don't reuse a stale cursor from the initial sync
-        $stage = "index";
-
-        $this->state["status"] = "in_progress";
-        $this->state["command"] = "files-sync";
-        $this->state["stage"] = $stage;
-        $this->audit_log(
-            "DELTA INDEX FRESH | clearing index state and remote index for new delta sync",
-        );
-        $this->state["index"] = $this->default_state()["index"];
-        if (file_exists($this->remote_index_file)) {
-            @unlink($this->remote_index_file);
-            $this->audit_log("FILE DELETE | {$this->remote_index_file}");
-        }
-        $this->save_state($this->state);
-
-        $this->files_imported = 0;
-        $index_size = $this->index_count();
-        $this->audit_log(
-            "START files-sync (delta) | index_files={$index_size} | stage={$stage}",
-            true,
-        );
-
-        if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "Starting files-sync (delta)\n");
-            fwrite($this->progress_fd, "  Index contains: {$index_size} files\n");
-            fwrite($this->progress_fd, "  Stage: {$stage}\n");
-        }
-
-        $this->run_files_sync_pipeline();
-
-        // Pipeline returns early with partial status if interrupted
-        if (($this->state["status"] ?? null) === "partial") {
-            return;
-        }
-
-        $this->state["status"] = "complete";
-        $this->save_state($this->state);
-
-        $this->clear_progress_line();
-        $index_size = $this->index_count();
-        $this->audit_log(
-            sprintf("files-sync (delta) complete: %d files indexed", $index_size),
-            true,
-        );
-
-        if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "files-sync (delta) complete: {$index_size} files indexed\n");
+            fwrite($this->progress_fd, "{$label} complete: {$index_size} files indexed\n");
             fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
 
@@ -3324,6 +3294,10 @@ class ImportClient
                     $local["size"] !== $remote["size"] ||
                     $local["type"] !== $remote["type"]
                 ) {
+                    // File is in both indexes but changed on the remote.
+                    // Always re-download — this file is in our local index,
+                    // meaning we synced it before; preserve-local does not
+                    // protect files we own.
                     $this->append_download_list(
                         $remote["path"],
                         $download_handle,
@@ -3335,7 +3309,13 @@ class ImportClient
                 $local === null ||
                 strcmp($local["path"], $remote["path"]) > 0
             ) {
-                $this->append_download_list($remote["path"], $download_handle);
+                $skip_reason = $this->should_skip_for_preserve_local($remote["path"]);
+                if ($skip_reason) {
+                    $this->audit_log($skip_reason, true);
+                    $this->show_progress_line("[skip] " . $this->display_path($remote["path"]));
+                } else {
+                    $this->append_download_list($remote["path"], $download_handle);
+                }
             }
 
             $processed++;
@@ -3601,7 +3581,7 @@ class ImportClient
         if ($line !== false) {
             fwrite($handle, $line . "\n");
         }
-        $this->audit_log("Download: {$path}", false);
+        $this->audit_log("Added to the download list: {$path}", false);
     }
 
     /**
@@ -4654,37 +4634,6 @@ class ImportClient
             // Reset skip flag for each new file
             $context->skip_current_file = false;
 
-            // In preserve-local mode, skip if anything already exists at this
-            // path — regular file, symlink (even to a file), or directory.
-            // This preserves hosting symlinks like wp-load.php -> __wp__/wp-load.php
-            // and drop-in symlinks like object-cache.php -> ../../wordpress/drop-ins/...
-            if ($this->docroot_nonempty_behavior === 'preserve-local' && (file_exists($local_path) || is_link($local_path))) {
-                $context->skip_current_file = true;
-                $this->audit_log("PRESERVE-LOCAL skip file (exists): {$path}", true);
-                $this->show_progress_line("[skip] " . $this->display_path($path));
-                return;
-            }
-
-            // In preserve-local mode, skip if parent directory is not writable
-            // or if any directory component in the path is a symlink.  We
-            // never create new files through symlinks — the symlink and its
-            // target contents are shared hosting infrastructure.
-            if ($this->docroot_nonempty_behavior === 'preserve-local') {
-                $dir = dirname($local_path);
-                if (is_dir($dir) && !is_writable($dir)) {
-                    $context->skip_current_file = true;
-                    $this->audit_log("PRESERVE-LOCAL skip file (dir not writable): {$path}", true);
-                    $this->show_progress_line("[skip] " . $this->display_path($path));
-                    return;
-                }
-                if ($this->path_traverses_symlink($dir)) {
-                    $context->skip_current_file = true;
-                    $this->audit_log("PRESERVE-LOCAL skip file (symlink in path): {$path}", true);
-                    $this->show_progress_line("[skip] " . $this->display_path($path));
-                    return;
-                }
-            }
-
             if (
                 (file_exists($local_path) || is_link($local_path)) &&
                 (!is_file($local_path) || is_link($local_path))
@@ -4855,6 +4804,36 @@ class ImportClient
      * contents belong to shared hosting infrastructure and must not be
      * modified.
      */
+    private function should_skip_for_preserve_local(string $path): ?string
+    {
+        if ($this->docroot_nonempty_behavior !== 'preserve-local') {
+            return null;
+        }
+
+        $local_path = $this->remote_path_to_local_path_within_import_root($path);
+
+        // Skip if anything already exists at this path — regular file, symlink
+        // (even to a file), or directory.  This preserves hosting symlinks like
+        // wp-load.php -> __wp__/wp-load.php and drop-in symlinks like
+        // object-cache.php -> ../../wordpress/drop-ins/...
+        if (file_exists($local_path) || is_link($local_path)) {
+            return "PRESERVE-LOCAL skip file (exists): {$path}";
+        }
+
+        // Skip if parent directory is not writable or if any directory component
+        // in the path is a symlink.  We never create new files through symlinks —
+        // the symlink and its target contents are shared hosting infrastructure.
+        $dir = dirname($local_path);
+        if (is_dir($dir) && !is_writable($dir)) {
+            return "PRESERVE-LOCAL skip file (dir not writable): {$path}";
+        }
+        if ($this->path_traverses_symlink($dir)) {
+            return "PRESERVE-LOCAL skip file (symlink in path): {$path}";
+        }
+
+        return null;
+    }
+
     private function path_traverses_symlink(string $path): bool
     {
         $root = $this->get_filesystem_root_path();

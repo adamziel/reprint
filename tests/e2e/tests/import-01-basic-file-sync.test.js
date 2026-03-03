@@ -71,11 +71,16 @@ describe('Import: Basic File Sync', () => {
         assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
     });
 
-    it('re-running after completion triggers a delta sync', () => {
+    it('re-running after completion refuses without --abort', () => {
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
+            autoResume: false,
         });
-        assert.equal(result.exitCode, 0, `Expected exit 0 (delta sync)\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        assert.ok(
+            result.stdout.includes('already complete') || result.stderr.includes('already complete'),
+            `Expected "already complete" message, got stdout: ${result.stdout}\nstderr: ${result.stderr}`,
+        );
     });
 
     it('--abort clears sync progress and exits', () => {

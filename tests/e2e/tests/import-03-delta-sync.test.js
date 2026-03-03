@@ -52,7 +52,14 @@ describe('Import: Delta Sync', () => {
         assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
     });
 
-    it('files-sync with no changes completes', () => {
+    it('abort + re-sync with no changes completes (delta)', () => {
+        // Abort so we can re-run
+        const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+            secret: getSiteSecret(site),
+            extraArgs: ['--abort'],
+        });
+        assert.equal(abort.exitCode, 0);
+
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });
@@ -63,11 +70,18 @@ describe('Import: Delta Sync', () => {
     });
 
     it('files-sync picks up new file via delta', () => {
+        // Abort previous completion so we can run a delta
+        const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+            secret: getSiteSecret(site),
+            extraArgs: ['--abort'],
+        });
+        assert.equal(abort.exitCode, 0);
+
         // Add a file on the source
         execSync(`echo "delta test content" | sudo tee ${JSON.stringify(addedFile)} > /dev/null`);
         execSync(`sudo chown nginx:nginx ${JSON.stringify(addedFile)}`);
 
-        // Run files-sync again — auto-detects completed state and runs delta
+        // Run files-sync — delta detects and downloads the new file
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });
