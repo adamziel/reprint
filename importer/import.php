@@ -1243,12 +1243,14 @@ class ImportClient
     {
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->follow_symlinks = $options["follow_symlinks"] ?? false;
-        $this->docroot_nonempty_behavior = $options["docroot_nonempty_behavior"] ?? 'error';
-        if (!in_array($this->docroot_nonempty_behavior, ['error', 'preserve-local'])) {
-            throw new InvalidArgumentException(
-                "Invalid --on-docroot-nonempty value: {$this->docroot_nonempty_behavior}. " .
-                    "Valid values: error, preserve-local",
-            );
+        if (isset($options["docroot_nonempty_behavior"])) {
+            $this->docroot_nonempty_behavior = $options["docroot_nonempty_behavior"];
+            if (!in_array($this->docroot_nonempty_behavior, ['error', 'preserve-local'])) {
+                throw new InvalidArgumentException(
+                    "Invalid --on-docroot-nonempty value: {$this->docroot_nonempty_behavior}. " .
+                        "Valid values: error, preserve-local",
+                );
+            }
         }
         $command = $options["command"] ?? null;
         $abort = $options["abort"] ?? false;
@@ -1290,7 +1292,7 @@ class ImportClient
         // Persist docroot_nonempty_behavior in state so it survives across invocations.
         // 'preserve-local' preserves existing local files instead of overwriting
         // them, and gracefully skips non-writable directories.
-        if ($this->docroot_nonempty_behavior !== 'error') {
+        if (isset($options["docroot_nonempty_behavior"])) {
             $this->state["docroot_nonempty_behavior"] = $this->docroot_nonempty_behavior;
             $this->save_state($this->state);
         } else {
@@ -2021,14 +2023,10 @@ class ImportClient
             $this->state["fetch"] = $this->default_state()["fetch"];
             $this->save_state($this->state);
 
-            if (!$is_empty && $this->docroot_nonempty_behavior !== 'error') {
-                $this->audit_log(
-                    "START files-sync (preserve-local mode, non-empty directory)",
-                    true,
-                );
-            } else {
-                $this->audit_log("START files-sync", true);
-            }
+            $this->audit_log(
+                "START files-sync ({$this->docroot_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
+                true,
+            );
 
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "Starting files-sync\n");
