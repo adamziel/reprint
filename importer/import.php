@@ -896,6 +896,15 @@ class ImportClient
      */
     private $follow_symlinks = false;
 
+    /**
+     * @var string Controls behavior when the target directory is non-empty.
+     * 'error' (default): throw an error if the directory is non-empty.
+     * 'preserve-local': preserve existing local files, symlinks, and directories
+     * instead of overwriting them; non-writable directories are skipped gracefully.
+     * Set via --on-docroot-nonempty, persisted in state so it survives across invocations.
+     */
+    private $docroot_nonempty_behavior = 'error';
+
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
@@ -1222,6 +1231,13 @@ class ImportClient
     {
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->follow_symlinks = $options["follow_symlinks"] ?? false;
+        $this->docroot_nonempty_behavior = $options["docroot_nonempty_behavior"] ?? 'error';
+        if (!in_array($this->docroot_nonempty_behavior, ['error', 'preserve-local'])) {
+            throw new InvalidArgumentException(
+                "Invalid --on-docroot-nonempty value: {$this->docroot_nonempty_behavior}. " .
+                    "Valid values: error, preserve-local",
+            );
+        }
         $command = $options["command"] ?? null;
         $abort = $options["abort"] ?? false;
         $this->pipeline_step = $options["pipeline_step"] ?? null;
@@ -1257,6 +1273,16 @@ class ImportClient
             $this->save_state($this->state);
         } elseif ($this->state["follow_symlinks"] ?? false) {
             $this->follow_symlinks = true;
+        }
+
+        // Persist docroot_nonempty_behavior in state so it survives across invocations.
+        // 'preserve-local' preserves existing local files instead of overwriting
+        // them, and gracefully skips non-writable directories.
+        if ($this->docroot_nonempty_behavior !== 'error') {
+            $this->state["docroot_nonempty_behavior"] = $this->docroot_nonempty_behavior;
+            $this->save_state($this->state);
+        } else {
+            $this->docroot_nonempty_behavior = $this->state["docroot_nonempty_behavior"] ?? 'error';
         }
 
         // Persist max_allowed_packet in state so it survives across invocations.
@@ -1968,7 +1994,7 @@ class ImportClient
             }
         } else {
             // Starting fresh — validate that target directory is empty
-            if (!$is_empty) {
+            if (!$is_empty && $this->docroot_nonempty_behavior === 'error') {
                 throw new RuntimeException(
                     "Target directory is not empty and no cursor found. " .
                         "Either clear the target directory or use --abort flag.",
@@ -1983,7 +2009,14 @@ class ImportClient
             $this->state["fetch"] = $this->default_state()["fetch"];
             $this->save_state($this->state);
 
-            $this->audit_log("START files-sync", true);
+            if (!$is_empty && $this->docroot_nonempty_behavior !== 'error') {
+                $this->audit_log(
+                    "START files-sync (preserve-local mode, non-empty directory)",
+                    true,
+                );
+            } else {
+                $this->audit_log("START files-sync", true);
+            }
 
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "Starting files-sync\n");
@@ -4608,6 +4641,29 @@ class ImportClient
 
         // Open file on first chunk
         if ($is_first) {
+            // Reset skip flag for each new file
+            $context->skip_current_file = false;
+
+            // In preserve-local mode, skip if anything already exists at this
+            // path — regular file, symlink (even to a file), or directory.
+            // This preserves hosting symlinks like wp-load.php -> __wp__/wp-load.php
+            // and drop-in symlinks like object-cache.php -> ../../wordpress/drop-ins/...
+            if ($this->docroot_nonempty_behavior === 'preserve-local' && (file_exists($local_path) || is_link($local_path))) {
+                $context->skip_current_file = true;
+                $this->audit_log("PRESERVE-LOCAL skip file (exists): {$path}", true);
+                return;
+            }
+
+            // In preserve-local mode, skip if parent directory is not writable
+            if ($this->docroot_nonempty_behavior === 'preserve-local') {
+                $dir = dirname($local_path);
+                if (is_dir($dir) && !is_writable($dir)) {
+                    $context->skip_current_file = true;
+                    $this->audit_log("PRESERVE-LOCAL skip file (dir not writable): {$path}", true);
+                    return;
+                }
+            }
+
             if (
                 (file_exists($local_path) || is_link($local_path)) &&
                 (!is_file($local_path) || is_link($local_path))
@@ -4656,6 +4712,11 @@ class ImportClient
             );
         }
 
+        // Skip body/close for files being preserved
+        if ($context->skip_current_file) {
+            return;
+        }
+
         // Open file handle on first chunk
         if ($is_first) {
             // Close previous file if any
@@ -4670,7 +4731,13 @@ class ImportClient
             $dir = dirname($local_path);
             if (!is_dir($dir)) {
                 // Check if any component of the path exists as a file and remove it
-                $this->ensure_directory_path($dir);
+                try {
+                    $this->ensure_directory_path($dir);
+                } catch (PreserveLocalSkipException $e) {
+                    $context->skip_current_file = true;
+                    $this->audit_log($e->getMessage(), true);
+                    return;
+                }
             }
 
             // Open new file
@@ -4789,6 +4856,11 @@ class ImportClient
         }
 
         if (is_dir($dir) && !is_link($dir)) {
+            if ($this->docroot_nonempty_behavior === 'preserve-local' && !is_writable($dir)) {
+                throw new PreserveLocalSkipException(
+                    "PRESERVE-LOCAL: directory not writable: {$dir}",
+                );
+            }
             return;
         }
 
@@ -4814,6 +4886,22 @@ class ImportClient
             $current .= "/" . $part;
 
             if (is_link($current)) {
+                if ($this->docroot_nonempty_behavior === 'preserve-local') {
+                    if (is_dir($current)) {
+                        // Symlink points to a directory — use it as-is, don't remove.
+                        // Check write permissions on the target.
+                        if (!is_writable($current)) {
+                            throw new PreserveLocalSkipException(
+                                "PRESERVE-LOCAL: symlink-to-directory not writable: {$current}",
+                            );
+                        }
+                        continue;
+                    } else {
+                        throw new PreserveLocalSkipException(
+                            "PRESERVE-LOCAL: symlink blocks directory and points to non-directory: {$current}",
+                        );
+                    }
+                }
                 $this->audit_log(
                     "Removing symlink blocking directory: {$current}",
                     true,
@@ -4830,6 +4918,11 @@ class ImportClient
 
             // Remove file if blocking directory creation
             if (is_file($current)) {
+                if ($this->docroot_nonempty_behavior === 'preserve-local') {
+                    throw new PreserveLocalSkipException(
+                        "PRESERVE-LOCAL: file blocks directory creation: {$current}",
+                    );
+                }
                 $this->audit_log(
                     "Removing file blocking directory: {$current}",
                     true,
@@ -4842,14 +4935,18 @@ class ImportClient
             }
 
             // Create directory if it doesn't exist
-            if (!is_dir($current)) {
-                if (!mkdir($current, 0755) && !is_dir($current)) {
-                    throw new RuntimeException(
-                        "Failed to create directory: {$current}\n" .
-                            "Error: " .
-                            (error_get_last()["message"] ?? "unknown"),
+            if (is_dir($current)) {
+                if ($this->docroot_nonempty_behavior === 'preserve-local' && !is_writable($current)) {
+                    throw new PreserveLocalSkipException(
+                        "PRESERVE-LOCAL: directory not writable: {$current}",
                     );
                 }
+            } elseif (!mkdir($current, 0755) && !is_dir($current)) {
+                throw new RuntimeException(
+                    "Failed to create directory: {$current}\n" .
+                        "Error: " .
+                        (error_get_last()["message"] ?? "unknown"),
+                );
             }
 
             $resolved = realpath($current);
@@ -4883,6 +4980,17 @@ class ImportClient
         }
 
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
+
+        // In preserve-local mode, if the directory already exists (as a real
+        // directory or via a symlink to a directory), keep it as-is.
+        if ($this->docroot_nonempty_behavior === 'preserve-local' && is_dir($local_path)) {
+            $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
+            if ($ctime > 0) {
+                $this->upsert_index_entry($path, $ctime, 0, "dir");
+            }
+            return;
+        }
+
         if (
             (file_exists($local_path) || is_link($local_path)) &&
             (!is_dir($local_path) || is_link($local_path))
@@ -4897,7 +5005,12 @@ class ImportClient
         }
 
         // Create directory, removing any files that block the path
-        $this->ensure_directory_path($local_path);
+        try {
+            $this->ensure_directory_path($local_path);
+        } catch (PreserveLocalSkipException $e) {
+            $this->audit_log($e->getMessage(), true);
+            return;
+        }
 
         $this->audit_log("Directory: {$path}", false);
 
@@ -4939,6 +5052,13 @@ class ImportClient
         }
 
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
+
+        // In preserve-local mode, if something already exists at the symlink
+        // path, keep it — whether it's a file, directory, or another symlink.
+        if ($this->docroot_nonempty_behavior === 'preserve-local' && (file_exists($local_path) || is_link($local_path))) {
+            $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
+            return;
+        }
 
         // Validate that the symlink target doesn't escape the filesystem root.
         $root = $this->get_filesystem_root_path();
@@ -4983,6 +5103,9 @@ class ImportClient
         if (!is_dir($dir)) {
             try {
                 $this->ensure_directory_path($dir);
+            } catch (PreserveLocalSkipException $e) {
+                $this->audit_log($e->getMessage(), true);
+                return;
             } catch (RuntimeException $e) {
                 // Log error and skip this symlink
                 $this->audit_log(
@@ -5928,11 +6051,13 @@ class ImportClient
         $preflight = $this->state["preflight"] ?? null;
         $version = $this->state["version"] ?? null;
         $follow = $this->state["follow_symlinks"] ?? false;
+        $nonempty = $this->state["docroot_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
         $this->state["version"] = $version;
         $this->state["follow_symlinks"] = $follow;
+        $this->state["docroot_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
     }
 
@@ -5948,6 +6073,7 @@ class ImportClient
             "remote_protocol_min_version" => null,
             "version" => null,
             "follow_symlinks" => false,
+            "docroot_nonempty_behavior" => "error",
             "max_allowed_packet" => null,
             "db_index" => [
                 "file" => null,
@@ -6531,7 +6657,16 @@ class StreamingContext
     public $response_stats = [];
     // Stream integrity
     public $saw_completion = false;
+    // When true, skip writing the current file (preserve-local mode)
+    public $skip_current_file = false;
 }
+
+/**
+ * Thrown by ensure_directory_path() in preserve-local mode when a directory
+ * component is not writable or a symlink blocks directory creation.
+ * Callers catch this to skip the current file/directory/symlink gracefully.
+ */
+class PreserveLocalSkipException extends RuntimeException {}
 
 // ============================================================================
 // CLI Entry Point
@@ -6558,10 +6693,12 @@ if (
                 "  - Interrupted sync: resumes from the last saved cursor\n" .
                 "\n" .
                 "Options:\n" .
-                "  --abort          Abort current sync and exit (keeps files and index)\n" .
-                "  --follow-symlinks  Follow symlinks pointing outside root directories\n" .
-                "  --secret=TOKEN     HMAC shared secret for export API authentication\n" .
-                "  --verbose, -v      Show detailed request/response logs\n" .
+                "  --abort              Abort current sync and exit (keeps files and index)\n" .
+                "  --follow-symlinks    Follow symlinks pointing outside root directories\n" .
+                "  --on-docroot-nonempty=MODE\n" .
+                "                       What to do when docroot is non-empty (error|preserve-local)\n" .
+                "  --secret=TOKEN       HMAC shared secret for export API authentication\n" .
+                "  --verbose, -v        Show detailed request/response logs\n" .
                 "\n" .
                 "Output files:\n" .
                 "  (docroot)/                    Downloaded files\n" .
@@ -6671,6 +6808,8 @@ if (
         echo "  --secret=TOKEN       HMAC shared secret for export API authentication\n";
         echo "  --abort            Abort current sync and exit (preserves downloaded files)\n";
         echo "  --follow-symlinks    Follow symlinks pointing outside root directories\n";
+        echo "  --on-docroot-nonempty=MODE\n";
+        echo "                       What to do when docroot is non-empty (error|preserve-local)\n";
         echo "  --verbose, -v        Show detailed request/response logs\n";
         echo "  --no-adaptive        Disable adaptive request tuning\n";
         echo "  --step=N             Current pipeline step (1-indexed, for status file)\n";
@@ -6733,6 +6872,11 @@ if (
             $options["verbose"] = true;
         } elseif ($argv[$i] === "--follow-symlinks") {
             $options["follow_symlinks"] = true;
+        } elseif (strpos($argv[$i], "--on-docroot-nonempty=") === 0) {
+            $options["docroot_nonempty_behavior"] = substr(
+                $argv[$i],
+                strlen("--on-docroot-nonempty="),
+            );
         } elseif (strpos($argv[$i], "--duty=") === 0) {
             $options["tuning_config"]["duty"] = (float) substr(
                 $argv[$i],

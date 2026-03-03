@@ -30,6 +30,7 @@
     "large-single-file": { "port": 8103 },
     "file-deletions":    { "port": 8104 },
     "file-type-swaps":   { "port": 8105 },
-    "file-type-cache":   { "port": 8106 }
+    "file-type-cache":   { "port": 8106 },
+    "preserve-local":    { "port": 8107 }
   }
 }
