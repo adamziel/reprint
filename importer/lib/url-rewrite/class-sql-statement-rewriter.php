@@ -14,6 +14,10 @@
  * block comment JSON, and CSS url(). All other columns default to auto-detect with
  * plain text strtr() replacement, which is simpler and more predictable for columns
  * that contain serialized PHP, JSON, or plain strings.
+ *
+ * Column resolution uses WP_MySQL_Parser to build a full AST, then maps each value
+ * expression's byte range to its column name. Base64ValueScanner's match offset is
+ * looked up against this map — no regex or manual comma-counting needed.
  */
 class SqlStatementRewriter
 {
@@ -22,11 +26,14 @@ class SqlStatementRewriter
     /** @var array<string, array<string, string>> table_suffix => [column_name => content_type] */
     private array $column_hints;
 
+    /** @var WP_Parser_Grammar|null Lazily loaded, shared across all instances. */
+    private static ?WP_Parser_Grammar $grammar = null;
+
     /**
      * WordPress core columns that contain block markup and benefit from
      * wp_rewrite_urls() over simple string replacement. Keyed by table suffix
      * (without prefix) so they match wp_posts, myprefix_posts, etc.
-     * 
+     *
      * @TODO: Make this extensible, find a way to treat the relevant columns from plugin tables.
      */
     private const WP_BLOCK_MARKUP_COLUMNS = [
@@ -67,8 +74,9 @@ class SqlStatementRewriter
             return $sql;
         }
 
-        // Parse the INSERT/UPDATE header to determine table and columns
-        $header = $this->parse_header($sql);
+        // Parse the INSERT/UPDATE statement to extract the table name and
+        // build a byte-offset→column map from the AST.
+        $parsed = $this->parse_statement($sql);
 
         // Iterate over all FROM_BASE64() values using the cursor-based scanner
         $scanner = new Base64ValueScanner($sql);
@@ -77,10 +85,10 @@ class SqlStatementRewriter
 
             // Determine content type hint for this column
             $content_type = null;
-            if ($header !== null) {
-                $column_name = $this->resolve_column_for_match($sql, $scanner->get_match_offset(), $header);
+            if ($parsed !== null) {
+                $column_name = $this->find_column_at_offset($parsed['column_map'], $scanner->get_match_offset());
                 if ($column_name !== null) {
-                    $content_type = $this->get_content_type($header['table'], $column_name);
+                    $content_type = $this->get_content_type($parsed['table'], $column_name);
                 }
             }
 
@@ -98,147 +106,225 @@ class SqlStatementRewriter
     }
 
     /**
-     * Parse the table name and column list from an INSERT or UPDATE statement.
+     * Parse the SQL with WP_MySQL_Parser to extract the table name and build
+     * an offset→column map. Each map entry is [start, end, column_name] where
+     * start/end are byte offsets of the value expression in the SQL string.
      *
-     * INSERT: INSERT INTO `table` (`col1`,`col2`,...) VALUES ...
-     * UPDATE: UPDATE `table` SET `col` = ...
-     * 
-     * @TODO: Use the MySQL parser, not naive regexes.
+     * Returns null for non-INSERT/UPDATE statements or parse failures — the
+     * caller falls back to auto-detect with no column awareness.
      *
-     * @return array{type: string, table: string, columns: string[]}|null
+     * @return array{table: string, column_map: list<array{int, int, string}>}|null
      */
-    private function parse_header(string $sql): ?array
+    private function parse_statement(string $sql): ?array
     {
-        // INSERT INTO `table` (`col1`,`col2`,...) VALUES
-        if (preg_match('/^INSERT\s+INTO\s+`([^`]+)`\s*\(([^)]+)\)\s*VALUES/i', $sql, $m)) {
-            $table = $m[1];
-            // Parse column names from `col1`,`col2`,...
-            preg_match_all('/`([^`]+)`/', $m[2], $col_matches);
-            return [
-                'type' => 'INSERT',
-                'table' => $table,
-                'columns' => $col_matches[1],
-            ];
-        }
+        $lexer  = new WP_MySQL_Lexer($sql);
+        $tokens = $lexer->remaining_tokens();
+        $parser = new WP_MySQL_Parser(self::get_grammar(), $tokens);
 
-        // INSERT INTO `table` VALUES (no explicit column list — can't determine columns)
-        if (preg_match('/^INSERT\s+INTO\s+`([^`]+)`\s*VALUES/i', $sql, $m)) {
-            return [
-                'type' => 'INSERT',
-                'table' => $m[1],
-                'columns' => [],
-            ];
-        }
-
-        // UPDATE `table` SET ...
-        if (preg_match('/^UPDATE\s+`([^`]+)`\s+SET\s+/i', $sql, $m)) {
-            return [
-                'type' => 'UPDATE',
-                'table' => $m[1],
-                'columns' => [],
-            ];
-        }
-
-        return null;
-    }
-
-    /**
-     * Determine which column a FROM_BASE64() expression belongs to.
-     *
-     * For INSERT: counts comma-separated positions between the row-opening
-     * parenthesis and the expression offset to get the column index.
-     *
-     * For UPDATE: extracts the column name from `col` = before the expression.
-     *
-     * @param string $sql          The full SQL statement.
-     * @param int    $match_offset Byte offset of the outermost expression (CONVERT or FROM_BASE64).
-     * @param array  $header       Parsed header from parse_header().
-     * @return string|null The column name, or null if it can't be determined.
-     */
-    private function resolve_column_for_match(string $sql, int $match_offset, array $header): ?string
-    {
-        if ($header['type'] === 'INSERT' && !empty($header['columns'])) {
-            return $this->resolve_insert_column($sql, $match_offset, $header['columns']);
-        }
-
-        if ($header['type'] === 'UPDATE') {
-            return $this->resolve_update_column($sql, $match_offset);
-        }
-
-        return null;
-    }
-
-    /**
-     * For INSERT statements, determine column index by counting commas at
-     * parenthesis depth 0 between the row-opening ( and the match offset.
-     *
-     * Scans backward from the match to find the row-opening parenthesis
-     * (tracking depth to skip past CONVERT(...) wrappers), then counts
-     * commas at depth 0 between that position and the match.
-     */
-    private function resolve_insert_column(string $sql, int $match_offset, array $columns): ?string
-    {
-        // Scan backward from the match to find the row-opening (
-        $depth = 0;
-        $row_start = null;
-        for ($i = $match_offset - 1; $i >= 0; $i--) {
-            $ch = $sql[$i];
-            if ($ch === ')') {
-                $depth++;
-            } elseif ($ch === '(') {
-                if ($depth === 0) {
-                    $row_start = $i;
-                    break;
-                }
-                $depth--;
-            }
-        }
-
-        if ($row_start === null) {
+        if (!$parser->next_query()) {
             return null;
         }
 
-        // Count commas at depth 0 between row_start and match_offset
-        $comma_count = 0;
-        $depth = 0;
-        for ($i = $row_start + 1; $i < $match_offset; $i++) {
-            $ch = $sql[$i];
-            if ($ch === '(') {
-                $depth++;
-            } elseif ($ch === ')') {
-                $depth--;
-            } elseif ($ch === ',' && $depth === 0) {
-                $comma_count++;
-            }
+        $ast = $parser->get_query_ast();
+        if (!$ast) {
+            return null;
         }
 
-        if ($comma_count < count($columns)) {
-            return $columns[$comma_count];
+        // AST: query → simpleStatement → insertStatement|updateStatement
+        $simple = $ast->get_first_child_node('simpleStatement');
+        if (!$simple) {
+            return null;
+        }
+
+        $insert = $simple->get_first_child_node('insertStatement');
+        if ($insert) {
+            return $this->parse_insert($insert);
+        }
+
+        $update = $simple->get_first_child_node('updateStatement');
+        if ($update) {
+            return $this->parse_update($update);
         }
 
         return null;
     }
 
     /**
-     * For UPDATE statements, extract the column name from `col` = before
-     * the FROM_BASE64() or CONCAT(`col`, FROM_BASE64()) expression.
+     * Extract table name, column list, and value expression ranges from an
+     * INSERT statement AST node.
      *
-     * Matches patterns like:
-     *   `column` = FROM_BASE64('...')
-     *   `column` = CONVERT(FROM_BASE64('...') USING utf8mb4)
-     *   `column` = CONCAT(`column`, FROM_BASE64('...'))
+     * AST shape:
+     *   insertStatement
+     *     tableRef                    → table name
+     *     insertFromConstructor
+     *       fields                    → column list (absent when no column list)
+     *         insertIdentifier...     → one per column
+     *       insertValues
+     *         valueList
+     *           values (per row)
+     *             expr (per column)   → byte range mapped to column index
      */
-    private function resolve_update_column(string $sql, int $match_offset): ?string
+    private function parse_insert(WP_Parser_Node $stmt): ?array
     {
-        // Look at the SQL before this match for `column_name` = pattern
-        $prefix = substr($sql, 0, $match_offset);
-
-        // Match the last `column` = (possibly with CONCAT( in between)
-        if (preg_match('/`([^`]+)`\s*=\s*(?:CONCAT\s*\(`[^`]+`,\s*)?(?:CONVERT\s*\()?$/', $prefix, $m)) {
-            return $m[1];
+        $table_ref = $stmt->get_first_child_node('tableRef');
+        if (!$table_ref) {
+            return null;
         }
 
+        $table = $this->extract_identifier($table_ref);
+        if ($table === null) {
+            return null;
+        }
+
+        $constructor = $stmt->get_first_child_node('insertFromConstructor');
+        if (!$constructor) {
+            return ['table' => $table, 'column_map' => []];
+        }
+
+        // Column names from the optional `fields` node. When absent (INSERT
+        // without column list), columns stays empty and the column_map will
+        // have no entries — every value falls back to auto-detect.
+        $columns = [];
+        $fields_node = $constructor->get_first_child_node('fields');
+        if ($fields_node) {
+            foreach ($fields_node->get_child_nodes('insertIdentifier') as $insert_id) {
+                $col_name = $this->extract_identifier($insert_id);
+                if ($col_name !== null) {
+                    $columns[] = $col_name;
+                }
+            }
+        }
+
+        // Build the offset→column map. Each `values` node has one `expr` child
+        // per column, in declaration order. Multi-row INSERTs repeat this for
+        // every row in the valueList.
+        $column_map = [];
+        $insert_values = $constructor->get_first_child_node('insertValues');
+        if ($insert_values) {
+            $value_list = $insert_values->get_first_child_node('valueList');
+            if ($value_list) {
+                foreach ($value_list->get_child_nodes('values') as $values_node) {
+                    $exprs = $values_node->get_child_nodes('expr');
+                    foreach ($exprs as $i => $expr) {
+                        if ($i < count($columns)) {
+                            $column_map[] = [
+                                $expr->get_start(),
+                                $expr->get_start() + $expr->get_length(),
+                                $columns[$i],
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+
+        return ['table' => $table, 'column_map' => $column_map];
+    }
+
+    /**
+     * Extract table name and value expression ranges from an UPDATE statement
+     * AST node.
+     *
+     * AST shape:
+     *   updateStatement
+     *     tableReferenceList → tableRef   → table name
+     *     updateList
+     *       updateElement (per SET assignment)
+     *         columnRef                    → column name
+     *         expr                         → byte range for the value
+     */
+    private function parse_update(WP_Parser_Node $stmt): ?array
+    {
+        $table_ref_list = $stmt->get_first_child_node('tableReferenceList');
+        if (!$table_ref_list) {
+            return null;
+        }
+
+        $table_ref = $table_ref_list->get_first_descendant_node('tableRef');
+        if (!$table_ref) {
+            return null;
+        }
+
+        $table = $this->extract_identifier($table_ref);
+        if ($table === null) {
+            return null;
+        }
+
+        // Each updateElement has a columnRef (the column name) and an expr
+        // (the value expression). The FROM_BASE64() call lives somewhere
+        // inside the expr — possibly wrapped in CONVERT() or CONCAT().
+        $column_map = [];
+        $update_list = $stmt->get_first_child_node('updateList');
+        if ($update_list) {
+            foreach ($update_list->get_child_nodes('updateElement') as $element) {
+                $col_ref = $element->get_first_child_node('columnRef');
+                if (!$col_ref) {
+                    continue;
+                }
+
+                $col_name = $this->extract_identifier($col_ref);
+                $expr = $element->get_first_child_node('expr');
+                if ($expr && $col_name !== null) {
+                    $column_map[] = [
+                        $expr->get_start(),
+                        $expr->get_start() + $expr->get_length(),
+                        $col_name,
+                    ];
+                }
+            }
+        }
+
+        return ['table' => $table, 'column_map' => $column_map];
+    }
+
+    /**
+     * Find which column a FROM_BASE64() expression belongs to by checking
+     * which expression range contains the given byte offset.
+     *
+     * @param list<array{int, int, string}> $column_map [start, end, column_name] entries.
+     * @param int $offset Byte offset of the CONVERT or FROM_BASE64 token.
+     * @return string|null Column name, or null if the offset isn't in any range.
+     */
+    private function find_column_at_offset(array $column_map, int $offset): ?string
+    {
+        foreach ($column_map as [$start, $end, $column]) {
+            if ($offset >= $start && $offset < $end) {
+                return $column;
+            }
+        }
         return null;
+    }
+
+    /**
+     * Extract the identifier text from an AST node by finding the last
+     * BACK_TICK_QUOTED_ID or IDENTIFIER descendant token. Using the last
+     * token handles qualified names like `schema`.`table` — we want `table`.
+     */
+    private function extract_identifier(WP_Parser_Node $node): ?string
+    {
+        $tokens = $node->get_descendant_tokens(WP_MySQL_Lexer::BACK_TICK_QUOTED_ID);
+        if (empty($tokens)) {
+            $tokens = $node->get_descendant_tokens(WP_MySQL_Lexer::IDENTIFIER);
+        }
+        if (empty($tokens)) {
+            return null;
+        }
+        return end($tokens)->get_value();
+    }
+
+    /**
+     * Lazily load and cache the MySQL grammar. The grammar data (~200KB PHP
+     * array) is expensive to inflate into a WP_Parser_Grammar, so we do it
+     * once and share across all SqlStatementRewriter instances.
+     */
+    private static function get_grammar(): WP_Parser_Grammar
+    {
+        if (self::$grammar === null) {
+            $path = dirname(__DIR__, 3) . '/lib/sqlite-database-integration/wp-includes/mysql/mysql-grammar.php';
+            $data = require $path;
+            self::$grammar = new WP_Parser_Grammar($data);
+        }
+        return self::$grammar;
     }
 
     /**
@@ -268,7 +354,7 @@ class SqlStatementRewriter
      * Check if a table name matches a suffix. Handles both prefixed and
      * unprefixed table names: "wp_posts" matches "posts", "posts" matches
      * "posts", "myprefix_posts" matches "posts".
-     * 
+     *
      * @TODO: Actually extract the table prefix from wp_config, do not use
      *        a naive heuristic like this.
      */
