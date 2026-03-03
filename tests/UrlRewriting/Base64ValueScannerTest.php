@@ -6,33 +6,46 @@ require_once __DIR__ . '/../../importer/lib/url-rewrite/load.php';
 
 class Base64ValueScannerTest extends TestCase
 {
-    public function testScanFindsSimpleFromBase64(): void
+    /**
+     * Collect all decoded values from the scanner without modifying them.
+     *
+     * @return string[]
+     */
+    private function collectValues(string $sql): array
+    {
+        $values = [];
+        $scanner = new Base64ValueScanner($sql);
+        while ($scanner->next_value()) {
+            $values[] = $scanner->get_value();
+        }
+        return $values;
+    }
+
+    public function testFindsSimpleFromBase64(): void
     {
         $value = 'hello world';
         $encoded = base64_encode($value);
         $sql = "INSERT INTO t VALUES(1, FROM_BASE64('{$encoded}'), NULL);";
 
-        $results = Base64ValueScanner::scan($sql);
+        $values = $this->collectValues($sql);
 
-        $this->assertCount(1, $results);
-        $this->assertEquals($value, $results[0]['value']);
-        $this->assertFalse($results[0]['is_json']);
+        $this->assertCount(1, $values);
+        $this->assertEquals($value, $values[0]);
     }
 
-    public function testScanFindsConvertWrappedValue(): void
+    public function testFindsConvertWrappedValue(): void
     {
         $value = '{"key": "value"}';
         $encoded = base64_encode($value);
         $sql = "INSERT INTO t VALUES(1, CONVERT(FROM_BASE64('{$encoded}') USING utf8mb4));";
 
-        $results = Base64ValueScanner::scan($sql);
+        $values = $this->collectValues($sql);
 
-        $this->assertCount(1, $results);
-        $this->assertEquals($value, $results[0]['value']);
-        $this->assertTrue($results[0]['is_json']);
+        $this->assertCount(1, $values);
+        $this->assertEquals($value, $values[0]);
     }
 
-    public function testScanFindsMixedValueTypes(): void
+    public function testFindsMixedValueTypes(): void
     {
         $text = 'some text';
         $json = '{"url": "https://example.com"}';
@@ -41,62 +54,28 @@ class Base64ValueScannerTest extends TestCase
 
         $sql = "INSERT INTO t VALUES(1, FROM_BASE64('{$text_enc}'), NULL, 42, CONVERT(FROM_BASE64('{$json_enc}') USING utf8mb4));";
 
-        $results = Base64ValueScanner::scan($sql);
+        $values = $this->collectValues($sql);
 
-        $this->assertCount(2, $results);
-        $this->assertEquals($text, $results[0]['value']);
-        $this->assertFalse($results[0]['is_json']);
-        $this->assertEquals($json, $results[1]['value']);
-        $this->assertTrue($results[1]['is_json']);
+        $this->assertCount(2, $values);
+        $this->assertEquals($text, $values[0]);
+        $this->assertEquals($json, $values[1]);
     }
 
-    public function testScanReturnsEmptyForNoBase64(): void
+    public function testReturnsNoValuesForNoBase64(): void
     {
         $sql = "CREATE TABLE t (id INT, name VARCHAR(255));";
-        $results = Base64ValueScanner::scan($sql);
-        $this->assertCount(0, $results);
+        $values = $this->collectValues($sql);
+        $this->assertCount(0, $values);
     }
 
-    public function testScanReturnsEmptyForNullAndNumeric(): void
+    public function testReturnsNoValuesForNullAndNumeric(): void
     {
         $sql = "INSERT INTO t VALUES(1, NULL, 3.14);";
-        $results = Base64ValueScanner::scan($sql);
-        $this->assertCount(0, $results);
+        $values = $this->collectValues($sql);
+        $this->assertCount(0, $values);
     }
 
-    public function testScanOffsetsAreCorrect(): void
-    {
-        $value = 'test';
-        $encoded = base64_encode($value);
-        $prefix = "INSERT INTO t VALUES(1, ";
-        $expr = "FROM_BASE64('{$encoded}')";
-        $sql = $prefix . $expr . ", NULL);";
-
-        $results = Base64ValueScanner::scan($sql);
-
-        $this->assertCount(1, $results);
-        $this->assertEquals(strlen($prefix), $results[0]['offset']);
-        $this->assertEquals(strlen($expr), $results[0]['length']);
-        $this->assertEquals($expr, substr($sql, $results[0]['offset'], $results[0]['length']));
-    }
-
-    public function testScanConvertOffsetsIncludeWrapper(): void
-    {
-        $value = '[]';
-        $encoded = base64_encode($value);
-        $prefix = "INSERT INTO t VALUES(";
-        $expr = "CONVERT(FROM_BASE64('{$encoded}') USING utf8mb4)";
-        $sql = $prefix . $expr . ");";
-
-        $results = Base64ValueScanner::scan($sql);
-
-        $this->assertCount(1, $results);
-        $this->assertEquals(strlen($prefix), $results[0]['offset']);
-        $this->assertEquals(strlen($expr), $results[0]['length']);
-        $this->assertEquals($expr, substr($sql, $results[0]['offset'], $results[0]['length']));
-    }
-
-    public function testScanMultipleValuesInOneStatement(): void
+    public function testMultipleValuesInOneStatement(): void
     {
         $v1 = 'alpha';
         $v2 = 'beta';
@@ -108,60 +87,50 @@ class Base64ValueScannerTest extends TestCase
             base64_encode($v3)
         );
 
-        $results = Base64ValueScanner::scan($sql);
+        $values = $this->collectValues($sql);
 
-        $this->assertCount(3, $results);
-        $this->assertEquals($v1, $results[0]['value']);
-        $this->assertEquals($v2, $results[1]['value']);
-        $this->assertEquals($v3, $results[2]['value']);
+        $this->assertCount(3, $values);
+        $this->assertEquals($v1, $values[0]);
+        $this->assertEquals($v2, $values[1]);
+        $this->assertEquals($v3, $values[2]);
     }
 
-    public function testReplaceSimpleValue(): void
+    public function testSetValueReplacesSimpleValue(): void
     {
         $old = 'old value';
         $new = 'new value';
         $encoded_old = base64_encode($old);
         $sql = "INSERT INTO t VALUES(FROM_BASE64('{$encoded_old}'));";
 
-        $results = Base64ValueScanner::scan($sql);
-        $this->assertCount(1, $results);
-
-        $modified = Base64ValueScanner::replace(
-            $sql,
-            $results[0]['offset'],
-            $results[0]['length'],
-            $new,
-            $results[0]['is_json']
-        );
+        $scanner = new Base64ValueScanner($sql);
+        while ($scanner->next_value()) {
+            $scanner->set_value($new);
+        }
+        $modified = $scanner->get_result();
 
         $expected_encoded = base64_encode($new);
         $this->assertStringContainsString("FROM_BASE64('{$expected_encoded}')", $modified);
         $this->assertStringNotContainsString($encoded_old, $modified);
     }
 
-    public function testReplaceConvertWrappedValue(): void
+    public function testSetValuePreservesConvertWrapper(): void
     {
         $old = '{"old": true}';
         $new = '{"new": true}';
         $encoded_old = base64_encode($old);
         $sql = "INSERT INTO t VALUES(CONVERT(FROM_BASE64('{$encoded_old}') USING utf8mb4));";
 
-        $results = Base64ValueScanner::scan($sql);
-        $this->assertCount(1, $results);
-
-        $modified = Base64ValueScanner::replace(
-            $sql,
-            $results[0]['offset'],
-            $results[0]['length'],
-            $new,
-            $results[0]['is_json']
-        );
+        $scanner = new Base64ValueScanner($sql);
+        while ($scanner->next_value()) {
+            $scanner->set_value($new);
+        }
+        $modified = $scanner->get_result();
 
         $expected_encoded = base64_encode($new);
         $this->assertStringContainsString("CONVERT(FROM_BASE64('{$expected_encoded}') USING utf8mb4)", $modified);
     }
 
-    public function testReplaceInReverseOrderPreservesPositions(): void
+    public function testSetValueOnMultipleValues(): void
     {
         $v1 = 'first';
         $v2 = 'second';
@@ -171,55 +140,56 @@ class Base64ValueScannerTest extends TestCase
             base64_encode($v2)
         );
 
-        $results = Base64ValueScanner::scan($sql);
-        $this->assertCount(2, $results);
+        $scanner = new Base64ValueScanner($sql);
+        while ($scanner->next_value()) {
+            $scanner->set_value(strtoupper($scanner->get_value()));
+        }
+        $modified = $scanner->get_result();
 
-        // Replace in reverse order to preserve offsets
-        $modified = $sql;
-        $modified = Base64ValueScanner::replace(
-            $modified,
-            $results[1]['offset'],
-            $results[1]['length'],
-            'SECOND_NEW',
-            false
-        );
-        $modified = Base64ValueScanner::replace(
-            $modified,
-            $results[0]['offset'],
-            $results[0]['length'],
-            'FIRST_NEW',
-            false
-        );
-
-        // Verify both replacements worked
-        $new_results = Base64ValueScanner::scan($modified);
-        $this->assertCount(2, $new_results);
-        $this->assertEquals('FIRST_NEW', $new_results[0]['value']);
-        $this->assertEquals('SECOND_NEW', $new_results[1]['value']);
+        // Verify both replacements worked by re-scanning
+        $new_values = $this->collectValues($modified);
+        $this->assertCount(2, $new_values);
+        $this->assertEquals('FIRST', $new_values[0]);
+        $this->assertEquals('SECOND', $new_values[1]);
     }
 
-    public function testScanHandlesEmptyString(): void
+    public function testNoChangeIsByteIdentical(): void
+    {
+        $value = 'unchanged';
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO t VALUES(FROM_BASE64('{$encoded}'));";
+
+        $scanner = new Base64ValueScanner($sql);
+        while ($scanner->next_value()) {
+            // read but don't modify
+            $scanner->get_value();
+        }
+
+        $this->assertSame($sql, $scanner->get_result());
+    }
+
+    public function testHandlesEmptyString(): void
     {
         $value = '';
         $encoded = base64_encode($value);
         $sql = "INSERT INTO t VALUES(FROM_BASE64('{$encoded}'));";
 
-        $results = Base64ValueScanner::scan($sql);
+        $values = $this->collectValues($sql);
 
-        $this->assertCount(1, $results);
-        $this->assertEquals('', $results[0]['value']);
+        $this->assertCount(1, $values);
+        $this->assertEquals('', $values[0]);
     }
 
-    public function testScanHandlesBase64WithSpecialChars(): void
+    public function testHandlesBase64WithSpecialChars(): void
     {
         // Value that produces base64 with +, /, and = characters
         $value = str_repeat("\xff\xfe\xfd", 10);
         $encoded = base64_encode($value);
         $sql = "INSERT INTO t VALUES(FROM_BASE64('{$encoded}'));";
 
-        $results = Base64ValueScanner::scan($sql);
+        $values = $this->collectValues($sql);
 
-        $this->assertCount(1, $results);
-        $this->assertEquals($value, $results[0]['value']);
+        $this->assertCount(1, $values);
+        $this->assertEquals($value, $values[0]);
     }
 }

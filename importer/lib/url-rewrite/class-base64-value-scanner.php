@@ -1,122 +1,169 @@
 <?php
 
 /**
- * Scans SQL statements for FROM_BASE64('...') expressions and provides
- * methods to extract and replace their decoded values.
+ * Cursor-based processor that iterates over FROM_BASE64('...') values in a SQL
+ * statement, letting the caller read and replace each decoded value.
  *
- * The SQL dump format encodes all string values as FROM_BASE64('...') and
- * JSON column values as CONVERT(FROM_BASE64('...') USING utf8mb4). Since
- * base64 alphabet (A-Za-z0-9+/=) never contains a single quote, the
- * closing ') is an unambiguous terminator.
+ * Uses WP_MySQL_Lexer for proper tokenization instead of string scanning.
+ * Detects CONVERT(FROM_BASE64('...') USING utf8mb4) wrappers automatically —
+ * set_value() only replaces the base64 payload inside the quotes, so wrappers
+ * are preserved without the caller needing to know about them.
+ *
+ * Usage:
+ *     $scanner = new Base64ValueScanner($sql);
+ *     while ($scanner->next_value()) {
+ *         $decoded = $scanner->get_value();
+ *         $rewritten = do_something($decoded);
+ *         if ($rewritten !== $decoded) {
+ *             $scanner->set_value($rewritten);
+ *         }
+ *     }
+ *     $new_sql = $scanner->get_result();
  */
 class Base64ValueScanner
 {
-    private const FROM_BASE64_PREFIX = "FROM_BASE64('";
-    private const FROM_BASE64_PREFIX_LEN = 13; // strlen("FROM_BASE64('")
-    private const CONVERT_SUFFIX = " USING utf8mb4)";
-    private const CONVERT_SUFFIX_LEN = 15; // strlen(" USING utf8mb4)")
+    private string $sql;
 
     /**
-     * Scan a SQL statement for FROM_BASE64('...') expressions.
+     * Each entry tracks one FROM_BASE64() value found in the SQL:
+     *   'expr_start'   => int    Offset of the outermost expression (CONVERT or FROM_BASE64)
+     *   'quote_start'  => int    Offset of the quoted string token (including quotes)
+     *   'quote_length' => int    Length of the quoted string token
+     *   'value'        => string The base64-decoded value
+     *   'new_value'    => ?string Non-null when set_value() has been called
      *
-     * Returns array of matches, each containing:
-     *   'offset'  => int    Position of the full expression in $sql
-     *   'length'  => int    Length of the full expression (including any CONVERT wrapper)
-     *   'value'   => string The base64-decoded string value
-     *   'is_json' => bool   Whether wrapped in CONVERT(... USING utf8mb4)
-     *
-     * @param string $sql The SQL statement to scan.
-     * @return array<int, array{offset: int, length: int, value: string, is_json: bool}>
+     * @var array<int, array{expr_start: int, quote_start: int, quote_length: int, value: string, new_value: ?string}>
      */
-    public static function scan(string $sql): array
+    private array $entries = [];
+
+    private int $cursor = -1;
+
+    public function __construct(string $sql)
     {
-        $results = [];
-        $pos = 0;
-        $sql_len = strlen($sql);
-
-        while ($pos < $sql_len) {
-            // Look for FROM_BASE64(' starting from current position
-            $fb_pos = strpos($sql, self::FROM_BASE64_PREFIX, $pos);
-            if ($fb_pos === false) {
-                break;
-            }
-
-            // Find the closing ')
-            $payload_start = $fb_pos + self::FROM_BASE64_PREFIX_LEN;
-            $close_pos = strpos($sql, "')", $payload_start);
-            if ($close_pos === false) {
-                // Malformed — skip past this match
-                $pos = $payload_start;
-                continue;
-            }
-
-            // Extract and decode the base64 payload
-            $b64_payload = substr($sql, $payload_start, $close_pos - $payload_start);
-            $decoded = base64_decode($b64_payload, true);
-            if ($decoded === false) {
-                // Invalid base64 — skip
-                $pos = $close_pos + 2;
-                continue;
-            }
-
-            // Check if preceded by CONVERT( to detect JSON wrapper
-            $is_json = false;
-            $expr_offset = $fb_pos;
-            $expr_end = $close_pos + 2; // past the ')
-
-            // CONVERT(FROM_BASE64('...') USING utf8mb4)
-            $convert_check_start = $fb_pos - 8; // strlen("CONVERT(") = 8
-            if (
-                $convert_check_start >= 0 &&
-                substr($sql, $convert_check_start, 8) === "CONVERT("
-            ) {
-                // Verify the USING utf8mb4) suffix follows
-                if (
-                    $expr_end + self::CONVERT_SUFFIX_LEN <= $sql_len &&
-                    substr($sql, $expr_end, self::CONVERT_SUFFIX_LEN) === self::CONVERT_SUFFIX
-                ) {
-                    $is_json = true;
-                    $expr_offset = $convert_check_start;
-                    $expr_end = $expr_end + self::CONVERT_SUFFIX_LEN;
-                }
-            }
-
-            $results[] = [
-                'offset' => $expr_offset,
-                'length' => $expr_end - $expr_offset,
-                'value' => $decoded,
-                'is_json' => $is_json,
-            ];
-
-            $pos = $expr_end;
-        }
-
-        return $results;
+        $this->sql = $sql;
+        $this->scan();
     }
 
     /**
-     * Replace a base64 value at the given offset.
-     *
-     * Handles both FROM_BASE64('...') and CONVERT(FROM_BASE64('...') USING utf8mb4).
-     * Returns the modified SQL.
-     *
-     * @param string $sql       The SQL statement.
-     * @param int    $offset    Start offset of the expression.
-     * @param int    $length    Length of the expression.
-     * @param string $new_value The new decoded value to encode.
-     * @param bool   $is_json   Whether to wrap in CONVERT(... USING utf8mb4).
-     * @return string The modified SQL.
+     * Advance to the next FROM_BASE64() value.
      */
-    public static function replace(string $sql, int $offset, int $length, string $new_value, bool $is_json): string
+    public function next_value(): bool
     {
-        $encoded = base64_encode($new_value);
+        $this->cursor++;
+        return $this->cursor < count($this->entries);
+    }
 
-        if ($is_json) {
-            $replacement = "CONVERT(FROM_BASE64('" . $encoded . "') USING utf8mb4)";
-        } else {
-            $replacement = "FROM_BASE64('" . $encoded . "')";
+    /**
+     * Get the decoded value at the current cursor position.
+     */
+    public function get_value(): string
+    {
+        return $this->entries[$this->cursor]['value'];
+    }
+
+    /**
+     * Replace the decoded value at the current cursor position.
+     * The new value will be base64-encoded when get_result() rebuilds the SQL.
+     */
+    public function set_value(string $new_value): void
+    {
+        $this->entries[$this->cursor]['new_value'] = $new_value;
+    }
+
+    /**
+     * Get the byte offset of the outermost expression for the current value.
+     * This is the start of CONVERT(...) if present, otherwise FROM_BASE64(...).
+     *
+     * SqlStatementRewriter uses this to determine which column a value belongs
+     * to by scanning backward through the SQL from this position.
+     */
+    public function get_match_offset(): int
+    {
+        return $this->entries[$this->cursor]['expr_start'];
+    }
+
+    /**
+     * Return the SQL with all set_value() replacements applied.
+     * Values that were not modified via set_value() are left unchanged.
+     */
+    public function get_result(): string
+    {
+        $result = $this->sql;
+
+        // Process in reverse order to preserve byte offsets
+        for ($i = count($this->entries) - 1; $i >= 0; $i--) {
+            $entry = $this->entries[$i];
+            if ($entry['new_value'] !== null) {
+                $replacement = "'" . base64_encode($entry['new_value']) . "'";
+                $result = substr($result, 0, $entry['quote_start'])
+                    . $replacement
+                    . substr($result, $entry['quote_start'] + $entry['quote_length']);
+            }
         }
 
-        return substr($sql, 0, $offset) . $replacement . substr($sql, $offset + $length);
+        return $result;
+    }
+
+    /**
+     * Tokenize the SQL and find all FROM_BASE64('...') expressions.
+     * Tracks whether each is wrapped in CONVERT(...) for correct expr_start offset.
+     */
+    private function scan(): void
+    {
+        $lexer = new WP_MySQL_Lexer($this->sql);
+
+        // Track the last two tokens so we can detect CONVERT( before FROM_BASE64.
+        // next_token() skips whitespace/comments, so CONVERT ( FROM_BASE64 appears
+        // as three consecutive tokens.
+        $prev = [null, null];
+
+        while ($lexer->next_token()) {
+            $token = $lexer->get_token();
+
+            if (
+                $token->id === WP_MySQL_Lexer::IDENTIFIER
+                && strtoupper($token->get_value()) === 'FROM_BASE64'
+            ) {
+                $expr_start = $token->start;
+
+                // If the previous tokens are CONVERT + (, the outer expression
+                // starts at CONVERT, not at FROM_BASE64.
+                if (
+                    $prev[1] !== null
+                    && $prev[1]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL
+                    && $prev[0] !== null
+                    && $prev[0]->id === WP_MySQL_Lexer::CONVERT_SYMBOL
+                ) {
+                    $expr_start = $prev[0]->start;
+                }
+
+                // Advance past ( to find the quoted base64 string
+                while ($lexer->next_token()) {
+                    $inner = $lexer->get_token();
+                    if (
+                        $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
+                        || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
+                    ) {
+                        $decoded = base64_decode($inner->get_value(), true);
+                        $this->entries[] = [
+                            'expr_start' => $expr_start,
+                            'quote_start' => $inner->start,
+                            'quote_length' => $inner->length,
+                            'value' => $decoded !== false ? $decoded : '',
+                            'new_value' => null,
+                        ];
+                        break;
+                    }
+                    // Skip the opening parenthesis of FROM_BASE64(
+                    if ($inner->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                        break;
+                    }
+                }
+            }
+
+            // Shift the two-token window
+            $prev[0] = $prev[1];
+            $prev[1] = $token;
+        }
     }
 }

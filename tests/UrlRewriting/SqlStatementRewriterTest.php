@@ -17,6 +17,21 @@ class SqlStatementRewriterTest extends TestCase
         );
     }
 
+    /**
+     * Collect all decoded values from a SQL statement using Base64ValueScanner.
+     *
+     * @return string[]
+     */
+    private function collectValues(string $sql): array
+    {
+        $values = [];
+        $scanner = new Base64ValueScanner($sql);
+        while ($scanner->next_value()) {
+            $values[] = $scanner->get_value();
+        }
+        return $values;
+    }
+
     public function testRewritesUrlInInsertStatement(): void
     {
         $rewriter = $this->createRewriter();
@@ -27,10 +42,10 @@ class SqlStatementRewriterTest extends TestCase
         $result = $rewriter->rewrite($sql);
 
         // Verify the rewritten SQL contains new-site.com
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertStringContainsString('new-site.com', $matches[0]['value']);
-        $this->assertStringNotContainsString('old-site.com', $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertStringContainsString('new-site.com', $values[0]);
+        $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
     public function testPassesThroughDdlStatements(): void
@@ -57,9 +72,9 @@ class SqlStatementRewriterTest extends TestCase
         $result = $rewriter->rewrite($sql);
 
         // Serialized PHP should now be rewritten with updated s:N: prefixes
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $unserialized = unserialize($matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $unserialized = unserialize($values[0]);
         $this->assertSame('https://new-site.com/site', $unserialized['siteurl']);
     }
 
@@ -72,10 +87,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertTrue($matches[0]['is_json']);
-        $decoded = json_decode($matches[0]['value'], true);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $decoded = json_decode($values[0], true);
         $this->assertStringContainsString('new-site.com', $decoded['url']);
     }
 
@@ -96,18 +110,18 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(3, $matches);
+        $values = $this->collectValues($result);
+        $this->assertCount(3, $values);
 
         // HTML should be rewritten
-        $this->assertStringContainsString('new-site.com', $matches[0]['value']);
+        $this->assertStringContainsString('new-site.com', $values[0]);
 
         // Serialized PHP should be rewritten with URLs updated
-        $unserialized = unserialize($matches[1]['value']);
+        $unserialized = unserialize($values[1]);
         $this->assertSame('https://new-site.com/home', $unserialized['url']);
 
         // Plain text should be rewritten
-        $this->assertStringContainsString('new-site.com', $matches[2]['value']);
+        $this->assertStringContainsString('new-site.com', $values[2]);
     }
 
     public function testValuesWithNoMatchingUrlsAreUnchanged(): void
@@ -119,9 +133,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertEquals($text, $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertEquals($text, $values[0]);
     }
 
     public function testRewritesMultipleRowInsert(): void
@@ -138,10 +152,10 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(2, $matches);
-        $this->assertStringContainsString('new-site.com/page1', $matches[0]['value']);
-        $this->assertStringContainsString('new-site.com/page2', $matches[1]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(2, $values);
+        $this->assertStringContainsString('new-site.com/page1', $values[0]);
+        $this->assertStringContainsString('new-site.com/page2', $values[1]);
     }
 
     public function testResultIsValidSql(): void
@@ -172,10 +186,10 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
-        $this->assertStringNotContainsString('old-site.com', $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertStringContainsString('new-site.com/page', $values[0]);
+        $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
     public function testUnknownColumnUsesPlainTextReplacement(): void
@@ -188,9 +202,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
+        $values = $this->collectValues($result);
         // option_value should be rewritten via strtr
-        $this->assertStringContainsString('new-site.com/api/endpoint', $matches[1]['value']);
+        $this->assertStringContainsString('new-site.com/api/endpoint', $values[1]);
     }
 
     public function testWpDefaultsWorkWithCustomTablePrefix(): void
@@ -203,9 +217,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
     public function testCommentContentUsesBlockMarkup(): void
@@ -217,9 +231,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertStringContainsString('new-site.com/post', $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertStringContainsString('new-site.com/post', $values[0]);
     }
 
     // --- Column awareness: consumer-provided hints ---
@@ -237,9 +251,9 @@ class SqlStatementRewriterTest extends TestCase
         $result = $rewriter->rewrite($sql);
 
         // Value should be unchanged because consumer said 'skip'
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertSame($markup, $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertSame($markup, $values[0]);
     }
 
     public function testConsumerHintForCustomTable(): void
@@ -254,9 +268,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
     // --- Column awareness: INSERT without column list ---
@@ -271,9 +285,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
     // --- Column awareness: UPDATE statements ---
@@ -287,9 +301,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
     public function testUpdateConcatWithColumnAwareness(): void
@@ -301,9 +315,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $this->assertStringContainsString('new-site.com/page', $matches[0]['value']);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $this->assertStringContainsString('new-site.com/page', $values[0]);
     }
 
     // --- Column awareness: multi-row INSERT with mixed columns ---
@@ -325,13 +339,13 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(4, $matches);
+        $values = $this->collectValues($result);
+        $this->assertCount(4, $values);
 
         // All values should have URLs rewritten
-        foreach ($matches as $match) {
-            $this->assertStringContainsString('new-site.com', $match['value']);
-            $this->assertStringNotContainsString('old-site.com', $match['value']);
+        foreach ($values as $value) {
+            $this->assertStringContainsString('new-site.com', $value);
+            $this->assertStringNotContainsString('old-site.com', $value);
         }
     }
 
@@ -346,9 +360,9 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        $matches = Base64ValueScanner::scan($result);
-        $this->assertCount(1, $matches);
-        $decoded = json_decode($matches[0]['value'], true);
+        $values = $this->collectValues($result);
+        $this->assertCount(1, $values);
+        $decoded = json_decode($values[0], true);
         $this->assertStringContainsString('new-site.com', $decoded['url']);
     }
 }

@@ -65,25 +65,18 @@ class SqlStatementRewriter
             return $sql;
         }
 
-        // Scan for base64 values
-        $matches = Base64ValueScanner::scan($sql);
-        if (empty($matches)) {
-            return $sql;
-        }
-
         // Parse the INSERT/UPDATE header to determine table and columns
         $header = $this->parse_header($sql);
 
-        // Process in reverse offset order to preserve positions
-        $matches = array_reverse($matches);
-
-        foreach ($matches as $match) {
-            $value = $match['value'];
+        // Iterate over all FROM_BASE64() values using the cursor-based scanner
+        $scanner = new Base64ValueScanner($sql);
+        while ($scanner->next_value()) {
+            $value = $scanner->get_value();
 
             // Determine content type hint for this column
             $content_type = null;
             if ($header !== null) {
-                $column_name = $this->resolve_column_for_match($sql, $match, $header);
+                $column_name = $this->resolve_column_for_match($sql, $scanner->get_match_offset(), $header);
                 if ($column_name !== null) {
                     $content_type = $this->get_content_type($header['table'], $column_name);
                 }
@@ -95,17 +88,11 @@ class SqlStatementRewriter
 
             // Only replace if the value actually changed
             if ($rewritten !== $value) {
-                $sql = Base64ValueScanner::replace(
-                    $sql,
-                    $match['offset'],
-                    $match['length'],
-                    $rewritten,
-                    $match['is_json']
-                );
+                $scanner->set_value($rewritten);
             }
         }
 
-        return $sql;
+        return $scanner->get_result();
     }
 
     /**
@@ -152,26 +139,26 @@ class SqlStatementRewriter
     }
 
     /**
-     * Determine which column a FROM_BASE64() match belongs to.
+     * Determine which column a FROM_BASE64() expression belongs to.
      *
      * For INSERT: counts comma-separated positions between the row-opening
-     * parenthesis and the match offset to get the column index.
+     * parenthesis and the expression offset to get the column index.
      *
-     * For UPDATE: extracts the column name from `col` = before the match.
+     * For UPDATE: extracts the column name from `col` = before the expression.
      *
-     * @param string $sql   The full SQL statement.
-     * @param array  $match A scanner match with 'offset' and 'length'.
-     * @param array  $header Parsed header from parse_header().
+     * @param string $sql          The full SQL statement.
+     * @param int    $match_offset Byte offset of the outermost expression (CONVERT or FROM_BASE64).
+     * @param array  $header       Parsed header from parse_header().
      * @return string|null The column name, or null if it can't be determined.
      */
-    private function resolve_column_for_match(string $sql, array $match, array $header): ?string
+    private function resolve_column_for_match(string $sql, int $match_offset, array $header): ?string
     {
         if ($header['type'] === 'INSERT' && !empty($header['columns'])) {
-            return $this->resolve_insert_column($sql, $match['offset'], $header['columns']);
+            return $this->resolve_insert_column($sql, $match_offset, $header['columns']);
         }
 
         if ($header['type'] === 'UPDATE') {
-            return $this->resolve_update_column($sql, $match['offset']);
+            return $this->resolve_update_column($sql, $match_offset);
         }
 
         return null;

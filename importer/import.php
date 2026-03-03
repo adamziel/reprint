@@ -4850,14 +4850,15 @@ class ImportClient
             $table = self::extract_insert_table($query);
             $is_options_table = substr($table, -8) === '_options';
 
-            $matches = \Base64ValueScanner::scan($query);
-            foreach ($matches as $match) {
+            $scanner = new \Base64ValueScanner($query);
+            while ($scanner->next_value()) {
                 // For _options tables, extract the option_name (second column)
                 // and skip transients — they contain ephemeral cached data
                 // that would pollute the domain list.
                 $option_name = null;
+                $match_offset = $scanner->get_match_offset();
                 if ($is_options_table) {
-                    $option_name = self::extract_option_name($query, $match['offset']);
+                    $option_name = self::extract_option_name($query, $match_offset);
                     if ($option_name !== null && (
                         strpos($option_name, '_transient') === 0 ||
                         strpos($option_name, '_site_transient') === 0
@@ -4866,9 +4867,9 @@ class ImportClient
                     }
                 }
 
-                $new_domains = $domain_collector->scan($match['value']);
+                $new_domains = $domain_collector->scan($scanner->get_value());
                 if (!empty($new_domains)) {
-                    $row_id = self::extract_row_identifier($query, $match['offset']);
+                    $row_id = self::extract_row_identifier($query, $match_offset);
 
                     $option_ctx = '';
                     if ($option_name !== null) {
