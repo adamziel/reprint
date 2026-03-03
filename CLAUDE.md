@@ -105,7 +105,7 @@ By default, `files-sync` refuses to start if `--docroot` is non-empty (to preven
 
 In `preserve-local` mode:
 - Existing files are never overwritten — if anything (regular file, symlink, directory) already exists at a remote file's path, the remote file is skipped.
-- Pre-existing symlinks in directory paths are kept. A symlink-to-directory is used as-is rather than being removed and replaced with a real directory. This is critical for hosting environments where plugins, themes, and WP core are symlinked from a shared read-only location.
+- Pre-existing symlinks in directory paths are kept, and no new content is ever created through them. If any component of a file's directory path is a symlink, the entire operation is skipped. This is critical for hosting environments where plugins, themes, and WP core are symlinked from a shared location — their contents must not be modified.
 - Non-writable directories are skipped gracefully instead of causing errors.
 - All skipped operations are logged to the audit log with a `PRESERVE-LOCAL` prefix.
 - The setting persists in state, so it survives across resume cycles and delta syncs. During delta sync, previously-skipped files remain protected.

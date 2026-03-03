@@ -4665,11 +4665,19 @@ class ImportClient
             }
 
             // In preserve-local mode, skip if parent directory is not writable
+            // or if any directory component in the path is a symlink.  We
+            // never create new files through symlinks — the symlink and its
+            // target contents are shared hosting infrastructure.
             if ($this->docroot_nonempty_behavior === 'preserve-local') {
                 $dir = dirname($local_path);
                 if (is_dir($dir) && !is_writable($dir)) {
                     $context->skip_current_file = true;
                     $this->audit_log("PRESERVE-LOCAL skip file (dir not writable): {$path}", true);
+                    return;
+                }
+                if ($this->path_traverses_symlink($dir)) {
+                    $context->skip_current_file = true;
+                    $this->audit_log("PRESERVE-LOCAL skip file (symlink in path): {$path}", true);
                     return;
                 }
             }
@@ -4833,6 +4841,37 @@ class ImportClient
     }
 
     /**
+     * Check whether any component of the path (between the filesystem root
+     * and the target) is a symlink.  In preserve-local mode this is used
+     * to prevent creating new content through symlinked directories — their
+     * contents belong to shared hosting infrastructure and must not be
+     * modified.
+     */
+    private function path_traverses_symlink(string $path): bool
+    {
+        $root = $this->get_filesystem_root_path();
+        $relative = ltrim(substr($path, strlen($root)), "/");
+        if ($relative === "") {
+            return false;
+        }
+
+        $current = $root;
+        foreach (explode("/", $relative) as $part) {
+            if ($part === "") {
+                continue;
+            }
+            $current .= "/" . $part;
+            if (is_link($current)) {
+                return true;
+            }
+            if (!file_exists($current)) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Ensure a directory path exists, removing any files that block it.
      *
      * @param string $dir Directory path to ensure
@@ -4859,6 +4898,15 @@ class ImportClient
                 $real_check === false ||
                 !path_is_within_root($real_check, $real_filesystem_root)
             ) {
+                // In preserve-local mode, a path that resolves outside the
+                // docroot is expected when a directory like wp-content/plugins
+                // is symlinked to a shared hosting location.  Skip gracefully
+                // instead of treating it as a security violation.
+                if ($this->docroot_nonempty_behavior === 'preserve-local') {
+                    throw new PreserveLocalSkipException(
+                        "PRESERVE-LOCAL: path resolves outside docroot via symlink: {$dir}",
+                    );
+                }
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside docroot: {$dir}",
                 );
@@ -4897,20 +4945,12 @@ class ImportClient
 
             if (is_link($current)) {
                 if ($this->docroot_nonempty_behavior === 'preserve-local') {
-                    if (is_dir($current)) {
-                        // Symlink points to a directory — use it as-is, don't remove.
-                        // Check write permissions on the target.
-                        if (!is_writable($current)) {
-                            throw new PreserveLocalSkipException(
-                                "PRESERVE-LOCAL: symlink-to-directory not writable: {$current}",
-                            );
-                        }
-                        continue;
-                    } else {
-                        throw new PreserveLocalSkipException(
-                            "PRESERVE-LOCAL: symlink blocks directory and points to non-directory: {$current}",
-                        );
-                    }
+                    // Never create directories through symlinks — the symlink
+                    // and its target contents are shared hosting infrastructure
+                    // that must not be modified.
+                    throw new PreserveLocalSkipException(
+                        "PRESERVE-LOCAL: symlink in directory path: {$current}",
+                    );
                 }
                 $this->audit_log(
                     "Removing symlink blocking directory: {$current}",
@@ -4993,12 +5033,23 @@ class ImportClient
 
         // In preserve-local mode, if the directory already exists (as a real
         // directory or via a symlink to a directory), keep it as-is.
-        if ($this->docroot_nonempty_behavior === 'preserve-local' && is_dir($local_path)) {
-            $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
-            if ($ctime > 0) {
-                $this->upsert_index_entry($path, $ctime, 0, "dir");
+        // Also skip if any parent component is a symlink — we never create
+        // new directories through symlinked paths.
+        if ($this->docroot_nonempty_behavior === 'preserve-local') {
+            if (is_dir($local_path)) {
+                $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
+                if ($ctime > 0) {
+                    $this->upsert_index_entry($path, $ctime, 0, "dir");
+                }
+                return;
             }
-            return;
+            if ($this->path_traverses_symlink($local_path)) {
+                $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$path}", true);
+                if ($ctime > 0) {
+                    $this->upsert_index_entry($path, $ctime, 0, "dir");
+                }
+                return;
+            }
         }
 
         if (
@@ -5065,9 +5116,17 @@ class ImportClient
 
         // In preserve-local mode, if something already exists at the symlink
         // path, keep it — whether it's a file, directory, or another symlink.
-        if ($this->docroot_nonempty_behavior === 'preserve-local' && (file_exists($local_path) || is_link($local_path))) {
-            $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
-            return;
+        // Also skip if any parent component is a symlink — we never create
+        // new content through symlinked directories.
+        if ($this->docroot_nonempty_behavior === 'preserve-local') {
+            if (file_exists($local_path) || is_link($local_path)) {
+                $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
+                return;
+            }
+            if ($this->path_traverses_symlink(dirname($local_path))) {
+                $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
+                return;
+            }
         }
 
         // Validate that the symlink target doesn't escape the filesystem root.

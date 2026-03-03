@@ -482,4 +482,95 @@ describe('Import: --preserve-local', () => {
             );
         });
     });
+
+    // ------------------------------------------------------------------
+    // Test: directory-level symlink pointing outside docroot
+    //
+    // This covers the case where an entire directory like wp-content/plugins
+    // is a symlink to a location outside the docroot (e.g., a shared hosting
+    // plugins pool).  When the remote site has files under that directory,
+    // they should all be skipped gracefully — we should never see "Security:
+    // Refusing to create directory outside docroot".
+    // ------------------------------------------------------------------
+    describe('directory-level symlink pointing outside docroot', () => {
+        let tempDir;
+        let localSiteRoot;
+        let sharedPluginsDir;
+
+        beforeAll(() => {
+            tempDir = createTempDir('e2e-preserve-local-dirlink');
+
+            const docroot = docrootDir(tempDir);
+            localSiteRoot = join(docroot, siteDir);
+
+            // Create the site structure with wp-content/plugins as a
+            // directory-level symlink rather than per-plugin symlinks.
+            // The symlink target is a sibling of the site root, completely
+            // outside the docroot tree that the importer considers safe.
+            sharedPluginsDir = join(docroot, dirname(siteDir), 'shared-plugins-pool');
+            mkdirSync(sharedPluginsDir, { recursive: true });
+
+            // Build minimal site structure (no per-plugin symlinks this time)
+            mkdirSync(join(localSiteRoot, 'wp-content'), { recursive: true });
+
+            // wp-content/plugins is itself a symlink outside the docroot.
+            // From wp-content/, ../../ goes to dirname(siteRoot) where the
+            // shared pool lives.
+            symlinkSync(
+                '../../shared-plugins-pool',
+                join(localSiteRoot, 'wp-content', 'plugins'),
+            );
+
+            // Also create a regular file to prove non-conflicting imports work
+            writeFileSync(
+                join(localSiteRoot, 'wp-content', 'local-marker.txt'),
+                'local marker',
+            );
+        });
+
+        afterAll(() => {
+            cleanupTempDir(tempDir);
+        });
+
+        it('files-sync completes without security errors', () => {
+            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+                secret: getSiteSecret(site),
+                extraArgs: ['--on-docroot-nonempty=preserve-local'],
+            });
+            assert.equal(
+                result.exitCode, 0,
+                `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+            );
+            assert.ok(
+                !result.stderr.includes('Security: Refusing to create directory outside docroot'),
+                `Should not see security error, got: ${result.stderr}`,
+            );
+        });
+
+        it('plugins directory symlink is preserved', () => {
+            const p = join(localSiteRoot, 'wp-content', 'plugins');
+            assert.ok(lstatSync(p).isSymbolicLink(),
+                'Expected wp-content/plugins to remain a symlink');
+            assert.equal(readlinkSync(p), '../../shared-plugins-pool');
+        });
+
+        it('no remote plugin files leaked into shared directory', () => {
+            // The remote site has akismet/akismet.php and akismet/readme.txt.
+            // Since wp-content/plugins points outside the docroot, these
+            // should be skipped — nothing should appear in the shared pool.
+            const akismetDir = join(sharedPluginsDir, 'akismet');
+            assert.ok(!existsSync(akismetDir),
+                'akismet directory should not have been created in the shared plugins pool');
+        });
+
+        it('audit log shows PRESERVE-LOCAL skip for symlink in path', () => {
+            const audit = readAuditLog(tempDir);
+            assert.ok(audit.includes('PRESERVE-LOCAL'),
+                'Expected PRESERVE-LOCAL entries in audit log');
+            assert.ok(
+                audit.includes('symlink in path'),
+                'Expected "symlink in path" skip entries in audit log',
+            );
+        });
+    });
 });
