@@ -3,8 +3,7 @@
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
-require_once __DIR__ . '/../../importer/lib/url-rewrite/PhpSerializationProcessor.php';
-require_once __DIR__ . '/../../importer/lib/url-rewrite/StructuredDataUrlRewriter.php';
+require_once __DIR__ . '/../../importer/lib/url-rewrite/load.php';
 
 class StructuredDataUrlRewriterTest extends TestCase
 {

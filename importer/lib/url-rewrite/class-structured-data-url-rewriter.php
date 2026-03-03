@@ -1,8 +1,5 @@
 <?php
 
-require_once __DIR__ . '/../wp-stubs.php';
-require_once __DIR__ . '/JsonStringIterator.php';
-
 use function WordPress\DataLiberation\URL\wp_rewrite_urls;
 
 /**

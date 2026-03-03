@@ -3,11 +3,7 @@
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
-require_once __DIR__ . '/../../importer/lib/wp-stubs.php';
-require_once __DIR__ . '/../../importer/lib/url-rewrite/Base64ValueScanner.php';
-require_once __DIR__ . '/../../importer/lib/url-rewrite/PhpSerializationProcessor.php';
-require_once __DIR__ . '/../../importer/lib/url-rewrite/StructuredDataUrlRewriter.php';
-require_once __DIR__ . '/../../importer/lib/url-rewrite/SqlStatementRewriter.php';
+require_once __DIR__ . '/../../importer/lib/url-rewrite/load.php';
 
 class SqlStatementRewriterTest extends TestCase
 {
