@@ -26,6 +26,8 @@ class SqlStatementRewriter
      * WordPress core columns that contain block markup and benefit from
      * wp_rewrite_urls() over simple string replacement. Keyed by table suffix
      * (without prefix) so they match wp_posts, myprefix_posts, etc.
+     * 
+     * @TODO: Make this extensible, find a way to treat the relevant columns from plugin tables.
      */
     private const WP_BLOCK_MARKUP_COLUMNS = [
         'posts' => [
@@ -100,6 +102,8 @@ class SqlStatementRewriter
      *
      * INSERT: INSERT INTO `table` (`col1`,`col2`,...) VALUES ...
      * UPDATE: UPDATE `table` SET `col` = ...
+     * 
+     * @TODO: Use the MySQL parser, not naive regexes.
      *
      * @return array{type: string, table: string, columns: string[]}|null
      */
@@ -264,6 +268,9 @@ class SqlStatementRewriter
      * Check if a table name matches a suffix. Handles both prefixed and
      * unprefixed table names: "wp_posts" matches "posts", "posts" matches
      * "posts", "myprefix_posts" matches "posts".
+     * 
+     * @TODO: Actually extract the table prefix from wp_config, do not use
+     *        a naive heuristic like this.
      */
     private function table_matches_suffix(string $table, string $suffix): bool
     {
