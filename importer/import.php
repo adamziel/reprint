@@ -904,13 +904,14 @@ class ImportClient
      * docroot instead of overwriting them; non-writable directories are skipped
      * gracefully and logged to the audit log.
      *
-     * On the first sync, existing docroot content is left untouched — files that
-     * collide with remote paths are skipped and never indexed.
-     * 
-     * On subsequent delta syncs, the diff sees those paths in the remote index but 
-     * not in the local index, so it adds them to the download list again. The
-     * preserve-local check fires again during download and skips them, so local
-     * content stays preserved across all sync cycles.
+     * On the first sync, existing docroot content is left untouched — any file,
+     * symlink, or directory that already exists at a path the remote tries to write
+     * is skipped and never added to the local index.
+     *
+     * On subsequent delta syncs, preserved paths survive because the importer only
+     * acts on paths listed in the remote index. Local-only hosting infrastructure
+     * (e.g. __wp__ symlinks, drop-in symlinks, shared plugin directories) is simply
+     * invisible to the diff and never touched.
      *
      * Set via --on-docroot-nonempty, persisted in state so it survives across invocations.
      */
