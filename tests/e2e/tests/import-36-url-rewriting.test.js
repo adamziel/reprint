@@ -4,7 +4,7 @@
  * Tests the full round-trip:
  * 1. Create site with known content containing source URLs in various formats
  * 2. Run db-sync → verify .import-domains.json contains the source domain
- * 3. Run db-apply with --url-mapping to apply SQL to target database
+ * 3. Run db-apply with --rewrite-url to apply SQL to target database
  * 4. Verify URLs are rewritten in all value types, including serialized PHP
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -124,7 +124,7 @@ describe('Import: URL Rewriting', () => {
                 `--target-user=e2e_admin`,
                 `--target-pass=e2e_password`,
                 `--target-db=${importDb}`,
-                `--url-mapping=${SOURCE_DOMAIN}::${TARGET_DOMAIN}`,
+                `--rewrite-url`, SOURCE_DOMAIN, TARGET_DOMAIN,
             ],
         });
 
