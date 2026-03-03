@@ -7379,14 +7379,13 @@ if (
                 "  --target-pass=PASS         Target MySQL password\n" .
                 "  --target-db=NAME           Target MySQL database (required)\n" .
                 "  --rewrite-url FROM TO      Rewrite FROM to TO (repeatable)\n" .
-                "  --url-mapping=FROM::TO     Rewrite FROM to TO (repeatable)\n" .
                 "  --abort                    Clear state and exit\n" .
                 "  --verbose, -v              Show detailed logs\n" .
                 "\n" .
                 "Example:\n" .
                 "  php import.php db-apply - /path/to/import \\\n" .
                 "    --target-user=root --target-db=wp_new \\\n" .
-                "    --url-mapping=https://old.com::https://new.com\n",
+                "    --rewrite-url https://old.com https://new.com\n",
         ],
         "preflight" => [
             "short" => "Run preflight check and print the full result as JSON",
@@ -7704,17 +7703,6 @@ if (
             }
             $options["rewrite_url"][] = [$argv[$i + 1], $argv[$i + 2]];
             $i += 2;
-        } elseif (strpos($argv[$i], "--url-mapping=") === 0) {
-            $mapping = substr($argv[$i], strlen("--url-mapping="));
-            $parts = explode("::", $mapping, 2);
-            if (count($parts) !== 2 || $parts[0] === "" || $parts[1] === "") {
-                fwrite(STDERR, "--url-mapping requires FROM::TO format\n");
-                exit(1);
-            }
-            if (!isset($options["rewrite_url"])) {
-                $options["rewrite_url"] = [];
-            }
-            $options["rewrite_url"][] = [$parts[0], $parts[1]];
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
