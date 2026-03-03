@@ -49,7 +49,25 @@ describe('Import: --preserve-local', () => {
     let siteDir;
 
     beforeAll(async () => {
-        await ensureSite(site);
+        await ensureSite(site, {
+            afterCreate: async (remoteSiteDir) => {
+                // Ensure the remote site has its own akismet — a genuine path
+                // conflict with the local hosting symlink to shared akismet.
+                // WP might ship with akismet by default, but we write explicit
+                // content so the test is self-contained and verifiable.
+                const akismetDir = join(remoteSiteDir, 'wp-content', 'plugins', 'akismet');
+                mkdirSync(akismetDir, { recursive: true });
+                writeFileSync(join(akismetDir, 'akismet.php'),
+                    '<?php /* REMOTE akismet – should NOT appear locally */');
+                writeFileSync(join(akismetDir, 'readme.txt'),
+                    'Remote Akismet readme – should NOT appear locally');
+
+                // A regular file that will also exist locally as a plain file
+                // (not a symlink) — tests file-vs-file conflict preservation.
+                writeFileSync(join(remoteSiteDir, 'wp-content', 'maintenance.php'),
+                    '<?php // REMOTE maintenance – should NOT appear locally');
+            },
+        });
         siteDir = getSiteDir(site);
     });
 
@@ -133,6 +151,12 @@ describe('Import: --preserve-local', () => {
         // Theme directory symlink (3 levels up)
         symlinkSync('../../../wordpress/themes/twentyseventeen/latest',
             join(siteRoot, 'wp-content', 'themes', 'twentyseventeen'));
+
+        // -- local regular files that conflict with remote paths --------
+        // These are plain files (not symlinks) that also exist on the
+        // remote site.  preserve-local should keep the local version.
+        writeFileSync(join(siteRoot, 'wp-content', 'maintenance.php'),
+            '<?php // LOCAL maintenance – should be preserved');
 
         // Lock down the shared directory — hosting infra is read-only
         chmodSync(join(wpShared, 'core/latest/wp-includes'), 0o555);
@@ -298,11 +322,44 @@ describe('Import: --preserve-local', () => {
             assert.equal(content, '<?php // shared akismet');
         });
 
-        // -- remote-only files imported normally ----------------------
+        // -- conflicting paths: local content wins --------------------
 
-        it('remote-only files were downloaded', () => {
-            // test-data/ doesn't overlap with our hosting symlinks,
-            // so its files should be imported from the server.
+        it('akismet.php through symlink is from shared hosting, not remote', () => {
+            // The remote site has wp-content/plugins/akismet/akismet.php
+            // with REMOTE content.  The local hosting has a symlink at
+            // wp-content/plugins/akismet pointing to shared hosting.
+            // Reading through the symlink should return the shared hosting
+            // version, proving the remote never overwrote it.
+            const content = readFileSync(
+                join(localSiteRoot, 'wp-content', 'plugins', 'akismet', 'akismet.php'), 'utf-8',
+            );
+            assert.equal(content, '<?php // shared akismet',
+                'Expected local shared hosting akismet.php, not the remote version');
+        });
+
+        it('no remote-only akismet files leaked through the symlink', () => {
+            // The remote's akismet includes readme.txt, but the shared
+            // hosting copy doesn't.  If the importer wrote through the
+            // symlink, readme.txt would appear in the shared directory.
+            const readmePath = join(localSiteRoot, 'wp-content', 'plugins', 'akismet', 'readme.txt');
+            assert.ok(!existsSync(readmePath),
+                'readme.txt should not exist under local akismet (shared hosting has no readme)');
+        });
+
+        it('local regular file preserved over conflicting remote version', () => {
+            // maintenance.php exists as a plain file both locally and on the
+            // remote, with different content.  The local version should win.
+            const content = readFileSync(
+                join(localSiteRoot, 'wp-content', 'maintenance.php'), 'utf-8',
+            );
+            assert.equal(content, '<?php // LOCAL maintenance – should be preserved');
+        });
+
+        // -- non-conflicting remote files imported normally -----------
+
+        it('non-conflicting remote files were downloaded', () => {
+            // test-data/ doesn't overlap with any local hosting content,
+            // so its files should be imported from the server normally.
             const remoteFile = join(localSiteRoot, 'test-data', 'hello.txt');
             assert.ok(existsSync(remoteFile),
                 'Expected test-data/hello.txt to be downloaded from remote');
