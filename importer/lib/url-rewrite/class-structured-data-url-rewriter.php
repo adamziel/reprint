@@ -199,8 +199,7 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_text();
 
             default:
-                _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
-                return '';
+                throw new InvalidArgumentException( 'rewrite_urls() requires either block_markup or plain_text to be provided' );
         }
     }
 }
