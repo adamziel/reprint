@@ -3,16 +3,16 @@
 # Builds importer.phar — a self-contained, lean archive of the import client
 # with all its runtime dependencies baked in.
 #
+# Uses Box (box-project/box) for GZ compression and PHP comment stripping
+# (line-number-preserving, so stack traces stay accurate).
+#
 # Usage:
 #   ./bin/build-importer-phar.sh            # outputs importer.phar in project root
-#   ./bin/build-importer-phar.sh /tmp/out   # outputs /tmp/out/importer.phar
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUTPUT_DIR="${1:-$PROJECT_ROOT}"
-PHAR_FILE="$OUTPUT_DIR/importer.phar"
 
 # ── Preflight checks ──────────────────────────────────────────────
 
@@ -34,67 +34,23 @@ if [ ! -f "$PROJECT_ROOT/vendor/autoload.php" ]; then
     exit 1
 fi
 
-# ── Assemble a staging directory ──────────────────────────────────
+# ── Locate or download Box ────────────────────────────────────────
 
-STAGE=$(mktemp -d)
-trap 'rm -rf "$STAGE"' EXIT
+BOX_PHAR="$PROJECT_ROOT/box.phar"
+if ! [ -f "$BOX_PHAR" ]; then
+    echo "Downloading box.phar …"
+    curl -sL "https://github.com/box-project/box/releases/latest/download/box.phar" \
+        -o "$BOX_PHAR"
+    chmod +x "$BOX_PHAR"
+fi
 
-echo "Staging files …"
+# ── Build ─────────────────────────────────────────────────────────
 
-# 1. Importer source
-cp -r "$PROJECT_ROOT/importer" "$STAGE/importer"
+cd "$PROJECT_ROOT"
+rm -f importer.phar
 
-# 2. Shared utils required by import.php
-mkdir -p "$STAGE/wordpress-plugin/generic"
-cp "$PROJECT_ROOT/wordpress-plugin/generic/utils.php" "$STAGE/wordpress-plugin/generic/utils.php"
+php -d phar.readonly=0 "$BOX_PHAR" compile
 
-# 3. Submodule: only the parser + MySQL files the importer actually loads
-mkdir -p "$STAGE/lib/sqlite-database-integration/wp-includes/parser"
-mkdir -p "$STAGE/lib/sqlite-database-integration/wp-includes/mysql"
-cp "$PROJECT_ROOT"/lib/sqlite-database-integration/wp-includes/parser/*.php \
-   "$STAGE/lib/sqlite-database-integration/wp-includes/parser/"
-cp "$PROJECT_ROOT"/lib/sqlite-database-integration/wp-includes/mysql/*.php \
-   "$STAGE/lib/sqlite-database-integration/wp-includes/mysql/"
-
-# 4. Composer vendor — runtime deps only, minus bloat
-cp -r "$PROJECT_ROOT/vendor" "$STAGE/vendor"
-# Strip test suites — they dominate the vendor size
-find "$STAGE/vendor" -type d \( -iname 'tests' -o -iname 'test' -o -iname 'Tests' -o -iname 'Test' \) -exec rm -rf {} + 2>/dev/null || true
-# Strip docs, examples, and other non-runtime files
-find "$STAGE/vendor" -type d \( -iname 'docs' -o -iname 'doc' -o -iname 'examples' -o -iname 'example' \) -exec rm -rf {} + 2>/dev/null || true
-find "$STAGE/vendor" -type f \( \
-    -iname '*.md' -o -iname 'LICENSE*' -o -iname 'CHANGELOG*' \
-    -o -iname 'CONTRIBUTING*' -o -iname '.gitignore' -o -iname '.gitattributes' \
-    -o -iname 'phpunit.xml*' -o -iname 'phpstan*' -o -iname '.editorconfig' \
-    -o -iname 'Makefile' -o -iname 'composer.json' -o -iname 'composer.lock' \
-    -o -iname '.php-cs-fixer*' \) -delete 2>/dev/null || true
-
-# 5. Phar bootstrap stub
-cat > "$STAGE/stub.php" <<'STUB'
-#!/usr/bin/env php
-<?php
-// Signal to import.php's CLI guard that we are the entry point.
-define('IMPORTER_PHAR_ENTRY', true);
-Phar::mapPhar('importer.phar');
-require 'phar://importer.phar/importer/import.php';
-__HALT_COMPILER();
-STUB
-
-# ── Build the phar ────────────────────────────────────────────────
-
-echo "Building $PHAR_FILE …"
-
-rm -f "$PHAR_FILE"
-
-php -d phar.readonly=0 -r '
-$phar = new Phar($argv[1]);
-$phar->startBuffering();
-$phar->buildFromDirectory($argv[2]);
-$phar->setStub(file_get_contents($argv[2] . "/stub.php"));
-$phar->stopBuffering();
-echo "Done. Files in archive: " . $phar->count() . PHP_EOL;
-' "$PHAR_FILE" "$STAGE"
-
-# Show final size
-SIZE=$(du -h "$PHAR_FILE" | cut -f1)
-echo "Output: $PHAR_FILE ($SIZE)"
+SIZE=$(du -h importer.phar | cut -f1)
+echo ""
+echo "Output: importer.phar ($SIZE)"
