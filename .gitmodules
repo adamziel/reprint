@@ -1,0 +1,3 @@
+[submodule "lib/sqlite-database-integration"]
+	path = lib/sqlite-database-integration
+	url = https://github.com/WordPress/sqlite-database-integration.git

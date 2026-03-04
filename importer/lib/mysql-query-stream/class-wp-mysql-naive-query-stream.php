@@ -37,6 +37,14 @@ class WP_MySQL_Naive_Query_Stream {
 	private $state = true;
 	private $last_query = false;
 
+	/**
+	 * Total number of bytes consumed (trimmed from the buffer) so far.
+	 * This is the byte offset within the total appended input where the
+	 * next unconsumed byte begins. Callers can add the file seek offset
+	 * to get the absolute file position after the last extracted query.
+	 */
+	private $bytes_consumed = 0;
+
 	const STATE_QUERY = 'valid';
 	const STATE_SYNTAX_ERROR = 'syntax_error';
 	const STATE_PAUSED_ON_INCOMPLETE_INPUT = 'paused_on_incomplete_input';
@@ -146,6 +154,7 @@ class WP_MySQL_Naive_Query_Stream {
 		$last_byte = $last_token->start + $last_token->length;
 		$query = substr($this->sql_buffer, 0, $last_byte);
 		$this->sql_buffer = substr($this->sql_buffer, $last_byte);
+		$this->bytes_consumed += $last_byte;
 		$this->last_query = $query;
 		$this->state = self::STATE_QUERY;
 		return true;
@@ -157,6 +166,19 @@ class WP_MySQL_Naive_Query_Stream {
 
 	public function get_state() {
 		return $this->state;
+	}
+
+	/**
+	 * Return the total number of input bytes consumed so far. This counts
+	 * only bytes that were part of extracted queries — bytes still sitting
+	 * in the internal buffer (partial/incomplete queries) are NOT included.
+	 *
+	 * Callers can add the initial file seek offset to this value to get the
+	 * absolute file position right after the last extracted query, which is
+	 * the correct resume point.
+	 */
+	public function get_bytes_consumed(): int {
+		return $this->bytes_consumed;
 	}
 
 }

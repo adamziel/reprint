@@ -2982,8 +2982,10 @@ class ImportClient
         // Set up SQL statement rewriter if we have URL mappings
         $stmt_rewriter = null;
         if (!empty($url_mapping)) {
+            $table_prefix = $this->state["preflight"]["data"]["database"]["wp"]["table_prefix"] ?? 'wp_';
             $stmt_rewriter = new SqlStatementRewriter(
                 new StructuredDataUrlRewriter($url_mapping),
+                $table_prefix,
             );
             $this->audit_log(
                 sprintf(
@@ -3038,14 +3040,19 @@ class ImportClient
         $save_every = 100;
         $stmts_since_save = 0;
 
-        // If resuming, seek to saved position and skip already-executed statements
-        $stmts_to_skip = $statements_executed;
+        // If resuming, seek to saved position. bytes_read is the byte offset
+        // right after the last successfully executed query (tracked via
+        // query_stream->get_bytes_consumed()), so no statement skipping is
+        // needed after seeking — we're exactly at the next un-executed query.
+        $seek_offset = 0;
+        $stmts_to_skip = 0;
         if ($bytes_read > 0 && $bytes_read < $sql_file_size) {
             fseek($sql_handle, $bytes_read);
             $total_bytes_read = $bytes_read;
-        } elseif ($stmts_to_skip > 0) {
+            $seek_offset = $bytes_read;
+        } elseif ($statements_executed > 0) {
             // Can't seek — need to scan from beginning and skip statements
-            $bytes_read = 0;
+            $stmts_to_skip = $statements_executed;
         }
 
         $this->output_progress([
@@ -3110,10 +3117,14 @@ class ImportClient
                     $statements_executed++;
                     $stmts_since_save++;
 
-                    // Save state periodically
+                    // Save state periodically. bytes_read is the file offset
+                    // right after the last extracted query — NOT total_bytes_read,
+                    // which includes bytes buffered in the query stream that haven't
+                    // formed a complete query yet. This ensures resumption starts at
+                    // the exact boundary between executed and un-executed queries.
                     if ($stmts_since_save >= $save_every) {
                         $this->state["apply"]["statements_executed"] = $statements_executed;
-                        $this->state["apply"]["bytes_read"] = $total_bytes_read;
+                        $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
                         $this->save_state($this->state);
                         $stmts_since_save = 0;
 
@@ -3171,7 +3182,7 @@ class ImportClient
             if ($this->shutdown_requested) {
                 // Save partial progress
                 $this->state["apply"]["statements_executed"] = $statements_executed;
-                $this->state["apply"]["bytes_read"] = $total_bytes_read;
+                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
                 $this->state["status"] = "partial";
                 $this->save_state($this->state);
                 $this->audit_log(
@@ -3184,7 +3195,7 @@ class ImportClient
             } else {
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
-                $this->state["apply"]["bytes_read"] = $total_bytes_read;
+                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
                 $this->state["status"] = "complete";
                 $this->save_state($this->state);
 

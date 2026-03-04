@@ -1,5 +1,10 @@
 <?php
 
+use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
+use WordPress\DataLiberation\URL\URLInTextProcessor;
+use WordPress\DataLiberation\URL\WPURL;
+
+use function WordPress\DataLiberation\URL\is_child_url_of;
 use function WordPress\DataLiberation\URL\wp_rewrite_urls;
 
 /**
@@ -25,6 +30,7 @@ use function WordPress\DataLiberation\URL\wp_rewrite_urls;
 class StructuredDataUrlRewriter
 {
     const BLOCK_MARKUP = 'block_markup';
+    const PLAIN_TEXT = 'plain_text';
 
     /** @var array<string, string> URL mapping: source_url => target_url */
     private array $url_mapping;
@@ -53,6 +59,10 @@ class StructuredDataUrlRewriter
 
         if ($content_type === 'skip') {
             return $value;
+        }
+
+        if ($content_type === null) {
+            $content_type = self::PLAIN_TEXT;
         }
 
         // Try serialized PHP: the parser validates the entire structure
@@ -95,15 +105,102 @@ class StructuredDataUrlRewriter
             }
         }
 
-        // Leaf: text handling. The caller decides whether this is block
-        // markup (wp_rewrite_urls) or plain text (strtr). We never guess.
-        if ($content_type === 'block_markup') {
-            return wp_rewrite_urls([
-                'block_markup' => $value,
-                'url-mapping' => $this->url_mapping,
-            ]);
+        return self::rewrite_urls([
+            'content' => $value,
+            'content_type' => $content_type,
+            'url-mapping' => $this->url_mapping,
+        ]);
+    }
+
+    /**
+     * Migrate URLs in post content. See WPRewriteUrlsTests for
+     * specific examples. TODO: A better description.
+     *
+     * Example:
+     *
+     * ```php
+     * php > wp_rewrite_urls([
+     *   'block_markup' => '<!-- wp:image {"src": "http://legacy-blog.com/image.jpg"} -->',
+     *   'url-mapping' => [
+     *     'http://legacy-blog.com' => 'https://modern-webstore.org'
+     *   ]
+     * ])
+     * <!-- wp:image {"src":"https:\/\/modern-webstore.org\/image.jpg"} -->
+     * ```
+     *
+     * @TODO Use a proper JSON parser and encoder to:
+     * * Support UTF-16 characters
+     * * Gracefully handle recoverable encoding issues
+     * * Avoid changing the whitespace in the same manner as
+     *   we do in WP_HTML_Tag_Processor. e.g. if we start with:
+     *
+     * ```html
+     * <!-- wp:block {"url":"https://w.org"}` -->
+     *                     ^ no space here
+     * ```
+     *
+     * then it would be nice to re-encode that block markup also without the space character. This is similar
+     * to how the tag processor avoids changing parts of the tag it doesn't need to change.
+     * 
+     * TODO: Migrate these changes back into the php-toolkit repo
+     */
+    static private function rewrite_urls( $options ) {
+        if ( empty( $options['base_url'] ) ) {
+            // Use first from-url as base_url if not specified.
+            $from_urls           = array_keys( $options['url-mapping'] );
+            $options['base_url'] = $from_urls[0];
         }
 
-        return strtr($value, $this->url_mapping);
+        $url_mapping = array();
+        foreach ( $options['url-mapping'] as $from_url_string => $to_url_string ) {
+            $url_mapping[] = array(
+                'from_url' => WPURL::parse( $from_url_string ),
+                'to_url'   => WPURL::parse( $to_url_string ),
+            );
+        }
+
+        switch($options['content_type']) {
+            case self::BLOCK_MARKUP:
+                $p = new BlockMarkupUrlProcessor( $options['content'], $options['base_url'] );
+                while ( $p->next_url() ) {
+                    $parsed_url = $p->get_parsed_url();
+                    foreach ( $url_mapping as $mapping ) {
+                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
+                            $p->replace_base_url( $mapping['to_url'] );
+                            break;
+                        }
+                    }
+                }
+
+                return $p->get_updated_html();
+                
+            case self::PLAIN_TEXT:
+                $p = new URLInTextProcessor( $options['content'], $options['base_url'] );
+                while ( $p->next_url() ) {
+                    $parsed_url = $p->get_parsed_url();
+                    foreach ( $url_mapping as $mapping ) {
+                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
+                            $new_raw_url = WPURL::replace_base_url(
+                                $parsed_url,
+                                array(
+                                    'old_base_url' => $options['base_url'],
+                                    'new_base_url' => $mapping['to_url'],
+                                    'raw_url'      => $p->get_raw_url(),
+                                    'is_relative'  => false,
+                                )
+                            );
+
+                            $p->set_raw_url( $new_raw_url );
+                            break;
+                        }
+                    }
+                }
+
+                return $p->get_updated_text();
+
+            default:
+                _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
+                return '';
+        }
     }
 }

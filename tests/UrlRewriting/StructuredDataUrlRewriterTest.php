@@ -63,6 +63,22 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/about', $result);
     }
 
+    public function testDoesNotRewriteNonUrlsInText(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'Visit us at do-you-knowhttps://old-site.com/about for more info.';
+        $result = $rewriter->rewrite($input);
+        $this->assertEquals($input, $result);
+    }
+
+    public function testDoesNotRewriteQueryString(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'Visit us at https://webarchive.org?url=https://old-site.com/about for more info.';
+        $result = $rewriter->rewrite($input);
+        $this->assertEquals($input, $result);
+    }
+
     // --- JSON content ---
 
     public function testRewritesUrlsInJsonStringValues(): void

@@ -21,6 +21,20 @@ On the **migration target** side:
 
 ### Getting started
 
+Clone the repository with submodules — the project depends on the
+[sqlite-database-integration](https://github.com/WordPress/sqlite-database-integration)
+library for MySQL parsing:
+
+```bash
+git clone --recurse-submodules <repo-url>
+```
+
+If you already cloned without `--recurse-submodules`, run:
+
+```bash
+git submodule update --init
+```
+
 This project consists of two parts:
 
 * A `./wordpress-plugin` that must be installed in the **migration source** (the remote site we want to migrate).
@@ -641,3 +655,32 @@ consider freezing writes or enabling maintenance mode during the migration.
   because we have structured parsers and tokenizers for all these formats, but it's a major scope creep.
 * Support for directories with more files than we can sort in memory at once. A million files with 64 byte names
   require around 100MB of memory to sort. If you have so many files, you better have that much memory available.
+
+## Development
+
+### Submodule
+
+The MySQL lexer and parser live in the [sqlite-database-integration](https://github.com/WordPress/sqlite-database-integration) repository, pulled in as a git submodule at `lib/sqlite-database-integration/`. After cloning (see [Getting started](#getting-started)), run:
+
+```bash
+composer install
+```
+
+To update the submodule to the latest upstream commit:
+
+```bash
+git submodule update --remote lib/sqlite-database-integration
+```
+
+### Tests
+
+```bash
+composer test            # Run all PHPUnit tests
+composer test:fast       # Skip large dataset tests
+composer test:large      # Run only large dataset tests
+composer analyze         # Run PHPStan static analysis
+```
+
+### E2E tests
+
+See [tests/e2e/](tests/e2e/) for the full end-to-end test setup.

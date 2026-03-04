@@ -22,6 +22,9 @@
         <testsuite name="Export Utility Tests">
             <file>BuildPdoDsnTest.php</file>
         </testsuite>
+        <testsuite name="Query Stream Tests">
+            <file>NaiveQueryStreamTest.php</file>
+        </testsuite>
     </testsuites>
     <php>
         <env name="DB_HOST" value="127.0.0.1"/>

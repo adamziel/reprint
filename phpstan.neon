@@ -18,3 +18,5 @@ parameters:
     treatPhpDocTypesAsCertain: false
     scanDirectories:
         - wordpress-plugin/generic
+        - lib/sqlite-database-integration/wp-includes/parser
+        - lib/sqlite-database-integration/wp-includes/mysql
