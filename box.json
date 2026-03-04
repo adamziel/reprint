@@ -32,6 +32,7 @@
 
     "files": [
         "wordpress-plugin/generic/utils.php",
+        "wordpress-plugin/generic/class-hmac-client.php",
         "vendor/autoload.php"
     ],
 
