@@ -30,6 +30,7 @@ use function WordPress\DataLiberation\URL\wp_rewrite_urls;
 class StructuredDataUrlRewriter
 {
     const BLOCK_MARKUP = 'block_markup';
+    const PLAIN_TEXT = 'plain_text';
 
     /** @var array<string, string> URL mapping: source_url => target_url */
     private array $url_mapping;
@@ -61,7 +62,7 @@ class StructuredDataUrlRewriter
         }
 
         if ($content_type === null) {
-            $content_type = 'plain_text';
+            $content_type = self::PLAIN_TEXT;
         }
 
         // Try serialized PHP: the parser validates the entire structure
@@ -159,7 +160,7 @@ class StructuredDataUrlRewriter
         }
 
         switch($options['content_type']) {
-            case 'block_markup':
+            case self::BLOCK_MARKUP:
                 $p = new BlockMarkupUrlProcessor( $options['content'], $options['base_url'] );
                 while ( $p->next_url() ) {
                     $parsed_url = $p->get_parsed_url();
@@ -173,7 +174,7 @@ class StructuredDataUrlRewriter
 
                 return $p->get_updated_html();
                 
-            case 'plain_text':
+            case self::PLAIN_TEXT:
                 $p = new URLInTextProcessor( $options['content'], $options['base_url'] );
                 while ( $p->next_url() ) {
                     $parsed_url = $p->get_parsed_url();
@@ -198,7 +199,7 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_text();
 
             default:
-                _doing_it_wrong( __FUNCTION__, 'wp_rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
+                _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
                 return '';
         }
     }
