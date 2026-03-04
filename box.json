@@ -1,6 +1,7 @@
 {
     "main": "importer/import.php",
     "output": "importer.phar",
+    "check-requirements": false,
 
     "directories": [
         "importer"
@@ -9,7 +10,13 @@
     "finder": [
         {
             "name": "*.php",
-            "exclude": ["tests", "test", "Tests", "Test", "docs", "doc", "examples", "bin"],
+            "exclude": [
+                "tests", "test", "Tests", "Test",
+                "docs", "doc", "examples", "bin",
+                "DataFormatConsumer", "DataFormatProducer",
+                "EntityWriter", "EntityReader",
+                "Importer"
+            ],
             "notName": "/LICENSE.*|CHANGELOG.*|CONTRIBUTING.*|README.*/",
             "in": "vendor"
         },
