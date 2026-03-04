@@ -2982,8 +2982,10 @@ class ImportClient
         // Set up SQL statement rewriter if we have URL mappings
         $stmt_rewriter = null;
         if (!empty($url_mapping)) {
+            $table_prefix = $this->state["preflight"]["data"]["database"]["wp"]["table_prefix"] ?? 'wp_';
             $stmt_rewriter = new SqlStatementRewriter(
                 new StructuredDataUrlRewriter($url_mapping),
+                $table_prefix,
             );
             $this->audit_log(
                 sprintf(

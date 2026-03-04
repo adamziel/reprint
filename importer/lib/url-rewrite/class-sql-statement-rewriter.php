@@ -23,7 +23,7 @@ class SqlStatementRewriter
 {
     private StructuredDataUrlRewriter $url_rewriter;
 
-    /** @var array<string, array<string, string>> table_suffix => [column_name => content_type] */
+    /** @var array<string, array<string, string>> full_table_name => [column_name => content_type] */
     private array $db_columns_with_block_markup;
 
     /** @var WP_Parser_Grammar|null Lazily loaded, shared across all instances. */
@@ -32,7 +32,8 @@ class SqlStatementRewriter
     /**
      * WordPress core columns that contain block markup and benefit from
      * wp_rewrite_urls() over simple string replacement. Keyed by table suffix
-     * (without prefix) so they match wp_posts, myprefix_posts, etc.
+     * (without prefix) — the constructor prepends the actual table_prefix to
+     * build full table names for exact matching.
      *
      * @TODO: Make this extensible, find a way to treat the relevant columns from plugin tables.
      */
@@ -52,16 +53,30 @@ class SqlStatementRewriter
 
     /**
      * @param StructuredDataUrlRewriter $url_rewriter
+     * @param string $table_prefix WordPress table prefix (e.g. "wp_"), used to
+     *        build full table names for exact matching.
      * @param array<string, array<string, string>> $extra_db_columns_with_block_markup Consumer-provided hints:
      *        table_suffix => [column_name => content_type]. Merged on top of WordPress defaults.
      */
-    public function __construct(StructuredDataUrlRewriter $url_rewriter, array $extra_db_columns_with_block_markup = [])
+    public function __construct(StructuredDataUrlRewriter $url_rewriter, string $table_prefix = 'wp_', array $extra_db_columns_with_block_markup = [])
     {
         $this->url_rewriter = $url_rewriter;
-        $this->db_columns_with_block_markup = array_merge_recursive(
+
+        // Merge WP defaults with consumer hints (both keyed by suffix),
+        // then prepend the table prefix to build full table names.
+        // array_replace_recursive so consumer hints override WP defaults
+        // for the same table+column (e.g. marking post_content as 'skip').
+        $by_suffix = array_replace_recursive(
 			self::WP_BLOCK_MARKUP_COLUMNS,
 			$extra_db_columns_with_block_markup
         );
+        $this->db_columns_with_block_markup = [];
+        foreach ($by_suffix as $suffix => $columns) {
+            // Some plugins create unprefixed tables, so we match both with and without the table
+            // prefix.
+            $this->db_columns_with_block_markup[$table_prefix . $suffix] = $columns;
+            $this->db_columns_with_block_markup[$suffix] = $columns;
+        }
     }
 
     /**
@@ -331,42 +346,15 @@ class SqlStatementRewriter
     }
 
     /**
-     * Look up the content type for a given table and column from the extra_db_columns_with_block_markup map.
+     * Look up the content type for a given table and column. The
+     * db_columns_with_block_markup map is keyed by full table name (prefix
+     * already applied at construction time), so this is a direct lookup.
      *
-     * Checks consumer-provided extra_db_columns_with_block_markup first (exact table suffix match), then
-     * falls back to WordPress core defaults. Returns null if neither has an
-     * entry for this table+column, meaning auto-detect with plain text default.
+     * Returns null if there's no entry for this table+column, meaning
+     * auto-detect with plain text default.
      */
     private function get_content_type(string $table, string $column): ?string
     {
-        // Check consumer hints and WP defaults, both keyed by table suffix
-        foreach ($this->db_columns_with_block_markup as $suffix => $columns) {
-            if ($this->table_matches_suffix($table, $suffix)) {
-                if (isset($columns[$column])) {
-                    return $columns[$column];
-                }
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Check if a table name matches a suffix. Handles both prefixed and
-     * unprefixed table names: "wp_posts" matches "posts", "posts" matches
-     * "posts", "myprefix_posts" matches "posts".
-     *
-     * @TODO: Actually extract the table prefix from wp_config, do not use
-     *        a naive heuristic like this.
-     */
-    private function table_matches_suffix(string $table, string $suffix): bool
-    {
-        if ($table === $suffix) {
-            return true;
-        }
-
-        // Table name ends with _suffix
-        $needle = '_' . $suffix;
-        return substr($table, -strlen($needle)) === $needle;
+        return $this->db_columns_with_block_markup[$table][$column] ?? null;
     }
 }
