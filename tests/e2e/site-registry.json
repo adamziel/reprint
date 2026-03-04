@@ -31,6 +31,7 @@
     "file-deletions":    { "port": 8104 },
     "file-type-swaps":   { "port": 8105 },
     "file-type-cache":   { "port": 8106 },
-    "url-rewriting":     { "port": 8107 }
+    "preserve-local":    { "port": 8107 },
+    "url-rewriting":     { "port": 8108 }
   }
 }

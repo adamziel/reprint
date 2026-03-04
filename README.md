@@ -107,6 +107,14 @@ The command returns one of three exit codes:
 
 Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
 
+**Non-empty local docroot**
+
+By default, `files-sync` refuses to start if `--docroot` is non-empty. If you need to use a non-empty local docroot,
+the `--on-docroot-nonempty` flag controls this behavior. It takes the following values:
+
+- `--on-docroot-nonempty=error` (default): throw an error and abort.
+- `--on-docroot-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
+
 #### Step 3 — Download the database.
 
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
