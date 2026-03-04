@@ -4,7 +4,6 @@ on:
   push:
     branches: [trunk]
   pull_request:
-    branches: [trunk]
 
 jobs:
   e2e:
