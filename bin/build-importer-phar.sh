@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+#
+# Builds importer.phar — a self-contained, lean archive of the import client
+# with all its runtime dependencies baked in.
+#
+# Uses Box (box-project/box) for GZ compression and PHP comment stripping
+# (line-number-preserving, so stack traces stay accurate).
+#
+# Usage:
+#   ./bin/build-importer-phar.sh            # outputs importer.phar in project root
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ── Preflight checks ──────────────────────────────────────────────
+
+if ! command -v php >/dev/null 2>&1; then
+    echo "Error: php not found in PATH" >&2
+    exit 1
+fi
+
+# Verify the submodule is initialised
+if [ ! -f "$PROJECT_ROOT/lib/sqlite-database-integration/wp-includes/parser/class-wp-parser.php" ]; then
+    echo "Error: sqlite-database-integration submodule not initialised." >&2
+    echo "Run: git submodule update --init" >&2
+    exit 1
+fi
+
+# Verify composer deps are installed (--no-dev is fine)
+if [ ! -f "$PROJECT_ROOT/vendor/autoload.php" ]; then
+    echo "Error: vendor/ not found. Run: composer install --no-dev" >&2
+    exit 1
+fi
+
+# ── Locate or download Box ────────────────────────────────────────
+
+BOX_PHAR="$PROJECT_ROOT/box.phar"
+if ! [ -f "$BOX_PHAR" ]; then
+    echo "Downloading box.phar …"
+    curl -sL "https://github.com/box-project/box/releases/latest/download/box.phar" \
+        -o "$BOX_PHAR"
+    chmod +x "$BOX_PHAR"
+fi
+
+# ── Build ─────────────────────────────────────────────────────────
+
+cd "$PROJECT_ROOT"
+rm -f importer.phar
+
+php -d phar.readonly=0 "$BOX_PHAR" compile
+
+SIZE=$(du -h importer.phar | cut -f1)
+echo ""
+echo "Output: importer.phar ($SIZE)"

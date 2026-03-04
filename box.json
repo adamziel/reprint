@@ -1,0 +1,48 @@
+{
+    "main": "importer/import.php",
+    "output": "importer.phar",
+    "check-requirements": false,
+
+    "directories": [
+        "importer"
+    ],
+
+    "finder": [
+        {
+            "name": "*.php",
+            "exclude": [
+                "tests", "test", "Tests", "Test",
+                "docs", "doc", "examples", "bin",
+                "DataFormatConsumer", "DataFormatProducer",
+                "EntityWriter", "EntityReader",
+                "Importer"
+            ],
+            "notName": "/LICENSE.*|CHANGELOG.*|CONTRIBUTING.*|README.*/",
+            "in": "vendor"
+        },
+        {
+            "name": "*.php",
+            "in": "lib/sqlite-database-integration/wp-includes/parser"
+        },
+        {
+            "name": "*.php",
+            "in": "lib/sqlite-database-integration/wp-includes/mysql"
+        }
+    ],
+
+    "files": [
+        "wordpress-plugin/generic/utils.php",
+        "wordpress-plugin/generic/class-hmac-client.php",
+        "vendor/autoload.php"
+    ],
+
+    "compactors": [
+        "KevinGH\\Box\\Compactor\\Php",
+        "KevinGH\\Box\\Compactor\\Json"
+    ],
+
+    "annotations": false,
+    "compression": "GZ",
+
+    "stub": "bin/phar-stub.php"
+}
