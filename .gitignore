@@ -16,4 +16,4 @@ exports
 exports-old
 siteground-export-*
 node_modules
-
+*.phar
