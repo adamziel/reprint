@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+          ini-values: phar.readonly=0
+
+      - run: composer install --no-dev --no-interaction --prefer-dist
+
+      - name: Build importer.phar
+        run: ./bin/build-importer-phar.sh
+
+      - name: Package wordpress-plugin.zip
+        run: cd wordpress-plugin && zip -r ../wordpress-plugin.zip . -x '*/secret.php'
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            importer.phar
+            wordpress-plugin.zip
+          generate_release_notes: true

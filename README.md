@@ -21,27 +21,13 @@ On the **migration target** side:
 
 ### Getting started
 
-Clone the repository with submodules — the project depends on the
-[sqlite-database-integration](https://github.com/WordPress/sqlite-database-integration)
-library for MySQL parsing:
+Download the latest release artifacts from [GitHub Releases](../../releases):
 
-```bash
-git clone --recurse-submodules <repo-url>
-```
-
-If you already cloned without `--recurse-submodules`, run:
-
-```bash
-git submodule update --init
-```
-
-This project consists of two parts:
-
-* A `./wordpress-plugin` that must be installed in the **migration source** (the remote site we want to migrate).
-* A `./importer/import.php` script, that must run on the **migration target** hosting account (the "local" site we are migrating to). Note that `import.php` requires some files from the `wordpress-plugin` so you'll need both on the importing end. This will be sorted out soon.
+* **`importer.phar`** — a self-contained PHP archive that runs on the **migration target** (the hosting account you are migrating to). No cloning or `composer install` needed.
+* **`wordpress-plugin.zip`** — install this on the **migration source** (the remote WordPress site you want to migrate).
 
 Both must share the same secret string. The plugin has a UI screen where the user can paste the secret, and then
-the import.php script will have to be fed the same secret string (more details below). Alternatively, the plugin
+the importer must be fed the same secret string (more details below). Alternatively, the plugin
 can be pre-packaged with a `./wordpress-plugin/secret.php` file where a pre-determined secret is shipped:
 
 ```php
@@ -72,7 +58,7 @@ SECRET="your-shared-secret"
 First, we'll make sure the server is reachable and the environment is in a good shape:
 
 ```bash
-php importer/import.php preflight "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar preflight "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
@@ -83,7 +69,7 @@ To run very basic diagnostics that confirms the remote server replied and it has
 sound-looking filesystem and a database connection, run:
 
 ```bash
-php importer/import.php preflight-assert "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 For hosting platform-specific checks, such as database version compatibility or
@@ -96,7 +82,7 @@ This first builds a full index of the remote directory tree, then streams every 
 It can be interrupted and resumed at any time — just re-run the same command:
 
 ```bash
-php importer/import.php files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -120,7 +106,7 @@ the `--on-docroot-nonempty` flag controls this behavior. It takes the following 
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
 
 ```bash
-php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 You can also pipe the SQL directly to stdout or stream it into a MySQL server
@@ -128,11 +114,11 @@ without writing a file to disk. Use `--sql-output` to choose the mode:
 
 ```bash
 # Pipe to stdout — useful for feeding into mysql CLI or another tool
-php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
     --sql-output=stdout | mysql -u root my_database
 
 # Stream directly into MySQL — no intermediate file, no pipe
-php importer/import.php db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
     --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=root --mysql-password=secret
 ```
 
@@ -164,7 +150,7 @@ First, we must abort the previous files-sync. Otherwise, it would just
 tell us it's completed and refuse to proceed:
 
 ```bash
-php importer/import.php files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" --abort
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" --abort
 ```
 
 From here, we can run the `files-sync` command again. It will index
@@ -172,7 +158,7 @@ the remote filesystem once again, compute which files have changed
 since the initial sync, and apply that delta in the local directory:
 
 ```bash
-php importer/import.php files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -188,7 +174,7 @@ to `https://new-site.com`), use `db-apply` with `--rewrite-url` to import
 the SQL dump into a target MySQL database while rewriting all URLs in one pass:
 
 ```bash
-php importer/import.php db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
 ```
@@ -203,7 +189,7 @@ are recalculated, JSON is re-encoded, and block comment attributes are updated.
 You can map multiple domains by repeating the flag:
 
 ```bash
-php importer/import.php db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com \
     --rewrite-url https://cdn.old-site.com https://cdn.new-site.com
@@ -378,10 +364,10 @@ This is useful for debugging but noisy for production use.
 
 ### Other CLI Commands
 
-The importer client (`import.php`) accepts the following commands:
+The importer accepts the following commands:
 
 ```
-php importer/import.php <command> <URL> --state-dir=DIR --docroot=DIR [options]
+php importer.phar <command> <URL> --state-dir=DIR --docroot=DIR [options]
 ```
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
