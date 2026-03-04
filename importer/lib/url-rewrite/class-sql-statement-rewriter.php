@@ -24,7 +24,7 @@ class SqlStatementRewriter
     private StructuredDataUrlRewriter $url_rewriter;
 
     /** @var array<string, array<string, string>> table_suffix => [column_name => content_type] */
-    private array $column_hints;
+    private array $db_columns_with_block_markup;
 
     /** @var WP_Parser_Grammar|null Lazily loaded, shared across all instances. */
     private static ?WP_Parser_Grammar $grammar = null;
@@ -52,13 +52,16 @@ class SqlStatementRewriter
 
     /**
      * @param StructuredDataUrlRewriter $url_rewriter
-     * @param array<string, array<string, string>> $column_hints Consumer-provided hints:
+     * @param array<string, array<string, string>> $extra_db_columns_with_block_markup Consumer-provided hints:
      *        table_suffix => [column_name => content_type]. Merged on top of WordPress defaults.
      */
-    public function __construct(StructuredDataUrlRewriter $url_rewriter, array $column_hints = [])
+    public function __construct(StructuredDataUrlRewriter $url_rewriter, array $extra_db_columns_with_block_markup = [])
     {
         $this->url_rewriter = $url_rewriter;
-        $this->column_hints = $column_hints;
+        $this->db_columns_with_block_markup = array_merge_recursive(
+			self::WP_BLOCK_MARKUP_COLUMNS,
+			$extra_db_columns_with_block_markup
+        );
     }
 
     /**
@@ -328,21 +331,19 @@ class SqlStatementRewriter
     }
 
     /**
-     * Look up the content type for a given table and column from the hints map.
+     * Look up the content type for a given table and column from the extra_db_columns_with_block_markup map.
      *
-     * Checks consumer-provided hints first (exact table suffix match), then
+     * Checks consumer-provided extra_db_columns_with_block_markup first (exact table suffix match), then
      * falls back to WordPress core defaults. Returns null if neither has an
      * entry for this table+column, meaning auto-detect with plain text default.
      */
     private function get_content_type(string $table, string $column): ?string
     {
         // Check consumer hints and WP defaults, both keyed by table suffix
-        foreach ([$this->column_hints, self::WP_BLOCK_MARKUP_COLUMNS] as $hints) {
-            foreach ($hints as $suffix => $columns) {
-                if ($this->table_matches_suffix($table, $suffix)) {
-                    if (isset($columns[$column])) {
-                        return $columns[$column];
-                    }
+        foreach ($this->db_columns_with_block_markup as $suffix => $columns) {
+            if ($this->table_matches_suffix($table, $suffix)) {
+                if (isset($columns[$column])) {
+                    return $columns[$column];
                 }
             }
         }
