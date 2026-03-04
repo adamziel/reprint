@@ -7278,11 +7278,13 @@ class StreamingContext
 // CLI Entry Point
 // ============================================================================
 
-// Only run CLI logic if this file is executed directly (not included/required)
+// Only run CLI logic if this file is executed directly (not included/required).
+// IMPORTER_PHAR_ENTRY is defined by the phar stub so the guard also passes
+// when running as `php importer.phar`.
 if (
     PHP_SAPI === "cli" &&
     isset($argv) &&
-    realpath($argv[0] ?? "") === __FILE__
+    (realpath($argv[0] ?? "") === __FILE__ || defined('IMPORTER_PHAR_ENTRY'))
 ) {
     // Per-command help definitions. Each command has a short description
     // shown in the main help, and a detailed help block shown when you
