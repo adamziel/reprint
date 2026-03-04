@@ -26,6 +26,7 @@
         "test:fast": "cd tests && ./run-tests.sh fast",
         "test:large": "cd tests && ./run-tests.sh large",
         "test:coverage": "cd tests && ./run-tests.sh coverage",
+        "build:phar": "./bin/build-importer-phar.sh",
         "analyze": "phpstan analyze --memory-limit=1G",
         "compat": "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps wordpress-plugin/ importer/ --ignore=wordpress-plugin/wordpress"
     },
