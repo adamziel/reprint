@@ -107,6 +107,14 @@ chown -R nginx:nginx ${sh(remoteRoot)}
         assert.equal(initial.exitCode, 0, `Expected exit 0\nstderr: ${initial.stderr}\nstdout: ${initial.stdout}`);
 
         applyDeltaRemoteChanges();
+
+        // Abort previous completion so we can run a delta
+        const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+            secret: getSiteSecret(site),
+            extraArgs: ['--abort'],
+        });
+        assert.equal(abort.exitCode, 0, `Expected abort exit 0\nstderr: ${abort.stderr}\nstdout: ${abort.stdout}`);
+
         const delta = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });

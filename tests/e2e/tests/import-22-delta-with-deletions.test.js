@@ -69,7 +69,13 @@ describe('Import: Delta Sync with Deletions', () => {
         // Delete the files from the source
         execSync(`sudo rm -f ${JSON.stringify(extraFile1)} ${JSON.stringify(extraFile2)}`);
 
-        // Run files-sync again — auto-detects completed state and runs delta
+        // Abort previous completion so we can run a delta
+        const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+            secret: getSiteSecret(site),
+            extraArgs: ['--abort'],
+        });
+        assert.equal(abort.exitCode, 0);
+
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });

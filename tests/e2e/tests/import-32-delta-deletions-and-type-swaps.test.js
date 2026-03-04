@@ -153,6 +153,13 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
     it('delta sync applies deletions and type swaps', () => {
         applyDeltaRemoteChanges();
 
+        // Abort previous completion so we can run a delta
+        const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+            secret: getSiteSecret(site),
+            extraArgs: ['--abort'],
+        });
+        assert.equal(abort.exitCode, 0);
+
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
         });
