@@ -15,6 +15,21 @@ ini_set("display_startup_errors", 1);
 
 require_once __DIR__ . "/../wordpress-plugin/generic/utils.php";
 
+// Load composer autoloader for wp-php-toolkit dependencies
+$autoloader = __DIR__ . '/../vendor/autoload.php'; 
+if (file_exists($autoloader)) {
+    require_once $autoloader;
+}
+
+// Load vendored MySQL query stream (from sqlite-database-integration PR #264)
+require_once __DIR__ . '/lib/mysql-query-stream/load.php';
+
+// Load WordPress function stubs (needed by wp-php-toolkit outside WordPress)
+require_once __DIR__ . '/lib/wp-stubs.php';
+
+// Load URL rewriting components
+require_once __DIR__ . '/lib/url-rewrite/load.php';
+
 /**
  * The wire-protocol version this importer speaks.
  *
@@ -1270,7 +1285,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync, files-index, db-sync, db-index, preflight, preflight-assert",
+                "Command is required. Valid commands: files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
             );
         }
 
@@ -1280,12 +1295,14 @@ class ImportClient
                 "files-index",
                 "db-sync",
                 "db-index",
+                "db-domains",
+                "db-apply",
                 "preflight",
                 "preflight-assert",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, db-sync, db-index, preflight, preflight-assert",
+                "Invalid command: {$command}. Valid commands: files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
             );
         }
 
@@ -1407,6 +1424,34 @@ class ImportClient
         if ($command === "preflight") {
             $this->run_preflight();
             $this->run_preflight_report();
+            return;
+        }
+
+        // db-domains and db-apply are local-only commands that don't need a remote server.
+        if ($command === "db-domains") {
+            $this->run_db_domains();
+            return;
+        }
+        if ($command === "db-apply") {
+            if ($abort) {
+                $this->handle_abort($command);
+                return;
+            }
+            try {
+                $this->run_db_apply($options);
+                $final_status = $this->state["status"] ?? "complete";
+                $this->output_progress(["status" => $final_status]);
+                if ($final_status === "partial") {
+                    $this->exit_code = 2;
+                }
+            } catch (Exception $e) {
+                $this->output_progress([
+                    "status" => "error",
+                    "error" => $e->getMessage(),
+                ]);
+                $this->write_status_file($e->getMessage());
+                throw $e;
+            }
             return;
         }
 
@@ -1557,6 +1602,13 @@ class ImportClient
                         "FILE DELETE | {$tables_file} | abort db-sync",
                     );
                 }
+                $domains_file = $this->state_dir . "/.import-domains.json";
+                if (file_exists($domains_file)) {
+                    unlink($domains_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$domains_file} | abort db-sync",
+                    );
+                }
                 break;
 
             case "db-index":
@@ -1574,6 +1626,15 @@ class ImportClient
                         "FILE DELETE | {$tables_file} | abort db-index",
                     );
                 }
+                break;
+
+            case "db-apply":
+                $this->audit_log(
+                    "RESTART | Clearing db-apply state",
+                    true,
+                );
+                $this->reset_state();
+                $this->save_state($this->state);
                 break;
         }
 
@@ -2755,6 +2816,418 @@ class ImportClient
                 fwrite($this->progress_fd, "SQL imported into {$this->mysql_database}\n");
             }
             fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
+        }
+    }
+
+    // =========================================================================
+    // db-apply: Apply SQL dump to a target MySQL database with URL rewriting
+    // =========================================================================
+
+    /**
+     * Command: db-apply
+     *
+     * Reads db.sql, optionally rewrites URLs, and executes statements against
+     * a target MySQL database. Supports resumption via statement count tracking.
+     *
+     */
+    private function run_db_domains(): void
+    {
+        $domains_file = $this->state_dir . "/.import-domains.json";
+        $sql_file = $this->state_dir . "/db.sql";
+
+        if (file_exists($domains_file)) {
+            // Fast path: domains were already discovered during db-sync
+            $domains = json_decode(file_get_contents($domains_file), true);
+            if (!is_array($domains)) {
+                throw new RuntimeException(
+                    "Failed to parse {$domains_file}",
+                );
+            }
+        } elseif (file_exists($sql_file)) {
+            // Scan db.sql for domains using the same pipeline as db-sync
+            $query_stream = new \WP_MySQL_Naive_Query_Stream();
+            $domain_collector = new \DomainCollector();
+
+            $sql_handle = fopen($sql_file, "r");
+            if (!$sql_handle) {
+                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+            }
+
+            try {
+                $chunk_size = 64 * 1024;
+                while (!feof($sql_handle)) {
+                    $data = fread($sql_handle, $chunk_size);
+                    if ($data === false || $data === '') {
+                        break;
+                    }
+                    $query_stream->append_sql($data);
+                    $this->drain_query_stream_for_domains(
+                        $query_stream,
+                        $domain_collector,
+                    );
+                }
+
+                $query_stream->mark_input_complete();
+                $this->drain_query_stream_for_domains(
+                    $query_stream,
+                    $domain_collector,
+                );
+            } finally {
+                fclose($sql_handle);
+            }
+
+            $domains = $domain_collector->get_domains();
+
+            // Save for future calls
+            file_put_contents(
+                $domains_file,
+                json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+            );
+        } else {
+            throw new RuntimeException(
+                "No domain data found. Run db-sync first, or place a db.sql file in {$this->state_dir}.",
+            );
+        }
+
+        // Print one domain per line to stdout
+        foreach ($domains as $domain) {
+            echo $domain . "\n";
+        }
+    }
+
+    private function run_db_apply(array $options): void
+    {
+        $sql_file = $this->state_dir . "/db.sql";
+        if (!file_exists($sql_file)) {
+            throw new RuntimeException(
+                "db.sql not found in {$this->state_dir}. Run db-sync first.",
+            );
+        }
+
+        // Parse target database options
+        $target_host = $options["target_host"] ?? "127.0.0.1";
+        $target_port = (int) ($options["target_port"] ?? 3306);
+        $target_user = $options["target_user"] ?? null;
+        $target_pass = $options["target_pass"] ?? "";
+        $target_db = $options["target_db"] ?? null;
+
+        if (!$target_user || !$target_db) {
+            throw new InvalidArgumentException(
+                "db-apply requires --target-user and --target-db options.",
+            );
+        }
+
+        // Parse URL mapping
+        $url_mapping = [];
+        if (!empty($options["rewrite_url"])) {
+            foreach ($options["rewrite_url"] as $pair) {
+                $url_mapping[$pair[0]] = $pair[1];
+            }
+        }
+
+        // Show discovered domains if available
+        $domains_file = $this->state_dir . "/.import-domains.json";
+        if (file_exists($domains_file)) {
+            $domains = json_decode(file_get_contents($domains_file), true);
+            if (is_array($domains) && !empty($domains)) {
+                $this->audit_log(
+                    sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
+                    false,
+                );
+                if ($this->is_tty && !$this->verbose_mode) {
+                    echo "Discovered domains in SQL dump:\n";
+                    foreach ($domains as $domain) {
+                        $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
+                        echo "  {$domain}{$mapped}\n";
+                    }
+                    echo "\n";
+                }
+            }
+        }
+
+        // Check state for resume
+        $state_command = $this->state["command"] ?? null;
+        $current_status = $state_command === "db-apply" ? ($this->state["status"] ?? null) : null;
+
+        if ($current_status === "complete") {
+            throw new RuntimeException(
+                "db-apply already completed. Use --abort flag to re-run.",
+            );
+        }
+
+        $apply_state = $this->state["apply"] ?? $this->default_state()["apply"];
+        $statements_executed = (int) ($apply_state["statements_executed"] ?? 0);
+        $bytes_read = (int) ($apply_state["bytes_read"] ?? 0);
+        $is_resume = $current_status === "in_progress" && $statements_executed > 0;
+
+        if ($is_resume) {
+            $this->audit_log(
+                sprintf(
+                    "RESUME db-apply | statements=%d | bytes_read=%d",
+                    $statements_executed,
+                    $bytes_read,
+                ),
+                true,
+            );
+            if ($this->is_tty && !$this->verbose_mode) {
+                echo "Resuming db-apply (executed: {$statements_executed} statements)\n";
+            }
+        } else {
+            $this->state["command"] = "db-apply";
+            $this->state["status"] = "in_progress";
+            $this->state["apply"] = $this->default_state()["apply"];
+            if (!empty($url_mapping)) {
+                $this->state["apply"]["rewrite_url"] = $url_mapping;
+            }
+            $this->save_state($this->state);
+            $statements_executed = 0;
+            $bytes_read = 0;
+
+            $this->audit_log("START db-apply", true);
+            if ($this->is_tty && !$this->verbose_mode) {
+                echo "Starting db-apply\n";
+            }
+        }
+
+        // On resume, use the persisted URL mapping if none provided on CLI
+        if (empty($url_mapping) && !empty($apply_state["rewrite_url"])) {
+            $url_mapping = $apply_state["rewrite_url"];
+        }
+
+        // Set up SQL statement rewriter if we have URL mappings
+        $stmt_rewriter = null;
+        if (!empty($url_mapping)) {
+            $table_prefix = $this->state["preflight"]["data"]["database"]["wp"]["table_prefix"] ?? 'wp_';
+            $stmt_rewriter = new SqlStatementRewriter(
+                new StructuredDataUrlRewriter($url_mapping),
+                $table_prefix,
+            );
+            $this->audit_log(
+                sprintf(
+                    "URL MAPPING | %d mapping(s): %s",
+                    count($url_mapping),
+                    implode(", ", array_map(
+                        fn($from, $to) => "{$from} => {$to}",
+                        array_keys($url_mapping),
+                        array_values($url_mapping),
+                    )),
+                ),
+                false,
+            );
+        }
+
+        // Connect to target MySQL
+        $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
+        try {
+            $pdo = new PDO($dsn, $target_user, $target_pass, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::MYSQL_ATTR_LOCAL_INFILE => false,
+            ]);
+        } catch (PDOException $e) {
+            throw new RuntimeException(
+                "Cannot connect to target database: " . $e->getMessage(),
+            );
+        }
+
+        $this->audit_log(
+            sprintf(
+                "CONNECTED | host=%s port=%d db=%s user=%s",
+                $target_host,
+                $target_port,
+                $target_db,
+                $target_user,
+            ),
+            false,
+        );
+
+        // Stream db.sql through the query stream and execute
+        $query_stream = new \WP_MySQL_Naive_Query_Stream();
+        $sql_handle = fopen($sql_file, "r");
+        if (!$sql_handle) {
+            throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+        }
+
+        $sql_file_size = filesize($sql_file);
+        $total_bytes_read = 0;
+        $stmt_count = 0;
+        $skipped = 0;
+        $save_every = 100;
+        $stmts_since_save = 0;
+
+        // If resuming, seek to saved position. bytes_read is the byte offset
+        // right after the last successfully executed query (tracked via
+        // query_stream->get_bytes_consumed()), so no statement skipping is
+        // needed after seeking — we're exactly at the next un-executed query.
+        $seek_offset = 0;
+        $stmts_to_skip = 0;
+        if ($bytes_read > 0 && $bytes_read < $sql_file_size) {
+            fseek($sql_handle, $bytes_read);
+            $total_bytes_read = $bytes_read;
+            $seek_offset = $bytes_read;
+        } elseif ($statements_executed > 0) {
+            // Can't seek — need to scan from beginning and skip statements
+            $stmts_to_skip = $statements_executed;
+        }
+
+        $this->output_progress([
+            "status" => "starting",
+            "phase" => "db-apply",
+        ]);
+
+        try {
+            $chunk_size = 64 * 1024; // 64KB read chunks
+
+            while (!feof($sql_handle)) {
+                // Check shutdown
+                if ($this->shutdown_requested) {
+                    $this->audit_log("SHUTDOWN REQUESTED | saving state", true);
+                    break;
+                }
+                if (function_exists("pcntl_signal_dispatch")) {
+                    pcntl_signal_dispatch();
+                }
+
+                $data = fread($sql_handle, $chunk_size);
+                if ($data === false || $data === '') {
+                    break;
+                }
+                $total_bytes_read += strlen($data);
+                $query_stream->append_sql($data);
+
+                while ($query_stream->next_query()) {
+                    $query = $query_stream->get_query();
+                    $stmt_count++;
+
+                    // Skip already-executed statements on resume
+                    if ($stmts_to_skip > 0) {
+                        $stmts_to_skip--;
+                        continue;
+                    }
+
+                    // Rewrite URLs if mapping is configured
+                    if ($stmt_rewriter) {
+                        $query = $stmt_rewriter->rewrite($query);
+                    }
+
+                    // Execute against target database
+                    try {
+                        $pdo->exec($query);
+                    } catch (PDOException $e) {
+                        $this->audit_log(
+                            sprintf(
+                                "SQL ERROR | stmt=%d | %s | query=%.200s",
+                                $stmt_count,
+                                $e->getMessage(),
+                                $query,
+                            ),
+                            true,
+                        );
+                        throw new RuntimeException(
+                            "SQL execution error at statement {$stmt_count}: " .
+                            $e->getMessage(),
+                        );
+                    }
+
+                    $statements_executed++;
+                    $stmts_since_save++;
+
+                    // Save state periodically. bytes_read is the file offset
+                    // right after the last extracted query — NOT total_bytes_read,
+                    // which includes bytes buffered in the query stream that haven't
+                    // formed a complete query yet. This ensures resumption starts at
+                    // the exact boundary between executed and un-executed queries.
+                    if ($stmts_since_save >= $save_every) {
+                        $this->state["apply"]["statements_executed"] = $statements_executed;
+                        $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
+                        $this->save_state($this->state);
+                        $stmts_since_save = 0;
+
+                        // Progress output
+                        $pct = $sql_file_size > 0
+                            ? round(100 * $total_bytes_read / $sql_file_size, 1)
+                            : 0;
+                        $this->output_progress([
+                            "phase" => "db-apply",
+                            "statements_executed" => $statements_executed,
+                            "bytes_read" => $total_bytes_read,
+                            "bytes_total" => $sql_file_size,
+                            "pct" => $pct,
+                        ]);
+                    }
+                }
+            }
+
+            // Drain any remaining buffered query
+            $query_stream->mark_input_complete();
+            while ($query_stream->next_query()) {
+                $query = $query_stream->get_query();
+                $stmt_count++;
+
+                if ($stmts_to_skip > 0) {
+                    $stmts_to_skip--;
+                    continue;
+                }
+
+                if ($stmt_rewriter) {
+                    $query = $stmt_rewriter->rewrite($query);
+                }
+
+                try {
+                    $pdo->exec($query);
+                } catch (PDOException $e) {
+                    $this->audit_log(
+                        sprintf(
+                            "SQL ERROR | stmt=%d | %s | query=%.200s",
+                            $stmt_count,
+                            $e->getMessage(),
+                            $query,
+                        ),
+                        true,
+                    );
+                    throw new RuntimeException(
+                        "SQL execution error at statement {$stmt_count}: " .
+                        $e->getMessage(),
+                    );
+                }
+
+                $statements_executed++;
+            }
+
+            if ($this->shutdown_requested) {
+                // Save partial progress
+                $this->state["apply"]["statements_executed"] = $statements_executed;
+                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
+                $this->state["status"] = "partial";
+                $this->save_state($this->state);
+                $this->audit_log(
+                    sprintf(
+                        "PARTIAL db-apply | %d statements executed",
+                        $statements_executed,
+                    ),
+                    true,
+                );
+            } else {
+                // Mark complete
+                $this->state["apply"]["statements_executed"] = $statements_executed;
+                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
+                $this->state["status"] = "complete";
+                $this->save_state($this->state);
+
+                $this->audit_log(
+                    sprintf(
+                        "db-apply complete | %d statements executed",
+                        $statements_executed,
+                    ),
+                    true,
+                );
+
+                if ($this->is_tty && !$this->verbose_mode) {
+                    echo "db-apply complete ({$statements_executed} statements executed)\n";
+                }
+            }
+        } finally {
+            fclose($sql_handle);
         }
     }
 
@@ -4140,6 +4613,37 @@ class ImportClient
             }
         }
 
+        // Domain discovery: scan SQL for URLs during download
+        $query_stream = class_exists('WP_MySQL_Naive_Query_Stream')
+            ? new \WP_MySQL_Naive_Query_Stream()
+            : null;
+        $domain_collector = class_exists('DomainCollector')
+            ? new \DomainCollector()
+            : null;
+        $domains_file = $this->state_dir . "/.import-domains.json";
+
+        // Auto-detect the source site domain from the export URL so it
+        // always appears in .import-domains.json even if the SQL dump
+        // hasn't been fully scanned yet.
+        if ($domain_collector) {
+            $parsed_url = parse_url($this->remote_url);
+            if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
+                $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
+                if (!empty($parsed_url['port'])) {
+                    $source_origin .= ':' . $parsed_url['port'];
+                }
+                $domain_collector->merge([$source_origin]);
+            }
+        }
+
+        // Load previously discovered domains (from earlier partial downloads)
+        if ($domain_collector && file_exists($domains_file)) {
+            $prev = json_decode(file_get_contents($domains_file), true);
+            if (is_array($prev)) {
+                $domain_collector->merge($prev);
+            }
+        }
+
         // Log current progress at start of request
         $has_cursor = $cursor !== null;
         $this->audit_log(
@@ -4168,7 +4672,10 @@ class ImportClient
                     &$buffer_handle,
                     &$sql_buffer,
                     &$sql_bytes_written,
-                    $context
+                    $context,
+                    $query_stream,
+                    $domain_collector,
+                    $domains_file
                 ) {
                     // Check if shutdown was requested
                     if ($this->shutdown_requested) {
@@ -4198,6 +4705,20 @@ class ImportClient
                         $this->state["sql_bytes"] = $sql_bytes_written;
                         $this->save_state($this->state);
                         $this->chunks_since_save = 0;
+
+                        // Also persist discovered domains so they survive crashes.
+                        // On resume, the SQL download picks up from the cursor,
+                        // skipping already-downloaded data — so domains from that
+                        // earlier data would be lost without periodic saves.
+                        if ($domain_collector) {
+                            $domains = $domain_collector->get_domains();
+                            if (!empty($domains)) {
+                                file_put_contents(
+                                    $domains_file,
+                                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+                                );
+                            }
+                        }
                     }
 
                     $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
@@ -4263,6 +4784,15 @@ class ImportClient
                                 }
                                 break;
                         }
+
+                        // Feed data to query stream for domain discovery
+                        if ($query_stream && $domain_collector) {
+                            $query_stream->append_sql($data);
+                            $this->drain_query_stream_for_domains(
+                                $query_stream,
+                                $domain_collector,
+                            );
+                        }
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
                     } elseif ($chunk_type === "completion") {
@@ -4325,6 +4855,31 @@ class ImportClient
                 $this->state["sql_bytes"] = $complete ? null : $sql_bytes_written;
                 $this->save_state($this->state);
             }
+
+            // Drain any remaining statements after download completes
+            if ($query_stream && $domain_collector) {
+                $query_stream->mark_input_complete();
+                $this->drain_query_stream_for_domains(
+                    $query_stream,
+                    $domain_collector,
+                );
+
+                // Save discovered domains
+                $domains = $domain_collector->get_domains();
+                if (!empty($domains)) {
+                    file_put_contents(
+                        $domains_file,
+                        json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+                    );
+                    $this->audit_log(
+                        sprintf(
+                            "DOMAINS DISCOVERED | %d unique domains saved to .import-domains.json",
+                            count($domains),
+                        ),
+                        false,
+                    );
+                }
+            }
         } finally {
             if ($sql_handle) {
                 fclose($sql_handle);
@@ -4351,6 +4906,224 @@ class ImportClient
                 }
             }
         }
+    }
+
+    /**
+     * Drain complete SQL statements from a query stream and scan their
+     * base64-decoded values for URL domains.
+     */
+    private function drain_query_stream_for_domains(
+        \WP_MySQL_Naive_Query_Stream $query_stream,
+        \DomainCollector $domain_collector
+    ) {
+        while ($query_stream->next_query()) {
+            $query = $query_stream->get_query();
+            // Only scan INSERT statements (they contain data values).
+            if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
+                continue;
+            }
+            // Only scan statements with base64 values
+            if (strpos($query, "FROM_BASE64(") === false) {
+                continue;
+            }
+
+            $table = self::extract_insert_table($query);
+            $is_options_table = substr($table, -8) === '_options';
+
+            $scanner = new \Base64ValueScanner($query);
+            while ($scanner->next_value()) {
+                // For _options tables, extract the option_name (second column)
+                // and skip transients — they contain ephemeral cached data
+                // that would pollute the domain list.
+                $option_name = null;
+                $match_offset = $scanner->get_match_offset();
+                if ($is_options_table) {
+                    $option_name = self::extract_option_name($query, $match_offset);
+                    if ($option_name !== null && (
+                        strpos($option_name, '_transient') === 0 ||
+                        strpos($option_name, '_site_transient') === 0
+                    )) {
+                        continue;
+                    }
+                }
+
+                $new_domains = $domain_collector->scan($scanner->get_value());
+                if (!empty($new_domains)) {
+                    $row_id = self::extract_row_identifier($query, $match_offset);
+
+                    $option_ctx = '';
+                    if ($option_name !== null) {
+                        $option_ctx = ' option=' . $option_name;
+                    }
+
+                    foreach ($new_domains as $domain) {
+                        $this->audit_log(
+                            sprintf(
+                                "NEW DOMAIN | %s | table=%s %s%s",
+                                $domain,
+                                $table,
+                                $row_id,
+                                $option_ctx,
+                            ),
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Extract the table name from an INSERT INTO statement.
+     */
+    private static function extract_insert_table(string $query): string
+    {
+        if (preg_match('/INSERT\s+INTO\s+`([^`]+)`/i', $query, $m)) {
+            return $m[1];
+        }
+        return '?';
+    }
+
+    /**
+     * Extract a row identifier (PK value or offset) from the INSERT row
+     * containing the base64 expression at $offset.
+     *
+     * Scans backwards from $offset to find the row-opening parenthesis,
+     * then reads the first column value — typically the primary key.
+     */
+    private static function extract_row_identifier(string $query, int $offset): string
+    {
+        // Walk backwards from the match to find the row-opening '('.
+        // Track parenthesis depth so we skip inner '(' from FROM_BASE64()
+        // and CONVERT() wrappers.
+        $depth = 0;
+        $row_start = -1;
+        for ($i = $offset - 1; $i >= 0; $i--) {
+            $ch = $query[$i];
+            if ($ch === ')') {
+                $depth++;
+            } elseif ($ch === '(') {
+                if ($depth === 0) {
+                    $row_start = $i + 1;
+                    break;
+                }
+                $depth--;
+            }
+        }
+
+        if ($row_start < 0) {
+            return 'offset=?';
+        }
+
+        // Read the first value after the row-opening '('.
+        // Numeric PKs: (123, ...  or (-5, ...
+        $after = substr($query, $row_start, 40);
+        if (preg_match('/^(-?\d+)/', $after, $m)) {
+            return 'pk=' . $m[1];
+        }
+        // String PKs: ('some-uuid', ...
+        if (preg_match("/^'([^']{0,30})'/", $after, $m)) {
+            return "pk=" . $m[1];
+        }
+        if (preg_match('/^NULL/i', $after)) {
+            return 'pk=NULL';
+        }
+
+        return 'offset=?';
+    }
+
+    /**
+     * Extract the option_name (second column) from a wp_options INSERT row.
+     *
+     * WordPress options tables have columns: option_id, option_name, option_value, autoload.
+     * Given an offset inside the row, this finds the row-opening '(' and reads
+     * past the first column (option_id) to extract the second column (option_name).
+     */
+    private static function extract_option_name(string $query, int $offset): ?string
+    {
+        // Find the row-opening '(' by walking backwards, same as extract_row_identifier.
+        $depth = 0;
+        $row_start = -1;
+        for ($i = $offset - 1; $i >= 0; $i--) {
+            $ch = $query[$i];
+            if ($ch === ')') {
+                $depth++;
+            } elseif ($ch === '(') {
+                if ($depth === 0) {
+                    $row_start = $i + 1;
+                    break;
+                }
+                $depth--;
+            }
+        }
+
+        if ($row_start < 0) {
+            return null;
+        }
+
+        // Skip the first column value (option_id) and the comma separator,
+        // then read the second column value (option_name) which is a quoted string.
+        $after = substr($query, $row_start, 200);
+        // First column is typically a number: "123," or could be FROM_BASE64(...)
+        // Skip to the first comma that's outside parentheses.
+        $len = strlen($after);
+        $d = 0;
+        $comma_pos = -1;
+        for ($j = 0; $j < $len; $j++) {
+            $c = $after[$j];
+            if ($c === '(') { $d++; }
+            elseif ($c === ')') { $d--; }
+            elseif ($c === ',' && $d === 0) {
+                $comma_pos = $j;
+                break;
+            }
+        }
+
+        if ($comma_pos < 0) {
+            return null;
+        }
+
+        // After the comma, skip whitespace and read a quoted string or FROM_BASE64(...)
+        $rest = ltrim(substr($after, $comma_pos + 1));
+        // Simple quoted string: 'option_name'
+        if (isset($rest[0]) && $rest[0] === "'") {
+            if (preg_match("/^'([^']{0,80})'/", $rest, $m)) {
+                return $m[1];
+            }
+        }
+        // FROM_BASE64('...') wrapped value — decode it
+        if (strpos($rest, 'FROM_BASE64(') === 0) {
+            if (preg_match("/^FROM_BASE64\\('([A-Za-z0-9+\\/=]+)'\\)/", $rest, $m)) {
+                $decoded = base64_decode($m[1], true);
+                if ($decoded !== false) {
+                    return substr($decoded, 0, 80);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Check whether a SQL statement's first keyword token matches a given token ID.
+     * Skips leading whitespace and comments, so "/* ... *​/ INSERT INTO ..." is handled.
+     */
+    private static function sql_starts_with_token(string $sql, int $expected_token_id): bool
+    {
+        $lexer = new \WP_MySQL_Lexer($sql);
+        while ($lexer->next_token()) {
+            $token = $lexer->get_token();
+            if (
+                $token->id === \WP_MySQL_Lexer::WHITESPACE
+                || $token->id === \WP_MySQL_Lexer::COMMENT
+                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_START
+                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_END
+            ) {
+                continue;
+            }
+            return $token->id === $expected_token_id;
+        }
+        return false;
     }
 
     /**
@@ -6165,6 +6938,12 @@ class ImportClient
             "current_file_bytes" => null,  // Expected bytes written so far
             // Crash recovery: track SQL file size
             "sql_bytes" => null,           // Expected SQL file size
+            // db-apply state
+            "apply" => [
+                "statements_executed" => 0,
+                "bytes_read" => 0,
+                "rewrite_url" => null,
+            ],
             // SQL output mode (file, stdout, mysql) — persisted for resume
             "sql_output" => null,
             // MySQL connection parameters — persisted for resume (password excluded)
@@ -6226,6 +7005,12 @@ class ImportClient
             $index_db,
         );
         $state["db_index"] = $index_db;
+        $apply = $state["apply"] ?? [];
+        if (!is_array($apply)) {
+            $apply = [];
+        }
+        $apply = array_intersect_key($apply, $defaults["apply"]);
+        $state["apply"] = array_merge($defaults["apply"], $apply);
         return $state;
     }
 
@@ -6821,6 +7606,43 @@ if (
                 "Output files:\n" .
                 "  db-tables.jsonl  One JSON object per table\n",
         ],
+        "db-domains" => [
+            "short" => "List domains discovered in the SQL dump",
+            "detail" =>
+                "Prints domains found in the SQL dump, one per line.\n" .
+                "\n" .
+                "If .import-domains.json exists (written by db-sync), it is read\n" .
+                "directly. Otherwise, db.sql is scanned for domains and the result\n" .
+                "is saved for future calls.\n" .
+                "\n" .
+                "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
+                "\n" .
+                "Example:\n" .
+                "  php import.php db-domains - --state-dir=/path/to/state\n",
+        ],
+        "db-apply" => [
+            "short" => "Apply SQL dump to a target MySQL database with URL rewriting",
+            "detail" =>
+                "Reads <local-path>/db.sql, optionally rewrites URLs, and executes\n" .
+                "all statements against a target MySQL database. Resumable.\n" .
+                "\n" .
+                "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --target-host=HOST         Target MySQL host (default: 127.0.0.1)\n" .
+                "  --target-port=PORT         Target MySQL port (default: 3306)\n" .
+                "  --target-user=USER         Target MySQL user (required)\n" .
+                "  --target-pass=PASS         Target MySQL password\n" .
+                "  --target-db=NAME           Target MySQL database (required)\n" .
+                "  --rewrite-url FROM TO      Rewrite FROM to TO (repeatable)\n" .
+                "  --abort                    Clear state and exit\n" .
+                "  --verbose, -v              Show detailed logs\n" .
+                "\n" .
+                "Example:\n" .
+                "  php import.php db-apply - /path/to/import \\\n" .
+                "    --target-user=root --target-db=wp_new \\\n" .
+                "    --rewrite-url https://old.com https://new.com\n",
+        ],
         "preflight" => [
             "short" => "Run preflight check and print the full result as JSON",
             "detail" =>
@@ -7124,6 +7946,26 @@ if (
             $options["mysql_password"] = substr($argv[$i], strlen("--mysql-password="));
         } elseif (strpos($argv[$i], "--mysql-database=") === 0) {
             $options["mysql_database"] = substr($argv[$i], strlen("--mysql-database="));
+        } elseif (strpos($argv[$i], "--target-host=") === 0) {
+            $options["target_host"] = substr($argv[$i], strlen("--target-host="));
+        } elseif (strpos($argv[$i], "--target-port=") === 0) {
+            $options["target_port"] = (int) substr($argv[$i], strlen("--target-port="));
+        } elseif (strpos($argv[$i], "--target-user=") === 0) {
+            $options["target_user"] = substr($argv[$i], strlen("--target-user="));
+        } elseif (strpos($argv[$i], "--target-pass=") === 0) {
+            $options["target_pass"] = substr($argv[$i], strlen("--target-pass="));
+        } elseif (strpos($argv[$i], "--target-db=") === 0) {
+            $options["target_db"] = substr($argv[$i], strlen("--target-db="));
+        } elseif ($argv[$i] === "--rewrite-url") {
+            if (!isset($argv[$i + 1]) || !isset($argv[$i + 2])) {
+                fwrite(STDERR, "--rewrite-url requires two arguments: FROM TO\n");
+                exit(1);
+            }
+            if (!isset($options["rewrite_url"])) {
+                $options["rewrite_url"] = [];
+            }
+            $options["rewrite_url"][] = [$argv[$i + 1], $argv[$i + 2]];
+            $i += 2;
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);

@@ -21,6 +21,20 @@ On the **migration target** side:
 
 ### Getting started
 
+Clone the repository with submodules — the project depends on the
+[sqlite-database-integration](https://github.com/WordPress/sqlite-database-integration)
+library for MySQL parsing:
+
+```bash
+git clone --recurse-submodules <repo-url>
+```
+
+If you already cloned without `--recurse-submodules`, run:
+
+```bash
+git submodule update --init
+```
+
 This project consists of two parts:
 
 * A `./wordpress-plugin` that must be installed in the **migration source** (the remote site we want to migrate).
@@ -167,11 +181,42 @@ The command returns one of three exit codes:
 - 1: failure
 - 2: partial completion, needs re-running
 
+#### Step 5 — Apply the database with domain rewriting.
+
+If the site's domain is changing (e.g. migrating from `https://old-site.com`
+to `https://new-site.com`), use `db-apply` with `--rewrite-url` to import
+the SQL dump into a target MySQL database while rewriting all URLs in one pass:
+
+```bash
+php importer/import.php db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+    --target-user=root --target-db=wp_new \
+    --rewrite-url https://old-site.com https://new-site.com
+```
+
+This reads `db.sql` from the state directory and executes each statement against
+the target database. For every data-bearing statement (`INSERT`, `UPDATE`), it
+decodes the base64-encoded column values, detects the data format (serialized PHP,
+JSON, block markup, plain text), and rewrites URLs through the appropriate parser
+so that surrounding structure stays intact. Serialized PHP `s:N:` length prefixes
+are recalculated, JSON is re-encoded, and block comment attributes are updated.
+
+You can map multiple domains by repeating the flag:
+
+```bash
+php importer/import.php db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+    --target-user=root --target-db=wp_new \
+    --rewrite-url https://old-site.com https://new-site.com \
+    --rewrite-url https://cdn.old-site.com https://cdn.new-site.com
+```
+
+If the domain isn't changing, you can skip `db-apply` and import `db.sql`
+directly with any MySQL tool.
+
 #### Shoehorning the site onto your platform
 
 You've got a copy of the remote files in the `--docroot` directory and
-the database in `--state-dir/db.sql`. From here, you need to figure out how
-to run that on your platform.
+the database either already applied (via `db-apply`) or in `--state-dir/db.sql`.
+From here, you need to figure out how to run that on your platform.
 
 The `db.sql` file will contain the relevant `DELETE TABLE IF EXISTS`
 statements to make sure it can always succeed. You might want to,
@@ -345,6 +390,8 @@ php importer/import.php <command> <URL> --state-dir=DIR --docroot=DIR [options]
 * `files-index` — Optional. It's a standalone command to index the full remote file index without fetching file contents. `files-sync` does it implicitly
                   so this is mostly useful for testing and diagnostics.
 * `db-sync` — Downloads the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
+* `db-apply` — Applies `db.sql` to a target MySQL database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
+* `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-sync`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 
 All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-sync`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-sync` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
@@ -644,8 +691,37 @@ consider freezing writes or enabling maintenance mode during the migration.
 * Symlink handling — use a single bulk request to index all symlink targets instead of one request
   per symlink.
 * Sites using multiple databases (either multiple MySQL instances or also Postgres, Redis, etc.)
-* Rewrite URLs in the incoming files. We have the tools to do it, but version 1 is about migrating between hosting
-  providers without changing the domain. We can parse and rewrite CSS, HTML, XML, JavaScript, JSON, and PHP
-  because we have structured parsers and tokenizers for all these formats, but it's a major scope creep.
+* Rewrite URLs in the incoming files. `db-apply --rewrite-url` handles the database, but files (CSS, JS, HTML
+  templates) may also contain hardcoded URLs. We have structured parsers for all these formats but it's a
+  significant addition.
 * Support for directories with more files than we can sort in memory at once. A million files with 64 byte names
   require around 100MB of memory to sort. If you have so many files, you better have that much memory available.
+
+## Development
+
+### Submodule
+
+The MySQL lexer and parser live in the [sqlite-database-integration](https://github.com/WordPress/sqlite-database-integration) repository, pulled in as a git submodule at `lib/sqlite-database-integration/`. After cloning (see [Getting started](#getting-started)), run:
+
+```bash
+composer install
+```
+
+To update the submodule to the latest upstream commit:
+
+```bash
+git submodule update --remote lib/sqlite-database-integration
+```
+
+### Tests
+
+```bash
+composer test            # Run all PHPUnit tests
+composer test:fast       # Skip large dataset tests
+composer test:large      # Run only large dataset tests
+composer analyze         # Run PHPStan static analysis
+```
+
+### E2E tests
+
+See [tests/e2e/](tests/e2e/) for the full end-to-end test setup.

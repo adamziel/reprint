@@ -59,3 +59,8 @@ parameters:
 			message: "#^Instantiated class SqliteDriverPDO not found\\.$#"
 			count: 1
 			path: wordpress-plugin/generic/export.php
+
+		-
+			message: "#^Function _doing_it_wrong not found\\.$#"
+			count: 1
+			path: importer/lib/url-rewrite/class-structured-data-url-rewriter.php

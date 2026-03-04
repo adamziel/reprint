@@ -8,10 +8,15 @@ parameters:
         - wordpress-plugin
         - importer
     excludePaths:
-        - wordpress-plugin/generic/secrets.php
-        - wordpress-plugin/generic/class-sqlite-driver-pdo.php
-        - wordpress-plugin/wordpress/
-        - wordpress-plugin/index.php
+        analyseAndScan:
+            - wordpress-plugin/generic/secrets.php
+            - wordpress-plugin/generic/class-sqlite-driver-pdo.php
+            - wordpress-plugin/wordpress/
+            - wordpress-plugin/index.php
+        analyse:
+            - importer/lib/mysql-query-stream/
     treatPhpDocTypesAsCertain: false
     scanDirectories:
         - wordpress-plugin/generic
+        - lib/sqlite-database-integration/wp-includes/parser
+        - lib/sqlite-database-integration/wp-includes/mysql
