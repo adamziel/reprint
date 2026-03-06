@@ -906,10 +906,11 @@ class ImportClient
 
     /**
      * @var bool When true, tell the server to follow symlinks that point outside
-     * the document root (expanding them into real files). Set via --follow-symlinks,
-     * persisted in state so it survives across invocations.
+     * the document root (expanding them into real files). Enabled by default,
+     * disable with --no-follow-symlinks. Persisted in state so it survives
+     * across invocations.
      */
-    private $follow_symlinks = false;
+    private $follow_symlinks = true;
 
     /**
      * @var string Controls behavior when the docroot is non-empty at import start.
@@ -1268,7 +1269,7 @@ class ImportClient
     public function run(array $options = []): void
     {
         $this->verbose_mode = $options["verbose"] ?? false;
-        $this->follow_symlinks = $options["follow_symlinks"] ?? false;
+        $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         if (isset($options["docroot_nonempty_behavior"])) {
             $this->docroot_nonempty_behavior = $options["docroot_nonempty_behavior"];
             if (!in_array($this->docroot_nonempty_behavior, ['error', 'preserve-local'])) {
@@ -1309,12 +1310,12 @@ class ImportClient
         $this->state = $this->load_state();
 
         // Persist follow_symlinks in state so it survives across invocations.
-        // If passed on CLI, store it.  Otherwise, restore from persisted state.
-        if ($this->follow_symlinks) {
-            $this->state["follow_symlinks"] = true;
+        // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
+        if (isset($options["follow_symlinks"])) {
+            $this->state["follow_symlinks"] = $this->follow_symlinks;
             $this->save_state($this->state);
-        } elseif ($this->state["follow_symlinks"] ?? false) {
-            $this->follow_symlinks = true;
+        } elseif (isset($this->state["follow_symlinks"])) {
+            $this->follow_symlinks = $this->state["follow_symlinks"];
         }
 
         // Persist docroot_nonempty_behavior in state so it survives across invocations.
@@ -6909,7 +6910,7 @@ class ImportClient
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,
             "version" => null,
-            "follow_symlinks" => false,
+            "follow_symlinks" => true,
             "docroot_nonempty_behavior" => "error",
             "max_allowed_packet" => null,
             "db_index" => [
@@ -7545,7 +7546,7 @@ if (
                 "\n" .
                 "Options:\n" .
                 "  --abort              Abort current sync and exit (keeps files and index)\n" .
-                "  --follow-symlinks    Follow symlinks pointing outside root directories\n" .
+                "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n" .
                 "  --on-docroot-nonempty=MODE\n" .
                 "                       What to do when docroot is non-empty (error|preserve-local)\n" .
                 "  --secret=TOKEN       HMAC shared secret for export API authentication\n" .
@@ -7695,7 +7696,7 @@ if (
         echo "Global options:\n";
         echo "  --secret=TOKEN       HMAC shared secret for export API authentication\n";
         echo "  --abort            Abort current sync and exit (preserves downloaded files)\n";
-        echo "  --follow-symlinks    Follow symlinks pointing outside root directories\n";
+        echo "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n";
         echo "  --on-docroot-nonempty=MODE\n";
         echo "                       What to do when docroot is non-empty (error|preserve-local)\n";
         echo "  --verbose, -v        Show detailed request/response logs\n";
@@ -7760,6 +7761,8 @@ if (
             $options["verbose"] = true;
         } elseif ($argv[$i] === "--follow-symlinks") {
             $options["follow_symlinks"] = true;
+        } elseif ($argv[$i] === "--no-follow-symlinks") {
+            $options["follow_symlinks"] = false;
         } elseif (strpos($argv[$i], "--on-docroot-nonempty=") === 0) {
             $options["docroot_nonempty_behavior"] = substr(
                 $argv[$i],
