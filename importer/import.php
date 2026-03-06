@@ -3317,13 +3317,36 @@ class ImportClient
     /**
      * Download file content for a prepared file list (file_fetch).
      *
-     * @param array|null $post_data Optional POST data
+     * @param array|string|null $post_data POST data — normally an array with
+     *        a 'file_list' CURLFile entry, but also accepts a raw JSON string
+     *        (the file list content) which is auto-converted to a CURLFile upload.
      * @param string|null $cursor Cursor for resumption within the current batch
      */
     private function download_file_fetch(
-        ?array $post_data,
+        $post_data,
         ?string $cursor
     ): bool {
+        // If a raw JSON string was passed (e.g. the file list content read
+        // via file_get_contents), write it to a temp file and wrap it in a
+        // CURLFile array so the server receives it as a file upload.
+        $inline_tmp = null;
+        if (is_string($post_data)) {
+            $inline_tmp = tempnam(sys_get_temp_dir(), "file-fetch-inline-");
+            if ($inline_tmp === false) {
+                throw new RuntimeException(
+                    "Failed to create temp file for inline file list",
+                );
+            }
+            file_put_contents($inline_tmp, $post_data);
+            $post_data = [
+                "file_list" => new CURLFile(
+                    $inline_tmp,
+                    "application/json",
+                    "file-list.json",
+                ),
+            ];
+        }
+
         $cursor = $cursor ?? ($this->state["fetch"]["cursor"] ?? null);
         $complete = false;
         $this->chunks_since_save = 0;
@@ -3501,6 +3524,11 @@ class ImportClient
             $this->state["current_file_bytes"] = null;
         }
         $this->save_state($this->state);
+
+        // Clean up the temp file created for inline string post_data.
+        if ($inline_tmp !== null && file_exists($inline_tmp)) {
+            @unlink($inline_tmp);
+        }
 
         return $complete;
     }
