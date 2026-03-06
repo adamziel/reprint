@@ -280,7 +280,7 @@ If the JSON is invalid on load, the importer renames it to
   "stage": "streaming",           // current phase within the command
   "preflight": { ... },           // cached preflight response
   "version": "...",               // importer version
-  "follow_symlinks": false,
+  "follow_symlinks": true,
   "max_allowed_packet": null,     // client-side MySQL packet limit
 
   // Per-command state sections:
@@ -489,12 +489,13 @@ export stream and calls `symlink()` to recreate them locally. This is safe becau
 constrained to the `--docroot` directory.
 
 Some symlinks may point to places on the remote filesystem that are
-outside of the requested directory root. When that happens, they're
-not recreated unless you use the `--follow-symlinks` option.
+outside of the requested directory root. By default, the importer
+follows these symlinks — it asks the server to expand them into real
+files and recreates the symlink structure locally, constrained within
+the `--docroot`.
 
-With the `--follow-symlinks`, the importer will create local
-symlinks even if they point ourside of the directory root. They're
-still constrained within the confines of the `--docroot`
+To disable this behavior, pass `--no-follow-symlinks`. Symlinks pointing
+outside the directory root will then be skipped instead of followed.
 
 ## Database synchronization
 
