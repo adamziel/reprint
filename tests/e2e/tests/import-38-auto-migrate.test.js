@@ -9,7 +9,6 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
-import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -30,9 +29,11 @@ describe('Import: auto-migrate', () => {
         await ensureSite(site);
         tempDir = createTempDir('e2e-auto-migrate');
 
-        // Drop import DB if it exists from a previous run
+        // Create a fresh import database — db-apply connects to an
+        // existing database, it does not create one.
         const conn = await createMysqlConnection();
         await conn.query(`DROP DATABASE IF EXISTS \`${importDbName}\``);
+        await conn.query(`CREATE DATABASE \`${importDbName}\``);
         await conn.end();
     });
 
@@ -177,9 +178,13 @@ describe('Import: auto-migrate --abort', () => {
         });
         assert.equal(abortResult.exitCode, 0, `Expected abort exit 0\nstderr: ${abortResult.stderr}`);
 
-        // Verify state is cleared
+        // Verify state is cleared — after abort, auto-migrate is set to null
+        // which is serialized as null in JSON
         const stateFile = join(tempDir, '.import-state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state['auto-migrate'], undefined, 'Expected auto-migrate state to be cleared');
+        assert.ok(
+            state['auto-migrate'] === null || state['auto-migrate'] === undefined,
+            'Expected auto-migrate state to be cleared'
+        );
     });
 });

@@ -2038,35 +2038,32 @@ class ImportClient
      * Phase state machine:
      *   preflight → files_sync → db_sync → files_delta → db_apply → complete
      *
-     * The db_apply phase is skipped if --target-user and --target-db are
-     * not provided. The step counts in progress output adjust accordingly.
+     * The db_apply phase is skipped if no target database options are
+     * provided. The step counts in progress output adjust accordingly.
      */
     private function run_migrate(array $options): void
     {
         $migrate_state = $this->state["auto-migrate"] ?? [];
+        if (!is_array($migrate_state)) {
+            $migrate_state = [];
+        }
         $phase = $migrate_state["phase"] ?? "preflight";
 
-        // Persist db-apply options so they survive across invocations
-        if (isset($options["target_user"])) {
-            $migrate_state["target_user"] = $options["target_user"];
-        }
-        if (isset($options["target_pass"])) {
-            $migrate_state["target_pass"] = $options["target_pass"];
-        }
-        if (isset($options["target_db"])) {
-            $migrate_state["target_db"] = $options["target_db"];
-        }
-        if (isset($options["target_host"])) {
-            $migrate_state["target_host"] = $options["target_host"];
-        }
-        if (isset($options["target_port"])) {
-            $migrate_state["target_port"] = $options["target_port"];
-        }
-        if (isset($options["rewrite_url"])) {
-            $migrate_state["rewrite_url"] = $options["rewrite_url"];
+        // Persist db-apply options so they survive across invocations.
+        // These are read back during the db_apply phase even if the
+        // process was killed and restarted between phases.
+        $persist_keys = [
+            "target_user", "target_pass", "target_db",
+            "target_host", "target_port", "target_sqlite",
+            "rewrite_url",
+        ];
+        foreach ($persist_keys as $key) {
+            if (isset($options[$key])) {
+                $migrate_state[$key] = $options[$key];
+            }
         }
 
-        $has_db_apply = !empty($migrate_state["target_user"]) && !empty($migrate_state["target_db"]);
+        $has_db_apply = $this->migrate_has_db_apply($migrate_state);
         $total_steps = $has_db_apply ? 5 : 4;
 
         $migrate_state["phase"] = $phase;
@@ -2092,10 +2089,24 @@ class ImportClient
         }
 
         // --- Phase: files_sync ---
+        // Loop run_files_sync() until it returns with status "complete".
+        // Each call may return "partial" (server time limit), so we
+        // keep calling until done. The "already complete" check handles
+        // the edge case where we were killed after files-sync finished
+        // but before we advanced the phase.
         if ($phase === "files_sync") {
             $this->migrate_log(2, $total_steps, "Downloading files");
             $this->require_preflight();
-            $this->migrate_loop_phase("files-sync");
+            while (true) {
+                if (($this->state["command"] ?? null) === "files-sync" &&
+                    ($this->state["status"] ?? null) === "complete") {
+                    break;
+                }
+                $this->run_files_sync();
+                if (($this->state["status"] ?? null) === "complete") {
+                    break;
+                }
+            }
 
             $phase = "db_sync";
             $this->state["auto-migrate"]["phase"] = $phase;
@@ -2106,7 +2117,16 @@ class ImportClient
         if ($phase === "db_sync") {
             $this->migrate_log(3, $total_steps, "Downloading database");
             $this->require_preflight();
-            $this->migrate_loop_phase("db-sync");
+            while (true) {
+                if (($this->state["command"] ?? null) === "db-sync" &&
+                    ($this->state["status"] ?? null) === "complete") {
+                    break;
+                }
+                $this->run_db_sync();
+                if (($this->state["status"] ?? null) === "complete") {
+                    break;
+                }
+            }
 
             // Clear files-sync progress so the next files-sync detects
             // delta mode (local index still exists → delta).
@@ -2121,7 +2141,16 @@ class ImportClient
         if ($phase === "files_delta") {
             $this->migrate_log(4, $total_steps, "Downloading file changes");
             $this->require_preflight();
-            $this->migrate_loop_phase("files-sync");
+            while (true) {
+                if (($this->state["command"] ?? null) === "files-sync" &&
+                    ($this->state["status"] ?? null) === "complete") {
+                    break;
+                }
+                $this->run_files_sync();
+                if (($this->state["status"] ?? null) === "complete") {
+                    break;
+                }
+            }
 
             $phase = $has_db_apply ? "db_apply" : "complete";
             $this->state["auto-migrate"]["phase"] = $phase;
@@ -2135,26 +2164,22 @@ class ImportClient
             // Build db-apply options from persisted migrate state
             $apply_options = $options;
             $ms = $this->state["auto-migrate"];
-            if (isset($ms["target_user"])) {
-                $apply_options["target_user"] = $ms["target_user"];
-            }
-            if (isset($ms["target_pass"])) {
-                $apply_options["target_pass"] = $ms["target_pass"];
-            }
-            if (isset($ms["target_db"])) {
-                $apply_options["target_db"] = $ms["target_db"];
-            }
-            if (isset($ms["target_host"])) {
-                $apply_options["target_host"] = $ms["target_host"];
-            }
-            if (isset($ms["target_port"])) {
-                $apply_options["target_port"] = $ms["target_port"];
-            }
-            if (isset($ms["rewrite_url"])) {
-                $apply_options["rewrite_url"] = $ms["rewrite_url"];
+            foreach ($persist_keys as $key) {
+                if (isset($ms[$key])) {
+                    $apply_options[$key] = $ms[$key];
+                }
             }
 
-            $this->migrate_loop_db_apply($apply_options);
+            while (true) {
+                if (($this->state["command"] ?? null) === "db-apply" &&
+                    ($this->state["status"] ?? null) === "complete") {
+                    break;
+                }
+                $this->run_db_apply($apply_options);
+                if (($this->state["status"] ?? null) === "complete") {
+                    break;
+                }
+            }
 
             $phase = "complete";
             $this->state["auto-migrate"]["phase"] = $phase;
@@ -2167,63 +2192,16 @@ class ImportClient
     }
 
     /**
-     * Loop a sub-command (files-sync or db-sync) until it completes.
-     *
-     * Each call to the sub-command's run method returns with the state
-     * status set to "complete" or "partial". We loop on "partial",
-     * checking first if the sub-command already finished (handles the
-     * kill-between-phases edge case).
+     * Check if db-apply should run based on migrate state options.
+     * Supports both MySQL targets (--target-user + --target-db) and
+     * SQLite targets (--target-sqlite).
      */
-    private function migrate_loop_phase(string $sub_command): void
+    private function migrate_has_db_apply(array $migrate_state): bool
     {
-        while (true) {
-            $state_command = $this->state["command"] ?? null;
-            $state_status = $this->state["status"] ?? null;
-
-            // Already done from a previous run — skip
-            if ($state_command === $sub_command && $state_status === "complete") {
-                return;
-            }
-
-            if ($sub_command === "files-sync") {
-                $this->run_files_sync();
-            } elseif ($sub_command === "db-sync") {
-                $this->run_db_sync();
-            }
-
-            $status = $this->state["status"] ?? "complete";
-            if ($status === "complete") {
-                return;
-            }
-            // status === "partial" → loop again
+        if (!empty($migrate_state["target_sqlite"])) {
+            return true;
         }
-    }
-
-    /**
-     * Loop db-apply until it completes.
-     *
-     * db-apply uses a different calling convention than files-sync / db-sync
-     * (it takes $options and throws on "already complete"), so it gets its
-     * own loop method.
-     */
-    private function migrate_loop_db_apply(array $options): void
-    {
-        while (true) {
-            $state_command = $this->state["command"] ?? null;
-            $state_status = $this->state["status"] ?? null;
-
-            // Already done from a previous run — skip
-            if ($state_command === "db-apply" && $state_status === "complete") {
-                return;
-            }
-
-            $this->run_db_apply($options);
-
-            $status = $this->state["status"] ?? "complete";
-            if ($status === "complete") {
-                return;
-            }
-        }
+        return !empty($migrate_state["target_user"]) && !empty($migrate_state["target_db"]);
     }
 
     /**
@@ -2252,7 +2230,7 @@ class ImportClient
         $active_command = $this->state["command"] ?? null;
 
         // Clear the auto-migrate phase tracker
-        unset($this->state["auto-migrate"]);
+        $this->state["auto-migrate"] = null;
         $this->save_state($this->state);
 
         // Abort the active sub-command if there is one
@@ -3083,6 +3061,51 @@ class ImportClient
      * a target MySQL database. Supports resumption via statement count tracking.
      *
      */
+    /**
+     * Create a SQLite target connection using the WP_PDO_MySQL_On_SQLite
+     * driver from the sqlite-database-integration submodule. This driver
+     * translates MySQL SQL to SQLite on the fly via an AST-based translator,
+     * so we can feed it the same MySQL dump that run_db_apply produces.
+     *
+     * @param string $sqlite_path Path to the SQLite database file.
+     * @param string $db_name     Logical database name (default: "wordpress").
+     * @return PDO A PDO-compatible connection that accepts MySQL SQL.
+     */
+    private function create_sqlite_target(string $sqlite_path, string $db_name = 'wordpress'): PDO
+    {
+        // Load the MySQL-on-SQLite driver and all its dependencies.
+        // The parser/lexer classes are already loaded by mysql-query-stream/load.php
+        // via require_once, so there is no conflict.
+        $driver_loader = dirname(__DIR__) . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php';
+        if (!file_exists($driver_loader)) {
+            throw new RuntimeException(
+                "SQLite driver not found. Run 'git submodule update --init' to install the sqlite-database-integration submodule.",
+            );
+        }
+        require_once $driver_loader;
+
+        // Ensure the directory for the SQLite file exists
+        $sqlite_dir = dirname($sqlite_path);
+        if (!is_dir($sqlite_dir)) {
+            if (!mkdir($sqlite_dir, 0755, true)) {
+                throw new RuntimeException(
+                    "Cannot create directory for SQLite database: {$sqlite_dir}",
+                );
+            }
+        }
+
+        $dsn = "mysql-on-sqlite:dbname={$db_name};path={$sqlite_path}";
+        try {
+            $pdo = new \WP_PDO_MySQL_On_SQLite($dsn);
+        } catch (\Exception $e) {
+            throw new RuntimeException(
+                "Cannot create SQLite target: " . $e->getMessage(),
+            );
+        }
+
+        return $pdo;
+    }
+
     private function run_db_domains(): void
     {
         $domains_file = $this->state_dir . "/.import-domains.json";
@@ -3158,15 +3181,16 @@ class ImportClient
         }
 
         // Parse target database options
+        $target_sqlite = $options["target_sqlite"] ?? null;
         $target_host = $options["target_host"] ?? "127.0.0.1";
         $target_port = (int) ($options["target_port"] ?? 3306);
         $target_user = $options["target_user"] ?? null;
         $target_pass = $options["target_pass"] ?? "";
         $target_db = $options["target_db"] ?? null;
 
-        if (!$target_user || !$target_db) {
+        if (!$target_sqlite && (!$target_user || !$target_db)) {
             throw new InvalidArgumentException(
-                "db-apply requires --target-user and --target-db options.",
+                "db-apply requires --target-user and --target-db options, or --target-sqlite=PATH.",
             );
         }
 
@@ -3269,30 +3293,37 @@ class ImportClient
             );
         }
 
-        // Connect to target MySQL
-        $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
-        try {
-            $pdo = new PDO($dsn, $target_user, $target_pass, [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::MYSQL_ATTR_LOCAL_INFILE => false,
-            ]);
-        } catch (PDOException $e) {
-            throw new RuntimeException(
-                "Cannot connect to target database: " . $e->getMessage(),
+        // Connect to target database (MySQL or SQLite)
+        if ($target_sqlite) {
+            $pdo = $this->create_sqlite_target($target_sqlite, $target_db ?: 'wordpress');
+            $this->audit_log(
+                sprintf("CONNECTED | sqlite=%s", $target_sqlite),
+                false,
+            );
+        } else {
+            $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
+            try {
+                $pdo = new PDO($dsn, $target_user, $target_pass, [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                    PDO::MYSQL_ATTR_LOCAL_INFILE => false,
+                ]);
+            } catch (PDOException $e) {
+                throw new RuntimeException(
+                    "Cannot connect to target database: " . $e->getMessage(),
+                );
+            }
+            $this->audit_log(
+                sprintf(
+                    "CONNECTED | host=%s port=%d db=%s user=%s",
+                    $target_host,
+                    $target_port,
+                    $target_db,
+                    $target_user,
+                ),
+                false,
             );
         }
-
-        $this->audit_log(
-            sprintf(
-                "CONNECTED | host=%s port=%d db=%s user=%s",
-                $target_host,
-                $target_port,
-                $target_db,
-                $target_user,
-            ),
-            false,
-        );
 
         // Stream db.sql through the query stream and execute
         $query_stream = new \WP_MySQL_Naive_Query_Stream();
@@ -7213,6 +7244,8 @@ class ImportClient
                 "config" => [],
                 "state" => [],
             ],
+            // auto-migrate phase tracker
+            "auto-migrate" => null,
         ];
     }
 
@@ -7814,15 +7847,23 @@ if (
                 "  --target-user=USER   Target MySQL user (enables db-apply step)\n" .
                 "  --target-pass=PASS   Target MySQL password\n" .
                 "  --target-db=NAME     Target MySQL database (enables db-apply step)\n" .
+                "  --target-sqlite=PATH Target SQLite database file (alternative to MySQL)\n" .
                 "  --rewrite-url FROM TO  Rewrite FROM to TO (repeatable)\n" .
                 "  --verbose, -v        Show detailed request/response logs\n" .
                 "\n" .
-                "Example:\n" .
+                "Examples:\n" .
+                "  # Import into MySQL:\n" .
                 "  php import.php auto-migrate https://example.com \\\n" .
                 "    --state-dir=/tmp/state --docroot=/tmp/site \\\n" .
                 "    --secret=mysecret \\\n" .
                 "    --target-user=root --target-db=wp_migrated \\\n" .
-                "    --rewrite-url https://example.com https://local.test\n",
+                "    --rewrite-url https://example.com https://local.test\n" .
+                "\n" .
+                "  # Import into SQLite:\n" .
+                "  php import.php auto-migrate https://example.com \\\n" .
+                "    --state-dir=/tmp/state --docroot=/tmp/site \\\n" .
+                "    --secret=mysecret \\\n" .
+                "    --target-sqlite=/tmp/site/wp-content/database/.ht.sqlite\n",
         ],
         "files-sync" => [
             "short" => "Sync files (auto-detects initial vs delta)",
@@ -7926,15 +7967,19 @@ if (
                 "  --target-port=PORT         Target MySQL port (default: 3306)\n" .
                 "  --target-user=USER         Target MySQL user (required)\n" .
                 "  --target-pass=PASS         Target MySQL password\n" .
-                "  --target-db=NAME           Target MySQL database (required)\n" .
+                "  --target-db=NAME           Target MySQL database (required unless --target-sqlite)\n" .
+                "  --target-sqlite=PATH       Target SQLite database file (alternative to MySQL)\n" .
                 "  --rewrite-url FROM TO      Rewrite FROM to TO (repeatable)\n" .
                 "  --abort                    Clear state and exit\n" .
                 "  --verbose, -v              Show detailed logs\n" .
                 "\n" .
-                "Example:\n" .
-                "  php import.php db-apply - /path/to/import \\\n" .
+                "Examples:\n" .
+                "  php import.php db-apply - --state-dir=/path/to/import --docroot=/path/to/site \\\n" .
                 "    --target-user=root --target-db=wp_new \\\n" .
-                "    --rewrite-url https://old.com https://new.com\n",
+                "    --rewrite-url https://old.com https://new.com\n" .
+                "\n" .
+                "  php import.php db-apply - --state-dir=/path/to/import --docroot=/path/to/site \\\n" .
+                "    --target-sqlite=/path/to/site/wp-content/database/.ht.sqlite\n",
         ],
         "preflight" => [
             "short" => "Run preflight check and print the full result as JSON",
@@ -8251,6 +8296,8 @@ if (
             $options["target_pass"] = substr($argv[$i], strlen("--target-pass="));
         } elseif (strpos($argv[$i], "--target-db=") === 0) {
             $options["target_db"] = substr($argv[$i], strlen("--target-db="));
+        } elseif (strpos($argv[$i], "--target-sqlite=") === 0) {
+            $options["target_sqlite"] = substr($argv[$i], strlen("--target-sqlite="));
         } elseif ($argv[$i] === "--rewrite-url") {
             if (!isset($argv[$i + 1]) || !isset($argv[$i + 2])) {
                 fwrite(STDERR, "--rewrite-url requires two arguments: FROM TO\n");
