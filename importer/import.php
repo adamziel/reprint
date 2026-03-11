@@ -3026,6 +3026,7 @@ class ImportClient
         }
 
         $driver_loader = dirname(__DIR__) . "/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php";
+        $polyfills = dirname(__DIR__) . "/lib/sqlite-database-integration/php-polyfills.php";
         if (!file_exists($driver_loader)) {
             throw new RuntimeException(
                 "SQLite target support requires lib/sqlite-database-integration to be initialized.",
@@ -3043,6 +3044,7 @@ class ImportClient
             }
         }
 
+        require_once $polyfills;
         require_once $driver_loader;
 
         $dsn = sprintf(

@@ -443,6 +443,7 @@ export async function createMysqlConnection(dbName = null) {
  */
 export function queryMysqlOnSqlite(sqlitePath, sql, dbName = 'sqlite_database') {
     const script = `
+require_once $argv[1] . '/lib/sqlite-database-integration/php-polyfills.php';
 require_once $argv[1] . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php';
 $pdo = new WP_PDO_MySQL_On_SQLite(
     'mysql-on-sqlite:path=' . str_replace(';', ';;', $argv[2]) . ';dbname=' . str_replace(';', ';;', $argv[3]),
