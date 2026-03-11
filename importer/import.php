@@ -2918,6 +2918,26 @@ class ImportClient
             );
         }
 
+        // If --new-site-url is provided, derive the source origin from the
+        // export URL and add an implicit --rewrite-url mapping.
+        if (!empty($options["new_site_url"])) {
+            $parsed_url = parse_url($this->remote_url);
+            if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
+                $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
+                if (!empty($parsed_url['port'])) {
+                    $source_origin .= ':' . $parsed_url['port'];
+                }
+                if (!isset($options["rewrite_url"])) {
+                    $options["rewrite_url"] = [];
+                }
+                $options["rewrite_url"][] = [$source_origin, $options["new_site_url"]];
+            } else {
+                throw new InvalidArgumentException(
+                    "--new-site-url requires a valid export URL to derive the source site origin.",
+                );
+            }
+        }
+
         // Parse URL mapping
         $url_mapping = [];
         if (!empty($options["rewrite_url"])) {
@@ -7971,6 +7991,15 @@ if (
             }
             $options["rewrite_url"][] = [$argv[$i + 1], $argv[$i + 2]];
             $i += 2;
+        } elseif (strpos($argv[$i], "--new-site-url=") === 0) {
+            $options["new_site_url"] = substr($argv[$i], strlen("--new-site-url="));
+        } elseif ($argv[$i] === "--new-site-url") {
+            if (!isset($argv[$i + 1])) {
+                fwrite(STDERR, "--new-site-url requires one argument: URL\n");
+                exit(1);
+            }
+            $options["new_site_url"] = $argv[$i + 1];
+            $i += 1;
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
