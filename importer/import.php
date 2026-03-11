@@ -1286,7 +1286,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
+                "Command is required. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
             );
         }
 
@@ -1298,12 +1298,13 @@ class ImportClient
                 "db-index",
                 "db-domains",
                 "db-apply",
+                "files-stats",
                 "preflight",
                 "preflight-assert",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
+                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
             );
         }
 
@@ -1431,6 +1432,10 @@ class ImportClient
         // db-domains and db-apply are local-only commands that don't need a remote server.
         if ($command === "db-domains") {
             $this->run_db_domains();
+            return;
+        }
+        if ($command === "files-stats") {
+            $this->run_files_stats();
             return;
         }
         if ($command === "db-apply") {
@@ -2894,6 +2899,89 @@ class ImportClient
         foreach ($domains as $domain) {
             echo $domain . "\n";
         }
+    }
+
+    /**
+     * Print file index statistics: total indexed files and their size,
+     * plus pending downloads and their size.
+     *
+     * Reads .import-remote-index.jsonl for all indexed files and
+     * .import-download-list.jsonl for files not yet downloaded.
+     */
+    private function run_files_stats(): void
+    {
+        $remote_index = $this->remote_index_file;
+        $download_list = $this->download_list_file;
+
+        // Single pass over the remote index: count, sum sizes, and build
+        // a path→size map for resolving download list entries.
+        $indexed_count = 0;
+        $indexed_bytes = 0;
+        $size_by_path = [];
+
+        if (is_file($remote_index)) {
+            $handle = fopen($remote_index, "r");
+            if ($handle) {
+                while (($line = fgets($handle)) !== false) {
+                    $entry = $this->parse_index_line($line);
+                    if ($entry === null) {
+                        continue;
+                    }
+                    $indexed_count++;
+                    $indexed_bytes += $entry["size"];
+                    $size_by_path[$entry["path"]] = $entry["size"];
+                }
+                fclose($handle);
+            }
+        }
+
+        // Walk the download list to count pending files. The download
+        // list only stores paths, so look up sizes from the map above.
+        // Files before the fetch byte offset have already been downloaded.
+        $pending_count = 0;
+        $pending_bytes = 0;
+        $fetch_offset = $this->state["fetch"]["offset"] ?? 0;
+
+        if (is_file($download_list)) {
+            $handle = fopen($download_list, "r");
+            if ($handle) {
+                // Seek past already-downloaded entries. The fetch offset
+                // is the byte position where the next batch starts, so
+                // everything before it has been fetched.
+                if ($fetch_offset > 0) {
+                    fseek($handle, $fetch_offset);
+                }
+                while (($line = fgets($handle)) !== false) {
+                    $line = trim($line);
+                    if ($line === "") {
+                        continue;
+                    }
+                    $data = json_decode($line, true);
+                    if (!is_array($data)) {
+                        continue;
+                    }
+                    $path_encoded = $data["path"] ?? "";
+                    $path = base64_decode($path_encoded, true);
+                    if ($path === false || $path === "") {
+                        continue;
+                    }
+                    $pending_count++;
+                    $pending_bytes += $size_by_path[$path] ?? 0;
+                }
+                fclose($handle);
+            }
+        }
+
+        echo json_encode([
+            "indexed" => [
+                "files" => $indexed_count,
+                "bytes" => $indexed_bytes,
+            ],
+            "pending" => [
+                "files" => $pending_count,
+                "bytes" => $pending_bytes,
+            ],
+        ], JSON_PRETTY_PRINT) . "\n";
     }
 
     /**
@@ -7602,6 +7690,19 @@ if (
                 "  --abort        Clear state and output, then exit\n" .
                 "  --secret=TOKEN   HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v    Show detailed request/response logs\n",
+        ],
+        "files-stats" => [
+            "short" => "Show file count and total size of indexed and pending files",
+            "detail" =>
+                "Reads the remote file index and download list to report:\n" .
+                "\n" .
+                "  - Total indexed files and their combined size\n" .
+                "  - Files not yet downloaded and their combined size\n" .
+                "\n" .
+                "Output is JSON with 'indexed' and 'pending' sections.\n" .
+                "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
+                "\n" .
+                "Requires a prior files-index or files-sync run.\n",
         ],
         "db-sync" => [
             "short" => "Download the database as a SQL dump",
