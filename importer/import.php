@@ -978,6 +978,9 @@ class ImportClient
     /** @var string|null MySQL database for --sql-output=mysql. */
     private $mysql_database;
 
+    /** @var string|null Path to WordPress wp-load.php for $wpdb-based import. */
+    private $wp_load_path;
+
     /** @var resource File descriptor for progress output — STDOUT normally, STDERR in stdout mode. */
     private $progress_fd;
 
@@ -1345,9 +1348,9 @@ class ImportClient
         // the MYSQL_PASSWORD environment variable).
         if (isset($options["sql_output"])) {
             $mode = $options["sql_output"];
-            if (!in_array($mode, ["file", "stdout", "mysql"])) {
+            if (!in_array($mode, ["file", "stdout", "mysql", "wpdb"])) {
                 throw new InvalidArgumentException(
-                    "Invalid --sql-output mode: {$mode}. Valid modes: file, stdout, mysql",
+                    "Invalid --sql-output mode: {$mode}. Valid modes: file, stdout, mysql, wpdb",
                 );
             }
             $this->sql_output_mode = $mode;
@@ -1392,6 +1395,21 @@ class ImportClient
             $this->mysql_database = $this->state["mysql_database"];
         }
 
+        // WordPress wp-load.php path for $wpdb-based import (used by
+        // --sql-output=wpdb and db-apply --wp-load).
+        if (isset($options["wp_load"])) {
+            $path = $options["wp_load"];
+            if (!file_exists($path)) {
+                throw new InvalidArgumentException(
+                    "wp-load.php not found at: {$path}",
+                );
+            }
+            $this->wp_load_path = realpath($path);
+            $this->state["wp_load"] = $this->wp_load_path;
+        } elseif (isset($this->state["wp_load"])) {
+            $this->wp_load_path = $this->state["wp_load"];
+        }
+
         $this->save_state($this->state);
 
         // Password is never persisted — must be supplied each run or via env.
@@ -1405,6 +1423,13 @@ class ImportClient
         if ($this->sql_output_mode === "mysql" && empty($this->mysql_database)) {
             throw new InvalidArgumentException(
                 "--mysql-database is required when using --sql-output=mysql",
+            );
+        }
+
+        // Validate wpdb mode requirements.
+        if ($this->sql_output_mode === "wpdb" && empty($this->wp_load_path)) {
+            throw new InvalidArgumentException(
+                "--wp-load is required when using --sql-output=wpdb",
             );
         }
 
@@ -2820,6 +2845,8 @@ class ImportClient
                 fwrite($this->progress_fd, "SQL written to stdout\n");
             } elseif ($this->sql_output_mode === "mysql") {
                 fwrite($this->progress_fd, "SQL imported into {$this->mysql_database}\n");
+            } elseif ($this->sql_output_mode === "wpdb") {
+                fwrite($this->progress_fd, "SQL imported via \$wpdb\n");
             }
             fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
@@ -3021,16 +3048,21 @@ class ImportClient
             );
         }
 
-        // Parse target database options
+        // Determine which database backend to use: either direct MySQL via
+        // PDO, or WordPress's $wpdb (which may be backed by MySQL or SQLite
+        // via the sqlite-database-integration plugin).
+        $use_wpdb = !empty($this->wp_load_path) || !empty($options["wp_load"]);
+
+        // Parse target database options (only needed for direct MySQL mode)
         $target_host = $options["target_host"] ?? "127.0.0.1";
         $target_port = (int) ($options["target_port"] ?? 3306);
         $target_user = $options["target_user"] ?? null;
         $target_pass = $options["target_pass"] ?? "";
         $target_db = $options["target_db"] ?? null;
 
-        if (!$target_user || !$target_db) {
+        if (!$use_wpdb && (!$target_user || !$target_db)) {
             throw new InvalidArgumentException(
-                "db-apply requires --target-user and --target-db options.",
+                "db-apply requires --target-user and --target-db, or --wp-load.",
             );
         }
 
@@ -3137,30 +3169,54 @@ class ImportClient
             );
         }
 
-        // Connect to target MySQL
-        $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
-        try {
-            $pdo = new PDO($dsn, $target_user, $target_pass, [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::MYSQL_ATTR_LOCAL_INFILE => false,
-            ]);
-        } catch (PDOException $e) {
-            throw new RuntimeException(
-                "Cannot connect to target database: " . $e->getMessage(),
+        // Set up the database executor — a closure that takes a SQL string
+        // and throws RuntimeException on failure.  This lets the streaming
+        // loop work identically regardless of the backend.
+        if ($use_wpdb) {
+            $wpdb = $this->load_wordpress();
+
+            // Suppress errors so $wpdb->query() returns false instead of
+            // calling wp_die().  We inspect $wpdb->last_error ourselves.
+            $wpdb->suppress_errors(true);
+            $wpdb->show_errors(false);
+
+            $exec_query = function (string $sql) use ($wpdb): void {
+                $result = $wpdb->query($sql);
+                if ($result === false && $wpdb->last_error) {
+                    throw new RuntimeException($wpdb->last_error);
+                }
+            };
+
+            $this->audit_log("CONNECTED | via \$wpdb (wp-load: {$this->wp_load_path})", false);
+        } else {
+            $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
+            try {
+                $pdo = new PDO($dsn, $target_user, $target_pass, [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                    PDO::MYSQL_ATTR_LOCAL_INFILE => false,
+                ]);
+            } catch (PDOException $e) {
+                throw new RuntimeException(
+                    "Cannot connect to target database: " . $e->getMessage(),
+                );
+            }
+
+            $exec_query = function (string $sql) use ($pdo): void {
+                $pdo->exec($sql);
+            };
+
+            $this->audit_log(
+                sprintf(
+                    "CONNECTED | host=%s port=%d db=%s user=%s",
+                    $target_host,
+                    $target_port,
+                    $target_db,
+                    $target_user,
+                ),
+                false,
             );
         }
-
-        $this->audit_log(
-            sprintf(
-                "CONNECTED | host=%s port=%d db=%s user=%s",
-                $target_host,
-                $target_port,
-                $target_db,
-                $target_user,
-            ),
-            false,
-        );
 
         // Stream db.sql through the query stream and execute
         $query_stream = new \WP_MySQL_Naive_Query_Stream();
@@ -3233,8 +3289,8 @@ class ImportClient
 
                     // Execute against target database
                     try {
-                        $pdo->exec($query);
-                    } catch (PDOException $e) {
+                        $exec_query($query);
+                    } catch (\Exception $e) {
                         $this->audit_log(
                             sprintf(
                                 "SQL ERROR | stmt=%d | %s | query=%.200s",
@@ -3295,8 +3351,8 @@ class ImportClient
                 }
 
                 try {
-                    $pdo->exec($query);
-                } catch (PDOException $e) {
+                    $exec_query($query);
+                } catch (\Exception $e) {
                     $this->audit_log(
                         sprintf(
                             "SQL ERROR | stmt=%d | %s | query=%.200s",
@@ -3350,6 +3406,41 @@ class ImportClient
         } finally {
             fclose($sql_handle);
         }
+    }
+
+    /**
+     * Load WordPress via wp-load.php and return the global $wpdb instance.
+     *
+     * Uses SHORTINIT to skip plugins/themes — only the database layer
+     * (including the db.php drop-in for SQLite) is bootstrapped.  This
+     * lets the importer route SQL through $wpdb whether WordPress is
+     * running on MySQL or SQLite (via sqlite-database-integration).
+     *
+     * @return \wpdb The global WordPress database object.
+     */
+    private function load_wordpress(): object
+    {
+        $wp_load = $this->wp_load_path;
+        if (empty($wp_load)) {
+            throw new RuntimeException("--wp-load path is not set.");
+        }
+
+        // SHORTINIT tells WordPress to stop after the database layer,
+        // skipping plugins, themes, and the rest of the bootstrap.
+        if (!defined('SHORTINIT')) {
+            define('SHORTINIT', true);
+        }
+
+        require_once $wp_load;
+
+        if (!isset($GLOBALS['wpdb'])) {
+            throw new RuntimeException(
+                "WordPress loaded from {$wp_load} but \$wpdb is not available. " .
+                "Check that wp-config.php and the database layer are working."
+            );
+        }
+
+        return $GLOBALS['wpdb'];
     }
 
     /**
@@ -4641,6 +4732,7 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
+        $wpdb = null;
         $buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
@@ -4732,6 +4824,32 @@ class ImportClient
             if (!$buffer_handle) {
                 throw new RuntimeException("Cannot open SQL buffer file: {$buffer_file}");
             }
+
+        } elseif ($mode === "wpdb") {
+            $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
+
+            $wpdb = $this->load_wordpress();
+            $wpdb->suppress_errors(true);
+            $wpdb->show_errors(false);
+
+            $this->audit_log(
+                "SQL OUTPUT wpdb | connected via \$wpdb (wp-load: {$this->wp_load_path})",
+                true,
+            );
+
+            // Use the same persistent buffer/crash-recovery strategy as mysql mode.
+            $buffer_file = $this->state_dir . "/.sql-buffer";
+            if (file_exists($buffer_file)) {
+                $sql_buffer = file_get_contents($buffer_file);
+                $this->audit_log(
+                    sprintf("CRASH RECOVERY | Restored %d bytes from .sql-buffer", strlen($sql_buffer)),
+                    true,
+                );
+            }
+            $buffer_handle = fopen($buffer_file, $sql_buffer !== "" ? "a" : "w");
+            if (!$buffer_handle) {
+                throw new RuntimeException("Cannot open SQL buffer file: {$buffer_file}");
+            }
         }
 
         // Domain discovery: scan SQL for URLs during download
@@ -4790,6 +4908,7 @@ class ImportClient
                     &$complete,
                     &$sql_handle,
                     $mysql_conn,
+                    $wpdb,
                     &$buffer_handle,
                     &$sql_buffer,
                     &$sql_bytes_written,
@@ -4897,6 +5016,43 @@ class ImportClient
                                     } while ($mysql_conn->more_results() && $mysql_conn->next_result());
 
                                     // Query executed — truncate the buffer file and reset.
+                                    if ($buffer_handle) {
+                                        ftruncate($buffer_handle, 0);
+                                        rewind($buffer_handle);
+                                    }
+                                    $sql_buffer = "";
+                                }
+                                break;
+
+                            case "wpdb":
+                                // Same buffer/crash-recovery strategy as mysql mode,
+                                // but execute through $wpdb->query() which routes
+                                // through whatever database backend WordPress uses
+                                // (MySQL or SQLite via sqlite-database-integration).
+                                if ($buffer_handle) {
+                                    fwrite($buffer_handle, $data);
+                                    fflush($buffer_handle);
+                                }
+
+                                $sql_buffer .= $data;
+                                $sql_bytes_written += strlen($data);
+
+                                if ($query_complete && $sql_buffer !== "") {
+                                    // $wpdb->query() handles one statement at a time,
+                                    // so split the buffer using the query stream.
+                                    $buf_stream = new \WP_MySQL_Naive_Query_Stream();
+                                    $buf_stream->append_sql($sql_buffer);
+                                    $buf_stream->mark_input_complete();
+                                    while ($buf_stream->next_query()) {
+                                        $q = $buf_stream->get_query();
+                                        $result = $wpdb->query($q);
+                                        if ($result === false && $wpdb->last_error) {
+                                            throw new RuntimeException(
+                                                "wpdb execution failed: " . $wpdb->last_error
+                                            );
+                                        }
+                                    }
+
                                     if ($buffer_handle) {
                                         ftruncate($buffer_handle, 0);
                                         rewind($buffer_handle);
@@ -5015,6 +5171,20 @@ class ImportClient
                 $mysql_conn = null;
                 // Clean up buffer file — if we got here with an empty buffer,
                 // all queries were executed successfully.
+                $buffer_file = $this->state_dir . "/.sql-buffer";
+                if ($pending === "" && file_exists($buffer_file)) {
+                    unlink($buffer_file);
+                }
+                if ($pending !== "") {
+                    throw new RuntimeException(
+                        "Buffered SQL was never executed (" . strlen($pending) .
+                        " bytes) — incomplete export?"
+                    );
+                }
+            }
+            // wpdb mode: same buffer cleanup logic as mysql mode.
+            if ($wpdb && !$mysql_conn) {
+                $pending = $sql_buffer;
                 $buffer_file = $this->state_dir . "/.sql-buffer";
                 if ($pending === "" && file_exists($buffer_file)) {
                     unlink($buffer_file);
@@ -7065,13 +7235,15 @@ class ImportClient
                 "bytes_read" => 0,
                 "rewrite_url" => null,
             ],
-            // SQL output mode (file, stdout, mysql) — persisted for resume
+            // SQL output mode (file, stdout, mysql, wpdb) — persisted for resume
             "sql_output" => null,
             // MySQL connection parameters — persisted for resume (password excluded)
             "mysql_host" => null,
             "mysql_port" => null,
             "mysql_user" => null,
             "mysql_database" => null,
+            // WordPress wp-load.php path — persisted for resume
+            "wp_load" => null,
             // Adaptive tuning state/config
             "tuning" => [
                 "config" => [],
@@ -7716,17 +7888,19 @@ if (
                 "  --secret=TOKEN              HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v               Show detailed request/response logs\n" .
                 "  --max-allowed-packet=SIZE   Client max_allowed_packet (e.g. 16M, 64M)\n" .
-                "  --sql-output=MODE           Output mode: file (default), stdout, mysql\n" .
+                "  --sql-output=MODE           Output mode: file (default), stdout, mysql, wpdb\n" .
                 "  --mysql-host=HOST           MySQL host (default: 127.0.0.1, for --sql-output=mysql)\n" .
                 "  --mysql-port=PORT           MySQL port (default: 3306, for --sql-output=mysql)\n" .
                 "  --mysql-user=USER           MySQL user (default: root, for --sql-output=mysql)\n" .
                 "  --mysql-password=PASS       MySQL password (or set MYSQL_PASSWORD env)\n" .
                 "  --mysql-database=DB         MySQL database (required for --sql-output=mysql)\n" .
+                "  --wp-load=PATH              Path to wp-load.php (required for --sql-output=wpdb)\n" .
                 "\n" .
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
                 "  stdout  Write raw SQL to stdout; progress goes to stderr\n" .
-                "  mysql   Stream directly into a MySQL connection\n",
+                "  mysql   Stream directly into a MySQL connection\n" .
+                "  wpdb    Stream through WordPress \$wpdb (supports MySQL and SQLite)\n",
         ],
         "db-index" => [
             "short" => "Index database tables and their statistics",
@@ -7757,26 +7931,37 @@ if (
                 "  php import.php db-domains - --state-dir=/path/to/state\n",
         ],
         "db-apply" => [
-            "short" => "Apply SQL dump to a target MySQL database with URL rewriting",
+            "short" => "Apply SQL dump to a target database with URL rewriting",
             "detail" =>
                 "Reads <local-path>/db.sql, optionally rewrites URLs, and executes\n" .
-                "all statements against a target MySQL database. Resumable.\n" .
+                "all statements against a target database. Resumable.\n" .
+                "\n" .
+                "Supports two backends:\n" .
+                "  1. Direct MySQL via --target-* options (default)\n" .
+                "  2. WordPress \$wpdb via --wp-load (works with MySQL and SQLite)\n" .
                 "\n" .
                 "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
                 "\n" .
                 "Options:\n" .
                 "  --target-host=HOST         Target MySQL host (default: 127.0.0.1)\n" .
                 "  --target-port=PORT         Target MySQL port (default: 3306)\n" .
-                "  --target-user=USER         Target MySQL user (required)\n" .
+                "  --target-user=USER         Target MySQL user (required without --wp-load)\n" .
                 "  --target-pass=PASS         Target MySQL password\n" .
-                "  --target-db=NAME           Target MySQL database (required)\n" .
+                "  --target-db=NAME           Target MySQL database (required without --wp-load)\n" .
+                "  --wp-load=PATH             Path to wp-load.php (uses \$wpdb instead of direct MySQL)\n" .
                 "  --rewrite-url FROM TO      Rewrite FROM to TO (repeatable)\n" .
                 "  --abort                    Clear state and exit\n" .
                 "  --verbose, -v              Show detailed logs\n" .
                 "\n" .
-                "Example:\n" .
+                "Examples:\n" .
+                "  # Direct MySQL:\n" .
                 "  php import.php db-apply - /path/to/import \\\n" .
                 "    --target-user=root --target-db=wp_new \\\n" .
+                "    --rewrite-url https://old.com https://new.com\n" .
+                "\n" .
+                "  # Via WordPress \$wpdb (MySQL or SQLite):\n" .
+                "  php import.php db-apply - /path/to/import \\\n" .
+                "    --wp-load=/path/to/wordpress/wp-load.php \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
         "preflight" => [
@@ -8094,6 +8279,8 @@ if (
             $options["target_pass"] = substr($argv[$i], strlen("--target-pass="));
         } elseif (strpos($argv[$i], "--target-db=") === 0) {
             $options["target_db"] = substr($argv[$i], strlen("--target-db="));
+        } elseif (strpos($argv[$i], "--wp-load=") === 0) {
+            $options["wp_load"] = substr($argv[$i], strlen("--wp-load="));
         } elseif ($argv[$i] === "--rewrite-url") {
             if (!isset($argv[$i + 1]) || !isset($argv[$i + 2])) {
                 fwrite(STDERR, "--rewrite-url requires two arguments: FROM TO\n");
