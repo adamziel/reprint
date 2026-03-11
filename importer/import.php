@@ -6383,7 +6383,7 @@ class ImportClient
             "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Accept: {$accept}",
             "Accept-Language: en-US,en;q=0.9",
-            "Accept-Encoding: gzip, deflate, br",
+            "Accept-Encoding: gzip, deflate",
             "Cache-Control: no-cache",
             "Pragma: no-cache",
             "Connection: keep-alive",
@@ -6475,7 +6475,7 @@ class ImportClient
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_TIMEOUT => 30,
-            CURLOPT_ENCODING => "",
+            CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_RETURNTRANSFER => true,
         ]);
@@ -6627,7 +6627,7 @@ class ImportClient
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_TIMEOUT => 300,
-            CURLOPT_ENCODING => "", // Auto-decompress gzip/deflate/br responses
+            CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
                 &$parser,
