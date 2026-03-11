@@ -27,10 +27,20 @@
         {
             "name": "*.php",
             "in": "lib/sqlite-database-integration/wp-includes/mysql"
+        },
+        {
+            "name": "*.php",
+            "in": "lib/sqlite-database-integration/wp-includes/sqlite"
+        },
+        {
+            "name": "*.php",
+            "in": "lib/sqlite-database-integration/wp-includes/sqlite-ast"
         }
     ],
 
     "files": [
+        "lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php",
+        "lib/sqlite-database-integration/version.php",
         "wordpress-plugin/generic/utils.php",
         "wordpress-plugin/generic/class-hmac-client.php",
         "vendor/autoload.php"

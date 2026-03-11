@@ -3012,16 +3012,88 @@ class ImportClient
         $options["rewrite_url"][] = [$source_origin, $options["new_site_url"]];
     }
 
-    private function run_db_apply(array $options): void
+    private function escape_pdo_dsn_value(string $value): string
     {
-        $sql_file = $this->state_dir . "/db.sql";
-        if (!file_exists($sql_file)) {
+        return str_replace(';', ';;', $value);
+    }
+
+    private function create_sqlite_target_pdo(string $target_path, string $target_db): PDO
+    {
+        if (!extension_loaded("pdo_sqlite")) {
             throw new RuntimeException(
-                "db.sql not found in {$this->state_dir}. Run db-sync first.",
+                "SQLite target support requires the pdo_sqlite extension.",
             );
         }
 
-        // Parse target database options
+        $driver_loader = dirname(__DIR__) . "/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php";
+        if (!file_exists($driver_loader)) {
+            throw new RuntimeException(
+                "SQLite target support requires lib/sqlite-database-integration to be initialized.",
+            );
+        }
+
+        if ($target_path !== ':memory:') {
+            $target_dir = dirname($target_path);
+            if ($target_dir !== '' && $target_dir !== '.' && !is_dir($target_dir)) {
+                if (!mkdir($target_dir, 0777, true) && !is_dir($target_dir)) {
+                    throw new RuntimeException(
+                        "Cannot create SQLite directory: {$target_dir}",
+                    );
+                }
+            }
+        }
+
+        require_once $driver_loader;
+
+        $dsn = sprintf(
+            "mysql-on-sqlite:path=%s;dbname=%s",
+            $this->escape_pdo_dsn_value($target_path),
+            $this->escape_pdo_dsn_value($target_db),
+        );
+
+        try {
+            return new WP_PDO_MySQL_On_SQLite($dsn, null, null, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            ]);
+        } catch (PDOException $e) {
+            throw new RuntimeException(
+                "Cannot connect to target SQLite database: " . $e->getMessage(),
+                0,
+                $e,
+            );
+        }
+    }
+
+    private function create_target_db_apply_connection(array $options): array
+    {
+        $target_engine = strtolower((string) ($options["target_engine"] ?? "mysql"));
+        if (!in_array($target_engine, ["mysql", "sqlite"], true)) {
+            throw new InvalidArgumentException(
+                "Invalid --target-engine value: {$target_engine}. Valid engines: mysql, sqlite.",
+            );
+        }
+
+        if ($target_engine === "sqlite") {
+            $target_path = $options["target_sqlite_path"] ?? null;
+            $target_db = $options["target_db"] ?? "sqlite_database";
+
+            if (!$target_path) {
+                throw new InvalidArgumentException(
+                    "db-apply with --target-engine=sqlite requires --target-sqlite-path.",
+                );
+            }
+
+            return [
+                $this->create_sqlite_target_pdo($target_path, $target_db),
+                sprintf(
+                    "engine=sqlite path=%s db=%s",
+                    $target_path,
+                    $target_db,
+                ),
+            ];
+        }
+
         $target_host = $options["target_host"] ?? "127.0.0.1";
         $target_port = (int) ($options["target_port"] ?? 3306);
         $target_user = $options["target_user"] ?? null;
@@ -3030,7 +3102,43 @@ class ImportClient
 
         if (!$target_user || !$target_db) {
             throw new InvalidArgumentException(
-                "db-apply requires --target-user and --target-db options.",
+                "db-apply with --target-engine=mysql requires --target-user and --target-db.",
+            );
+        }
+
+        $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
+        try {
+            $pdo = new PDO($dsn, $target_user, $target_pass, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::MYSQL_ATTR_LOCAL_INFILE => false,
+            ]);
+        } catch (PDOException $e) {
+            throw new RuntimeException(
+                "Cannot connect to target MySQL database: " . $e->getMessage(),
+                0,
+                $e,
+            );
+        }
+
+        return [
+            $pdo,
+            sprintf(
+                "engine=mysql host=%s port=%d db=%s user=%s",
+                $target_host,
+                $target_port,
+                $target_db,
+                $target_user,
+            ),
+        ];
+    }
+
+    private function run_db_apply(array $options): void
+    {
+        $sql_file = $this->state_dir . "/db.sql";
+        if (!file_exists($sql_file)) {
+            throw new RuntimeException(
+                "db.sql not found in {$this->state_dir}. Run db-sync first.",
             );
         }
 
@@ -3137,28 +3245,10 @@ class ImportClient
             );
         }
 
-        // Connect to target MySQL
-        $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
-        try {
-            $pdo = new PDO($dsn, $target_user, $target_pass, [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::MYSQL_ATTR_LOCAL_INFILE => false,
-            ]);
-        } catch (PDOException $e) {
-            throw new RuntimeException(
-                "Cannot connect to target database: " . $e->getMessage(),
-            );
-        }
+        [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
 
         $this->audit_log(
-            sprintf(
-                "CONNECTED | host=%s port=%d db=%s user=%s",
-                $target_host,
-                $target_port,
-                $target_db,
-                $target_user,
-            ),
+            "CONNECTED | {$connection_label}",
             false,
         );
 
@@ -7757,26 +7847,33 @@ if (
                 "  php import.php db-domains - --state-dir=/path/to/state\n",
         ],
         "db-apply" => [
-            "short" => "Apply SQL dump to a target MySQL database with URL rewriting",
+            "short" => "Apply SQL dump to a target MySQL or SQLite database with URL rewriting",
             "detail" =>
                 "Reads <local-path>/db.sql, optionally rewrites URLs, and executes\n" .
-                "all statements against a target MySQL database. Resumable.\n" .
+                "all statements against a target MySQL or SQLite database. Resumable.\n" .
                 "\n" .
                 "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
                 "\n" .
                 "Options:\n" .
+                "  --target-engine=ENGINE     Target database engine: mysql (default) or sqlite\n" .
                 "  --target-host=HOST         Target MySQL host (default: 127.0.0.1)\n" .
                 "  --target-port=PORT         Target MySQL port (default: 3306)\n" .
-                "  --target-user=USER         Target MySQL user (required)\n" .
+                "  --target-user=USER         Target MySQL user (required for mysql)\n" .
                 "  --target-pass=PASS         Target MySQL password\n" .
-                "  --target-db=NAME           Target MySQL database (required)\n" .
+                "  --target-db=NAME           Target DB name (required for mysql, optional for sqlite)\n" .
+                "  --target-sqlite-path=PATH  Target SQLite database file (required for sqlite)\n" .
                 "  --rewrite-url FROM TO      Rewrite FROM to TO (repeatable)\n" .
                 "  --abort                    Clear state and exit\n" .
                 "  --verbose, -v              Show detailed logs\n" .
                 "\n" .
-                "Example:\n" .
+                "MySQL example:\n" .
                 "  php import.php db-apply - /path/to/import \\\n" .
                 "    --target-user=root --target-db=wp_new \\\n" .
+                "    --rewrite-url https://old.com https://new.com\n" .
+                "\n" .
+                "SQLite example:\n" .
+                "  php import.php db-apply - /path/to/import \\\n" .
+                "    --target-engine=sqlite --target-sqlite-path=/path/to/db.sqlite \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
         "preflight" => [
@@ -8088,12 +8185,16 @@ if (
             $options["target_host"] = substr($argv[$i], strlen("--target-host="));
         } elseif (strpos($argv[$i], "--target-port=") === 0) {
             $options["target_port"] = (int) substr($argv[$i], strlen("--target-port="));
+        } elseif (strpos($argv[$i], "--target-engine=") === 0) {
+            $options["target_engine"] = substr($argv[$i], strlen("--target-engine="));
         } elseif (strpos($argv[$i], "--target-user=") === 0) {
             $options["target_user"] = substr($argv[$i], strlen("--target-user="));
         } elseif (strpos($argv[$i], "--target-pass=") === 0) {
             $options["target_pass"] = substr($argv[$i], strlen("--target-pass="));
         } elseif (strpos($argv[$i], "--target-db=") === 0) {
             $options["target_db"] = substr($argv[$i], strlen("--target-db="));
+        } elseif (strpos($argv[$i], "--target-sqlite-path=") === 0) {
+            $options["target_sqlite_path"] = substr($argv[$i], strlen("--target-sqlite-path="));
         } elseif ($argv[$i] === "--rewrite-url") {
             if (!isset($argv[$i + 1]) || !isset($argv[$i + 2])) {
                 fwrite(STDERR, "--rewrite-url requires two arguments: FROM TO\n");

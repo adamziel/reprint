@@ -439,6 +439,30 @@ export async function createMysqlConnection(dbName = null) {
 }
 
 /**
+ * Query a SQLite database through the upstream MySQL-on-SQLite PDO driver.
+ */
+export function queryMysqlOnSqlite(sqlitePath, sql, dbName = 'sqlite_database') {
+    const script = `
+require_once $argv[1] . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php';
+$pdo = new WP_PDO_MySQL_On_SQLite(
+    'mysql-on-sqlite:path=' . str_replace(';', ';;', $argv[2]) . ';dbname=' . str_replace(';', ';;', $argv[3]),
+    null,
+    null,
+    [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
+);
+$stmt = $pdo->query($argv[4]);
+echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC), JSON_UNESCAPED_SLASHES);
+`;
+
+    const output = execFileSync('php', ['-r', script, PROJECT_ROOT, sqlitePath, dbName, sql], {
+        encoding: 'utf-8',
+        env: { ...process.env },
+    });
+
+    return JSON.parse(output);
+}
+
+/**
  * Get database name for a site.
  */
 export function getDbName(siteName) {

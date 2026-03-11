@@ -16,6 +16,8 @@ On the **migration target** side:
  - ext-json — JSON encoding/decoding
  - ext-hash — hash_hmac, hash_equals
  - ext-zlib — deflate_init/deflate_add for gzip streaming
+ - ext-pdo + ext-pdo_mysql — for MySQL targets
+ - ext-pdo + ext-pdo_sqlite — for SQLite targets via sqlite-database-integration
 
 ## Integrating with a hosting platform
 
@@ -171,11 +173,22 @@ The command returns one of three exit codes:
 
 If the site's domain is changing (e.g. migrating from `https://old-site.com`
 to `https://new-site.com`), use `db-apply` with `--rewrite-url` to import
-the SQL dump into a target MySQL database while rewriting all URLs in one pass:
+the SQL dump into a target database while rewriting all URLs in one pass.
+
+MySQL target:
 
 ```bash
 php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
     --target-user=root --target-db=wp_new \
+    --rewrite-url https://old-site.com https://new-site.com
+```
+
+SQLite target:
+
+```bash
+php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+    --target-engine=sqlite --target-sqlite-path="$STATE_DIR/wordpress.sqlite" \
+    --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
 ```
 
@@ -196,7 +209,8 @@ php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" 
 ```
 
 If the domain isn't changing, you can skip `db-apply` and import `db.sql`
-directly with any MySQL tool.
+directly with a MySQL tool, or use `db-apply --target-engine=sqlite` to load it
+into SQLite through the bundled `sqlite-database-integration` driver.
 
 #### Shoehorning the site onto your platform
 
@@ -376,7 +390,7 @@ php importer.phar <command> <URL> --state-dir=DIR --docroot=DIR [options]
 * `files-index` — Optional. It's a standalone command to index the full remote file index without fetching file contents. `files-sync` does it implicitly
                   so this is mostly useful for testing and diagnostics.
 * `db-sync` — Downloads the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
-* `db-apply` — Applies `db.sql` to a target MySQL database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
+* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-sync`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 
