@@ -1,0 +1,85 @@
+name: Tag Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+          - custom
+      custom_version:
+        description: 'Custom version (only when bump is "custom", e.g. 0.1.6). The "v" prefix is added automatically.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create release tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: version
+        run: |
+          if [ "${{ inputs.bump }}" = "custom" ]; then
+            if [ -z "${{ inputs.custom_version }}" ]; then
+              echo "::error::Custom version is required when bump type is 'custom'"
+              exit 1
+            fi
+            VERSION="${{ inputs.custom_version }}"
+          else
+            # Find the latest vX.Y.Z tag
+            LATEST=$(git tag -l 'v*' --sort=-v:refname | head -1)
+            if [ -z "$LATEST" ]; then
+              echo "::error::No existing version tags found. Use 'custom' to set the first version."
+              exit 1
+            fi
+
+            # Strip the "v" prefix and split into components
+            LATEST="${LATEST#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+
+            case "${{ inputs.bump }}" in
+              patch) PATCH=$((PATCH + 1)) ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            esac
+
+            VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - name: Validate version format
+        run: |
+          if ! echo "${{ steps.version.outputs.value }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Version must be in semver format (e.g. 0.1.6)"
+            exit 1
+          fi
+
+      - name: Check tag does not already exist
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.value }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ steps.version.outputs.value }} already exists"
+            exit 1
+          fi
+
+      - name: Create and push tag
+        run: |
+          git tag "v${{ steps.version.outputs.value }}"
+          git push origin "v${{ steps.version.outputs.value }}"
+          echo "Tagged and pushed v${{ steps.version.outputs.value }}"
