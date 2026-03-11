@@ -1,0 +1,169 @@
+<?php
+
+namespace ImportTests;
+
+use PHPUnit\Framework\TestCase;
+
+require_once __DIR__ . '/../../importer/import.php';
+
+/**
+ * Test the --new-site-url flag, which derives a --rewrite-url mapping
+ * from the export URL's origin.
+ */
+class NewSiteUrlTest extends TestCase
+{
+    private $tempDir;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->tempDir = sys_get_temp_dir() . '/import-new-site-url-test-' . uniqid();
+        mkdir($this->tempDir, 0755, true);
+        mkdir($this->tempDir . '/docroot', 0755, true);
+    }
+
+    protected function tearDown(): void
+    {
+        $this->recursiveDelete($this->tempDir);
+        parent::tearDown();
+    }
+
+    private function recursiveDelete(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        $items = scandir($dir);
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $path = $dir . '/' . $item;
+            if (is_link($path)) {
+                unlink($path);
+            } elseif (is_dir($path)) {
+                $this->recursiveDelete($path);
+            } else {
+                unlink($path);
+            }
+        }
+        rmdir($dir);
+    }
+
+    private function callResolve(\ImportClient $client, array $options): array
+    {
+        $reflection = new \ReflectionClass($client);
+        $method = $reflection->getMethod('resolve_new_site_url_option');
+        $method->invokeArgs($client, [&$options]);
+        return $options;
+    }
+
+    public function testDerivesOriginFromHttpsUrl(): void
+    {
+        $client = new \ImportClient(
+            'https://old-site.example.com/wp-json/export',
+            $this->tempDir,
+            $this->tempDir . '/docroot'
+        );
+
+        $options = ['new_site_url' => 'https://new-site.example.com'];
+        $options = $this->callResolve($client, $options);
+
+        $this->assertArrayHasKey('rewrite_url', $options);
+        $this->assertCount(1, $options['rewrite_url']);
+        $this->assertSame(
+            ['https://old-site.example.com', 'https://new-site.example.com'],
+            $options['rewrite_url'][0]
+        );
+    }
+
+    public function testDerivesOriginFromHttpUrl(): void
+    {
+        $client = new \ImportClient(
+            'http://old-site.local/export?key=abc',
+            $this->tempDir,
+            $this->tempDir . '/docroot'
+        );
+
+        $options = ['new_site_url' => 'https://new-site.example.com'];
+        $options = $this->callResolve($client, $options);
+
+        $this->assertSame(
+            ['http://old-site.local', 'https://new-site.example.com'],
+            $options['rewrite_url'][0]
+        );
+    }
+
+    public function testPreservesPort(): void
+    {
+        $client = new \ImportClient(
+            'https://old-site.example.com:8443/export',
+            $this->tempDir,
+            $this->tempDir . '/docroot'
+        );
+
+        $options = ['new_site_url' => 'https://new-site.example.com'];
+        $options = $this->callResolve($client, $options);
+
+        $this->assertSame(
+            ['https://old-site.example.com:8443', 'https://new-site.example.com'],
+            $options['rewrite_url'][0]
+        );
+    }
+
+    public function testAppendsToExistingRewriteUrlEntries(): void
+    {
+        $client = new \ImportClient(
+            'https://old-site.example.com/export',
+            $this->tempDir,
+            $this->tempDir . '/docroot'
+        );
+
+        $options = [
+            'new_site_url' => 'https://new-site.example.com',
+            'rewrite_url' => [
+                ['https://cdn.old-site.com', 'https://cdn.new-site.com'],
+            ],
+        ];
+        $options = $this->callResolve($client, $options);
+
+        $this->assertCount(2, $options['rewrite_url']);
+        $this->assertSame(
+            ['https://cdn.old-site.com', 'https://cdn.new-site.com'],
+            $options['rewrite_url'][0]
+        );
+        $this->assertSame(
+            ['https://old-site.example.com', 'https://new-site.example.com'],
+            $options['rewrite_url'][1]
+        );
+    }
+
+    public function testNoOpWhenNewSiteUrlNotSet(): void
+    {
+        $client = new \ImportClient(
+            'https://old-site.example.com/export',
+            $this->tempDir,
+            $this->tempDir . '/docroot'
+        );
+
+        $options = [];
+        $options = $this->callResolve($client, $options);
+
+        $this->assertArrayNotHasKey('rewrite_url', $options);
+    }
+
+    public function testThrowsOnUnparseableExportUrl(): void
+    {
+        $client = new \ImportClient(
+            '://not-a-url',
+            $this->tempDir,
+            $this->tempDir . '/docroot'
+        );
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('--new-site-url requires a valid export URL');
+
+        $options = ['new_site_url' => 'https://new-site.example.com'];
+        $this->callResolve($client, $options);
+    }
+}
