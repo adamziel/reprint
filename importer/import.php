@@ -1262,7 +1262,7 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: files-sync, files-index, db-sync, db-index, preflight, preflight-assert
+     *   - command: Required. One of: auto-migrate, files-sync, files-index, db-sync, db-index, preflight, preflight-assert
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      */
@@ -1286,12 +1286,13 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
+                "Command is required. Valid commands: auto-migrate, files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
             );
         }
 
         if (
             !in_array($command, [
+                "auto-migrate",
                 "files-sync",
                 "files-index",
                 "db-sync",
@@ -1303,7 +1304,7 @@ class ImportClient
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
+                "Invalid command: {$command}. Valid commands: auto-migrate, files-sync, files-index, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
             );
         }
 
@@ -1418,6 +1419,17 @@ class ImportClient
             //       we'll see!
             require_once __DIR__ . "/../wordpress-plugin/generic/class-hmac-client.php";
             $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
+        }
+
+        // auto-migrate runs the full import pipeline as a single command:
+        // preflight → files_sync → db_sync → files_delta → db_apply → complete
+        if ($command === "auto-migrate") {
+            if ($abort) {
+                $this->handle_abort_migrate();
+                return;
+            }
+            $this->run_migrate($options);
+            return;
         }
 
         // preflight and preflight-assert run the preflight themselves and
@@ -2013,6 +2025,246 @@ class ImportClient
         if ($sleep > 0) {
             usleep((int) round($sleep * 1_000_000));
         }
+    }
+
+    /**
+     * Command: auto-migrate
+     *
+     * Runs the full import pipeline as a single command, looping internally
+     * within each phase until complete. The phase is persisted in
+     * state["auto-migrate"]["phase"] so the process can be killed and
+     * restarted at any point.
+     *
+     * Phase state machine:
+     *   preflight → files_sync → db_sync → files_delta → db_apply → complete
+     *
+     * The db_apply phase is skipped if --target-user and --target-db are
+     * not provided. The step counts in progress output adjust accordingly.
+     */
+    private function run_migrate(array $options): void
+    {
+        $migrate_state = $this->state["auto-migrate"] ?? [];
+        $phase = $migrate_state["phase"] ?? "preflight";
+
+        // Persist db-apply options so they survive across invocations
+        if (isset($options["target_user"])) {
+            $migrate_state["target_user"] = $options["target_user"];
+        }
+        if (isset($options["target_pass"])) {
+            $migrate_state["target_pass"] = $options["target_pass"];
+        }
+        if (isset($options["target_db"])) {
+            $migrate_state["target_db"] = $options["target_db"];
+        }
+        if (isset($options["target_host"])) {
+            $migrate_state["target_host"] = $options["target_host"];
+        }
+        if (isset($options["target_port"])) {
+            $migrate_state["target_port"] = $options["target_port"];
+        }
+        if (isset($options["rewrite_url"])) {
+            $migrate_state["rewrite_url"] = $options["rewrite_url"];
+        }
+
+        $has_db_apply = !empty($migrate_state["target_user"]) && !empty($migrate_state["target_db"]);
+        $total_steps = $has_db_apply ? 5 : 4;
+
+        $migrate_state["phase"] = $phase;
+        $this->state["auto-migrate"] = $migrate_state;
+        $this->save_state($this->state);
+
+        // --- Phase: preflight ---
+        if ($phase === "preflight") {
+            $this->migrate_log(1, $total_steps, "Preflight check");
+            $this->run_preflight();
+
+            $ok = $this->state["preflight"]["ok"] ?? null;
+            if ($ok !== true) {
+                $error = $this->state["preflight"]["error"] ?? "unknown error";
+                throw new RuntimeException(
+                    "Preflight failed: {$error}",
+                );
+            }
+
+            $phase = "files_sync";
+            $this->state["auto-migrate"]["phase"] = $phase;
+            $this->save_state($this->state);
+        }
+
+        // --- Phase: files_sync ---
+        if ($phase === "files_sync") {
+            $this->migrate_log(2, $total_steps, "Downloading files");
+            $this->require_preflight();
+            $this->migrate_loop_phase("files-sync");
+
+            $phase = "db_sync";
+            $this->state["auto-migrate"]["phase"] = $phase;
+            $this->save_state($this->state);
+        }
+
+        // --- Phase: db_sync ---
+        if ($phase === "db_sync") {
+            $this->migrate_log(3, $total_steps, "Downloading database");
+            $this->require_preflight();
+            $this->migrate_loop_phase("db-sync");
+
+            // Clear files-sync progress so the next files-sync detects
+            // delta mode (local index still exists → delta).
+            $this->handle_abort("files-sync");
+
+            $phase = "files_delta";
+            $this->state["auto-migrate"]["phase"] = $phase;
+            $this->save_state($this->state);
+        }
+
+        // --- Phase: files_delta ---
+        if ($phase === "files_delta") {
+            $this->migrate_log(4, $total_steps, "Downloading file changes");
+            $this->require_preflight();
+            $this->migrate_loop_phase("files-sync");
+
+            $phase = $has_db_apply ? "db_apply" : "complete";
+            $this->state["auto-migrate"]["phase"] = $phase;
+            $this->save_state($this->state);
+        }
+
+        // --- Phase: db_apply ---
+        if ($phase === "db_apply") {
+            $this->migrate_log(5, $total_steps, "Applying database");
+
+            // Build db-apply options from persisted migrate state
+            $apply_options = $options;
+            $ms = $this->state["auto-migrate"];
+            if (isset($ms["target_user"])) {
+                $apply_options["target_user"] = $ms["target_user"];
+            }
+            if (isset($ms["target_pass"])) {
+                $apply_options["target_pass"] = $ms["target_pass"];
+            }
+            if (isset($ms["target_db"])) {
+                $apply_options["target_db"] = $ms["target_db"];
+            }
+            if (isset($ms["target_host"])) {
+                $apply_options["target_host"] = $ms["target_host"];
+            }
+            if (isset($ms["target_port"])) {
+                $apply_options["target_port"] = $ms["target_port"];
+            }
+            if (isset($ms["rewrite_url"])) {
+                $apply_options["rewrite_url"] = $ms["rewrite_url"];
+            }
+
+            $this->migrate_loop_db_apply($apply_options);
+
+            $phase = "complete";
+            $this->state["auto-migrate"]["phase"] = $phase;
+            $this->save_state($this->state);
+        }
+
+        // --- Phase: complete ---
+        $this->migrate_log(null, null, "Migration complete!");
+        $this->output_progress(["status" => "complete"]);
+    }
+
+    /**
+     * Loop a sub-command (files-sync or db-sync) until it completes.
+     *
+     * Each call to the sub-command's run method returns with the state
+     * status set to "complete" or "partial". We loop on "partial",
+     * checking first if the sub-command already finished (handles the
+     * kill-between-phases edge case).
+     */
+    private function migrate_loop_phase(string $sub_command): void
+    {
+        while (true) {
+            $state_command = $this->state["command"] ?? null;
+            $state_status = $this->state["status"] ?? null;
+
+            // Already done from a previous run — skip
+            if ($state_command === $sub_command && $state_status === "complete") {
+                return;
+            }
+
+            if ($sub_command === "files-sync") {
+                $this->run_files_sync();
+            } elseif ($sub_command === "db-sync") {
+                $this->run_db_sync();
+            }
+
+            $status = $this->state["status"] ?? "complete";
+            if ($status === "complete") {
+                return;
+            }
+            // status === "partial" → loop again
+        }
+    }
+
+    /**
+     * Loop db-apply until it completes.
+     *
+     * db-apply uses a different calling convention than files-sync / db-sync
+     * (it takes $options and throws on "already complete"), so it gets its
+     * own loop method.
+     */
+    private function migrate_loop_db_apply(array $options): void
+    {
+        while (true) {
+            $state_command = $this->state["command"] ?? null;
+            $state_status = $this->state["status"] ?? null;
+
+            // Already done from a previous run — skip
+            if ($state_command === "db-apply" && $state_status === "complete") {
+                return;
+            }
+
+            $this->run_db_apply($options);
+
+            $status = $this->state["status"] ?? "complete";
+            if ($status === "complete") {
+                return;
+            }
+        }
+    }
+
+    /**
+     * Print a labeled progress line for auto-migrate phases.
+     */
+    private function migrate_log(?int $step, ?int $total, string $message): void
+    {
+        if ($step !== null && $total !== null) {
+            $line = "[auto-migrate] Step {$step}/{$total}: {$message}";
+        } else {
+            $line = "[auto-migrate] {$message}";
+        }
+
+        $this->audit_log($line, true);
+        if ($this->is_tty && !$this->verbose_mode) {
+            fwrite($this->progress_fd, $line . "\n");
+        }
+    }
+
+    /**
+     * Handle --abort for auto-migrate: clear the migrate phase tracker
+     * and abort whichever sub-command was active.
+     */
+    private function handle_abort_migrate(): void
+    {
+        $active_command = $this->state["command"] ?? null;
+
+        // Clear the auto-migrate phase tracker
+        unset($this->state["auto-migrate"]);
+        $this->save_state($this->state);
+
+        // Abort the active sub-command if there is one
+        if ($active_command && in_array($active_command, ["files-sync", "db-sync", "db-apply"])) {
+            $this->handle_abort($active_command);
+        }
+
+        $this->audit_log("RESTART | Cleared auto-migrate state", true);
+        if ($this->is_tty && !$this->verbose_mode) {
+            fwrite($this->progress_fd, "State cleared for auto-migrate.\n");
+        }
+        $this->output_progress(["status" => "aborted"]);
     }
 
     /**
@@ -6891,12 +7143,16 @@ class ImportClient
         $follow = $this->state["follow_symlinks"] ?? false;
         $nonempty = $this->state["docroot_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
+        $auto_migrate = $this->state["auto-migrate"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
         $this->state["version"] = $version;
         $this->state["follow_symlinks"] = $follow;
         $this->state["docroot_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
+        if ($auto_migrate !== null) {
+            $this->state["auto-migrate"] = $auto_migrate;
+        }
     }
 
     private function default_state(): array
@@ -7534,6 +7790,40 @@ if (
     // shown in the main help, and a detailed help block shown when you
     // run `php import.php <command> <url> <local-path> --help`.
     $command_help = [
+        "auto-migrate" => [
+            "short" => "Run the full migration pipeline in one command",
+            "detail" =>
+                "Runs all migration steps automatically:\n" .
+                "  1. Preflight check\n" .
+                "  2. Download files (initial sync)\n" .
+                "  3. Download database\n" .
+                "  4. Download file changes (delta sync)\n" .
+                "  5. Apply database (if --target-user and --target-db provided)\n" .
+                "\n" .
+                "Loops internally until each step completes. If killed, restart\n" .
+                "with the same arguments to resume from the current step.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --secret=TOKEN       HMAC shared secret for export API authentication\n" .
+                "  --abort              Clear all auto-migrate state and exit\n" .
+                "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n" .
+                "  --on-docroot-nonempty=MODE\n" .
+                "                       What to do when docroot is non-empty (error|preserve-local)\n" .
+                "  --target-host=HOST   Target MySQL host (default: 127.0.0.1)\n" .
+                "  --target-port=PORT   Target MySQL port (default: 3306)\n" .
+                "  --target-user=USER   Target MySQL user (enables db-apply step)\n" .
+                "  --target-pass=PASS   Target MySQL password\n" .
+                "  --target-db=NAME     Target MySQL database (enables db-apply step)\n" .
+                "  --rewrite-url FROM TO  Rewrite FROM to TO (repeatable)\n" .
+                "  --verbose, -v        Show detailed request/response logs\n" .
+                "\n" .
+                "Example:\n" .
+                "  php import.php auto-migrate https://example.com \\\n" .
+                "    --state-dir=/tmp/state --docroot=/tmp/site \\\n" .
+                "    --secret=mysecret \\\n" .
+                "    --target-user=root --target-db=wp_migrated \\\n" .
+                "    --rewrite-url https://example.com https://local.test\n",
+        ],
         "files-sync" => [
             "short" => "Sync files (auto-detects initial vs delta)",
             "detail" =>
