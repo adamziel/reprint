@@ -92,3 +92,33 @@ if(!class_exists('WP_Error')) {
         }
     }
 }
+
+if (!class_exists('wpdb')) {
+    /**
+     * Minimal wpdb stub so PHPStan can resolve the type when the real
+     * WordPress isn't available.  Only the methods/properties used by
+     * the importer's $wpdb integration are declared here.
+     */
+    class wpdb {
+        /** @var string */
+        public $last_error = '';
+
+        /**
+         * @param string $query
+         * @return int|bool
+         */
+        public function query($query) { return 0; }
+
+        /**
+         * @param bool $suppress
+         * @return bool
+         */
+        public function suppress_errors($suppress = true) { return false; }
+
+        /**
+         * @param bool $show
+         * @return void
+         */
+        public function show_errors($show = true) {}
+    }
+}

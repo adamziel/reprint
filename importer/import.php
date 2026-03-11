@@ -5183,7 +5183,7 @@ class ImportClient
                 }
             }
             // wpdb mode: same buffer cleanup logic as mysql mode.
-            if ($wpdb && !$mysql_conn) {
+            if ($wpdb) {
                 $pending = $sql_buffer;
                 $buffer_file = $this->state_dir . "/.sql-buffer";
                 if ($pending === "" && file_exists($buffer_file)) {
