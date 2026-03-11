@@ -2896,6 +2896,34 @@ class ImportClient
         }
     }
 
+    /**
+     * If --new-site-url is set, derive the source origin from the export URL
+     * and append an implicit --rewrite-url mapping to $options.
+     */
+    private function resolve_new_site_url_option(array &$options): void
+    {
+        if (empty($options["new_site_url"])) {
+            return;
+        }
+
+        $parsed_url = parse_url($this->remote_url);
+        if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
+            throw new InvalidArgumentException(
+                "--new-site-url requires a valid export URL to derive the source site origin.",
+            );
+        }
+
+        $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
+        if (!empty($parsed_url['port'])) {
+            $source_origin .= ':' . $parsed_url['port'];
+        }
+
+        if (!isset($options["rewrite_url"])) {
+            $options["rewrite_url"] = [];
+        }
+        $options["rewrite_url"][] = [$source_origin, $options["new_site_url"]];
+    }
+
     private function run_db_apply(array $options): void
     {
         $sql_file = $this->state_dir . "/db.sql";
@@ -2920,23 +2948,7 @@ class ImportClient
 
         // If --new-site-url is provided, derive the source origin from the
         // export URL and add an implicit --rewrite-url mapping.
-        if (!empty($options["new_site_url"])) {
-            $parsed_url = parse_url($this->remote_url);
-            if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
-                $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
-                if (!empty($parsed_url['port'])) {
-                    $source_origin .= ':' . $parsed_url['port'];
-                }
-                if (!isset($options["rewrite_url"])) {
-                    $options["rewrite_url"] = [];
-                }
-                $options["rewrite_url"][] = [$source_origin, $options["new_site_url"]];
-            } else {
-                throw new InvalidArgumentException(
-                    "--new-site-url requires a valid export URL to derive the source site origin.",
-                );
-            }
-        }
+        $this->resolve_new_site_url_option($options);
 
         // Parse URL mapping
         $url_mapping = [];
