@@ -3096,6 +3096,7 @@ class ImportClient
 
         $dsn = "mysql-on-sqlite:dbname={$db_name};path={$sqlite_path}";
         try {
+            /** @phpstan-ignore class.notFound (loaded dynamically from sqlite-database-integration submodule) */
             $pdo = new \WP_PDO_MySQL_On_SQLite($dsn);
         } catch (\Exception $e) {
             throw new RuntimeException(
@@ -3103,6 +3104,7 @@ class ImportClient
             );
         }
 
+        /** @phpstan-ignore return.type (WP_PDO_MySQL_On_SQLite extends PDO) */
         return $pdo;
     }
 
