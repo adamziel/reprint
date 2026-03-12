@@ -3374,27 +3374,23 @@ class ImportClient
                         $pct = $sql_file_size > 0
                             ? round(100 * $total_bytes_read / $sql_file_size, 1)
                             : 0;
-                        $progress = [
+
+                        $this->output_progress([
                             "phase" => "db-apply",
                             "statements_executed" => $statements_executed,
                             "bytes_read" => $total_bytes_read,
                             "bytes_total" => $sql_file_size,
                             "pct" => $pct,
-                        ];
-                        if ($statements_total !== null) {
-                            $progress["statements_total"] = $statements_total;
-                        }
-                        $this->output_progress($progress);
+                            "statements_total" => $statements_total,
+                        ]);
 
-                        if ($statements_total !== null) {
-                            $this->show_progress_line(
-                                sprintf("db-apply: %d / %d statements (%.1f%%)", $statements_executed, $statements_total, $pct),
-                            );
-                        } else {
-                            $this->show_progress_line(
-                                sprintf("db-apply: %d statements (%.1f%%)", $statements_executed, $pct),
-                            );
-                        }
+                        $this->show_progress_line(
+                            sprintf(
+                                "db-apply: %s statements (%.1f%%)",
+                                $statements_total === null ? $statements_executed : "{$statements_executed} / {$statements_total}",
+                                $pct,
+                            ),
+                        );
                     }
                 }
             }
@@ -3448,15 +3444,12 @@ class ImportClient
                     ),
                     true,
                 );
-                $partial_progress = [
+                $this->output_progress([
                     "status" => "partial",
                     "phase" => "db-apply",
                     "statements_executed" => $statements_executed,
-                ];
-                if ($statements_total !== null) {
-                    $partial_progress["statements_total"] = $statements_total;
-                }
-                $this->output_progress($partial_progress, true);
+                    "statements_total" => $statements_total,
+                ], true);
             } else {
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
@@ -3472,15 +3465,12 @@ class ImportClient
                     true,
                 );
 
-                $complete_progress = [
+                $this->output_progress([
                     "status" => "complete",
                     "phase" => "db-apply",
                     "statements_executed" => $statements_executed,
-                ];
-                if ($statements_total !== null) {
-                    $complete_progress["statements_total"] = $statements_total;
-                }
-                $this->output_progress($complete_progress, true);
+                    "statements_total" => $statements_total,
+                ]);
 
                 if ($this->is_tty && !$this->verbose_mode) {
                     // Clear the progress line before printing the final message
