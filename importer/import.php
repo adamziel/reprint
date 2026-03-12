@@ -2913,10 +2913,10 @@ class ImportClient
         $remote_index = $this->remote_index_file;
         $download_list = $this->download_list_file;
 
-        // Single pass over the remote index: count, sum sizes, and build
-        // a path→size map for resolving download list entries.
-        $indexed_count = 0;
-        $indexed_bytes = 0;
+        // Single pass over the remote index to build a path→size map.
+        // Duplicates (from overlapping symlink targets) are collapsed
+        // automatically because later entries overwrite earlier ones in
+        // the map, so the counts we derive are always deduplicated.
         $size_by_path = [];
 
         if (is_file($remote_index)) {
@@ -2927,13 +2927,14 @@ class ImportClient
                     if ($entry === null) {
                         continue;
                     }
-                    $indexed_count++;
-                    $indexed_bytes += $entry["size"];
                     $size_by_path[$entry["path"]] = $entry["size"];
                 }
                 fclose($handle);
             }
         }
+
+        $indexed_count = count($size_by_path);
+        $indexed_bytes = array_sum($size_by_path);
 
         // Walk the download list to count pending files. The download
         // list only stores paths, so look up sizes from the map above.
