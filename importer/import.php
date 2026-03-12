@@ -6699,7 +6699,7 @@ class ImportClient
         try {
             $this->check_curl_error($ch);
         } catch (RuntimeException $e) {
-            curl_close($ch);
+            @curl_close($ch);
             return [
                 "ok" => false,
                 "http_code" => 0,
@@ -6713,7 +6713,7 @@ class ImportClient
         }
 
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        @curl_close($ch);
 
         if ($http_code !== 200) {
             return [
@@ -7019,7 +7019,7 @@ class ImportClient
             $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
             $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
         } finally {
-            curl_close($ch);
+            @curl_close($ch);
         }
 
         if (!isset($context->response_stats) || !is_array($context->response_stats)) {
