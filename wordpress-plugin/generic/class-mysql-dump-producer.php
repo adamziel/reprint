@@ -493,6 +493,31 @@ class MySQLDumpProducer
      * Emits SET statements that disable constraint checks and set a strict SQL mode.
      * These are restored in emit_sql_footer(). Without disabling FK checks, tables
      * that reference each other would need to be imported in dependency order.
+     *
+     * The SQL_MODE explicitly omits NO_ZERO_DATE and NO_ZERO_IN_DATE. This is
+     * intentional: many WordPress databases contain zero dates like '0000-00-00'
+     * or '0000-00-00 00:00:00' (e.g. in wp_posts.post_date for drafts). The
+     * source server may have been running without those restrictions, and the
+     * dump must be importable regardless of the target server's default sql_mode.
+     *
+     * From the MySQL 8.0 Reference Manual (§5.1.11 "Server SQL Modes"):
+     *
+     *   NO_ZERO_DATE — [...] The server requires dates to have nonzero month
+     *   and day values. If NO_ZERO_DATE is enabled and strict mode is enabled,
+     *   '0000-00-00' is not permitted and inserts produce an error. [...]
+     *   If NO_ZERO_DATE is disabled, '0000-00-00' is permitted and inserts
+     *   produce no warning.
+     *
+     *   NO_ZERO_IN_DATE — [...] Affects whether the server permits dates in
+     *   which the year part is nonzero but the month or day part is 0.
+     *   [...] If this mode is disabled, dates with zero parts are permitted
+     *   and inserts produce no warning.
+     *
+     * By omitting both flags while keeping STRICT_TRANS_TABLES, the dump
+     * preserves MySQL's permissive behavior toward zero dates during import.
+     *
+     * @see https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sqlmode_no_zero_date
+     * @see https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sqlmode_no_zero_in_date
      */
     private function emit_sql_header()
     {

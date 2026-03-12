@@ -254,9 +254,29 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
     // Date/time extremes
     // ──────────────────────────────────────────────────
 
+    /**
+     * Zero dates ('0000-00-00', '0000-00-00 00:00:00') are valid MySQL values
+     * when the server's sql_mode does not include NO_ZERO_DATE. Many WordPress
+     * sites store them (e.g. wp_posts.post_date for auto-drafts). The dump must
+     * round-trip these faithfully.
+     *
+     * The dump header sets a sql_mode that omits NO_ZERO_DATE and
+     * NO_ZERO_IN_DATE, so zero dates are accepted during import even if
+     * the target server's default mode includes those restrictions (as
+     * MySQL 8.0+ does by default).
+     *
+     * From the MySQL 8.0 Reference Manual (§5.1.11 "Server SQL Modes"):
+     *
+     *   NO_ZERO_DATE: [...] If strict mode is not enabled, '0000-00-00' is
+     *   permitted and inserts produce no warning. If strict mode is enabled,
+     *   '0000-00-00' is not permitted and inserts produce an error, unless
+     *   IGNORE is given as well. [...]
+     *
+     * @see https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sqlmode_no_zero_date
+     */
     public function testZeroDatesAndTimestamps(): void
     {
-        // Allow zero dates for this test
+        // Allow zero dates on the source connection so we can INSERT test data.
         $this->pdo->exec("SET SESSION sql_mode = ''");
 
         $this->pdo->exec("CREATE TABLE t (id INT PRIMARY KEY, d DATE, dt DATETIME, ts TIMESTAMP NULL)");
@@ -265,9 +285,89 @@ class EdgeCasesTest extends MySQLDumpProducerTestBase
 
         $sql = $this->getDumpSQL();
 
+        // The import connection keeps the server's default sql_mode (which
+        // typically includes NO_ZERO_DATE on MySQL 8.0+). The dump's own
+        // SET SQL_MODE header ensures zero dates are accepted anyway.
         $importPdo = $this->executeDumpInNewDatabase($sql);
         $importPdo->exec("SET SESSION sql_mode = ''");
         $this->assertDatabasesEqual($this->pdo, $importPdo, ['t']);
+    }
+
+    /**
+     * Verify the dump's SET SQL_MODE header is sufficient for zero-date
+     * import — no extra sql_mode override should be needed on the target.
+     *
+     * This test deliberately leaves the import connection's sql_mode at its
+     * server default (which on MySQL 8.0 includes NO_ZERO_DATE and
+     * NO_ZERO_IN_DATE). The dump's own preamble must disable those
+     * restrictions for the duration of the import.
+     */
+    public function testZeroDatesImportWithoutManualSqlModeOverride(): void
+    {
+        $this->pdo->exec("SET SESSION sql_mode = ''");
+
+        $this->pdo->exec(
+            "CREATE TABLE t_zero (" .
+            "  id INT PRIMARY KEY," .
+            "  d DATE," .
+            "  dt DATETIME," .
+            "  ts TIMESTAMP NULL" .
+            ")"
+        );
+        $this->pdo->exec(
+            "INSERT INTO t_zero VALUES " .
+            "(1, '0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:00')," .
+            "(2, '9999-12-31', '9999-12-31 23:59:59', '2038-01-19 03:14:07')"
+        );
+
+        $sql = $this->getDumpSQL();
+
+        // Import WITHOUT touching sql_mode — the dump header handles it.
+        $importPdo = $this->executeDumpInNewDatabase($sql);
+
+        // For comparison we need to allow reading zero dates on both sides.
+        $this->pdo->exec("SET SESSION sql_mode = ''");
+        $importPdo->exec("SET SESSION sql_mode = ''");
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ['t_zero']);
+    }
+
+    /**
+     * Partial zero dates like '2024-00-01' (zero month) or '2024-01-00'
+     * (zero day) are controlled by NO_ZERO_IN_DATE, which the dump header
+     * also omits.
+     *
+     * From the MySQL 8.0 Reference Manual (§5.1.11 "Server SQL Modes"):
+     *
+     *   NO_ZERO_IN_DATE: [...] affects whether the server permits dates
+     *   in which the year part is nonzero but the month or day part is 0.
+     *   [...] If this mode and strict mode are both enabled, '2024-00-01'
+     *   and '2024-01-00' are not permitted and inserts produce an error.
+     *
+     * @see https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sqlmode_no_zero_in_date
+     */
+    public function testPartialZeroDatesRoundTrip(): void
+    {
+        $this->pdo->exec("SET SESSION sql_mode = ''");
+
+        $this->pdo->exec(
+            "CREATE TABLE t_partial_zero (" .
+            "  id INT PRIMARY KEY," .
+            "  d DATE," .
+            "  dt DATETIME" .
+            ")"
+        );
+        $this->pdo->exec(
+            "INSERT INTO t_partial_zero VALUES " .
+            "(1, '2024-00-00', '2024-00-00 00:00:00')," .
+            "(2, '2024-01-00', '2024-01-00 12:30:00')," .
+            "(3, '2024-00-15', '2024-00-15 08:00:00')"
+        );
+
+        $sql = $this->getDumpSQL();
+
+        $importPdo = $this->executeDumpInNewDatabase($sql);
+        $importPdo->exec("SET SESSION sql_mode = ''");
+        $this->assertDatabasesEqual($this->pdo, $importPdo, ['t_partial_zero']);
     }
 
     // ──────────────────────────────────────────────────
