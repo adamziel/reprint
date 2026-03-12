@@ -3268,6 +3268,16 @@ class ImportClient
         $save_every = 100;
         $stmts_since_save = 0;
 
+        // Load pre-computed statement count from db-sync for progress reporting
+        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
+        $statements_total = null;
+        if (file_exists($sql_stats_file)) {
+            $stats = json_decode(file_get_contents($sql_stats_file), true);
+            if (is_array($stats) && isset($stats["statements_total"])) {
+                $statements_total = (int) $stats["statements_total"];
+            }
+        }
+
         // If resuming, seek to saved position. bytes_read is the byte offset
         // right after the last successfully executed query (tracked via
         // query_stream->get_bytes_consumed()), so no statement skipping is
@@ -3283,10 +3293,14 @@ class ImportClient
             $stmts_to_skip = $statements_executed;
         }
 
-        $this->output_progress([
+        $starting_progress = [
             "status" => "starting",
             "phase" => "db-apply",
-        ]);
+        ];
+        if ($statements_total !== null) {
+            $starting_progress["statements_total"] = $statements_total;
+        }
+        $this->output_progress($starting_progress);
 
         try {
             $chunk_size = 64 * 1024; // 64KB read chunks
@@ -3360,13 +3374,27 @@ class ImportClient
                         $pct = $sql_file_size > 0
                             ? round(100 * $total_bytes_read / $sql_file_size, 1)
                             : 0;
-                        $this->output_progress([
+                        $progress = [
                             "phase" => "db-apply",
                             "statements_executed" => $statements_executed,
                             "bytes_read" => $total_bytes_read,
                             "bytes_total" => $sql_file_size,
                             "pct" => $pct,
-                        ]);
+                        ];
+                        if ($statements_total !== null) {
+                            $progress["statements_total"] = $statements_total;
+                        }
+                        $this->output_progress($progress);
+
+                        if ($statements_total !== null) {
+                            $this->show_progress_line(
+                                sprintf("db-apply: %d / %d statements (%.1f%%)", $statements_executed, $statements_total, $pct),
+                            );
+                        } else {
+                            $this->show_progress_line(
+                                sprintf("db-apply: %d statements (%.1f%%)", $statements_executed, $pct),
+                            );
+                        }
                     }
                 }
             }
@@ -3420,6 +3448,15 @@ class ImportClient
                     ),
                     true,
                 );
+                $partial_progress = [
+                    "status" => "partial",
+                    "phase" => "db-apply",
+                    "statements_executed" => $statements_executed,
+                ];
+                if ($statements_total !== null) {
+                    $partial_progress["statements_total"] = $statements_total;
+                }
+                $this->output_progress($partial_progress, true);
             } else {
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
@@ -3435,7 +3472,19 @@ class ImportClient
                     true,
                 );
 
+                $complete_progress = [
+                    "status" => "complete",
+                    "phase" => "db-apply",
+                    "statements_executed" => $statements_executed,
+                ];
+                if ($statements_total !== null) {
+                    $complete_progress["statements_total"] = $statements_total;
+                }
+                $this->output_progress($complete_progress, true);
+
                 if ($this->is_tty && !$this->verbose_mode) {
+                    // Clear the progress line before printing the final message
+                    fwrite($this->progress_fd, "\r\033[K");
                     echo "db-apply complete ({$statements_executed} statements executed)\n";
                 }
             }
@@ -4826,7 +4875,7 @@ class ImportClient
             }
         }
 
-        // Domain discovery: scan SQL for URLs during download
+        // Domain discovery and statement counting: scan SQL for URLs during download
         $query_stream = class_exists('WP_MySQL_Naive_Query_Stream')
             ? new \WP_MySQL_Naive_Query_Stream()
             : null;
@@ -4834,6 +4883,8 @@ class ImportClient
             ? new \DomainCollector()
             : null;
         $domains_file = $this->state_dir . "/.import-domains.json";
+        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
+        $sql_statements_counted = (int) ($this->state["sql_statements_counted"] ?? 0);
 
         // Auto-detect the source site domain from the export URL so it
         // always appears in .import-domains.json even if the SQL dump
@@ -4888,7 +4939,8 @@ class ImportClient
                     $context,
                     $query_stream,
                     $domain_collector,
-                    $domains_file
+                    $domains_file,
+                    &$sql_statements_counted
                 ) {
                     // Check if shutdown was requested
                     if ($this->shutdown_requested) {
@@ -4916,6 +4968,7 @@ class ImportClient
                         }
                         $this->state["cursor"] = $cursor;
                         $this->state["sql_bytes"] = $sql_bytes_written;
+                        $this->state["sql_statements_counted"] = $sql_statements_counted;
                         $this->save_state($this->state);
                         $this->chunks_since_save = 0;
 
@@ -4998,12 +5051,13 @@ class ImportClient
                                 break;
                         }
 
-                        // Feed data to query stream for domain discovery
+                        // Feed data to query stream for domain discovery and statement counting
                         if ($query_stream && $domain_collector) {
                             $query_stream->append_sql($data);
                             $this->drain_query_stream_for_domains(
                                 $query_stream,
                                 $domain_collector,
+                                $sql_statements_counted,
                             );
                         }
                     } elseif ($chunk_type === "progress") {
@@ -5075,6 +5129,7 @@ class ImportClient
                 $this->drain_query_stream_for_domains(
                     $query_stream,
                     $domain_collector,
+                    $sql_statements_counted,
                 );
 
                 // Save discovered domains
@@ -5088,6 +5143,21 @@ class ImportClient
                         sprintf(
                             "DOMAINS DISCOVERED | %d unique domains saved to .import-domains.json",
                             count($domains),
+                        ),
+                        false,
+                    );
+                }
+
+                // Save statement count for db-apply progress reporting
+                if ($complete && $sql_statements_counted > 0) {
+                    file_put_contents(
+                        $sql_stats_file,
+                        json_encode(["statements_total" => $sql_statements_counted]) . "\n",
+                    );
+                    $this->audit_log(
+                        sprintf(
+                            "SQL STATS | %d statements counted during download",
+                            $sql_statements_counted,
                         ),
                         false,
                     );
@@ -5127,10 +5197,14 @@ class ImportClient
      */
     private function drain_query_stream_for_domains(
         \WP_MySQL_Naive_Query_Stream $query_stream,
-        \DomainCollector $domain_collector
+        \DomainCollector $domain_collector,
+        ?int &$statements_counted = null
     ) {
         while ($query_stream->next_query()) {
             $query = $query_stream->get_query();
+            if ($statements_counted !== null) {
+                $statements_counted++;
+            }
             // Only scan INSERT statements (they contain data values).
             if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
                 continue;
