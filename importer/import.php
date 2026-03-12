@@ -5136,7 +5136,7 @@ class ImportClient
                 }
 
                 // Save statement count for db-apply progress reporting
-                if ($complete && $sql_statements_counted > 0) {
+                if ($sql_statements_counted > 0) {
                     file_put_contents(
                         $sql_stats_file,
                         json_encode(["statements_total" => $sql_statements_counted]) . "\n",
