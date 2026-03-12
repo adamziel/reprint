@@ -3293,14 +3293,11 @@ class ImportClient
             $stmts_to_skip = $statements_executed;
         }
 
-        $starting_progress = [
+        $this->output_progress([
             "status" => "starting",
             "phase" => "db-apply",
-        ];
-        if ($statements_total !== null) {
-            $starting_progress["statements_total"] = $statements_total;
-        }
-        $this->output_progress($starting_progress);
+            "statements_total" => $statements_total,
+        ]);
 
         try {
             $chunk_size = 64 * 1024; // 64KB read chunks
