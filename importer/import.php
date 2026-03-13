@@ -7796,6 +7796,24 @@ class PreserveLocalSkipException extends RuntimeException {}
 // CLI Entry Point
 // ============================================================================
 
+// Returns the importer version string. Inside the phar, reads the baked-in
+// VERSION file. In development, falls back to `git describe`.
+function get_importer_version(): string {
+    // When running from the phar, the VERSION file is baked in at build time.
+    $version_file = __DIR__ . '/VERSION';
+    if (file_exists($version_file)) {
+        return trim(file_get_contents($version_file));
+    }
+
+    // Development fallback: derive from git.
+    $tag = trim(shell_exec('git describe --exact-match --tags HEAD 2>/dev/null') ?: '');
+    if ($tag !== '') {
+        return $tag;
+    }
+    $latest = trim(shell_exec("git tag -l 'v*' --sort=-v:refname 2>/dev/null | head -1") ?: '');
+    return ($latest !== '' ? $latest : 'v0.0.0') . '-trunk';
+}
+
 // Only run CLI logic if this file is executed directly (not included/required).
 // IMPORTER_PHAR_ENTRY is defined by the phar stub so the guard also passes
 // when running as `php importer.phar`.
@@ -7804,6 +7822,12 @@ if (
     isset($argv) &&
     (realpath($argv[0] ?? "") === __FILE__ || defined('IMPORTER_PHAR_ENTRY'))
 ) {
+    // Handle --version before anything else.
+    if (isset($argv[1]) && in_array($argv[1], ["--version", "-V"])) {
+        echo get_importer_version() . "\n";
+        exit(0);
+    }
+
     // Per-command help definitions. Each command has a short description
     // shown in the main help, and a detailed help block shown when you
     // run `php import.php <command> <url> <local-path> --help`.
@@ -7973,6 +7997,8 @@ if (
 
     // Show main help when invoked with no arguments or just --help
     if ($argc < 2 || (isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]))) {
+        echo "Berlin " . get_importer_version() . "\n";
+        echo "\n";
         echo "Usage: php import.php <command> <remote-url> --state-dir=DIR --docroot=DIR [options]\n";
         echo "\n";
         echo "Commands:\n";
@@ -7993,6 +8019,7 @@ if (
         echo "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n";
         echo "  --on-docroot-nonempty=MODE\n";
         echo "                       What to do when docroot is non-empty (error|preserve-local)\n";
+        echo "  --version, -V        Print version and exit\n";
         echo "  --verbose, -v        Show detailed request/response logs\n";
         echo "  --no-adaptive        Disable adaptive request tuning\n";
         echo "  --step=N             Current pipeline step (1-indexed, for status file)\n";
