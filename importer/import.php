@@ -7997,7 +7997,7 @@ if (
 
     // Show main help when invoked with no arguments or just --help
     if ($argc < 2 || (isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]))) {
-        echo "Berlin " . get_importer_version() . "\n";
+        echo "Version " . get_importer_version() . "\n";
         echo "\n";
         echo "Usage: php import.php <command> <remote-url> --state-dir=DIR --docroot=DIR [options]\n";
         echo "\n";
