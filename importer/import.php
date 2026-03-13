@@ -1286,7 +1286,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
+                "Command is required. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flatten-docroot",
             );
         }
 
@@ -1301,10 +1301,11 @@ class ImportClient
                 "files-stats",
                 "preflight",
                 "preflight-assert",
+                "flatten-docroot",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert",
+                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flatten-docroot",
             );
         }
 
@@ -1436,6 +1437,10 @@ class ImportClient
         }
         if ($command === "files-stats") {
             $this->run_files_stats();
+            return;
+        }
+        if ($command === "flatten-docroot") {
+            $this->run_flatten_docroot($options);
             return;
         }
         if ($command === "db-apply") {
@@ -1710,6 +1715,13 @@ class ImportClient
             $this->state["remote_protocol_min_version"] = (int) $payload["protocol_min_version"];
         }
 
+        // Detect webhost environment from preflight data
+        $detected_webhost = $this->detect_webhost($payload);
+        if ($detected_webhost !== null) {
+            $this->state["webhost"] = $detected_webhost;
+            $this->audit_log("WEBHOST DETECTED | {$detected_webhost}", true);
+        }
+
         $this->save_state($this->state);
 
         $this->audit_log(
@@ -1747,6 +1759,74 @@ class ImportClient
                 );
             }
         }
+    }
+
+    /**
+     * Detect the webhost environment from preflight data.
+     *
+     * - SiteGround: has plugins prefixed with "sg-" (e.g. sg-cachepress, sg-security)
+     * - WP Cloud: has a __wp__ symlink in the document root
+     *
+     * @param array|null $preflight_data The preflight response payload
+     * @return string|null "siteground", "wpcloud", or null if unknown
+     */
+    private function detect_webhost(?array $preflight_data): ?string
+    {
+        if (!is_array($preflight_data)) {
+            return null;
+        }
+
+        // Check for SiteGround: look for plugins prefixed with "sg-"
+        $roots = $preflight_data["wp_content"]["roots"] ?? [];
+        $sg_count = 0;
+        foreach ($roots as $root) {
+            $plugins = $root["plugins"] ?? [];
+            foreach ($plugins as $plugin) {
+                $name = $plugin["name"] ?? "";
+                if (strpos($name, "sg-") === 0) {
+                    $sg_count++;
+                }
+            }
+        }
+        if ($sg_count >= 2) {
+            return "siteground";
+        }
+
+        // Check for WP Cloud: look for __wp__ in the filesystem directories
+        // WP Cloud sites have a __wp__ symlink in the document root pointing
+        // to the WordPress core installation.
+        $doc_root = $preflight_data["runtime"]["document_root"] ?? null;
+        if (is_string($doc_root) && $doc_root !== "") {
+            $wp_dir = rtrim($doc_root, "/") . "/__wp__";
+            // Check if __wp__ appears in the filesystem directory checks
+            $dir_checks = $preflight_data["filesystem"]["directories"] ?? [];
+            foreach ($dir_checks as $check) {
+                $path = $check["path"] ?? "";
+                if ($path === $wp_dir && ($check["exists"] ?? false)) {
+                    return "wpcloud";
+                }
+            }
+        }
+
+        // Also check wp_detect roots: WP Cloud typically has WordPress
+        // detected at __wp__ inside the document root
+        $wp_roots = $preflight_data["wp_detect"]["roots"] ?? [];
+        if (is_string($doc_root) && $doc_root !== "") {
+            $wp_subdir = rtrim($doc_root, "/") . "/__wp__";
+            foreach ($wp_roots as $root) {
+                $path = $root["path"] ?? "";
+                if ($path === $wp_subdir) {
+                    return "wpcloud";
+                }
+            }
+        }
+
+        // Fallback: check the local docroot for a __wp__ symlink
+        if (is_link($this->docroot . "/__wp__")) {
+            return "wpcloud";
+        }
+
+        return null;
     }
 
     /**
@@ -2983,6 +3063,173 @@ class ImportClient
                 "bytes" => $pending_bytes,
             ],
         ], JSON_PRETTY_PRINT) . "\n";
+    }
+
+    /**
+     * Command: flatten-docroot
+     *
+     * Creates a directory at the specified --flatten-to path that mirrors
+     * a vanilla WordPress installation layout by symlinking entries from
+     * the import docroot. This is useful when the source site uses a
+     * non-standard layout (e.g. WP Cloud with __wp__) and the target
+     * needs a conventional wp-admin/, wp-includes/, wp-load.php structure.
+     *
+     * The command is idempotent: re-running refreshes all symlinks.
+     * If a path that should be a symlink is a regular file/directory,
+     * the command stops with an error unless --force is specified.
+     */
+    private function run_flatten_docroot(array $options): void
+    {
+        $flatten_to = $options["flatten_to"] ?? null;
+        if (empty($flatten_to)) {
+            throw new InvalidArgumentException(
+                "flatten-docroot requires --flatten-to=PATH",
+            );
+        }
+
+        $flatten_to = rtrim($flatten_to, "/");
+        $force = $options["force"] ?? false;
+
+        // Ensure the docroot exists
+        if (!is_dir($this->docroot)) {
+            throw new RuntimeException(
+                "Docroot does not exist: {$this->docroot}",
+            );
+        }
+
+        // Create the target directory if it doesn't exist
+        if (!is_dir($flatten_to)) {
+            if (!mkdir($flatten_to, 0755, true)) {
+                throw new RuntimeException(
+                    "Failed to create flatten-to directory: {$flatten_to}",
+                );
+            }
+            $this->audit_log("FLATTEN-DOCROOT | Created directory: {$flatten_to}");
+        }
+
+        // Enumerate all top-level entries in the docroot
+        $entries = @scandir($this->docroot);
+        if ($entries === false) {
+            throw new RuntimeException(
+                "Failed to scan docroot: {$this->docroot}",
+            );
+        }
+
+        $created = 0;
+        $refreshed = 0;
+        $forced = 0;
+
+        foreach ($entries as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+
+            $source = $this->docroot . "/" . $entry;
+            $target = $flatten_to . "/" . $entry;
+
+            // If the target is already a symlink, remove it and recreate
+            // (refresh) to ensure it points to the right place.
+            if (is_link($target)) {
+                $current_link_target = readlink($target);
+                if ($current_link_target === $source) {
+                    // Already correct — still count as refreshed
+                    $refreshed++;
+                    continue;
+                }
+                // Points elsewhere — remove and recreate
+                unlink($target);
+                $this->audit_log(
+                    "FLATTEN-DOCROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
+                );
+                if (!symlink($source, $target)) {
+                    throw new RuntimeException(
+                        "Failed to create symlink: {$target} -> {$source}",
+                    );
+                }
+                $refreshed++;
+                continue;
+            }
+
+            // If something exists at the target path that is not a symlink,
+            // this is a conflict.
+            if (file_exists($target)) {
+                if (!$force) {
+                    throw new RuntimeException(
+                        "Cannot create symlink at {$target}: a non-symlink " .
+                        (is_dir($target) ? "directory" : "file") .
+                        " already exists. Use --force to remove it and replace with a symlink.",
+                    );
+                }
+
+                // --force: remove the conflicting entry and replace with symlink
+                $type = is_dir($target) ? "directory" : "file";
+                $this->audit_log(
+                    "FLATTEN-DOCROOT FORCE | Removing conflicting {$type}: {$target}",
+                    true,
+                );
+
+                if (is_dir($target) && !is_link($target)) {
+                    $this->remove_directory_recursive($target);
+                } else {
+                    unlink($target);
+                }
+                $forced++;
+            }
+
+            // Create the symlink
+            if (!symlink($source, $target)) {
+                throw new RuntimeException(
+                    "Failed to create symlink: {$target} -> {$source}",
+                );
+            }
+            $this->audit_log(
+                "FLATTEN-DOCROOT | Created symlink: {$target} -> {$source}",
+            );
+            $created++;
+        }
+
+        $this->audit_log(
+            sprintf(
+                "FLATTEN-DOCROOT | Complete: %d created, %d refreshed, %d force-replaced",
+                $created,
+                $refreshed,
+                $forced,
+            ),
+            true,
+        );
+
+        $result = [
+            "status" => "complete",
+            "flatten_to" => $flatten_to,
+            "docroot" => $this->docroot,
+            "created" => $created,
+            "refreshed" => $refreshed,
+            "force_replaced" => $forced,
+        ];
+        fwrite($this->progress_fd, json_encode($result) . "\n");
+    }
+
+    /**
+     * Recursively remove a directory and all its contents.
+     */
+    private function remove_directory_recursive(string $dir): void
+    {
+        $entries = @scandir($dir);
+        if ($entries === false) {
+            throw new RuntimeException("Failed to scan directory for removal: {$dir}");
+        }
+        foreach ($entries as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $path = $dir . "/" . $entry;
+            if (is_dir($path) && !is_link($path)) {
+                $this->remove_directory_recursive($path);
+            } else {
+                unlink($path);
+            }
+        }
+        rmdir($dir);
     }
 
     /**
@@ -7182,12 +7429,14 @@ class ImportClient
     {
         $preflight = $this->state["preflight"] ?? null;
         $version = $this->state["version"] ?? null;
+        $webhost = $this->state["webhost"] ?? null;
         $follow = $this->state["follow_symlinks"] ?? false;
         $nonempty = $this->state["docroot_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
         $this->state["version"] = $version;
+        $this->state["webhost"] = $webhost;
         $this->state["follow_symlinks"] = $follow;
         $this->state["docroot_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
@@ -7204,6 +7453,7 @@ class ImportClient
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,
             "version" => null,
+            "webhost" => null,
             "follow_symlinks" => true,
             "docroot_nonempty_behavior" => "error",
             "max_allowed_packet" => null,
@@ -8013,6 +8263,28 @@ if (
                 "Options:\n" .
                 "  --secret=TOKEN   HMAC shared secret for export API authentication\n",
         ],
+        "flatten-docroot" => [
+            "short" => "Create a vanilla WordPress directory layout using symlinks",
+            "detail" =>
+                "Creates a directory at --flatten-to that mirrors the standard\n" .
+                "WordPress directory structure (wp-admin/, wp-includes/, wp-content/,\n" .
+                "wp-load.php, etc.) by symlinking each entry from the import docroot.\n" .
+                "\n" .
+                "Useful when the source site uses a non-standard layout (e.g. WP Cloud\n" .
+                "with __wp__ symlinks) and the target needs conventional paths.\n" .
+                "\n" .
+                "The command is idempotent: re-running refreshes all symlinks.\n" .
+                "If a path that should be a symlink is a regular file or directory,\n" .
+                "the command stops with an error unless --force is specified.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --flatten-to=PATH  Target directory for the flattened layout (required)\n" .
+                "  --force            Remove conflicting non-symlink files and replace\n" .
+                "                     with symlinks (logged to audit log)\n" .
+                "  --verbose, -v      Show detailed operation logs\n" .
+                "\n" .
+                "The <remote-url> parameter is kept for CLI consistency but ignored.\n",
+        ],
     ];
 
     // Show main help when invoked with no arguments or just --help
@@ -8325,6 +8597,10 @@ if (
             }
             $options["new_site_url"] = $argv[$i + 1];
             $i += 1;
+        } elseif (strpos($argv[$i], "--flatten-to=") === 0) {
+            $options["flatten_to"] = substr($argv[$i], strlen("--flatten-to="));
+        } elseif ($argv[$i] === "--force") {
+            $options["force"] = true;
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
