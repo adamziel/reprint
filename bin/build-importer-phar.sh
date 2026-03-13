@@ -44,9 +44,24 @@ if ! [ -f "$BOX_PHAR" ]; then
     chmod +x "$BOX_PHAR"
 fi
 
+# ── Compute version ──────────────────────────────────────────────
+#
+# Tagged commits  → "v0.1.8"
+# Trunk commits   → "v0.1.8-trunk"  (latest tag + "-trunk")
+#
+cd "$PROJECT_ROOT"
+
+if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+    VERSION=$(git describe --exact-match --tags HEAD)
+else
+    LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+    VERSION="${LATEST_TAG:-v0.0.0}-trunk"
+fi
+echo "$VERSION" > importer/VERSION
+echo "Version: $VERSION"
+
 # ── Build ─────────────────────────────────────────────────────────
 
-cd "$PROJECT_ROOT"
 rm -f importer.phar
 
 php -d phar.readonly=0 "$BOX_PHAR" compile
