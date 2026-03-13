@@ -1,0 +1,4 @@
+.distignore
+.gitignore
+secret.php
+README.md

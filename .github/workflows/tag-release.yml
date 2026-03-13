@@ -78,8 +78,19 @@ jobs:
             exit 1
           fi
 
-      - name: Create and push tag
+      - name: Bump version in plugin files
         run: |
-          git tag "v${{ steps.version.outputs.value }}"
-          git push origin "v${{ steps.version.outputs.value }}"
-          echo "Tagged and pushed v${{ steps.version.outputs.value }}"
+          VERSION="${{ steps.version.outputs.value }}"
+          perl -i -pe "s/Version:(\s+)[0-9.]+/Version:\${1}$VERSION/" wordpress-plugin/index.php
+          perl -i -pe "s/define\('SITE_EXPORT_VERSION', '[0-9.]+'\)/define('SITE_EXPORT_VERSION', '$VERSION')/" wordpress-plugin/index.php
+          perl -i -pe "s/Stable tag:(\s+)[0-9.]+/Stable tag:\${1}$VERSION/" wordpress-plugin/readme.txt
+
+      - name: Commit version bump and tag
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -a -m "Bump version to $VERSION"
+          git tag "v$VERSION"
+          git push origin HEAD:${{ github.ref_name }} --follow-tags
+          echo "Committed version bump and tagged v$VERSION"

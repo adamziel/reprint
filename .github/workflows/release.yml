@@ -29,7 +29,7 @@ jobs:
         run: ./bin/build-importer-phar.sh
 
       - name: Package wordpress-plugin.zip
-        run: cd wordpress-plugin && zip -r ../wordpress-plugin.zip . -x '*/secret.php'
+        run: cd wordpress-plugin && zip -r ../wordpress-plugin.zip . -x '*/secret.php' -x '*/.gitignore'
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -38,3 +38,25 @@ jobs:
             importer.phar
             wordpress-plugin.zip
           generate_release_notes: true
+
+  deploy-to-wporg:
+    name: Deploy plugin to WordPress.org
+    runs-on: ubuntu-latest
+    environment: WordPress.org Plugin
+    needs: release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: WordPress Plugin Deploy
+        uses: 10up/action-wordpress-plugin-deploy@stable
+        env:
+          SVN_USERNAME: ${{ secrets.WPORG_SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.WPORG_SVN_PASSWORD }}
+          SLUG: site-export
+          VERSION: ${{ steps.version.outputs.value }}
+          BUILD_DIR: wordpress-plugin
