@@ -3055,7 +3055,7 @@ class ImportClient
         );
 
         try {
-            return new WP_PDO_MySQL_On_SQLite($dsn, null, null, [
+            $pdo = new WP_PDO_MySQL_On_SQLite($dsn, null, null, [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             ]);
@@ -3066,6 +3066,26 @@ class ImportClient
                 $e,
             );
         }
+
+        // Register MySQL-compatible FROM_BASE64() and TO_BASE64() functions
+        // on the underlying SQLite connection. The SQL dumps produced by
+        // MySQLDumpProducer encode all values as FROM_BASE64('...'), so
+        // SQLite needs these functions to decode them during import.
+        $sqlite_pdo = $pdo->get_connection()->get_pdo();
+        $sqlite_pdo->sqliteCreateFunction('FROM_BASE64', function ($data) {
+            if ($data === null) {
+                return null;
+            }
+            return base64_decode($data);
+        }, 1);
+        $sqlite_pdo->sqliteCreateFunction('TO_BASE64', function ($data) {
+            if ($data === null) {
+                return null;
+            }
+            return base64_encode($data);
+        }, 1);
+
+        return $pdo;
     }
 
     private function create_target_db_apply_connection(array $options): array
