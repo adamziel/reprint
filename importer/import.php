@@ -7625,10 +7625,11 @@ class ImportClient
     }
 
     /**
-     * Write a flat status file for external consumers (e.g. web UI polling).
+     * Write a consolidated status file for external consumers (e.g. web UI polling).
      *
-     * Derives a simple JSON object from the current state and pipeline
-     * position. Written atomically via temp file + rename so readers
+     * Includes both file sync and SQL import progress in a single file,
+     * derived from the current state, instance properties, and on-disk
+     * artifacts. Written atomically via temp file + rename so readers
      * never see a partial write.
      */
     private function write_status_file(?string $error = null): void
@@ -7648,6 +7649,8 @@ class ImportClient
             "phase" => $phase,
             "error" => $error,
             "ts" => microtime(true),
+            "files" => $this->get_files_progress($state),
+            "db" => $this->get_db_progress($state),
         ];
 
         $json = json_encode($payload, JSON_PRETTY_PRINT);
@@ -7658,6 +7661,120 @@ class ImportClient
         if (file_put_contents($tmp, $json) !== false) {
             rename($tmp, $this->status_file);
         }
+    }
+
+    /**
+     * Gather file sync progress from state and on-disk artifacts.
+     *
+     * Returns null when there is no file sync data to report.
+     */
+    private function get_files_progress(array $state): ?array
+    {
+        $command = $state["command"] ?? null;
+        if ($command !== "files-sync" && $command !== "files-index") {
+            // No active file operation — but we may still have index data
+            // from a prior completed sync. Only report if there is an index.
+            if (!is_file($this->index_file) || filesize($this->index_file) === 0) {
+                return null;
+            }
+            return [
+                "files_indexed" => $this->index_count(),
+            ];
+        }
+
+        $progress = [
+            "stage" => $state["stage"] ?? null,
+            "files_indexed" => $this->index_count(),
+            "files_imported" => $this->files_imported,
+        ];
+
+        // Remote index line count — gives total files on the remote
+        if (is_file($this->remote_index_file) && filesize($this->remote_index_file) > 0) {
+            $progress["remote_files"] = $this->line_count($this->remote_index_file);
+        }
+
+        // Download list line count — files pending download
+        if (is_file($this->download_list_file) && filesize($this->download_list_file) > 0) {
+            $progress["files_to_download"] = $this->line_count($this->download_list_file);
+        }
+
+        // Current file being downloaded (crash recovery field)
+        if (!empty($state["current_file"])) {
+            $progress["current_file"] = $state["current_file"];
+            $progress["current_file_bytes"] = $state["current_file_bytes"] ?? 0;
+        }
+
+        return $progress;
+    }
+
+    /**
+     * Gather SQL/database import progress from state and on-disk artifacts.
+     *
+     * Returns null when there is no database data to report.
+     */
+    private function get_db_progress(array $state): ?array
+    {
+        $command = $state["command"] ?? null;
+        $has_db_index = !empty($state["db_index"]["tables"]);
+        $has_apply = !empty($state["apply"]["statements_executed"]);
+        $sql_file = $this->state_dir . "/db.sql";
+        $has_sql_file = is_file($sql_file) && filesize($sql_file) > 0;
+
+        if ($command !== "db-sync" && $command !== "db-index" && $command !== "db-apply"
+            && !$has_db_index && !$has_apply && !$has_sql_file) {
+            return null;
+        }
+
+        $progress = [];
+
+        // db-index progress: tables and estimated rows
+        if ($has_db_index) {
+            $db_index = $state["db_index"];
+            $progress["tables"] = (int) ($db_index["tables"] ?? 0);
+            $progress["rows_estimated"] = (int) ($db_index["rows_estimated"] ?? 0);
+            $progress["index_bytes"] = (int) ($db_index["bytes"] ?? 0);
+        }
+
+        // SQL dump file size
+        if ($has_sql_file) {
+            $progress["sql_bytes_downloaded"] = filesize($sql_file);
+        }
+        if (isset($state["sql_bytes"])) {
+            $progress["sql_bytes_written"] = (int) $state["sql_bytes"];
+        }
+
+        // db-apply progress: statements executed and bytes consumed
+        if ($has_apply) {
+            $apply = $state["apply"];
+            $progress["statements_executed"] = (int) ($apply["statements_executed"] ?? 0);
+            $progress["apply_bytes_read"] = (int) ($apply["bytes_read"] ?? 0);
+            if ($has_sql_file) {
+                $sql_size = filesize($sql_file);
+                $bytes_read = (int) ($apply["bytes_read"] ?? 0);
+                $progress["apply_pct"] = $sql_size > 0
+                    ? round(100 * $bytes_read / $sql_size, 1)
+                    : 0;
+            }
+        }
+
+        return $progress;
+    }
+
+    /**
+     * Count lines in a file without loading it into memory.
+     */
+    private function line_count(string $path): int
+    {
+        $handle = @fopen($path, "r");
+        if (!$handle) {
+            return 0;
+        }
+        $count = 0;
+        while (fgets($handle) !== false) {
+            $count++;
+        }
+        fclose($handle);
+        return $count;
     }
 
     /**
