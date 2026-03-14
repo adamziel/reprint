@@ -1625,10 +1625,34 @@ function endpoint_preflight(array $config): array
                         $db["wp"]["theme_template"] = get_option("template");
                         $db["wp"]["siteurl"] = get_option("siteurl");
                         $db["wp"]["home"] = get_option("home");
+                        // Resolve wp-admin and wp-includes paths.
+                        // These are always ABSPATH/wp-admin and ABSPATH/WPINC
+                        // by WordPress convention, but on hosts like WP Cloud
+                        // they may be symlinks (e.g. __wp__/wp-admin -> /wordpress/wp-admin).
+                        // Use realpath() to resolve to the physical location so
+                        // the importer knows where the files actually live.
+                        $wp_admin_path = null;
+                        $wp_includes_path = null;
+                        if (defined("ABSPATH")) {
+                            $wp_admin_candidate = ABSPATH . "wp-admin";
+                            $wp_admin_real = realpath($wp_admin_candidate);
+                            if ($wp_admin_real !== false && is_dir($wp_admin_real)) {
+                                $wp_admin_path = $wp_admin_real;
+                            }
+                            $wpinc = defined("WPINC") ? WPINC : "wp-includes";
+                            $wp_includes_candidate = ABSPATH . $wpinc;
+                            $wp_includes_real = realpath($wp_includes_candidate);
+                            if ($wp_includes_real !== false && is_dir($wp_includes_real)) {
+                                $wp_includes_path = $wp_includes_real;
+                            }
+                        }
+
                         $paths_urls = [
                             "abspath" => defined("ABSPATH")
                                 ? rtrim(ABSPATH, "/")
                                 : null,
+                            "wp_admin_path" => $wp_admin_path,
+                            "wp_includes_path" => $wp_includes_path,
                             "content_dir" => defined("WP_CONTENT_DIR")
                                 ? rtrim(WP_CONTENT_DIR, "/")
                                 : null,

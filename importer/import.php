@@ -3109,6 +3109,8 @@ class ImportClient
         // Extract WordPress directory paths from preflight
         $paths_urls = $preflight["database"]["wp"]["paths_urls"] ?? null;
         $abspath = null;
+        $wp_admin_path = null;
+        $wp_includes_path = null;
         $content_dir = null;
         $plugins_dir = null;
         $mu_plugins_dir = null;
@@ -3116,6 +3118,8 @@ class ImportClient
 
         if (is_array($paths_urls)) {
             $abspath = $this->flatten_clean_path($paths_urls["abspath"] ?? null);
+            $wp_admin_path = $this->flatten_clean_path($paths_urls["wp_admin_path"] ?? null);
+            $wp_includes_path = $this->flatten_clean_path($paths_urls["wp_includes_path"] ?? null);
             $content_dir = $this->flatten_clean_path($paths_urls["content_dir"] ?? null);
             $plugins_dir = $this->flatten_clean_path($paths_urls["plugins_dir"] ?? null);
             $mu_plugins_dir = $this->flatten_clean_path($paths_urls["mu_plugins_dir"] ?? null);
@@ -3148,6 +3152,12 @@ class ImportClient
             );
         }
 
+        $local_wp_admin = $wp_admin_path !== null
+            ? $this->docroot . $wp_admin_path
+            : null;
+        $local_wp_includes = $wp_includes_path !== null
+            ? $this->docroot . $wp_includes_path
+            : null;
         $local_content_dir = $content_dir !== null
             ? $this->docroot . $content_dir
             : null;
@@ -3163,6 +3173,13 @@ class ImportClient
 
         // Determine which components are "detached" — located outside
         // their conventional parent directory on the source server.
+        // wp-admin and wp-includes are detached when their resolved path
+        // differs from the ABSPATH/wp-admin or ABSPATH/wp-includes path
+        // (e.g. WP Cloud where they live behind __wp__/).
+        $wp_admin_detached = $wp_admin_path !== null
+            && $wp_admin_path !== $abspath . "/wp-admin";
+        $wp_includes_detached = $wp_includes_path !== null
+            && $wp_includes_path !== $abspath . "/wp-includes";
         $content_detached = $content_dir !== null
             && strpos($content_dir, $abspath . "/") !== 0;
         $plugins_detached = $plugins_dir !== null
@@ -3195,10 +3212,12 @@ class ImportClient
 
         $this->audit_log(
             sprintf(
-                "FLATTEN-DOCROOT | abspath=%s content_dir=%s " .
-                    "content_detached=%s plugins_detached=%s " .
-                    "mu_plugins_detached=%s uploads_detached=%s",
+                "FLATTEN-DOCROOT | abspath=%s wp_admin=%s wp_includes=%s " .
+                    "content_dir=%s content_detached=%s " .
+                    "plugins_detached=%s mu_plugins_detached=%s uploads_detached=%s",
                 $abspath,
+                $wp_admin_path ?? "(from abspath)",
+                $wp_includes_path ?? "(from abspath)",
                 $content_dir ?? "(not set)",
                 $content_detached ? "yes" : "no",
                 $plugins_detached ? "yes" : "no",
@@ -3212,15 +3231,21 @@ class ImportClient
         $forced = 0;
 
         // Determine what to skip from ABSPATH enumeration.
-        // If content_dir is detached (or needs exploding), skip any
-        // wp-content entry from ABSPATH since we'll handle it separately.
+        // Components with known detached locations are handled separately.
         $skip_from_abspath = [];
         if ($content_detached || $need_exploded_content) {
             $skip_from_abspath["wp-content"] = true;
         }
+        if ($wp_admin_detached) {
+            $skip_from_abspath["wp-admin"] = true;
+        }
+        if ($wp_includes_detached) {
+            $skip_from_abspath["wp-includes"] = true;
+        }
 
         // Phase 1: Symlink all entries from ABSPATH into flatten-to.
-        // This covers wp-admin, wp-includes, wp-load.php, index.php, etc.
+        // This covers core files (index.php, wp-load.php, wp-config.php, etc.)
+        // and wp-admin/wp-includes when they're directly under ABSPATH.
         $entries = @scandir($local_abspath);
         if ($entries === false) {
             throw new RuntimeException(
@@ -3235,7 +3260,7 @@ class ImportClient
             if (isset($skip_from_abspath[$entry])) {
                 $this->audit_log(
                     "FLATTEN-DOCROOT | Skipping '{$entry}' from ABSPATH " .
-                        "(will be handled from detached location)",
+                        "(will be sourced from resolved location)",
                 );
                 continue;
             }
@@ -3245,6 +3270,29 @@ class ImportClient
             $this->flatten_place_symlink(
                 $source,
                 $target,
+                $force,
+                $created,
+                $refreshed,
+                $forced,
+            );
+        }
+
+        // Phase 1b: Symlink detached wp-admin and wp-includes from their
+        // resolved physical locations (e.g. /wordpress/wp-admin on WP Cloud).
+        if ($wp_admin_detached && $local_wp_admin !== null && is_dir($local_wp_admin)) {
+            $this->flatten_place_symlink(
+                $local_wp_admin,
+                $flatten_to . "/wp-admin",
+                $force,
+                $created,
+                $refreshed,
+                $forced,
+            );
+        }
+        if ($wp_includes_detached && $local_wp_includes !== null && is_dir($local_wp_includes)) {
+            $this->flatten_place_symlink(
+                $local_wp_includes,
+                $flatten_to . "/wp-includes",
                 $force,
                 $created,
                 $refreshed,
@@ -3369,6 +3417,8 @@ class ImportClient
             "flatten_to" => $flatten_to,
             "docroot" => $this->docroot,
             "abspath" => $abspath,
+            "wp_admin_path" => $wp_admin_path,
+            "wp_includes_path" => $wp_includes_path,
             "content_dir" => $content_dir,
             "content_detached" => $content_detached,
             "created" => $created,
