@@ -260,6 +260,193 @@ class ProfilingStructuredDataUrlRewriter
     }
 }
 
+// ─── Optimized StructuredDataUrlRewriter ──────────────────────────────────────
+
+/**
+ * Optimized version of StructuredDataUrlRewriter with three short-circuits:
+ *
+ * 1. Cache WPURL::parse() results in constructor (not per-leaf).
+ * 2. Skip values that contain no "http:" / "https:" — not even base64-encoded.
+ *    Pre-computes 7 patterns: the two raw protocols + 5 unique base64
+ *    alignment fragments. If none match → value can't contain a URL → skip.
+ * 3. For block_markup hint, downgrade to plain_text if no "<!--" present
+ *    (avoids the expensive HTML token walker for non-block content).
+ */
+class OptimizedStructuredDataUrlRewriter
+{
+    private array $url_mapping;
+
+    /** Pre-parsed URL mapping, computed once in the constructor. */
+    private array $parsed_url_mapping;
+    private string $base_url;
+
+    /**
+     * Fingerprint patterns: if none of these appear as a substring in a value,
+     * the value cannot contain an http: or https: URL (even base64-encoded).
+     * @var string[]
+     */
+    private array $url_fingerprints;
+
+    // Counters for profiling
+    public int $calls_total = 0;
+    public int $short_circuited = 0;
+    public int $block_markup_downgraded = 0;
+
+    public function __construct(array $url_mapping)
+    {
+        $this->url_mapping = $url_mapping;
+
+        // Cache parsed URL objects
+        $from_urls = array_keys($url_mapping);
+        $this->base_url = $from_urls[0];
+        $this->parsed_url_mapping = [];
+        foreach ($url_mapping as $from => $to) {
+            $this->parsed_url_mapping[] = [
+                'from_url' => WPURL::parse($from),
+                'to_url'   => WPURL::parse($to),
+            ];
+        }
+
+        // Pre-compute URL fingerprints: raw protocols + base64 fragments
+        $this->url_fingerprints = self::compute_url_fingerprints();
+    }
+
+    private static function compute_url_fingerprints(): array
+    {
+        $patterns = ['http:', 'https:'];
+        foreach (['http:', 'https:'] as $proto) {
+            for ($a = 0; $a < 3; $a++) {
+                $skip = $a > 0 ? (3 - $a) : 0;
+                if ($skip >= strlen($proto)) continue;
+                $remaining = strlen($proto) - $skip;
+                $full_groups = (int)($remaining / 3);
+                if ($full_groups === 0) continue;
+                $stable_bytes = substr($proto, $skip, $full_groups * 3);
+                $patterns[] = base64_encode($stable_bytes);
+            }
+        }
+        return array_values(array_unique($patterns));
+    }
+
+    /**
+     * Fast check: does this value possibly contain a URL (even base64-encoded)?
+     */
+    private function might_contain_url(string $value): bool
+    {
+        foreach ($this->url_fingerprints as $pattern) {
+            if (strpos($value, $pattern) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public function rewrite(string $value, ?string $content_type = null): string
+    {
+        $this->calls_total++;
+
+        if ($value === '') {
+            return $value;
+        }
+
+        if ($content_type === 'skip') {
+            return $value;
+        }
+
+        if ($content_type === null) {
+            $content_type = 'plain_text';
+        }
+
+        // Short-circuit: if no URL fingerprint matches, skip entirely
+        if (!$this->might_contain_url($value)) {
+            $this->short_circuited++;
+            return $value;
+        }
+
+        // Try PHP serialization
+        $p = new PhpSerializationProcessor($value);
+        if (!$p->is_malformed()) {
+            while ($p->next_value()) {
+                $orig = $p->get_value();
+                $rewritten = $this->rewrite($orig, $content_type);
+                if ($rewritten !== $orig) {
+                    $p->set_value($rewritten);
+                }
+            }
+            return $p->get_updated_serialization();
+        }
+
+        // Try JSON
+        $iter = new JsonStringIterator($value);
+        if (!$iter->is_malformed()) {
+            while ($iter->next_value()) {
+                $orig = $iter->get_value();
+                $rewritten = $this->rewrite($orig, $content_type);
+                if ($rewritten !== $orig) {
+                    $iter->set_value($rewritten);
+                }
+            }
+            return $iter->get_result();
+        }
+
+        // Try base64
+        $decoded = base64_decode($value, true);
+        if ($decoded !== false && $decoded !== '') {
+            // Only recurse if decoded content is valid UTF-8
+            if (mb_check_encoding($decoded, 'UTF-8')) {
+                $rewritten = $this->rewrite($decoded, $content_type);
+                if ($rewritten !== $decoded) {
+                    return base64_encode($rewritten);
+                }
+            }
+        }
+
+        // Leaf URL rewriting — use cached parsed URL mapping
+        if ($content_type === 'block_markup') {
+            // Downgrade to plain_text if no block comments present
+            if (strpos($value, '<!--') === false) {
+                $content_type = 'plain_text';
+                $this->block_markup_downgraded++;
+            }
+        }
+
+        if ($content_type === 'block_markup') {
+            $p2 = new BlockMarkupUrlProcessor($value, $this->base_url);
+            while ($p2->next_url()) {
+                $parsed_url = $p2->get_parsed_url();
+                foreach ($this->parsed_url_mapping as $mapping) {
+                    if (is_child_url_of($parsed_url, $mapping['from_url'])) {
+                        $p2->replace_base_url($mapping['to_url']);
+                        break;
+                    }
+                }
+            }
+            return $p2->get_updated_html();
+        } else {
+            $p2 = new URLInTextProcessor($value, $this->base_url);
+            while ($p2->next_url()) {
+                $parsed_url = $p2->get_parsed_url();
+                foreach ($this->parsed_url_mapping as $mapping) {
+                    if (is_child_url_of($parsed_url, $mapping['from_url'])) {
+                        $new_raw_url = WPURL::replace_base_url(
+                            $parsed_url,
+                            [
+                                'old_base_url' => $this->base_url,
+                                'new_base_url' => $mapping['to_url'],
+                                'raw_url'      => $p2->get_raw_url(),
+                                'is_relative'  => false,
+                            ]
+                        );
+                        $p2->set_raw_url($new_raw_url);
+                        break;
+                    }
+                }
+            }
+            return $p2->get_updated_text();
+        }
+    }
+}
+
 // ─── Main profiling ──────────────────────────────────────────────────────────
 
 echo "Extracting values from ~1MB SQL dump...\n";
@@ -420,7 +607,56 @@ printf("  3. WPURL::parse called per-leaf (could cache):     %s (%.1f%%)\n",
     fmt_t($repeated_wpurl_parse),
     $total_time > 0 ? 100 * $repeated_wpurl_parse / $total_time : 0);
 
-echo "\n";
+// ── Profile the OPTIMIZED rewriter ──
+echo "====================================================================\n";
+echo "  OPTIMIZED URL REWRITE PROFILE\n";
+echo "====================================================================\n";
+
+$opt_rewriter = new OptimizedStructuredDataUrlRewriter($URL_MAPPING);
+$opt_start = microtime(true);
+for ($i = 0; $i < $total_values; $i++) {
+    $opt_rewriter->rewrite($values[$i], $content_types[$i]);
+}
+$opt_time = microtime(true) - $opt_start;
+
+printf("  Total rewrite time:        %s\n", fmt_t($opt_time));
+printf("  Values processed:          %d\n", $opt_rewriter->calls_total);
+printf("  Short-circuited (no URL):  %d (%.1f%%)\n",
+    $opt_rewriter->short_circuited,
+    100 * $opt_rewriter->short_circuited / max(1, $opt_rewriter->calls_total));
+printf("  Block markup downgraded:   %d\n\n", $opt_rewriter->block_markup_downgraded);
+
+// ── Verify correctness ──
+echo "  CORRECTNESS CHECK:\n";
+echo "  " . str_repeat('─', 64) . "\n";
+// Compare using the profiling rewriter vs optimized
+$mismatches = 0;
+$orig_rw = new ProfilingStructuredDataUrlRewriter($URL_MAPPING);
+$opt_rw = new OptimizedStructuredDataUrlRewriter($URL_MAPPING);
+for ($i = 0; $i < min($total_values, 500); $i++) {
+    $orig_result = $orig_rw->rewrite($values[$i], $content_types[$i]);
+    $opt_result = $opt_rw->rewrite($values[$i], $content_types[$i]);
+    if ($orig_result !== $opt_result) {
+        $mismatches++;
+        if ($mismatches <= 3) {
+            printf("  MISMATCH at value %d:\n    orig: %.100s\n    opt:  %.100s\n",
+                $i, $orig_result, $opt_result);
+        }
+    }
+}
+printf("  Checked %d values: %s\n\n",
+    min($total_values, 500),
+    $mismatches === 0 ? "ALL MATCH" : "$mismatches MISMATCHES");
+
+// ── Head-to-head comparison ──
+echo "====================================================================\n";
+echo "  HEAD-TO-HEAD: Original vs Optimized\n";
+echo "====================================================================\n";
+printf("  Original:   %s\n", fmt_t($total_time));
+printf("  Optimized:  %s\n", fmt_t($opt_time));
+printf("  Speedup:    %.2fx\n", $total_time / max(0.000001, $opt_time));
+printf("  Saved:      %s (%.1f%%)\n\n", fmt_t($total_time - $opt_time),
+    100 * ($total_time - $opt_time) / max(0.000001, $total_time));
 
 function fmt_t(float $seconds): string
 {
