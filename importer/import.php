@@ -3070,9 +3070,14 @@ class ImportClient
      *
      * Creates a directory at the specified --flatten-to path that mirrors
      * a vanilla WordPress installation layout by symlinking entries from
-     * the import docroot. This is useful when the source site uses a
-     * non-standard layout (e.g. WP Cloud with __wp__) and the target
-     * needs a conventional wp-admin/, wp-includes/, wp-load.php structure.
+     * the import docroot. Uses preflight data (paths_urls) to determine
+     * where each WordPress component actually lives, rather than blindly
+     * scanning docroot top-level entries.
+     *
+     * This is essential when the source site uses a non-standard layout
+     * (e.g. WP Cloud with ABSPATH=/srv/htdocs and WP_CONTENT_DIR=/tmp/__wp__/wp-content)
+     * and the target needs a conventional wp-admin/, wp-includes/,
+     * wp-content/, wp-load.php structure.
      *
      * The command is idempotent: re-running refreshes all symlinks.
      * If a path that should be a symlink is a regular file/directory,
@@ -3097,6 +3102,85 @@ class ImportClient
             );
         }
 
+        // Require preflight data so we know where WP components live
+        $this->require_preflight();
+        $preflight = $this->state["preflight"]["data"] ?? [];
+
+        // Extract WordPress directory paths from preflight
+        $paths_urls = $preflight["database"]["wp"]["paths_urls"] ?? null;
+        $abspath = null;
+        $content_dir = null;
+        $plugins_dir = null;
+        $mu_plugins_dir = null;
+        $uploads_basedir = null;
+
+        if (is_array($paths_urls)) {
+            $abspath = $this->flatten_clean_path($paths_urls["abspath"] ?? null);
+            $content_dir = $this->flatten_clean_path($paths_urls["content_dir"] ?? null);
+            $plugins_dir = $this->flatten_clean_path($paths_urls["plugins_dir"] ?? null);
+            $mu_plugins_dir = $this->flatten_clean_path($paths_urls["mu_plugins_dir"] ?? null);
+            $uploads_basedir = $this->flatten_clean_path(
+                $paths_urls["uploads"]["basedir"] ?? null,
+            );
+        }
+
+        // Fall back to wp_detect roots if abspath not available
+        if ($abspath === null) {
+            $roots = $preflight["wp_detect"]["roots"] ?? [];
+            if (!empty($roots)) {
+                $abspath = $this->flatten_clean_path($roots[0]["path"] ?? null);
+            }
+        }
+
+        if ($abspath === null) {
+            throw new RuntimeException(
+                "Cannot determine WordPress ABSPATH from preflight data. " .
+                    "Run preflight first to detect the WordPress installation.",
+            );
+        }
+
+        // Map remote paths to local paths within docroot
+        $local_abspath = $this->docroot . $abspath;
+        if (!is_dir($local_abspath)) {
+            throw new RuntimeException(
+                "WordPress ABSPATH directory not found in docroot: {$local_abspath} " .
+                    "(remote ABSPATH: {$abspath}). Has the file sync completed?",
+            );
+        }
+
+        $local_content_dir = $content_dir !== null
+            ? $this->docroot . $content_dir
+            : null;
+        $local_plugins_dir = $plugins_dir !== null
+            ? $this->docroot . $plugins_dir
+            : null;
+        $local_mu_plugins_dir = $mu_plugins_dir !== null
+            ? $this->docroot . $mu_plugins_dir
+            : null;
+        $local_uploads_basedir = $uploads_basedir !== null
+            ? $this->docroot . $uploads_basedir
+            : null;
+
+        // Determine which components are "detached" — located outside
+        // their conventional parent directory on the source server.
+        $content_detached = $content_dir !== null
+            && strpos($content_dir, $abspath . "/") !== 0;
+        $plugins_detached = $plugins_dir !== null
+            && $content_dir !== null
+            && strpos($plugins_dir, $content_dir . "/") !== 0;
+        $mu_plugins_detached = $mu_plugins_dir !== null
+            && $content_dir !== null
+            && strpos($mu_plugins_dir, $content_dir . "/") !== 0;
+        $uploads_detached = $uploads_basedir !== null
+            && $content_dir !== null
+            && strpos($uploads_basedir, $content_dir . "/") !== 0;
+
+        // If any sub-component is detached from content_dir, we need to
+        // "explode" wp-content into a real directory with individual symlinks
+        // rather than symlinking the content_dir wholesale.
+        $need_exploded_content =
+            $plugins_detached || $mu_plugins_detached || $uploads_detached;
+
         // Create the target directory if it doesn't exist
         if (!is_dir($flatten_to)) {
             if (!mkdir($flatten_to, 0755, true)) {
@@ -3104,88 +3188,170 @@ class ImportClient
                     "Failed to create flatten-to directory: {$flatten_to}",
                 );
             }
-            $this->audit_log("FLATTEN-DOCROOT | Created directory: {$flatten_to}");
-        }
-
-        // Enumerate all top-level entries in the docroot
-        $entries = @scandir($this->docroot);
-        if ($entries === false) {
-            throw new RuntimeException(
-                "Failed to scan docroot: {$this->docroot}",
+            $this->audit_log(
+                "FLATTEN-DOCROOT | Created directory: {$flatten_to}",
             );
         }
+
+        $this->audit_log(
+            sprintf(
+                "FLATTEN-DOCROOT | abspath=%s content_dir=%s " .
+                    "content_detached=%s plugins_detached=%s " .
+                    "mu_plugins_detached=%s uploads_detached=%s",
+                $abspath,
+                $content_dir ?? "(not set)",
+                $content_detached ? "yes" : "no",
+                $plugins_detached ? "yes" : "no",
+                $mu_plugins_detached ? "yes" : "no",
+                $uploads_detached ? "yes" : "no",
+            ),
+        );
 
         $created = 0;
         $refreshed = 0;
         $forced = 0;
 
+        // Determine what to skip from ABSPATH enumeration.
+        // If content_dir is detached (or needs exploding), skip any
+        // wp-content entry from ABSPATH since we'll handle it separately.
+        $skip_from_abspath = [];
+        if ($content_detached || $need_exploded_content) {
+            $skip_from_abspath["wp-content"] = true;
+        }
+
+        // Phase 1: Symlink all entries from ABSPATH into flatten-to.
+        // This covers wp-admin, wp-includes, wp-load.php, index.php, etc.
+        $entries = @scandir($local_abspath);
+        if ($entries === false) {
+            throw new RuntimeException(
+                "Failed to scan ABSPATH directory: {$local_abspath}",
+            );
+        }
+
         foreach ($entries as $entry) {
             if ($entry === "." || $entry === "..") {
                 continue;
             }
-
-            $source = $this->docroot . "/" . $entry;
-            $target = $flatten_to . "/" . $entry;
-
-            // If the target is already a symlink, remove it and recreate
-            // (refresh) to ensure it points to the right place.
-            if (is_link($target)) {
-                $current_link_target = readlink($target);
-                if ($current_link_target === $source) {
-                    // Already correct — still count as refreshed
-                    $refreshed++;
-                    continue;
-                }
-                // Points elsewhere — remove and recreate
-                unlink($target);
+            if (isset($skip_from_abspath[$entry])) {
                 $this->audit_log(
-                    "FLATTEN-DOCROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
+                    "FLATTEN-DOCROOT | Skipping '{$entry}' from ABSPATH " .
+                        "(will be handled from detached location)",
                 );
-                if (!symlink($source, $target)) {
-                    throw new RuntimeException(
-                        "Failed to create symlink: {$target} -> {$source}",
-                    );
-                }
-                $refreshed++;
                 continue;
             }
 
-            // If something exists at the target path that is not a symlink,
-            // this is a conflict.
-            if (file_exists($target)) {
-                if (!$force) {
-                    throw new RuntimeException(
-                        "Cannot create symlink at {$target}: a non-symlink " .
-                        (is_dir($target) ? "directory" : "file") .
-                        " already exists. Use --force to remove it and replace with a symlink.",
+            $source = $local_abspath . "/" . $entry;
+            $target = $flatten_to . "/" . $entry;
+            $this->flatten_place_symlink(
+                $source,
+                $target,
+                $force,
+                $created,
+                $refreshed,
+                $forced,
+            );
+        }
+
+        // Phase 2: Handle wp-content when it's outside ABSPATH
+        if ($need_exploded_content && $local_content_dir !== null) {
+            // wp-content must be a real directory because some sub-components
+            // (plugins, mu-plugins, or uploads) live outside content_dir.
+            $wp_content_target = $flatten_to . "/wp-content";
+            $this->flatten_ensure_real_directory(
+                $wp_content_target,
+                $force,
+                $forced,
+            );
+
+            // Symlink all entries from content_dir into the real wp-content dir
+            if (is_dir($local_content_dir)) {
+                $content_entries = @scandir($local_content_dir) ?: [];
+                // Determine which sub-entries to skip (will be overridden)
+                $skip_from_content = [];
+                if ($plugins_detached) {
+                    $skip_from_content["plugins"] = true;
+                }
+                if ($mu_plugins_detached) {
+                    $skip_from_content["mu-plugins"] = true;
+                }
+                if ($uploads_detached) {
+                    $skip_from_content["uploads"] = true;
+                }
+
+                foreach ($content_entries as $entry) {
+                    if ($entry === "." || $entry === "..") {
+                        continue;
+                    }
+                    if (isset($skip_from_content[$entry])) {
+                        continue;
+                    }
+                    $source = $local_content_dir . "/" . $entry;
+                    $target = $wp_content_target . "/" . $entry;
+                    $this->flatten_place_symlink(
+                        $source,
+                        $target,
+                        $force,
+                        $created,
+                        $refreshed,
+                        $forced,
                     );
                 }
+            }
 
-                // --force: remove the conflicting entry and replace with symlink
-                $type = is_dir($target) ? "directory" : "file";
+            // Symlink detached sub-components into wp-content
+            if ($plugins_detached && is_dir($local_plugins_dir)) {
+                $target = $wp_content_target . "/plugins";
+                $this->flatten_place_symlink(
+                    $local_plugins_dir,
+                    $target,
+                    $force,
+                    $created,
+                    $refreshed,
+                    $forced,
+                );
+            }
+            if ($mu_plugins_detached && is_dir($local_mu_plugins_dir)) {
+                $target = $wp_content_target . "/mu-plugins";
+                $this->flatten_place_symlink(
+                    $local_mu_plugins_dir,
+                    $target,
+                    $force,
+                    $created,
+                    $refreshed,
+                    $forced,
+                );
+            }
+            if ($uploads_detached && is_dir($local_uploads_basedir)) {
+                $target = $wp_content_target . "/uploads";
+                $this->flatten_place_symlink(
+                    $local_uploads_basedir,
+                    $target,
+                    $force,
+                    $created,
+                    $refreshed,
+                    $forced,
+                );
+            }
+        } elseif ($content_detached && $local_content_dir !== null) {
+            // Content dir is outside ABSPATH but sub-components are inside it.
+            // Simple case: just symlink the whole content_dir as wp-content.
+            if (is_dir($local_content_dir)) {
+                $target = $flatten_to . "/wp-content";
+                $this->flatten_place_symlink(
+                    $local_content_dir,
+                    $target,
+                    $force,
+                    $created,
+                    $refreshed,
+                    $forced,
+                );
+            } else {
                 $this->audit_log(
-                    "FLATTEN-DOCROOT FORCE | Removing conflicting {$type}: {$target}",
+                    "FLATTEN-DOCROOT | Warning: content_dir not found in docroot: " .
+                        "{$local_content_dir} (remote: {$content_dir})",
                     true,
                 );
-
-                if (is_dir($target) && !is_link($target)) {
-                    $this->remove_directory_recursive($target);
-                } else {
-                    unlink($target);
-                }
-                $forced++;
             }
-
-            // Create the symlink
-            if (!symlink($source, $target)) {
-                throw new RuntimeException(
-                    "Failed to create symlink: {$target} -> {$source}",
-                );
-            }
-            $this->audit_log(
-                "FLATTEN-DOCROOT | Created symlink: {$target} -> {$source}",
-            );
-            $created++;
         }
 
         $this->audit_log(
@@ -3202,11 +3368,134 @@ class ImportClient
             "status" => "complete",
             "flatten_to" => $flatten_to,
             "docroot" => $this->docroot,
+            "abspath" => $abspath,
+            "content_dir" => $content_dir,
+            "content_detached" => $content_detached,
             "created" => $created,
             "refreshed" => $refreshed,
             "force_replaced" => $forced,
         ];
         fwrite($this->progress_fd, json_encode($result) . "\n");
+    }
+
+    /**
+     * Clean a path value from preflight data: trim, strip trailing slash.
+     * Returns null if the value is not a non-empty string.
+     */
+    private function flatten_clean_path($value): ?string
+    {
+        if (!is_string($value) || trim($value) === "") {
+            return null;
+        }
+        return rtrim($value, "/");
+    }
+
+    /**
+     * Create or refresh a symlink at $target pointing to $source.
+     * Handles conflicts (existing non-symlinks) based on --force flag.
+     */
+    private function flatten_place_symlink(
+        string $source,
+        string $target,
+        bool $force,
+        int &$created,
+        int &$refreshed,
+        int &$forced
+    ): void {
+        // If the target is already a symlink, check if it points to the
+        // right place. Refresh if not, skip if already correct.
+        if (is_link($target)) {
+            $current_link_target = readlink($target);
+            if ($current_link_target === $source) {
+                $refreshed++;
+                return;
+            }
+            // Points elsewhere — remove and recreate
+            unlink($target);
+            $this->audit_log(
+                "FLATTEN-DOCROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
+            );
+            if (!symlink($source, $target)) {
+                throw new RuntimeException(
+                    "Failed to create symlink: {$target} -> {$source}",
+                );
+            }
+            $refreshed++;
+            return;
+        }
+
+        // If something exists at the target path that is not a symlink,
+        // this is a conflict.
+        if (file_exists($target)) {
+            if (!$force) {
+                throw new RuntimeException(
+                    "Cannot create symlink at {$target}: a non-symlink " .
+                        (is_dir($target) ? "directory" : "file") .
+                        " already exists. Use --force to remove it and replace with a symlink.",
+                );
+            }
+
+            $type = is_dir($target) ? "directory" : "file";
+            $this->audit_log(
+                "FLATTEN-DOCROOT FORCE | Removing conflicting {$type}: {$target}",
+                true,
+            );
+
+            if (is_dir($target) && !is_link($target)) {
+                $this->remove_directory_recursive($target);
+            } else {
+                unlink($target);
+            }
+            $forced++;
+        }
+
+        // Create the symlink
+        if (!symlink($source, $target)) {
+            throw new RuntimeException(
+                "Failed to create symlink: {$target} -> {$source}",
+            );
+        }
+        $this->audit_log(
+            "FLATTEN-DOCROOT | Created symlink: {$target} -> {$source}",
+        );
+        $created++;
+    }
+
+    /**
+     * Ensure a path is a real directory (not a symlink).
+     * If it's a symlink, remove it (or error without --force).
+     * If it doesn't exist, create it.
+     */
+    private function flatten_ensure_real_directory(
+        string $path,
+        bool $force,
+        int &$forced
+    ): void {
+        if (is_link($path)) {
+            if (!$force) {
+                throw new RuntimeException(
+                    "Cannot create real directory at {$path}: a symlink already " .
+                        "exists. Use --force to remove it.",
+                );
+            }
+            $this->audit_log(
+                "FLATTEN-DOCROOT FORCE | Replacing symlink with real directory: {$path}",
+                true,
+            );
+            unlink($path);
+            $forced++;
+        }
+
+        if (!is_dir($path)) {
+            if (!mkdir($path, 0755, true)) {
+                throw new RuntimeException(
+                    "Failed to create directory: {$path}",
+                );
+            }
+            $this->audit_log(
+                "FLATTEN-DOCROOT | Created directory: {$path}",
+            );
+        }
     }
 
     /**
@@ -8267,11 +8556,16 @@ if (
             "short" => "Create a vanilla WordPress directory layout using symlinks",
             "detail" =>
                 "Creates a directory at --flatten-to that mirrors the standard\n" .
-                "WordPress directory structure (wp-admin/, wp-includes/, wp-content/,\n" .
-                "wp-load.php, etc.) by symlinking each entry from the import docroot.\n" .
+                "WordPress directory structure by analyzing preflight path data\n" .
+                "and symlinking each component from where it actually lives.\n" .
                 "\n" .
-                "Useful when the source site uses a non-standard layout (e.g. WP Cloud\n" .
-                "with __wp__ symlinks) and the target needs conventional paths.\n" .
+                "Uses preflight paths_urls (ABSPATH, WP_CONTENT_DIR, WP_PLUGIN_DIR,\n" .
+                "WPMU_PLUGIN_DIR, uploads basedir) to locate each WordPress component\n" .
+                "within the import docroot, even when they reside in different parent\n" .
+                "directories on the source server (e.g. WP Cloud with ABSPATH at\n" .
+                "/srv/htdocs and WP_CONTENT_DIR at /tmp/__wp__/wp-content).\n" .
+                "\n" .
+                "Requires a prior preflight run to detect the WordPress directory layout.\n" .
                 "\n" .
                 "The command is idempotent: re-running refreshes all symlinks.\n" .
                 "If a path that should be a symlink is a regular file or directory,\n" .
@@ -8281,9 +8575,7 @@ if (
                 "  --flatten-to=PATH  Target directory for the flattened layout (required)\n" .
                 "  --force            Remove conflicting non-symlink files and replace\n" .
                 "                     with symlinks (logged to audit log)\n" .
-                "  --verbose, -v      Show detailed operation logs\n" .
-                "\n" .
-                "The <remote-url> parameter is kept for CLI consistency but ignored.\n",
+                "  --verbose, -v      Show detailed operation logs\n",
         ],
     ];
 
