@@ -12,6 +12,11 @@
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/../importer/lib/url-rewrite/load.php';
 
+use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
+use WordPress\DataLiberation\URL\URLInTextProcessor;
+use WordPress\DataLiberation\URL\WPURL;
+use function WordPress\DataLiberation\URL\is_child_url_of;
+
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 $URL_MAPPING = [
@@ -198,7 +203,8 @@ function generate_sql_dump(int $target_size, string $table_prefix): string
  */
 class ProfilingSqlStatementRewriter
 {
-    private StructuredDataUrlRewriter $url_rewriter;
+    /** @var StructuredDataUrlRewriter|OptimizedStructuredDataUrlRewriter */
+    private $url_rewriter;
     private string $table_prefix;
     private array $db_columns_with_block_markup;
 
@@ -213,7 +219,7 @@ class ProfilingSqlStatementRewriter
     /** @var WP_Parser_Grammar|null */
     private static ?WP_Parser_Grammar $grammar = null;
 
-    public function __construct(StructuredDataUrlRewriter $url_rewriter, string $table_prefix = 'wp_')
+    public function __construct($url_rewriter, string $table_prefix = 'wp_')
     {
         $this->url_rewriter = $url_rewriter;
         $this->table_prefix = $table_prefix;
@@ -406,8 +412,9 @@ class ProfilingSqlStatementRewriter
 
 /**
  * Profile the import of a SQL string into a target PDO connection.
+ * Pass $use_optimized=true to use the OptimizedStructuredDataUrlRewriter.
  */
-function profile_import(string $sql, PDO $pdo, array $url_mapping, string $table_prefix): array
+function profile_import(string $sql, PDO $pdo, array $url_mapping, string $table_prefix, bool $use_optimized = false): array
 {
     $timings = [
         'total'              => 0,
@@ -419,8 +426,13 @@ function profile_import(string $sql, PDO $pdo, array $url_mapping, string $table
     $stmt_count = 0;
     $rewrite_count = 0;
 
+    if ($use_optimized) {
+        $value_rewriter = new OptimizedStructuredDataUrlRewriter($url_mapping);
+    } else {
+        $value_rewriter = new StructuredDataUrlRewriter($url_mapping);
+    }
     $stmt_rewriter = new ProfilingSqlStatementRewriter(
-        new StructuredDataUrlRewriter($url_mapping),
+        $value_rewriter,
         $table_prefix,
     );
 
@@ -584,6 +596,147 @@ function print_results(string $label, array $result): void
     echo "\n";
 }
 
+// ─── Optimized StructuredDataUrlRewriter ──────────────────────────────────────
+
+/**
+ * Optimized version with three short-circuits:
+ * 1. Cache WPURL::parse() results in constructor.
+ * 2. Skip values with no URL fingerprint (http:/https: or base64 fragments).
+ * 3. Downgrade block_markup to plain_text if no "<!--" present.
+ */
+class OptimizedStructuredDataUrlRewriter
+{
+    private array $url_mapping;
+    private array $parsed_url_mapping;
+    private string $base_url;
+    private array $url_fingerprints;
+
+    public int $calls_total = 0;
+    public int $short_circuited = 0;
+    public int $block_markup_downgraded = 0;
+
+    public function __construct(array $url_mapping)
+    {
+        $this->url_mapping = $url_mapping;
+        $from_urls = array_keys($url_mapping);
+        $this->base_url = $from_urls[0];
+        $this->parsed_url_mapping = [];
+        foreach ($url_mapping as $from => $to) {
+            $this->parsed_url_mapping[] = [
+                'from_url' => WPURL::parse($from),
+                'to_url'   => WPURL::parse($to),
+            ];
+        }
+        $this->url_fingerprints = self::compute_url_fingerprints();
+    }
+
+    private static function compute_url_fingerprints(): array
+    {
+        $patterns = ['http:', 'https:'];
+        foreach (['http:', 'https:'] as $proto) {
+            for ($a = 0; $a < 3; $a++) {
+                $skip = $a > 0 ? (3 - $a) : 0;
+                if ($skip >= strlen($proto)) continue;
+                $remaining = strlen($proto) - $skip;
+                $full_groups = (int)($remaining / 3);
+                if ($full_groups === 0) continue;
+                $stable_bytes = substr($proto, $skip, $full_groups * 3);
+                $patterns[] = base64_encode($stable_bytes);
+            }
+        }
+        return array_values(array_unique($patterns));
+    }
+
+    private function might_contain_url(string $value): bool
+    {
+        foreach ($this->url_fingerprints as $pattern) {
+            if (strpos($value, $pattern) !== false) return true;
+        }
+        return false;
+    }
+
+    public function rewrite(string $value, ?string $content_type = null): string
+    {
+        $this->calls_total++;
+        if ($value === '') return $value;
+        if ($content_type === 'skip') return $value;
+        if ($content_type === null) $content_type = 'plain_text';
+
+        if (!$this->might_contain_url($value)) {
+            $this->short_circuited++;
+            return $value;
+        }
+
+        $p = new PhpSerializationProcessor($value);
+        if (!$p->is_malformed()) {
+            while ($p->next_value()) {
+                $orig = $p->get_value();
+                $rewritten = $this->rewrite($orig, $content_type);
+                if ($rewritten !== $orig) $p->set_value($rewritten);
+            }
+            return $p->get_updated_serialization();
+        }
+
+        $iter = new JsonStringIterator($value);
+        if (!$iter->is_malformed()) {
+            while ($iter->next_value()) {
+                $orig = $iter->get_value();
+                $rewritten = $this->rewrite($orig, $content_type);
+                if ($rewritten !== $orig) $iter->set_value($rewritten);
+            }
+            return $iter->get_result();
+        }
+
+        $decoded = base64_decode($value, true);
+        if ($decoded !== false && $decoded !== '') {
+            if (mb_check_encoding($decoded, 'UTF-8')) {
+                $rewritten = $this->rewrite($decoded, $content_type);
+                if ($rewritten !== $decoded) return base64_encode($rewritten);
+            }
+        }
+
+        if ($content_type === 'block_markup' && strpos($value, '<!--') === false) {
+            $content_type = 'plain_text';
+            $this->block_markup_downgraded++;
+        }
+
+        if ($content_type === 'block_markup') {
+            $p2 = new BlockMarkupUrlProcessor($value, $this->base_url);
+            while ($p2->next_url()) {
+                $parsed_url = $p2->get_parsed_url();
+                foreach ($this->parsed_url_mapping as $mapping) {
+                    if (is_child_url_of($parsed_url, $mapping['from_url'])) {
+                        $p2->replace_base_url($mapping['to_url']);
+                        break;
+                    }
+                }
+            }
+            return $p2->get_updated_html();
+        } else {
+            $p2 = new URLInTextProcessor($value, $this->base_url);
+            while ($p2->next_url()) {
+                $parsed_url = $p2->get_parsed_url();
+                foreach ($this->parsed_url_mapping as $mapping) {
+                    if (is_child_url_of($parsed_url, $mapping['from_url'])) {
+                        $new_raw_url = WPURL::replace_base_url(
+                            $parsed_url,
+                            [
+                                'old_base_url' => $this->base_url,
+                                'new_base_url' => $mapping['to_url'],
+                                'raw_url'      => $p2->get_raw_url(),
+                                'is_relative'  => false,
+                            ]
+                        );
+                        $p2->set_raw_url($new_raw_url);
+                        break;
+                    }
+                }
+            }
+            return $p2->get_updated_text();
+        }
+    }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 echo "Generating ~1MB SQL dump with URL-rich WordPress content...\n";
@@ -636,6 +789,31 @@ $sqlite_result = profile_import($sql, $sqlite_pdo, $URL_MAPPING, $TABLE_PREFIX);
 print_results('SQLite with URL rewriting', $sqlite_result);
 
 unset($sqlite_pdo, $raw_sqlite);
+
+// ── SQLite import (OPTIMIZED) ──
+
+echo "\n" . str_repeat('=', 68) . "\n";
+echo "PROFILING: SQLite import with OPTIMIZED URL rewriting\n";
+echo str_repeat('=', 68) . "\n";
+
+if (file_exists($SQLITE_PATH)) unlink($SQLITE_PATH);
+
+$sqlite_pdo_opt = new WP_PDO_MySQL_On_SQLite($sqlite_dsn, null, null, [
+    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+]);
+$raw_sqlite_opt = $sqlite_pdo_opt->get_connection()->get_pdo();
+$raw_sqlite_opt->sqliteCreateFunction('FROM_BASE64', function ($data) {
+    return $data === null ? null : base64_decode($data);
+}, 1);
+$raw_sqlite_opt->sqliteCreateFunction('TO_BASE64', function ($data) {
+    return $data === null ? null : base64_encode($data);
+}, 1);
+
+$sqlite_result_opt = profile_import($sql, $sqlite_pdo_opt, $URL_MAPPING, $TABLE_PREFIX, true);
+print_results('SQLite with OPTIMIZED URL rewriting', $sqlite_result_opt);
+
+unset($sqlite_pdo_opt, $raw_sqlite_opt);
 if (file_exists($SQLITE_PATH)) unlink($SQLITE_PATH);
 
 // ── MySQL import ──
@@ -658,12 +836,71 @@ try {
     print_results('MySQL with URL rewriting', $mysql_result);
 
     $mysql_pdo->exec("DROP DATABASE IF EXISTS `{$MYSQL_DB}`");
+
+    // ── MySQL import (OPTIMIZED) ──
+    echo str_repeat('=', 68) . "\n";
+    echo "PROFILING: MySQL import with OPTIMIZED URL rewriting\n";
+    echo str_repeat('=', 68) . "\n";
+
+    $mysql_pdo->exec("CREATE DATABASE `{$MYSQL_DB}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+    $mysql_pdo->exec("USE `{$MYSQL_DB}`");
+
+    $mysql_result_opt = profile_import($sql, $mysql_pdo, $URL_MAPPING, $TABLE_PREFIX, true);
+    print_results('MySQL with OPTIMIZED URL rewriting', $mysql_result_opt);
+
+    $mysql_pdo->exec("DROP DATABASE IF EXISTS `{$MYSQL_DB}`");
     unset($mysql_pdo);
 } catch (PDOException $e) {
     fprintf(STDERR, "\nMySQL connection failed: %s\nSkipping MySQL profiling.\n", $e->getMessage());
 }
 
-// ── Comparison ──
+// ── Comparison: Original vs Optimized ──
+
+echo "\n" . str_repeat('=', 68) . "\n";
+echo "  SPEEDUP: Original vs Optimized\n";
+echo str_repeat('=', 68) . "\n\n";
+
+$pairs = [
+    ['SQLite', $sqlite_result, $sqlite_result_opt],
+];
+if (isset($mysql_result, $mysql_result_opt)) {
+    $pairs[] = ['MySQL', $mysql_result, $mysql_result_opt];
+}
+
+foreach ($pairs as [$engine, $orig, $opt]) {
+    printf("  %s:\n", $engine);
+    printf("  %-30s %12s %12s %10s\n", '', 'Original', 'Optimized', 'Speedup');
+    printf("  %-30s %12s %12s %10s\n", str_repeat('─', 30), str_repeat('─', 12), str_repeat('─', 12), str_repeat('─', 10));
+
+    $keys = [
+        'Total'              => 'total',
+        'URL rewrite'        => 'url_rewrite',
+        'DB execute'         => 'db_execute',
+        'Query stream parse' => 'query_stream_parse',
+    ];
+    foreach ($keys as $label => $key) {
+        $ov = $orig['timings'][$key];
+        $nv = $opt['timings'][$key];
+        $speedup = $nv > 0 ? $ov / $nv : INF;
+        printf("  %-30s %12s %12s %9.2fx\n", $label, fmt_ms($ov), fmt_ms($nv), $speedup);
+    }
+
+    // URL rewrite sub-breakdown
+    $sub_keys = [
+        'Value rewrite'    => 'value_rewrite',
+        'SQL parse'        => 'sql_parse',
+        'Base64 scan iter' => 'base64_scan_iter',
+    ];
+    foreach ($sub_keys as $label => $key) {
+        $ov = $orig['rewrite_detail'][$key];
+        $nv = $opt['rewrite_detail'][$key];
+        $speedup = $nv > 0 ? $ov / $nv : INF;
+        printf("  %-30s %12s %12s %9.2fx\n", "  └ " . $label, fmt_ms($ov), fmt_ms($nv), $speedup);
+    }
+    echo "\n";
+}
+
+// ── Comparison: SQLite vs MySQL ──
 
 if (isset($mysql_result)) {
     echo str_repeat('=', 68) . "\n";
