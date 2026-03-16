@@ -3624,6 +3624,10 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
+        $export_dirs = $this->get_export_directories();
+        if (count($export_dirs) > 1) {
+            $params["directory"] = $export_dirs;
+        }
         $url = $this->build_url("file_fetch", $cursor, $params);
         $this->audit_log("Downloading file fetch from {$url}");
         $this->audit_log("POST data: " . json_encode($post_data));
@@ -3814,6 +3818,10 @@ class ImportClient
         }
         if ($this->follow_symlinks) {
             $params["follow_symlinks"] = "1";
+        }
+        $export_dirs = $this->get_export_directories();
+        if (count($export_dirs) > 1) {
+            $params["directory"] = $export_dirs;
         }
         $url = $this->build_url("file_index", $cursor, $params);
         $context = new StreamingContext();
@@ -6387,21 +6395,6 @@ class ImportClient
             // Also include cursor in query params as a fallback when headers are stripped.
             $params["cursor"] = $cursor;
         }
-
-        // For file endpoints, tell the server about all directories it
-        // should allow. On managed hosts wp-content often lives outside
-        // ABSPATH so the server needs explicit directory[] params to
-        // serve files from it.
-        if (
-            in_array($endpoint, ["file_index", "file_fetch"], true) &&
-            !isset($params["directory"])
-        ) {
-            $export_dirs = $this->get_export_directories();
-            if (count($export_dirs) > 1) {
-                $params["directory"] = $export_dirs;
-            }
-        }
-
         $params["_cache_bust"] = time() . "-" . rand(0, 999999);
 
         return $url . $separator . http_build_query($params);
