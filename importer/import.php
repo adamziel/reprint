@@ -6431,10 +6431,11 @@ class ImportClient
      * Build the list of directories the server should traverse.
      *
      * Starts from the wp_detect roots (ABSPATH, etc.) and adds
-     * WP_CONTENT_DIR when it lives outside those roots. On managed
-     * hosts like wp.com Atomic, content_dir is on a separate path
-     * (e.g. /srv/htdocs/wp-content vs /wordpress/core/6.9.4) so
-     * the server won't discover it by traversing ABSPATH alone.
+     * WP_CONTENT_DIR and document_root when they live outside those
+     * roots. On managed hosts like wp.com Atomic, these are on
+     * separate paths (e.g. /srv/htdocs/wp-content and /srv/htdocs
+     * vs /wordpress/core/6.9.4) so the server won't discover them
+     * by traversing ABSPATH alone.
      */
     private function get_export_directories(): array
     {
@@ -6443,32 +6444,36 @@ class ImportClient
             return [];
         }
 
-        $content_dir = rtrim(
-            $this->state["preflight"]["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
-            "/",
-        );
-        if ($content_dir === "") {
-            return $dirs;
-        }
+        $preflight = $this->state["preflight"]["data"] ?? [];
 
-        // Check if content_dir is already covered by an existing root.
-        $covered = false;
-        foreach ($dirs as $root) {
-            if (
-                $content_dir === $root ||
-                str_starts_with($content_dir, $root . "/")
-            ) {
-                $covered = true;
-                break;
+        // Collect extra paths that may live outside the wp_detect roots.
+        $extra_paths = [
+            "document_root" => rtrim($preflight["runtime"]["document_root"] ?? "", "/"),
+            "content_dir" => rtrim($preflight["database"]["wp"]["paths_urls"]["content_dir"] ?? "", "/"),
+        ];
+
+        foreach ($extra_paths as $label => $path) {
+            if ($path === "") {
+                continue;
             }
-        }
-
-        if (!$covered) {
-            $dirs[] = $content_dir;
-            $this->audit_log(
-                "DIRECTORY AUTO-DETECT | adding content_dir outside roots: " .
-                    $content_dir,
-            );
+            // Check if this path is already covered by an existing dir.
+            $covered = false;
+            foreach ($dirs as $root) {
+                if (
+                    $path === $root ||
+                    str_starts_with($path, $root . "/")
+                ) {
+                    $covered = true;
+                    break;
+                }
+            }
+            if (!$covered) {
+                $dirs[] = $path;
+                $this->audit_log(
+                    "DIRECTORY AUTO-DETECT | adding {$label} outside roots: " .
+                        $path,
+                );
+            }
         }
 
         return $dirs;
