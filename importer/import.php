@@ -2987,7 +2987,8 @@ class ImportClient
 
     /**
      * If --new-site-url is set, derive the source origin from the export URL
-     * and append an implicit --rewrite-url mapping to $options.
+     * and append implicit --rewrite-url mappings for both HTTP and HTTPS
+     * variants of the old URL to $options. The new URL is used verbatim.
      */
     private function resolve_new_site_url_option(array &$options): void
     {
@@ -3002,15 +3003,21 @@ class ImportClient
             );
         }
 
-        $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
+        $host_with_port = $parsed_url['host'];
         if (!empty($parsed_url['port'])) {
-            $source_origin .= ':' . $parsed_url['port'];
+            $host_with_port .= ':' . $parsed_url['port'];
         }
 
         if (!isset($options["rewrite_url"])) {
             $options["rewrite_url"] = [];
         }
-        $options["rewrite_url"][] = [$source_origin, $options["new_site_url"]];
+
+        // Rewrite both http:// and https:// variants of the old origin
+        // to the new URL verbatim, so we catch references stored with
+        // either scheme in the database.
+        $new_url = $options["new_site_url"];
+        $options["rewrite_url"][] = ['https://' . $host_with_port, $new_url];
+        $options["rewrite_url"][] = ['http://' . $host_with_port, $new_url];
     }
 
     private function escape_pdo_dsn_value(string $value): string
