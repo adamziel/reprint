@@ -1774,6 +1774,19 @@ function endpoint_preflight(array $config): array
                             "SITE_ID_CURRENT_SITE",
                             "BLOG_ID_CURRENT_SITE",
                             "SUBDOMAIN_INSTALL",
+                            "TEMPLATEPATH",
+                            "STYLESHEETPATH",
+                            "WP_HOME",
+                            "WP_SITEURL",
+                            "FORCE_SSL_LOGIN",
+                            "FORCE_SSL_ADMIN",
+                            "WP_CACHE",
+                            "WP_DEBUG",
+                            "WP_DEBUG_LOG",
+                            "WP_DEBUG_DISPLAY",
+                            "SAVEQUERIES",
+                            "WP_MEMORY_LIMIT",
+                            "WP_MAX_MEMORY_LIMIT",
                         ];
                         $constant_values = [];
                         foreach ($constants as $name) {
