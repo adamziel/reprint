@@ -3102,9 +3102,15 @@ class ImportClient
             $target_db = $options["target_db"] ?? "sqlite_database";
 
             if (!$target_path) {
-                throw new InvalidArgumentException(
-                    "db-apply with --target-engine=sqlite requires --target-sqlite-path.",
+                $content_dir = rtrim(
+                    $this->state["preflight"]["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
+                    "/",
                 );
+                if ($content_dir === "") {
+                    $content_dir = "/wp-content";
+                }
+                $target_path = $this->get_filesystem_root_path() . $content_dir . '/database/.ht.sqlite';
+                fwrite(STDERR, "[db-apply] No --target-sqlite-path specified, defaulting to: $target_path\n");
             }
 
             return [
@@ -8021,7 +8027,7 @@ if (
                 "  --target-user=USER         Target MySQL user (required for mysql)\n" .
                 "  --target-pass=PASS         Target MySQL password\n" .
                 "  --target-db=NAME           Target DB name (required for mysql, optional for sqlite)\n" .
-                "  --target-sqlite-path=PATH  Target SQLite database file (required for sqlite)\n" .
+                "  --target-sqlite-path=PATH  Target SQLite database file (default: <wp-content>/database/.ht.sqlite)\n" .
                 "  --rewrite-url FROM TO      Rewrite FROM to TO (repeatable)\n" .
                 "  --abort                    Clear state and exit\n" .
                 "  --verbose, -v              Show detailed logs\n" .
