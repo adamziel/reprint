@@ -3441,8 +3441,42 @@ class ImportClient
     }
 
     /**
+     * Compute a relative path from $from to $to.
+     *
+     * Both paths must be absolute. Returns a relative path such that
+     * a symlink at $from/$name pointing to the result will resolve to $to.
+     *
+     * Example: relative_path('/a/b/c', '/a/d/e') => '../../d/e'
+     */
+    private static function compute_relative_path(
+        string $from,
+        string $to
+    ): string {
+        $from_parts = explode("/", trim($from, "/"));
+        $to_parts = explode("/", trim($to, "/"));
+
+        // Find common prefix length
+        $common = 0;
+        $max = min(count($from_parts), count($to_parts));
+        while ($common < $max && $from_parts[$common] === $to_parts[$common]) {
+            $common++;
+        }
+
+        // Go up from $from to the common ancestor, then down to $to
+        $up = count($from_parts) - $common;
+        $down = array_slice($to_parts, $common);
+
+        $parts = array_merge(array_fill(0, $up, ".."), $down);
+        return implode("/", $parts) ?: ".";
+    }
+
+    /**
      * Create or refresh a symlink at $target pointing to $source.
      * Handles conflicts (existing non-symlinks) based on --force flag.
+     *
+     * The symlink value is computed as a relative path from the symlink's
+     * parent directory to the source, so it works regardless of CWD and
+     * survives directory moves.
      */
     private function flatten_place_symlink(
         string $source,
@@ -3452,11 +3486,37 @@ class ImportClient
         int &$refreshed,
         int &$forced
     ): void {
-        // If the target is already a symlink, check if it points to the
-        // right place. Refresh if not, skip if already correct.
+        // Resolve both paths to absolute so we can compute a correct
+        // relative symlink value.  The source may not have a realpath()
+        // (e.g. broken symlink), but its parent directory should exist.
+        $abs_source = realpath($source);
+        if ($abs_source === false) {
+            // Source itself may be a symlink or not exist yet — try
+            // resolving the parent and appending the basename.
+            $parent_real = realpath(dirname($source));
+            if ($parent_real === false) {
+                throw new RuntimeException(
+                    "Cannot resolve source path for symlink: {$source}",
+                );
+            }
+            $abs_source = $parent_real . "/" . basename($source);
+        }
+
+        // The target's parent must exist (we create flatten-to before calling this).
+        $target_parent_real = realpath(dirname($target));
+        if ($target_parent_real === false) {
+            throw new RuntimeException(
+                "Cannot resolve target parent directory: " . dirname($target),
+            );
+        }
+
+        $link_value = self::compute_relative_path($target_parent_real, $abs_source);
+
+        // If the target is already a symlink, check if it resolves to the
+        // same place. Refresh if not, skip if already correct.
         if (is_link($target)) {
             $current_link_target = readlink($target);
-            if ($current_link_target === $source) {
+            if ($current_link_target === $link_value) {
                 $refreshed++;
                 return;
             }
@@ -3465,9 +3525,9 @@ class ImportClient
             $this->audit_log(
                 "FLATTEN-DOCROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
             );
-            if (!symlink($source, $target)) {
+            if (!symlink($link_value, $target)) {
                 throw new RuntimeException(
-                    "Failed to create symlink: {$target} -> {$source}",
+                    "Failed to create symlink: {$target} -> {$link_value}",
                 );
             }
             $refreshed++;
@@ -3500,13 +3560,13 @@ class ImportClient
         }
 
         // Create the symlink
-        if (!symlink($source, $target)) {
+        if (!symlink($link_value, $target)) {
             throw new RuntimeException(
-                "Failed to create symlink: {$target} -> {$source}",
+                "Failed to create symlink: {$target} -> {$link_value}",
             );
         }
         $this->audit_log(
-            "FLATTEN-DOCROOT | Created symlink: {$target} -> {$source}",
+            "FLATTEN-DOCROOT | Created symlink: {$target} -> {$link_value}",
         );
         $created++;
     }

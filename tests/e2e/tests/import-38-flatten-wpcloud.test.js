@@ -201,8 +201,13 @@ require_once ABSPATH . 'wp-settings.php';
                 'wp-admin should be a symlink',
             );
 
-            // The symlink target should point into the core directory, not ABSPATH
+            // The symlink target should be relative (not absolute) and point
+            // into the core directory, not ABSPATH
             const target = readlinkSync(wpAdminLink);
+            assert.ok(
+                !target.startsWith('/'),
+                `wp-admin symlink should be relative, got: ${target}`,
+            );
             assert.ok(
                 target.includes('e2e-wpcloud-core'),
                 `wp-admin symlink should point to core dir, got: ${target}`,
@@ -218,6 +223,10 @@ require_once ABSPATH . 'wp-settings.php';
             );
 
             const target = readlinkSync(wpIncludesLink);
+            assert.ok(
+                !target.startsWith('/'),
+                `wp-includes symlink should be relative, got: ${target}`,
+            );
             assert.ok(
                 target.includes('e2e-wpcloud-core'),
                 `wp-includes symlink should point to core dir, got: ${target}`,
