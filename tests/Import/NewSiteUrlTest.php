@@ -7,8 +7,8 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Test the --new-site-url flag, which derives a --rewrite-url mapping
- * from the export URL's origin.
+ * Test the --new-site-url flag, which derives --rewrite-url mappings
+ * for both HTTP and HTTPS variants of the export URL's origin.
  */
 class NewSiteUrlTest extends TestCase
 {
@@ -58,7 +58,7 @@ class NewSiteUrlTest extends TestCase
         return $options;
     }
 
-    public function testDerivesOriginFromHttpsUrl(): void
+    public function testDerivesHttpAndHttpsFromHttpsUrl(): void
     {
         $client = new \ImportClient(
             'https://old-site.example.com/wp-json/export',
@@ -70,14 +70,18 @@ class NewSiteUrlTest extends TestCase
         $options = $this->callResolve($client, $options);
 
         $this->assertArrayHasKey('rewrite_url', $options);
-        $this->assertCount(1, $options['rewrite_url']);
+        $this->assertCount(2, $options['rewrite_url']);
         $this->assertSame(
             ['https://old-site.example.com', 'https://new-site.example.com'],
             $options['rewrite_url'][0]
         );
+        $this->assertSame(
+            ['http://old-site.example.com', 'https://new-site.example.com'],
+            $options['rewrite_url'][1]
+        );
     }
 
-    public function testDerivesOriginFromHttpUrl(): void
+    public function testDerivesHttpAndHttpsFromHttpUrl(): void
     {
         $client = new \ImportClient(
             'http://old-site.local/export?key=abc',
@@ -88,9 +92,14 @@ class NewSiteUrlTest extends TestCase
         $options = ['new_site_url' => 'https://new-site.example.com'];
         $options = $this->callResolve($client, $options);
 
+        $this->assertCount(2, $options['rewrite_url']);
+        $this->assertSame(
+            ['https://old-site.local', 'https://new-site.example.com'],
+            $options['rewrite_url'][0]
+        );
         $this->assertSame(
             ['http://old-site.local', 'https://new-site.example.com'],
-            $options['rewrite_url'][0]
+            $options['rewrite_url'][1]
         );
     }
 
@@ -105,9 +114,14 @@ class NewSiteUrlTest extends TestCase
         $options = ['new_site_url' => 'https://new-site.example.com'];
         $options = $this->callResolve($client, $options);
 
+        $this->assertCount(2, $options['rewrite_url']);
         $this->assertSame(
             ['https://old-site.example.com:8443', 'https://new-site.example.com'],
             $options['rewrite_url'][0]
+        );
+        $this->assertSame(
+            ['http://old-site.example.com:8443', 'https://new-site.example.com'],
+            $options['rewrite_url'][1]
         );
     }
 
@@ -127,7 +141,7 @@ class NewSiteUrlTest extends TestCase
         ];
         $options = $this->callResolve($client, $options);
 
-        $this->assertCount(2, $options['rewrite_url']);
+        $this->assertCount(3, $options['rewrite_url']);
         $this->assertSame(
             ['https://cdn.old-site.com', 'https://cdn.new-site.com'],
             $options['rewrite_url'][0]
@@ -135,6 +149,10 @@ class NewSiteUrlTest extends TestCase
         $this->assertSame(
             ['https://old-site.example.com', 'https://new-site.example.com'],
             $options['rewrite_url'][1]
+        );
+        $this->assertSame(
+            ['http://old-site.example.com', 'https://new-site.example.com'],
+            $options['rewrite_url'][2]
         );
     }
 
@@ -165,5 +183,23 @@ class NewSiteUrlTest extends TestCase
 
         $options = ['new_site_url' => 'https://new-site.example.com'];
         $this->callResolve($client, $options);
+    }
+
+    public function testNewUrlUsedVerbatim(): void
+    {
+        $client = new \ImportClient(
+            'https://old-site.example.com/export',
+            $this->tempDir,
+            $this->tempDir . '/docroot'
+        );
+
+        // The new URL should be used exactly as-is, even with a trailing path
+        $options = ['new_site_url' => 'http://localhost:8080/subdir'];
+        $options = $this->callResolve($client, $options);
+
+        $this->assertCount(2, $options['rewrite_url']);
+        // Both variants map to the exact same verbatim new URL
+        $this->assertSame('http://localhost:8080/subdir', $options['rewrite_url'][0][1]);
+        $this->assertSame('http://localhost:8080/subdir', $options['rewrite_url'][1][1]);
     }
 }
