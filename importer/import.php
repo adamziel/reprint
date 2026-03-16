@@ -6387,14 +6387,26 @@ class ImportClient
             // Also include cursor in query params as a fallback when headers are stripped.
             $params["cursor"] = $cursor;
         }
+
+        // For file endpoints, tell the server about all directories it
+        // should allow. On managed hosts wp-content often lives outside
+        // ABSPATH so the server needs explicit directory[] params to
+        // serve files from it.
+        if (
+            in_array($endpoint, ["file_index", "file_fetch"], true) &&
+            !isset($params["directory"])
+        ) {
+            $export_dirs = $this->get_export_directories();
+            if (count($export_dirs) > 1) {
+                $params["directory"] = $export_dirs;
+            }
+        }
+
         $params["_cache_bust"] = time() . "-" . rand(0, 999999);
 
         return $url . $separator . http_build_query($params);
     }
 
-    /**
-     * Extract root directories from the remote URL query.
-     */
     /**
      * Extract root directories from preflight wp_detect data.
      * Falls back to this when the URL doesn't contain directory[] params.
@@ -6419,6 +6431,53 @@ class ImportClient
                     implode(", ", $dirs),
             );
         }
+        return $dirs;
+    }
+
+    /**
+     * Build the list of directories the server should traverse.
+     *
+     * Starts from the wp_detect roots (ABSPATH, etc.) and adds
+     * WP_CONTENT_DIR when it lives outside those roots. On managed
+     * hosts like wp.com Atomic, content_dir is on a separate path
+     * (e.g. /srv/htdocs/wp-content vs /wordpress/core/6.9.4) so
+     * the server won't discover it by traversing ABSPATH alone.
+     */
+    private function get_export_directories(): array
+    {
+        $dirs = $this->get_root_directories_from_preflight();
+        if (empty($dirs)) {
+            return [];
+        }
+
+        $content_dir = rtrim(
+            $this->state["preflight"]["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
+            "/",
+        );
+        if ($content_dir === "") {
+            return $dirs;
+        }
+
+        // Check if content_dir is already covered by an existing root.
+        $covered = false;
+        foreach ($dirs as $root) {
+            if (
+                $content_dir === $root ||
+                str_starts_with($content_dir, $root . "/")
+            ) {
+                $covered = true;
+                break;
+            }
+        }
+
+        if (!$covered) {
+            $dirs[] = $content_dir;
+            $this->audit_log(
+                "DIRECTORY AUTO-DETECT | adding content_dir outside roots: " .
+                    $content_dir,
+            );
+        }
+
         return $dirs;
     }
 
