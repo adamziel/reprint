@@ -3102,12 +3102,15 @@ class ImportClient
             $target_db = $options["target_db"] ?? "sqlite_database";
 
             if (!$target_path) {
+                fwrite(STDERR, "[db-apply] No --target-sqlite-path specified");
                 $content_dir = rtrim(
                     $this->state["preflight"]["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
                     "/",
                 );
-                if ($content_dir === "") {
-                    $content_dir = "/wp-content";
+                if(!$content_dir) {
+                    throw new InvalidArgumentException(
+                        "--target-sqlite-path option is required but was missing.",
+                    );
                 }
                 $target_path = $this->get_filesystem_root_path() . $content_dir . '/database/.ht.sqlite';
                 fwrite(STDERR, "[db-apply] No --target-sqlite-path specified, defaulting to: $target_path\n");
