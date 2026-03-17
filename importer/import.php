@@ -1848,61 +1848,21 @@ class ImportClient
             "file_list" => new CURLFile($tmp, "application/json", "file_list"),
         ];
 
-        $params = [];
-        $params["directory"] = $directories;
+        $params = ["directory" => $directories];
         $url = $this->build_url("file_fetch", null, $params);
 
+        // Reuse the standard file chunk handler by setting target_base_dir
+        // on the context — handle_file_chunk will write files there instead
+        // of the import docroot and skip index/state updates.
         $context = new StreamingContext();
-        $context->file_handle = null;
-        $context->file_path = null;
-        $context->file_ctime = null;
-        $downloaded = 0;
+        $context->target_base_dir = $runtime_dir;
 
-        $context->on_chunk = function ($chunk) use ($runtime_dir, $context, &$downloaded) {
+        $context->on_chunk = function ($chunk) use ($context) {
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
             if ($chunk_type === "file") {
-                $raw_header = $chunk["headers"]["x-file-path"] ?? "";
-                $path = base64_decode($raw_header, true);
-                if ($path === false || $path === "") {
-                    return;
-                }
-
-                $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
-                $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
-                $local_path = $runtime_dir . $path;
-
-                if ($is_first) {
-                    $dir = dirname($local_path);
-                    if (!is_dir($dir)) {
-                        @mkdir($dir, 0755, true);
-                    }
-                    $context->file_handle = fopen($local_path, "wb");
-                    $context->file_path = $local_path;
-                }
-
-                if ($context->file_handle) {
-                    fwrite($context->file_handle, $chunk["body"] ?? "");
-                }
-
-                if ($is_last && $context->file_handle) {
-                    fclose($context->file_handle);
-                    $context->file_handle = null;
-                    $context->file_path = null;
-
-                    $ctime = $chunk["headers"]["x-file-ctime"] ?? null;
-                    if ($ctime !== null) {
-                        @touch($local_path, (int) $ctime);
-                    }
-
-                    $downloaded++;
-                    $this->audit_log("RUNTIME FILES | saved {$path} → {$local_path}");
-                }
+                $this->handle_file_chunk($chunk, $context);
             } elseif ($chunk_type === "error") {
-                $body = json_decode($chunk["body"] ?? "{}", true);
-                $error_path = isset($body["path"]) ? base64_decode($body["path"]) : "unknown";
-                $message = $body["message"] ?? "unknown error";
-                $this->audit_log("RUNTIME FILES | error fetching {$error_path}: {$message}", true);
+                $this->handle_error_chunk($chunk, "runtime_files", $context);
             }
         };
 
@@ -1920,8 +1880,6 @@ class ImportClient
         if ($context->file_handle) {
             fclose($context->file_handle);
         }
-
-        $this->audit_log("RUNTIME FILES | downloaded {$downloaded}/" . count($files) . " file(s)");
     }
 
     /**
@@ -5922,7 +5880,13 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        // When target_base_dir is set on the context, write files there
+        // instead of the import docroot.  This is used by download_runtime_files()
+        // to store php.ini / auto_prepend / auto_append files in the state dir.
+        $custom_target = $context->target_base_dir !== null;
+        $local_path = $custom_target
+            ? $context->target_base_dir . $path
+            : $this->remote_path_to_local_path_within_import_root($path);
 
         // Open file on first chunk
         if ($is_first) {
@@ -5930,6 +5894,7 @@ class ImportClient
             $context->skip_current_file = false;
 
             if (
+                !$custom_target &&
                 (file_exists($local_path) || is_link($local_path)) &&
                 (!is_file($local_path) || is_link($local_path))
             ) {
@@ -5962,9 +5927,11 @@ class ImportClient
                 false,
             );
 
-            $this->show_progress_line(
-                sprintf("[%d files] %s", $this->files_imported, $this->display_path($path)),
-            );
+            if (!$custom_target) {
+                $this->show_progress_line(
+                    sprintf("[%d files] %s", $this->files_imported, $this->display_path($path)),
+                );
+            }
         }
 
         // Skip body/close for files being preserved
@@ -5985,14 +5952,18 @@ class ImportClient
             // Create parent directory if needed
             $dir = dirname($local_path);
             if (!is_dir($dir)) {
-                // Check if any component of the path exists as a file and remove it
-                try {
-                    $this->ensure_directory_path($dir);
-                } catch (PreserveLocalSkipException $e) {
-                    $context->skip_current_file = true;
-                    $this->audit_log($e->getMessage(), true);
-                    $this->show_progress_line("[skip] " . $this->display_path($path));
-                    return;
+                if ($custom_target) {
+                    @mkdir($dir, 0755, true);
+                } else {
+                    // Check if any component of the path exists as a file and remove it
+                    try {
+                        $this->ensure_directory_path($dir);
+                    } catch (PreserveLocalSkipException $e) {
+                        $context->skip_current_file = true;
+                        $this->audit_log($e->getMessage(), true);
+                        $this->show_progress_line("[skip] " . $this->display_path($path));
+                        return;
+                    }
                 }
             }
 
@@ -6040,41 +6011,44 @@ class ImportClient
                 touch($context->file_path, $context->file_ctime);
             }
 
-            // Index update (JSON lines)
-            $file_size = (int) ($headers["x-file-size"] ?? 0);
-            $final_size = file_exists($context->file_path)
-                ? filesize($context->file_path)
-                : 0;
+            if (!$custom_target) {
+                // Index update (JSON lines)
+                $file_size = (int) ($headers["x-file-size"] ?? 0);
+                $final_size = file_exists($context->file_path)
+                    ? filesize($context->file_path)
+                    : 0;
 
-            $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
+                $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
 
-            if ($context->file_ctime && !$file_changed) {
-                $this->upsert_index_entry(
-                    $path,
-                    $context->file_ctime,
-                    $file_size,
-                    "file",
-                );
-                $this->files_imported++; // Count completed files only
-                $this->clear_volatile_file($path);
-                $this->audit_log(
-                    sprintf("  Indexed (wrote %d bytes)", $final_size),
-                    false,
-                );
-            } elseif ($file_changed) {
-                $this->audit_log(
-                    "  File changed during stream; index not updated",
-                    true,
-                );
+                if ($context->file_ctime && !$file_changed) {
+                    $this->upsert_index_entry(
+                        $path,
+                        $context->file_ctime,
+                        $file_size,
+                        "file",
+                    );
+                    $this->files_imported++; // Count completed files only
+                    $this->clear_volatile_file($path);
+                    $this->audit_log(
+                        sprintf("  Indexed (wrote %d bytes)", $final_size),
+                        false,
+                    );
+                } elseif ($file_changed) {
+                    $this->audit_log(
+                        "  File changed during stream; index not updated",
+                        true,
+                    );
+                }
+
+                // Clear crash recovery tracking - file is complete
+                $this->state["current_file"] = null;
+                $this->state["current_file_bytes"] = null;
             }
 
             $context->file_handle = null;
             $context->file_path = null;
             $context->file_ctime = null;
             $context->file_bytes_written = 0;
-            // Clear crash recovery tracking - file is complete
-            $this->state["current_file"] = null;
-            $this->state["current_file_bytes"] = null;
         }
     }
 
@@ -8099,6 +8073,9 @@ class StreamingContext
     public $saw_completion = false;
     // When true, skip writing the current file (preserve-local mode)
     public $skip_current_file = false;
+    // When set, file chunks are written under this directory instead of
+    // the import docroot, and index/state updates are skipped.
+    public $target_base_dir = null;
 }
 
 /**
