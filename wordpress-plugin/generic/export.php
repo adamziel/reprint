@@ -1760,11 +1760,18 @@ function endpoint_preflight(array $config): array
                         }
                         $db["wp"]["multisite"] = $multisite;
 
-                        $constants = [
-                            "WP_CONTENT_DIR",
-                            "WP_CONTENT_URL",
-                            "WP_PLUGIN_DIR",
-                            "WP_PLUGIN_URL",
+                        // Capture all WP_* constants plus a few other
+                        // WordPress-specific ones that don't follow the prefix.
+                        $all_constants = get_defined_constants();
+                        $constant_values = [];
+                        foreach ($all_constants as $name => $value) {
+                            if (strncmp($name, "WP_", 3) === 0) {
+                                $constant_values[$name] = $value;
+                            }
+                        }
+                        // Include non-WP_* constants that are still
+                        // important for understanding a WordPress site.
+                        $extra_constants = [
                             "WPMU_PLUGIN_DIR",
                             "WPMU_PLUGIN_URL",
                             "UPLOADS",
@@ -1776,20 +1783,11 @@ function endpoint_preflight(array $config): array
                             "SUBDOMAIN_INSTALL",
                             "TEMPLATEPATH",
                             "STYLESHEETPATH",
-                            "WP_HOME",
-                            "WP_SITEURL",
                             "FORCE_SSL_LOGIN",
                             "FORCE_SSL_ADMIN",
-                            "WP_CACHE",
-                            "WP_DEBUG",
-                            "WP_DEBUG_LOG",
-                            "WP_DEBUG_DISPLAY",
                             "SAVEQUERIES",
-                            "WP_MEMORY_LIMIT",
-                            "WP_MAX_MEMORY_LIMIT",
                         ];
-                        $constant_values = [];
-                        foreach ($constants as $name) {
+                        foreach ($extra_constants as $name) {
                             if (defined($name)) {
                                 $constant_values[$name] = constant($name);
                             }
