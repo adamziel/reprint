@@ -2049,6 +2049,11 @@ function endpoint_preflight(array $config): array
             "php_ini" => function_exists("php_ini_loaded_file")
                 ? (php_ini_loaded_file() ?: null)
                 : null,
+            "php_ini_scanned_files" => function_exists("php_ini_scanned_files")
+                ? (php_ini_scanned_files() ?: null)
+                : null,
+            "auto_prepend_file" => ini_get("auto_prepend_file") ?: null,
+            "auto_append_file" => ini_get("auto_append_file") ?: null,
             "temp_dir" => sys_get_temp_dir(),
             "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,

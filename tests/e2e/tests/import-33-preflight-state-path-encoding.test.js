@@ -67,7 +67,7 @@ describe('Import: Preflight state path encoding', () => {
         }
 
         const runtime = data.runtime || {};
-        for (const key of ['php_ini', 'temp_dir', 'document_root', 'script_filename', 'cwd']) {
+        for (const key of ['php_ini', 'auto_prepend_file', 'auto_append_file', 'temp_dir', 'document_root', 'script_filename', 'cwd']) {
             if (typeof runtime[key] === 'string') {
                 assertEncoded(runtime[key], `runtime.${key}`);
             }

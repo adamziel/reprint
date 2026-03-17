@@ -1747,6 +1747,207 @@ class ImportClient
                 );
             }
         }
+
+        $this->download_runtime_files();
+    }
+
+    /**
+     * Collect the filesystem paths of PHP runtime config files reported
+     * in the preflight response: the main php.ini, any scanned .ini
+     * files, and auto_prepend_file / auto_append_file.
+     *
+     * @return array{files: string[], directories: string[]}
+     *   - files: absolute paths of individual files to fetch
+     *   - directories: their parent directories (for the export allow-list)
+     */
+    private function collect_runtime_file_paths(): array
+    {
+        $preflight = $this->state["preflight"]["data"] ?? [];
+        $runtime = $preflight["runtime"] ?? [];
+
+        $files = [];
+
+        foreach (["php_ini", "auto_prepend_file", "auto_append_file"] as $key) {
+            $path = $runtime[$key] ?? "";
+            if (is_string($path) && $path !== "") {
+                $files[] = $path;
+            }
+        }
+
+        $scanned = $runtime["php_ini_scanned_files"] ?? "";
+        if (is_string($scanned) && $scanned !== "") {
+            foreach (array_map("trim", explode(",", $scanned)) as $ini_path) {
+                if ($ini_path !== "") {
+                    $files[] = $ini_path;
+                }
+            }
+        }
+
+        // Deduplicate and compute parent directories for the export allow-list.
+        $files = array_values(array_unique($files));
+        $dirs = [];
+        foreach ($files as $f) {
+            $parent = dirname($f);
+            if ($parent !== "" && $parent !== ".") {
+                $dirs[rtrim($parent, "/")] = true;
+            }
+        }
+
+        return [
+            "files" => $files,
+            "directories" => array_keys($dirs),
+        ];
+    }
+
+    /**
+     * Download PHP runtime configuration files (php.ini, scanned .ini
+     * files, auto_prepend_file, auto_append_file) into the state
+     * directory under runtime_files/.
+     *
+     * Called on every preflight: the runtime_files/ directory is deleted
+     * and re-created so it always reflects the current server state.
+     */
+    private function download_runtime_files(): void
+    {
+        $info = $this->collect_runtime_file_paths();
+        $files = $info["files"];
+        $directories = $info["directories"];
+
+        $runtime_dir = $this->state_dir . "/runtime_files";
+
+        // Always wipe and recreate so the directory reflects current state.
+        if (is_dir($runtime_dir)) {
+            $this->recursive_rmdir($runtime_dir);
+            $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
+        }
+
+        if (empty($files)) {
+            $this->audit_log("RUNTIME FILES | no runtime files to download");
+            return;
+        }
+
+        if (!mkdir($runtime_dir, 0755, true)) {
+            $this->audit_log("RUNTIME FILES | failed to create {$runtime_dir}", true);
+            return;
+        }
+
+        $this->audit_log(
+            "RUNTIME FILES | downloading " . count($files) . " file(s): " .
+                implode(", ", $files),
+        );
+
+        // Build a JSON file list for the file_fetch endpoint.
+        $tmp = tempnam(sys_get_temp_dir(), "runtime-fetch-");
+        if ($tmp === false) {
+            $this->audit_log("RUNTIME FILES | failed to create temp file", true);
+            return;
+        }
+        file_put_contents($tmp, json_encode($files, JSON_UNESCAPED_SLASHES));
+
+        $post_data = [
+            "file_list" => new CURLFile($tmp, "application/json", "file_list"),
+        ];
+
+        $params = [];
+        $params["directory"] = $directories;
+        $url = $this->build_url("file_fetch", null, $params);
+
+        $context = new StreamingContext();
+        $context->file_handle = null;
+        $context->file_path = null;
+        $context->file_ctime = null;
+        $downloaded = 0;
+
+        $context->on_chunk = function ($chunk) use ($runtime_dir, $context, &$downloaded) {
+            $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+
+            if ($chunk_type === "file") {
+                $raw_header = $chunk["headers"]["x-file-path"] ?? "";
+                $path = base64_decode($raw_header, true);
+                if ($path === false || $path === "") {
+                    return;
+                }
+
+                $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
+                $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
+                $local_path = $runtime_dir . $path;
+
+                if ($is_first) {
+                    $dir = dirname($local_path);
+                    if (!is_dir($dir)) {
+                        @mkdir($dir, 0755, true);
+                    }
+                    $context->file_handle = fopen($local_path, "wb");
+                    $context->file_path = $local_path;
+                }
+
+                if ($context->file_handle) {
+                    fwrite($context->file_handle, $chunk["body"] ?? "");
+                }
+
+                if ($is_last && $context->file_handle) {
+                    fclose($context->file_handle);
+                    $context->file_handle = null;
+                    $context->file_path = null;
+
+                    $ctime = $chunk["headers"]["x-file-ctime"] ?? null;
+                    if ($ctime !== null) {
+                        @touch($local_path, (int) $ctime);
+                    }
+
+                    $downloaded++;
+                    $this->audit_log("RUNTIME FILES | saved {$path} → {$local_path}");
+                }
+            } elseif ($chunk_type === "error") {
+                $body = json_decode($chunk["body"] ?? "{}", true);
+                $error_path = isset($body["path"]) ? base64_decode($body["path"]) : "unknown";
+                $message = $body["message"] ?? "unknown error";
+                $this->audit_log("RUNTIME FILES | error fetching {$error_path}: {$message}", true);
+            }
+        };
+
+        try {
+            $this->fetch_streaming($url, null, $context, $post_data, "file_fetch");
+        } catch (RuntimeException $e) {
+            $this->audit_log(
+                "RUNTIME FILES | fetch failed: " . substr($e->getMessage(), 0, 200),
+                true,
+            );
+        }
+
+        @unlink($tmp);
+
+        if ($context->file_handle) {
+            fclose($context->file_handle);
+        }
+
+        $this->audit_log("RUNTIME FILES | downloaded {$downloaded}/" . count($files) . " file(s)");
+    }
+
+    /**
+     * Recursively remove a directory and all its contents.
+     */
+    private function recursive_rmdir(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        $entries = scandir($dir);
+        if ($entries === false) {
+            return;
+        }
+        foreach ($entries as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $path = $dir . "/" . $entry;
+            if (is_dir($path) && !is_link($path)) {
+                $this->recursive_rmdir($path);
+            } else {
+                @unlink($path);
+            }
+        }
+        @rmdir($dir);
     }
 
     /**
@@ -7473,10 +7674,21 @@ class ImportClient
         }
 
         if (isset($data["runtime"]) && is_array($data["runtime"])) {
-            foreach (["php_ini", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
+            foreach (["php_ini", "auto_prepend_file", "auto_append_file", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
                 if (array_key_exists($key, $data["runtime"])) {
                     $data["runtime"][$key] = $this->encode_state_path_value($data["runtime"][$key]);
                 }
+            }
+            // php_ini_scanned_files is a comma-separated string of paths
+            if (array_key_exists("php_ini_scanned_files", $data["runtime"]) && is_string($data["runtime"]["php_ini_scanned_files"])) {
+                $files = array_map("trim", explode(",", $data["runtime"]["php_ini_scanned_files"]));
+                $encoded = [];
+                foreach ($files as $f) {
+                    if ($f !== "") {
+                        $encoded[] = $this->encode_state_path_value($f);
+                    }
+                }
+                $data["runtime"]["php_ini_scanned_files"] = implode(",", $encoded);
             }
         }
 
@@ -7539,10 +7751,21 @@ class ImportClient
         }
 
         if (isset($data["runtime"]) && is_array($data["runtime"])) {
-            foreach (["php_ini", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
+            foreach (["php_ini", "auto_prepend_file", "auto_append_file", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
                 if (array_key_exists($key, $data["runtime"])) {
                     $data["runtime"][$key] = $this->decode_state_path_value($data["runtime"][$key]);
                 }
+            }
+            // php_ini_scanned_files is a comma-separated string of paths
+            if (array_key_exists("php_ini_scanned_files", $data["runtime"]) && is_string($data["runtime"]["php_ini_scanned_files"])) {
+                $files = array_map("trim", explode(",", $data["runtime"]["php_ini_scanned_files"]));
+                $decoded = [];
+                foreach ($files as $f) {
+                    if ($f !== "") {
+                        $decoded[] = $this->decode_state_path_value($f);
+                    }
+                }
+                $data["runtime"]["php_ini_scanned_files"] = implode(",", $decoded);
             }
         }
 
