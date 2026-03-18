@@ -113,10 +113,10 @@ class RuntimeFilesTest extends TestCase
     }
 
     /**
-     * collect_runtime_file_paths() extracts php_ini and scanned ini files
-     * from the preflight runtime section.
+     * collect_runtime_file_paths() extracts auto_prepend_file and
+     * auto_append_file from ini_get_all.
      */
-    public function testCollectRuntimeFilePathsAllFields()
+    public function testCollectRuntimeFilePathsFromIniGetAll()
     {
         $this->writeState([
             "preflight" => [
@@ -124,8 +124,11 @@ class RuntimeFilesTest extends TestCase
                 "data" => [
                     "ok" => true,
                     "runtime" => [
-                        "php_ini" => "/etc/php/8.1/php.ini",
-                        "php_ini_scanned_files" => "/etc/php/8.1/conf.d/curl.ini, /etc/php/8.1/conf.d/gd.ini",
+                        "ini_get_all" => [
+                            "auto_prepend_file" => "/scripts/prepend.php",
+                            "auto_append_file" => "/scripts/append.php",
+                            "max_execution_time" => "30",
+                        ],
                     ],
                 ],
             ],
@@ -136,23 +139,16 @@ class RuntimeFilesTest extends TestCase
 
         $result = $this->callPrivate($client, 'collect_runtime_file_paths');
 
-        $this->assertEqualsCanonicalizing(
-            [
-                "/etc/php/8.1/php.ini",
-                "/etc/php/8.1/conf.d/curl.ini",
-                "/etc/php/8.1/conf.d/gd.ini",
-            ],
+        $this->assertEquals(
+            ["/scripts/prepend.php", "/scripts/append.php"],
             $result["files"],
         );
-
-        // Parent directories should be computed for each unique path.
-        $this->assertContains("/etc/php/8.1", $result["directories"]);
-        $this->assertContains("/etc/php/8.1/conf.d", $result["directories"]);
+        $this->assertContains("/scripts", $result["directories"]);
     }
 
     /**
-     * collect_runtime_file_paths() deduplicates paths — if php_ini and a
-     * scanned ini share the same path, it appears only once.
+     * collect_runtime_file_paths() deduplicates when prepend and append
+     * point to the same file.
      */
     public function testCollectRuntimeFilePathsDeduplicates()
     {
@@ -162,8 +158,10 @@ class RuntimeFilesTest extends TestCase
                 "data" => [
                     "ok" => true,
                     "runtime" => [
-                        "php_ini" => "/etc/php.ini",
-                        "php_ini_scanned_files" => "/etc/php.ini, /etc/conf.d/extra.ini",
+                        "ini_get_all" => [
+                            "auto_prepend_file" => "/scripts/shared.php",
+                            "auto_append_file" => "/scripts/shared.php",
+                        ],
                     ],
                 ],
             ],
@@ -174,11 +172,7 @@ class RuntimeFilesTest extends TestCase
 
         $result = $this->callPrivate($client, 'collect_runtime_file_paths');
 
-        // /etc/php.ini should appear only once despite being in both php_ini and scanned list.
-        $this->assertEquals(
-            ["/etc/php.ini", "/etc/conf.d/extra.ini"],
-            $result["files"],
-        );
+        $this->assertEquals(["/scripts/shared.php"], $result["files"]);
     }
 
     /**
