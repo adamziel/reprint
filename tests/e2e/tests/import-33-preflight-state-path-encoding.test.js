@@ -73,6 +73,21 @@ describe('Import: Preflight state path encoding', () => {
             }
         }
 
+        // php_ini_scanned_files is a comma-separated list of base64-encoded paths.
+        if (typeof runtime.php_ini_scanned_files === 'string' && runtime.php_ini_scanned_files !== '') {
+            const parts = runtime.php_ini_scanned_files.split(',').map(s => s.trim()).filter(Boolean);
+            assert.ok(parts.length > 0, 'Expected at least one scanned ini file');
+            for (const [idx, part] of parts.entries()) {
+                assertEncoded(part, `runtime.php_ini_scanned_files[${idx}]`);
+            }
+        }
+
+        // ini_get_all is NOT a path field — it should be a plain object, not encoded.
+        assert.ok(
+            typeof runtime.ini_get_all === 'object' && runtime.ini_get_all !== null,
+            'runtime.ini_get_all should be a plain object (not base64-encoded)'
+        );
+
         const directories = data.filesystem?.directories || [];
         assert.ok(Array.isArray(directories) && directories.length > 0, 'Expected filesystem.directories entries');
         for (const [idx, dir] of directories.entries()) {
