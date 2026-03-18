@@ -1752,43 +1752,8 @@ class ImportClient
     }
 
     /**
-     * Collect auto_prepend_file and auto_append_file paths from ini_get_all.
-     *
-     * @return array{files: string[], directories: string[]}
-     *   - files: absolute paths to download
-     *   - directories: their parent directories (for the export allow-list)
-     */
-    private function collect_runtime_file_paths(): array
-    {
-        $preflight = $this->state["preflight"]["data"] ?? [];
-        $ini_all = $preflight["runtime"]["ini_get_all"] ?? [];
-
-        $files = [];
-        foreach (["auto_prepend_file", "auto_append_file"] as $key) {
-            $path = $ini_all[$key] ?? "";
-            if (is_string($path) && $path !== "") {
-                $files[] = $path;
-            }
-        }
-
-        $files = array_values(array_unique($files));
-        $dirs = [];
-        foreach ($files as $f) {
-            $parent = dirname($f);
-            if ($parent !== "" && $parent !== ".") {
-                $dirs[rtrim($parent, "/")] = true;
-            }
-        }
-
-        return [
-            "files" => $files,
-            "directories" => array_keys($dirs),
-        ];
-    }
-
-    /**
-     * Save ini_get_all data and download auto_prepend/append scripts
-     * into state_dir/runtime_files/.
+     * Download auto_prepend_file and auto_append_file scripts into
+     * state_dir/runtime_files/.
      *
      * Called on every preflight: the directory is wiped and recreated
      * so it always reflects the current server state.  Download
@@ -1801,40 +1766,48 @@ class ImportClient
 
         // Always wipe and recreate so the directory reflects current state.
         if (is_dir($runtime_dir)) {
-            $this->recursive_rmdir($runtime_dir);
+            self::rmdir_recursive($runtime_dir);
             $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
-        if (!mkdir($runtime_dir, 0755, true)) {
-            $this->audit_log("RUNTIME FILES | failed to create {$runtime_dir}", true);
-            return;
+        $ini_all = $this->state["preflight"]["data"]["runtime"]["ini_get_all"] ?? [];
+        $files = [];
+        foreach (["auto_prepend_file", "auto_append_file"] as $key) {
+            $path = $ini_all[$key] ?? "";
+            if (is_string($path) && $path !== "") {
+                $files[] = $path;
+            }
         }
+        $files = array_values(array_unique($files));
 
-        // Write the full computed INI configuration from ini_get_all().
-        $preflight = $this->state["preflight"]["data"] ?? [];
-        $runtime = $preflight["runtime"] ?? [];
-        $ini_all = $runtime["ini_get_all"] ?? null;
-        if (is_array($ini_all) && !empty($ini_all)) {
-            $json = json_encode($ini_all, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-            file_put_contents($runtime_dir . "/ini_get_all.json", $json);
-            $this->audit_log("RUNTIME FILES | wrote ini_get_all.json (" . count($ini_all) . " directives)");
-        }
-
-        // Download auto_prepend_file and auto_append_file scripts.
-        $info = $this->collect_runtime_file_paths();
-        $files = $info["files"];
         if (empty($files)) {
             $this->audit_log("RUNTIME FILES | no prepend/append scripts to download");
             return;
         }
+
+        mkdir($runtime_dir, 0755, true);
 
         $this->audit_log(
             "RUNTIME FILES | downloading " . count($files) . " script(s): " .
                 implode(", ", $files),
         );
 
-        // Issue one file_fetch request per parent directory so that
-        // an inaccessible directory doesn't block the other.
+        $downloaded = $this->fetch_files_into($runtime_dir, $files);
+        $this->audit_log("RUNTIME FILES | downloaded {$downloaded}/" . count($files) . " script(s)");
+    }
+
+    /**
+     * Download a list of absolute remote paths into $target_dir,
+     * preserving their directory structure.
+     *
+     * Issues one file_fetch request per parent directory so that an
+     * inaccessible directory doesn't block the others.  All errors
+     * are caught and logged as non-fatal.
+     *
+     * @return int Number of files successfully downloaded.
+     */
+    private function fetch_files_into(string $target_dir, array $files): int
+    {
         $by_dir = [];
         foreach ($files as $f) {
             $parent = dirname($f);
@@ -1844,10 +1817,9 @@ class ImportClient
         }
 
         $downloaded = 0;
-        $total = count($files);
 
         foreach ($by_dir as $directory => $dir_files) {
-            $tmp = tempnam(sys_get_temp_dir(), "runtime-fetch-");
+            $tmp = tempnam(sys_get_temp_dir(), "fetch-into-");
             if ($tmp === false) {
                 continue;
             }
@@ -1863,19 +1835,19 @@ class ImportClient
             $context->file_path = null;
             $context->file_ctime = null;
 
-            $context->on_chunk = function ($chunk) use ($runtime_dir, $context, &$downloaded) {
+            $context->on_chunk = function ($chunk) use ($target_dir, $context, &$downloaded) {
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                 if ($chunk_type === "file") {
-                    $raw_header = $chunk["headers"]["x-file-path"] ?? "";
-                    $path = base64_decode($raw_header, true);
+                    $raw = $chunk["headers"]["x-file-path"] ?? "";
+                    $path = base64_decode($raw, true);
                     if ($path === false || $path === "") {
                         return;
                     }
 
                     $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
                     $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
-                    $local_path = $runtime_dir . $path;
+                    $local_path = $target_dir . $path;
 
                     if ($is_first) {
                         if ($context->file_handle) {
@@ -1898,13 +1870,12 @@ class ImportClient
                         fclose($context->file_handle);
                         $context->file_handle = null;
                         $downloaded++;
-                        $this->audit_log("RUNTIME FILES | saved {$path} → {$local_path}");
+                        $this->audit_log("Saved {$path} → {$local_path}");
                     }
                 } elseif ($chunk_type === "error") {
                     $body = json_decode($chunk["body"] ?? "{}", true);
                     $error_path = isset($body["path"]) ? base64_decode($body["path"]) : "unknown";
-                    $message = $body["message"] ?? "unknown error";
-                    $this->audit_log("RUNTIME FILES | error for {$error_path}: {$message}");
+                    $this->audit_log("Fetch error for {$error_path}: " . ($body["message"] ?? "unknown"));
                 }
             };
 
@@ -1912,7 +1883,7 @@ class ImportClient
                 $this->fetch_streaming($url, null, $context, $post_data, "file_fetch");
             } catch (\RuntimeException $e) {
                 $this->audit_log(
-                    "RUNTIME FILES | fetch failed for {$directory} (non-fatal): " .
+                    "Fetch failed for directory {$directory} (non-fatal): " .
                         substr($e->getMessage(), 0, 200),
                 );
             }
@@ -1924,13 +1895,13 @@ class ImportClient
             }
         }
 
-        $this->audit_log("RUNTIME FILES | downloaded {$downloaded}/{$total} script(s)");
+        return $downloaded;
     }
 
     /**
      * Recursively remove a directory and all its contents.
      */
-    private function recursive_rmdir(string $dir): void
+    private static function rmdir_recursive(string $dir): void
     {
         if (!is_dir($dir)) {
             return;
@@ -1945,7 +1916,7 @@ class ImportClient
             }
             $path = $dir . "/" . $entry;
             if (is_dir($path) && !is_link($path)) {
-                $this->recursive_rmdir($path);
+                self::rmdir_recursive($path);
             } else {
                 @unlink($path);
             }
