@@ -2057,9 +2057,11 @@ function endpoint_preflight(array $config): array
         ],
         "runtime" => [
             "server_software" => $_SERVER["SERVER_SOFTWARE"] ?? null,
-            "php_ini" => function_exists("php_ini_loaded_file")
-                ? (php_ini_loaded_file() ?: null)
-                : null,
+            // Every effective INI directive as computed by the PHP runtime
+            // after merging php.ini, scanned .ini files, and htaccess
+            // overrides.  This captures the full configuration without
+            // needing to read the .ini files themselves.
+            "ini_get_all" => ini_get_all(null, false),
             "temp_dir" => sys_get_temp_dir(),
             "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,

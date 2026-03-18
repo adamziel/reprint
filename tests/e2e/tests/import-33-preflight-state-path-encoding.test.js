@@ -67,11 +67,17 @@ describe('Import: Preflight state path encoding', () => {
         }
 
         const runtime = data.runtime || {};
-        for (const key of ['php_ini', 'temp_dir', 'document_root', 'script_filename', 'cwd']) {
+        for (const key of ['temp_dir', 'document_root', 'script_filename', 'cwd']) {
             if (typeof runtime[key] === 'string') {
                 assertEncoded(runtime[key], `runtime.${key}`);
             }
         }
+
+        // ini_get_all is NOT a path field — it should be a plain object, not encoded.
+        assert.ok(
+            typeof runtime.ini_get_all === 'object' && runtime.ini_get_all !== null,
+            'runtime.ini_get_all should be a plain object (not base64-encoded)'
+        );
 
         const directories = data.filesystem?.directories || [];
         assert.ok(Array.isArray(directories) && directories.length > 0, 'Expected filesystem.directories entries');
