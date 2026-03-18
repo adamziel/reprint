@@ -7,13 +7,18 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Tests for PHP runtime file downloading during preflight.
+ * Tests for PHP runtime file path collection and directory management.
  *
- * The export preflight includes a runtime_files array with
- * base64-encoded contents of php.ini, scanned ini files,
- * and auto_prepend/append scripts.  The import side writes
- * these into state_dir/runtime_files/ preserving their
- * original absolute paths.
+ * The import side reads runtime file paths (php.ini, scanned ini files,
+ * auto_prepend/append scripts) from the preflight response and downloads
+ * them via the file_fetch endpoint.  Since unit tests cannot hit a real
+ * server, these tests cover:
+ *
+ * - collect_runtime_file_paths(): correct parsing of preflight runtime data
+ * - Directory wipe/create lifecycle of runtime_files/
+ * - Graceful handling when no runtime paths are present
+ * - Tolerance of fetch failures (the file_fetch call will fail against a
+ *   fake URL, but download_runtime_files() must not throw)
  */
 class RuntimeFilesTest extends TestCase
 {
@@ -108,39 +113,22 @@ class RuntimeFilesTest extends TestCase
     }
 
     /**
-     * Runtime files from preflight are written to state_dir/runtime_files/
-     * preserving the original absolute path structure.
+     * collect_runtime_file_paths() extracts php_ini, auto_prepend_file,
+     * auto_append_file, and scanned ini files from the preflight runtime
+     * section.
      */
-    public function testRuntimeFilesWrittenFromPreflight()
+    public function testCollectRuntimeFilePathsAllFields()
     {
-        $phpIniContent = "; PHP configuration\nmax_execution_time = 30\n";
-        $prependContent = "<?php // auto prepend\n";
-        $scannedContent = "extension=curl\n";
-
         $this->writeState([
             "preflight" => [
                 "http_code" => 200,
                 "data" => [
                     "ok" => true,
-                    "runtime_files" => [
-                        [
-                            "path" => "/etc/php/8.1/php.ini",
-                            "content" => base64_encode($phpIniContent),
-                            "size" => strlen($phpIniContent),
-                            "error" => null,
-                        ],
-                        [
-                            "path" => "/scripts/env.php",
-                            "content" => base64_encode($prependContent),
-                            "size" => strlen($prependContent),
-                            "error" => null,
-                        ],
-                        [
-                            "path" => "/etc/php/8.1/conf.d/curl.ini",
-                            "content" => base64_encode($scannedContent),
-                            "size" => strlen($scannedContent),
-                            "error" => null,
-                        ],
+                    "runtime" => [
+                        "php_ini" => "/etc/php/8.1/php.ini",
+                        "auto_prepend_file" => "/scripts/prepend.php",
+                        "auto_append_file" => "/scripts/append.php",
+                        "php_ini_scanned_files" => "/etc/php/8.1/conf.d/curl.ini, /etc/php/8.1/conf.d/gd.ini",
                     ],
                 ],
             ],
@@ -148,49 +136,42 @@ class RuntimeFilesTest extends TestCase
 
         $client = $this->makeClient();
         $this->loadClientState($client);
-        $this->callPrivate($client, 'download_runtime_files');
 
-        $runtimeDir = $this->stateDir . '/runtime_files';
-        $this->assertDirectoryExists($runtimeDir);
+        $result = $this->callPrivate($client, 'collect_runtime_file_paths');
 
-        $phpIniPath = $runtimeDir . '/etc/php/8.1/php.ini';
-        $this->assertFileExists($phpIniPath);
-        $this->assertEquals($phpIniContent, file_get_contents($phpIniPath));
+        $this->assertEqualsCanonicalizing(
+            [
+                "/etc/php/8.1/php.ini",
+                "/scripts/prepend.php",
+                "/scripts/append.php",
+                "/etc/php/8.1/conf.d/curl.ini",
+                "/etc/php/8.1/conf.d/gd.ini",
+            ],
+            $result["files"],
+        );
 
-        $prependPath = $runtimeDir . '/scripts/env.php';
-        $this->assertFileExists($prependPath);
-        $this->assertEquals($prependContent, file_get_contents($prependPath));
-
-        $curlIniPath = $runtimeDir . '/etc/php/8.1/conf.d/curl.ini';
-        $this->assertFileExists($curlIniPath);
-        $this->assertEquals($scannedContent, file_get_contents($curlIniPath));
+        // Parent directories should be computed for each unique path.
+        $this->assertContains("/etc/php/8.1", $result["directories"]);
+        $this->assertContains("/scripts", $result["directories"]);
+        $this->assertContains("/etc/php/8.1/conf.d", $result["directories"]);
     }
 
     /**
-     * Entries with errors in the preflight data are skipped gracefully.
+     * collect_runtime_file_paths() deduplicates paths — if php_ini and a
+     * scanned ini share the same path, it appears only once.
      */
-    public function testRuntimeFilesSkipsErrors()
+    public function testCollectRuntimeFilePathsDeduplicates()
     {
-        $goodContent = "extension=gd\n";
-
         $this->writeState([
             "preflight" => [
                 "http_code" => 200,
                 "data" => [
                     "ok" => true,
-                    "runtime_files" => [
-                        [
-                            "path" => "/etc/php/unreadable.ini",
-                            "content" => null,
-                            "size" => null,
-                            "error" => "not readable",
-                        ],
-                        [
-                            "path" => "/etc/php/8.1/conf.d/gd.ini",
-                            "content" => base64_encode($goodContent),
-                            "size" => strlen($goodContent),
-                            "error" => null,
-                        ],
+                    "runtime" => [
+                        "php_ini" => "/etc/php.ini",
+                        "auto_prepend_file" => null,
+                        "auto_append_file" => "",
+                        "php_ini_scanned_files" => "/etc/php.ini, /etc/conf.d/extra.ini",
                     ],
                 ],
             ],
@@ -198,89 +179,43 @@ class RuntimeFilesTest extends TestCase
 
         $client = $this->makeClient();
         $this->loadClientState($client);
-        $this->callPrivate($client, 'download_runtime_files');
 
-        $runtimeDir = $this->stateDir . '/runtime_files';
+        $result = $this->callPrivate($client, 'collect_runtime_file_paths');
 
-        // Errored file should not exist
-        $this->assertFileDoesNotExist($runtimeDir . '/etc/php/unreadable.ini');
-
-        // Good file should exist
-        $gdPath = $runtimeDir . '/etc/php/8.1/conf.d/gd.ini';
-        $this->assertFileExists($gdPath);
-        $this->assertEquals($goodContent, file_get_contents($gdPath));
+        // /etc/php.ini should appear only once despite being in both php_ini and scanned list.
+        $this->assertEquals(
+            ["/etc/php.ini", "/etc/conf.d/extra.ini"],
+            $result["files"],
+        );
     }
 
     /**
-     * Re-running preflight wipes and recreates runtime_files/.
+     * collect_runtime_file_paths() returns empty arrays when no runtime
+     * section is present in preflight data.
      */
-    public function testRuntimeFilesWipedOnRerun()
+    public function testCollectRuntimeFilePathsEmpty()
     {
-        $content = "max_execution_time = 60\n";
-
         $this->writeState([
             "preflight" => [
                 "http_code" => 200,
                 "data" => [
                     "ok" => true,
-                    "runtime_files" => [
-                        [
-                            "path" => "/etc/php.ini",
-                            "content" => base64_encode("old content"),
-                            "size" => 11,
-                            "error" => null,
-                        ],
-                        [
-                            "path" => "/etc/old-file.ini",
-                            "content" => base64_encode("stale"),
-                            "size" => 5,
-                            "error" => null,
-                        ],
-                    ],
                 ],
             ],
         ]);
 
-        // First run
         $client = $this->makeClient();
         $this->loadClientState($client);
-        $this->callPrivate($client, 'download_runtime_files');
 
-        $runtimeDir = $this->stateDir . '/runtime_files';
-        $this->assertFileExists($runtimeDir . '/etc/php.ini');
-        $this->assertFileExists($runtimeDir . '/etc/old-file.ini');
+        $result = $this->callPrivate($client, 'collect_runtime_file_paths');
 
-        // Simulate a second preflight with different files
-        $this->writeState([
-            "preflight" => [
-                "http_code" => 200,
-                "data" => [
-                    "ok" => true,
-                    "runtime_files" => [
-                        [
-                            "path" => "/etc/php.ini",
-                            "content" => base64_encode($content),
-                            "size" => strlen($content),
-                            "error" => null,
-                        ],
-                    ],
-                ],
-            ],
-        ]);
-
-        $client2 = $this->makeClient();
-        $this->loadClientState($client2);
-        $this->callPrivate($client2, 'download_runtime_files');
-
-        // New content should be there
-        $this->assertEquals($content, file_get_contents($runtimeDir . '/etc/php.ini'));
-
-        // Old stale file should be gone
-        $this->assertFileDoesNotExist($runtimeDir . '/etc/old-file.ini');
+        $this->assertEmpty($result["files"]);
+        $this->assertEmpty($result["directories"]);
     }
 
     /**
-     * When preflight has no runtime_files, the directory should not be created.
+     * When preflight has no runtime paths, download_runtime_files() should
+     * not create the runtime_files/ directory.
      */
     public function testNoRuntimeFilesNoDirectory()
     {
@@ -298,5 +233,69 @@ class RuntimeFilesTest extends TestCase
         $this->callPrivate($client, 'download_runtime_files');
 
         $this->assertDirectoryDoesNotExist($this->stateDir . '/runtime_files');
+    }
+
+    /**
+     * download_runtime_files() wipes the existing runtime_files/ directory
+     * even when the fetch fails (which it will against a fake URL).
+     */
+    public function testRuntimeFilesDirWipedOnRerun()
+    {
+        $runtimeDir = $this->stateDir . '/runtime_files';
+        mkdir($runtimeDir . '/etc/old', 0755, true);
+        file_put_contents($runtimeDir . '/etc/old/stale.ini', 'stale content');
+
+        $this->writeState([
+            "preflight" => [
+                "http_code" => 200,
+                "data" => [
+                    "ok" => true,
+                    "runtime" => [
+                        "php_ini" => "/etc/php.ini",
+                    ],
+                ],
+            ],
+        ]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->callPrivate($client, 'download_runtime_files');
+
+        // The old stale file should be gone because the directory was wiped.
+        $this->assertFileDoesNotExist($runtimeDir . '/etc/old/stale.ini');
+
+        // The runtime_files/ directory itself should exist (it was recreated
+        // because there are files to download, even though the fetch failed).
+        $this->assertDirectoryExists($runtimeDir);
+    }
+
+    /**
+     * download_runtime_files() tolerates fetch failures without throwing.
+     * The file_fetch call against a fake URL will fail, but the method
+     * must catch the exception and continue.
+     */
+    public function testDownloadToleratesFetchFailure()
+    {
+        $this->writeState([
+            "preflight" => [
+                "http_code" => 200,
+                "data" => [
+                    "ok" => true,
+                    "runtime" => [
+                        "php_ini" => "/etc/php/8.1/php.ini",
+                        "auto_prepend_file" => "/scripts/prepend.php",
+                    ],
+                ],
+            ],
+        ]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+
+        // This must not throw — failures are caught internally.
+        $this->callPrivate($client, 'download_runtime_files');
+
+        // The directory should exist even though no files were downloaded.
+        $this->assertDirectoryExists($this->stateDir . '/runtime_files');
     }
 }
