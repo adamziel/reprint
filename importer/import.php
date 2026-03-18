@@ -1816,7 +1816,6 @@ class ImportClient
     {
         $info = $this->collect_runtime_file_paths();
         $files = $info["files"];
-        $directories = $info["directories"];
 
         $runtime_dir = $this->state_dir . "/runtime_files";
 
@@ -1841,95 +1840,113 @@ class ImportClient
                 implode(", ", $files),
         );
 
-        // Build a JSON file list for the file_fetch endpoint.
-        $tmp = tempnam(sys_get_temp_dir(), "runtime-fetch-");
-        if ($tmp === false) {
-            $this->audit_log("RUNTIME FILES | failed to create temp file", true);
-            return;
+        // Group files by parent directory.  The file_fetch endpoint validates
+        // all directories via realpath() up front, so if any single directory
+        // is inaccessible the whole request fails.  By issuing one request per
+        // directory we ensure that accessible directories succeed independently.
+        $by_dir = [];
+        foreach ($files as $f) {
+            $parent = dirname($f);
+            if ($parent === "" || $parent === ".") {
+                continue;
+            }
+            $parent = rtrim($parent, "/");
+            $by_dir[$parent][] = $f;
         }
-        file_put_contents($tmp, json_encode($files, JSON_UNESCAPED_SLASHES));
 
-        $post_data = [
-            "file_list" => new \CURLFile($tmp, "application/json", "file_list"),
-        ];
-
-        $params = ["directory" => $directories];
-        $url = $this->build_url("file_fetch", null, $params);
-
-        $context = new StreamingContext();
-        $context->file_handle = null;
-        $context->file_path = null;
-        $context->file_ctime = null;
         $downloaded = 0;
+        $total = count($files);
 
-        $context->on_chunk = function ($chunk) use ($runtime_dir, $context, &$downloaded) {
-            $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+        foreach ($by_dir as $directory => $dir_files) {
+            $tmp = tempnam(sys_get_temp_dir(), "runtime-fetch-");
+            if ($tmp === false) {
+                $this->audit_log("RUNTIME FILES | failed to create temp file for {$directory}", true);
+                continue;
+            }
+            file_put_contents($tmp, json_encode($dir_files, JSON_UNESCAPED_SLASHES));
 
-            if ($chunk_type === "file") {
-                $raw_header = $chunk["headers"]["x-file-path"] ?? "";
-                $path = base64_decode($raw_header, true);
-                if ($path === false || $path === "") {
-                    return;
-                }
+            $post_data = [
+                "file_list" => new \CURLFile($tmp, "application/json", "file_list"),
+            ];
 
-                $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
-                $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
-                $local_path = $runtime_dir . $path;
+            $params = ["directory" => [$directory]];
+            $url = $this->build_url("file_fetch", null, $params);
 
-                if ($is_first) {
-                    if ($context->file_handle) {
+            $context = new StreamingContext();
+            $context->file_handle = null;
+            $context->file_path = null;
+            $context->file_ctime = null;
+
+            $context->on_chunk = function ($chunk) use ($runtime_dir, $context, &$downloaded) {
+                $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+
+                if ($chunk_type === "file") {
+                    $raw_header = $chunk["headers"]["x-file-path"] ?? "";
+                    $path = base64_decode($raw_header, true);
+                    if ($path === false || $path === "") {
+                        return;
+                    }
+
+                    $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
+                    $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
+                    $local_path = $runtime_dir . $path;
+
+                    if ($is_first) {
+                        if ($context->file_handle) {
+                            fclose($context->file_handle);
+                            $context->file_handle = null;
+                        }
+                        $dir = dirname($local_path);
+                        if (!is_dir($dir)) {
+                            @mkdir($dir, 0755, true);
+                        }
+                        $context->file_handle = @fopen($local_path, "wb");
+                        $context->file_path = $local_path;
+                    }
+
+                    if ($context->file_handle && isset($chunk["body"])) {
+                        fwrite($context->file_handle, $chunk["body"]);
+                    }
+
+                    if ($is_last && $context->file_handle) {
                         fclose($context->file_handle);
                         $context->file_handle = null;
+
+                        $ctime = $chunk["headers"]["x-file-ctime"] ?? null;
+                        if ($ctime !== null) {
+                            @touch($local_path, (int) $ctime);
+                        }
+
+                        $downloaded++;
+                        $this->audit_log("RUNTIME FILES | saved {$path} → {$local_path}");
                     }
-                    $dir = dirname($local_path);
-                    if (!is_dir($dir)) {
-                        @mkdir($dir, 0755, true);
-                    }
-                    $context->file_handle = @fopen($local_path, "wb");
-                    $context->file_path = $local_path;
+                } elseif ($chunk_type === "error") {
+                    $body = json_decode($chunk["body"] ?? "{}", true);
+                    $error_path = isset($body["path"]) ? base64_decode($body["path"]) : "unknown";
+                    $message = $body["message"] ?? "unknown error";
+                    $this->audit_log("RUNTIME FILES | error for {$error_path}: {$message}");
                 }
+            };
 
-                if ($context->file_handle && isset($chunk["body"])) {
-                    fwrite($context->file_handle, $chunk["body"]);
-                }
-
-                if ($is_last && $context->file_handle) {
-                    fclose($context->file_handle);
-                    $context->file_handle = null;
-
-                    $ctime = $chunk["headers"]["x-file-ctime"] ?? null;
-                    if ($ctime !== null) {
-                        @touch($local_path, (int) $ctime);
-                    }
-
-                    $downloaded++;
-                    $this->audit_log("RUNTIME FILES | saved {$path} → {$local_path}");
-                }
-            } elseif ($chunk_type === "error") {
-                $body = json_decode($chunk["body"] ?? "{}", true);
-                $error_path = isset($body["path"]) ? base64_decode($body["path"]) : "unknown";
-                $message = $body["message"] ?? "unknown error";
-                $this->audit_log("RUNTIME FILES | error for {$error_path}: {$message}");
+            try {
+                $this->fetch_streaming($url, null, $context, $post_data, "file_fetch");
+            } catch (\RuntimeException $e) {
+                // Tolerate failures — these are system paths that may not be
+                // accessible to the web server process.
+                $this->audit_log(
+                    "RUNTIME FILES | fetch failed for {$directory} (non-fatal): " .
+                        substr($e->getMessage(), 0, 200),
+                );
             }
-        };
 
-        try {
-            $this->fetch_streaming($url, null, $context, $post_data, "file_fetch");
-        } catch (\RuntimeException $e) {
-            // Tolerate failures — these are system paths that may not be
-            // accessible to the web server process.
-            $this->audit_log(
-                "RUNTIME FILES | fetch failed (non-fatal): " . substr($e->getMessage(), 0, 200),
-            );
+            @unlink($tmp);
+
+            if ($context->file_handle) {
+                fclose($context->file_handle);
+            }
         }
 
-        @unlink($tmp);
-
-        if ($context->file_handle) {
-            fclose($context->file_handle);
-        }
-
-        $this->audit_log("RUNTIME FILES | downloaded {$downloaded}/" . count($files) . " file(s)");
+        $this->audit_log("RUNTIME FILES | downloaded {$downloaded}/{$total} file(s)");
     }
 
     /**
