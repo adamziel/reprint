@@ -214,10 +214,10 @@ class RuntimeFilesTest extends TestCase
     }
 
     /**
-     * When preflight has no runtime paths, download_runtime_files() should
-     * not create the runtime_files/ directory.
+     * When preflight has no runtime section, the runtime_files/ directory
+     * is created but contains no files.
      */
-    public function testNoRuntimeFilesNoDirectory()
+    public function testNoRuntimeDataEmptyDirectory()
     {
         $this->writeState([
             "preflight" => [
@@ -232,7 +232,52 @@ class RuntimeFilesTest extends TestCase
         $this->loadClientState($client);
         $this->callPrivate($client, 'download_runtime_files');
 
-        $this->assertDirectoryDoesNotExist($this->stateDir . '/runtime_files');
+        $runtimeDir = $this->stateDir . '/runtime_files';
+        $this->assertDirectoryExists($runtimeDir);
+        // No ini_get_all.json since there's no runtime section at all.
+        $this->assertFileDoesNotExist($runtimeDir . '/ini_get_all.json');
+    }
+
+    /**
+     * ini_get_all data from the preflight response is written to
+     * runtime_files/ini_get_all.json.
+     */
+    public function testIniGetAllWrittenToFile()
+    {
+        $iniData = [
+            "max_execution_time" => [
+                "global_value" => "30",
+                "local_value" => "30",
+                "access" => 7,
+            ],
+            "memory_limit" => [
+                "global_value" => "128M",
+                "local_value" => "256M",
+                "access" => 7,
+            ],
+        ];
+
+        $this->writeState([
+            "preflight" => [
+                "http_code" => 200,
+                "data" => [
+                    "ok" => true,
+                    "runtime" => [
+                        "ini_get_all" => $iniData,
+                    ],
+                ],
+            ],
+        ]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->callPrivate($client, 'download_runtime_files');
+
+        $path = $this->stateDir . '/runtime_files/ini_get_all.json';
+        $this->assertFileExists($path);
+
+        $written = json_decode(file_get_contents($path), true);
+        $this->assertEquals($iniData, $written);
     }
 
     /**

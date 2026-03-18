@@ -2054,6 +2054,11 @@ function endpoint_preflight(array $config): array
                 : null,
             "auto_prepend_file" => ini_get("auto_prepend_file") ?: null,
             "auto_append_file" => ini_get("auto_append_file") ?: null,
+            // Every effective INI directive as computed by the PHP runtime
+            // after merging php.ini, scanned .ini files, and htaccess
+            // overrides.  This lets us reconstruct the full configuration
+            // even when the .ini files themselves are not readable.
+            "ini_get_all" => ini_get_all(null, false),
             "temp_dir" => sys_get_temp_dir(),
             "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,

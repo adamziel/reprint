@@ -1825,13 +1825,25 @@ class ImportClient
             $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
-        if (empty($files)) {
-            $this->audit_log("RUNTIME FILES | no runtime files to download");
+        if (!mkdir($runtime_dir, 0755, true)) {
+            $this->audit_log("RUNTIME FILES | failed to create {$runtime_dir}", true);
             return;
         }
 
-        if (!mkdir($runtime_dir, 0755, true)) {
-            $this->audit_log("RUNTIME FILES | failed to create {$runtime_dir}", true);
+        // Write the full computed INI configuration from ini_get_all().
+        // This is always available in the preflight response regardless of
+        // whether the actual .ini files are readable on disk.
+        $preflight = $this->state["preflight"]["data"] ?? [];
+        $runtime = $preflight["runtime"] ?? [];
+        $ini_all = $runtime["ini_get_all"] ?? null;
+        if (is_array($ini_all) && !empty($ini_all)) {
+            $json = json_encode($ini_all, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            file_put_contents($runtime_dir . "/ini_get_all.json", $json);
+            $this->audit_log("RUNTIME FILES | wrote ini_get_all.json (" . count($ini_all) . " directives)");
+        }
+
+        if (empty($files)) {
+            $this->audit_log("RUNTIME FILES | no runtime files to download");
             return;
         }
 
