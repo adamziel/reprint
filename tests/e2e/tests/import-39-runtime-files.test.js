@@ -81,27 +81,14 @@ describe('Import: Runtime files', () => {
         assert.deepEqual(fileKeys, stateKeys, 'ini_get_all.json keys should match state keys');
     });
 
-    it('reports auto_prepend_file and auto_append_file in preflight', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        const runtime = state.preflight?.data?.runtime;
-        assert.ok(runtime, 'preflight state should contain runtime section');
+    it('ini_get_all includes auto_prepend_file and auto_append_file directives', () => {
+        const iniPath = join(tempDir, 'runtime_files', 'ini_get_all.json');
+        const iniData = JSON.parse(readFileSync(iniPath, 'utf-8'));
 
-        // These fields must be present in the runtime section (even if null).
-        assert.ok('auto_prepend_file' in runtime, 'runtime should have auto_prepend_file field');
-        assert.ok('auto_append_file' in runtime, 'runtime should have auto_append_file field');
-
-        // In the default e2e environment these are typically not set.
-        // If they are set, the value should be a base64-encoded path string.
-        for (const key of ['auto_prepend_file', 'auto_append_file']) {
-            const value = runtime[key];
-            if (value !== null) {
-                assert.equal(typeof value, 'string', `runtime.${key} should be a string or null`);
-                assert.ok(
-                    value.startsWith('base64:'),
-                    `runtime.${key} should be base64-encoded when set, got: ${value}`
-                );
-            }
-        }
+        // These directives should always be present in ini_get_all,
+        // even when empty — they're part of core PHP configuration.
+        assert.ok('auto_prepend_file' in iniData, 'ini_get_all should contain auto_prepend_file');
+        assert.ok('auto_append_file' in iniData, 'ini_get_all should contain auto_append_file');
     });
 
     it('audit log records runtime file activity', () => {

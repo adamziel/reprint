@@ -113,9 +113,8 @@ class RuntimeFilesTest extends TestCase
     }
 
     /**
-     * collect_runtime_file_paths() extracts php_ini, auto_prepend_file,
-     * auto_append_file, and scanned ini files from the preflight runtime
-     * section.
+     * collect_runtime_file_paths() extracts php_ini and scanned ini files
+     * from the preflight runtime section.
      */
     public function testCollectRuntimeFilePathsAllFields()
     {
@@ -126,8 +125,6 @@ class RuntimeFilesTest extends TestCase
                     "ok" => true,
                     "runtime" => [
                         "php_ini" => "/etc/php/8.1/php.ini",
-                        "auto_prepend_file" => "/scripts/prepend.php",
-                        "auto_append_file" => "/scripts/append.php",
                         "php_ini_scanned_files" => "/etc/php/8.1/conf.d/curl.ini, /etc/php/8.1/conf.d/gd.ini",
                     ],
                 ],
@@ -142,8 +139,6 @@ class RuntimeFilesTest extends TestCase
         $this->assertEqualsCanonicalizing(
             [
                 "/etc/php/8.1/php.ini",
-                "/scripts/prepend.php",
-                "/scripts/append.php",
                 "/etc/php/8.1/conf.d/curl.ini",
                 "/etc/php/8.1/conf.d/gd.ini",
             ],
@@ -152,7 +147,6 @@ class RuntimeFilesTest extends TestCase
 
         // Parent directories should be computed for each unique path.
         $this->assertContains("/etc/php/8.1", $result["directories"]);
-        $this->assertContains("/scripts", $result["directories"]);
         $this->assertContains("/etc/php/8.1/conf.d", $result["directories"]);
     }
 
@@ -169,8 +163,6 @@ class RuntimeFilesTest extends TestCase
                     "ok" => true,
                     "runtime" => [
                         "php_ini" => "/etc/php.ini",
-                        "auto_prepend_file" => null,
-                        "auto_append_file" => "",
                         "php_ini_scanned_files" => "/etc/php.ini, /etc/conf.d/extra.ini",
                     ],
                 ],

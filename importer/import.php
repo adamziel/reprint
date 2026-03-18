@@ -1753,8 +1753,10 @@ class ImportClient
 
     /**
      * Collect the filesystem paths of PHP runtime config files reported
-     * in the preflight response: the main php.ini, any scanned .ini
-     * files, and auto_prepend_file / auto_append_file.
+     * in the preflight response: the main php.ini and any scanned .ini
+     * files.  Values like auto_prepend_file and auto_append_file are
+     * already captured in ini_get_all so they don't need separate
+     * file downloads.
      *
      * @return array{files: string[], directories: string[]}
      *   - files: absolute paths of individual files to fetch
@@ -1767,11 +1769,9 @@ class ImportClient
 
         $files = [];
 
-        foreach (["php_ini", "auto_prepend_file", "auto_append_file"] as $key) {
-            $path = $runtime[$key] ?? "";
-            if (is_string($path) && $path !== "") {
-                $files[] = $path;
-            }
+        $php_ini = $runtime["php_ini"] ?? "";
+        if (is_string($php_ini) && $php_ini !== "") {
+            $files[] = $php_ini;
         }
 
         $scanned = $runtime["php_ini_scanned_files"] ?? "";
@@ -1800,8 +1800,8 @@ class ImportClient
     }
 
     /**
-     * Download PHP runtime configuration files (php.ini, scanned .ini
-     * files, auto_prepend_file, auto_append_file) into the state
+     * Download PHP runtime configuration files (php.ini and scanned .ini
+     * files) into the state
      * directory under runtime_files/.
      *
      * Uses the file_fetch endpoint with the parent directories of
@@ -7711,7 +7711,7 @@ class ImportClient
         }
 
         if (isset($data["runtime"]) && is_array($data["runtime"])) {
-            foreach (["php_ini", "auto_prepend_file", "auto_append_file", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
+            foreach (["php_ini", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
                 if (array_key_exists($key, $data["runtime"])) {
                     $data["runtime"][$key] = $this->encode_state_path_value($data["runtime"][$key]);
                 }
@@ -7788,7 +7788,7 @@ class ImportClient
         }
 
         if (isset($data["runtime"]) && is_array($data["runtime"])) {
-            foreach (["php_ini", "auto_prepend_file", "auto_append_file", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
+            foreach (["php_ini", "temp_dir", "document_root", "script_filename", "cwd"] as $key) {
                 if (array_key_exists($key, $data["runtime"])) {
                     $data["runtime"][$key] = $this->decode_state_path_value($data["runtime"][$key]);
                 }

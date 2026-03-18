@@ -2052,8 +2052,6 @@ function endpoint_preflight(array $config): array
             "php_ini_scanned_files" => function_exists("php_ini_scanned_files")
                 ? (php_ini_scanned_files() ?: null)
                 : null,
-            "auto_prepend_file" => ini_get("auto_prepend_file") ?: null,
-            "auto_append_file" => ini_get("auto_append_file") ?: null,
             // Every effective INI directive as computed by the PHP runtime
             // after merging php.ini, scanned .ini files, and htaccess
             // overrides.  This lets us reconstruct the full configuration
