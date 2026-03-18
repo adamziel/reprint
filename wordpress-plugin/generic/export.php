@@ -1150,6 +1150,80 @@ function endpoint_db_index(
 }
 
 /**
+ * Read PHP runtime configuration files and return their contents.
+ *
+ * Collects the main php.ini, all scanned .ini files, and the
+ * auto_prepend_file / auto_append_file scripts.  Each entry
+ * includes the absolute path and base64-encoded file content
+ * so the importer can recreate them without a separate fetch.
+ *
+ * @return array List of {path, content, size, error} entries.
+ */
+function collect_runtime_files(): array
+{
+    $paths = [];
+
+    $php_ini = function_exists("php_ini_loaded_file")
+        ? (php_ini_loaded_file() ?: null)
+        : null;
+    if ($php_ini !== null) {
+        $paths[] = $php_ini;
+    }
+
+    $prepend = ini_get("auto_prepend_file") ?: null;
+    if ($prepend !== null) {
+        $paths[] = $prepend;
+    }
+
+    $append = ini_get("auto_append_file") ?: null;
+    if ($append !== null) {
+        $paths[] = $append;
+    }
+
+    $scanned = function_exists("php_ini_scanned_files")
+        ? (php_ini_scanned_files() ?: null)
+        : null;
+    if ($scanned !== null) {
+        foreach (array_map("trim", explode(",", $scanned)) as $ini) {
+            if ($ini !== "") {
+                $paths[] = $ini;
+            }
+        }
+    }
+
+    $paths = array_values(array_unique($paths));
+    $result = [];
+
+    foreach ($paths as $file_path) {
+        $entry = [
+            "path" => $file_path,
+            "content" => null,
+            "size" => null,
+            "error" => null,
+        ];
+
+        if (!is_file($file_path) || !is_readable($file_path)) {
+            $entry["error"] = "not readable";
+            $result[] = $entry;
+            continue;
+        }
+
+        $data = @file_get_contents($file_path);
+        if ($data === false) {
+            $entry["error"] = "read failed";
+            $result[] = $entry;
+            continue;
+        }
+
+        $entry["content"] = base64_encode($data);
+        $entry["size"] = strlen($data);
+        $result[] = $entry;
+    }
+
+    return $result;
+}
+
+/**
  * Resolves directory paths from config.
  */
 function resolve_directories(array $config): array
@@ -2059,6 +2133,7 @@ function endpoint_preflight(array $config): array
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,
             "cwd" => getcwd() ?: null,
         ],
+        "runtime_files" => collect_runtime_files(),
         "filesystem" => [
             "directories" => $dir_checks,
             "error" => $dir_error,
