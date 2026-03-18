@@ -58,11 +58,10 @@ describe('Import: Runtime files', () => {
         assert.ok('error_reporting' in iniData, 'Should contain error_reporting');
         assert.ok('upload_max_filesize' in iniData, 'Should contain upload_max_filesize');
 
-        // Each directive should have global_value, local_value, access.
+        // ini_get_all(null, false) returns scalar values (local value only),
+        // not the detailed {global_value, local_value, access} objects.
         const entry = iniData['max_execution_time'];
-        assert.ok('global_value' in entry, 'INI entry should have global_value');
-        assert.ok('local_value' in entry, 'INI entry should have local_value');
-        assert.ok('access' in entry, 'INI entry should have access');
+        assert.equal(typeof entry, 'string', 'INI values should be strings (local value)');
     });
 
     it('ini_get_all.json matches preflight state data', () => {

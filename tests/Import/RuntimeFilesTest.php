@@ -244,17 +244,10 @@ class RuntimeFilesTest extends TestCase
      */
     public function testIniGetAllWrittenToFile()
     {
+        // ini_get_all(null, false) returns scalar local values, not detailed arrays.
         $iniData = [
-            "max_execution_time" => [
-                "global_value" => "30",
-                "local_value" => "30",
-                "access" => 7,
-            ],
-            "memory_limit" => [
-                "global_value" => "128M",
-                "local_value" => "256M",
-                "access" => 7,
-            ],
+            "max_execution_time" => "30",
+            "memory_limit" => "256M",
         ];
 
         $this->writeState([
