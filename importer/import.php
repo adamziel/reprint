@@ -30,6 +30,9 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
 
+// Load runtime environment components (host analyzers, runtime appliers)
+require_once __DIR__ . '/lib/runtime/load.php';
+
 /**
  * The wire-protocol version this importer speaks.
  *
@@ -1302,10 +1305,11 @@ class ImportClient
                 "preflight",
                 "preflight-assert",
                 "flatten-docroot",
+                "apply-runtime",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flatten-docroot",
+                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flatten-docroot, apply-runtime",
             );
         }
 
@@ -1441,6 +1445,10 @@ class ImportClient
         }
         if ($command === "flatten-docroot") {
             $this->run_flatten_docroot($options);
+            return;
+        }
+        if ($command === "apply-runtime") {
+            $this->run_apply_runtime($options);
             return;
         }
         if ($command === "db-apply") {
@@ -3294,6 +3302,77 @@ class ImportClient
      * If a path that should be a symlink is a regular file/directory,
      * the command stops with an error unless --force is specified.
      */
+    /**
+     * Generate runtime configuration for the imported site.
+     *
+     * Reads the detected webhost from state (set during preflight), runs the
+     * appropriate host analyzer to produce a runtime manifest, then applies
+     * it using the chosen runtime applier. The manifest captures what the
+     * source site needs (constants, INI directives, request interceptors);
+     * the applier writes the files the target server needs to fulfill those
+     * requirements.
+     */
+    private function run_apply_runtime(array $options): void
+    {
+        $runtime = $options["runtime"] ?? null;
+        if (empty($runtime)) {
+            throw new InvalidArgumentException(
+                "apply-runtime requires --runtime=RUNTIME. Valid runtimes: nginx-fpm, php-builtin"
+            );
+        }
+
+        // Load state to get preflight data and detected webhost.
+        $entry = $this->state["preflight"] ?? null;
+        if (!is_array($entry) || empty($entry["data"])) {
+            throw new RuntimeException(
+                "apply-runtime requires a prior preflight run. " .
+                "Run 'preflight' first to capture the source site's environment."
+            );
+        }
+
+        $preflight_data = $entry["data"];
+        $webhost = $this->state["webhost"] ?? "other";
+
+        // Resolve to absolute paths so generated files work from any cwd.
+        $abs_state_dir = realpath($this->state_dir) ?: $this->state_dir;
+        $abs_docroot = realpath($this->docroot) ?: $this->docroot;
+
+        // Step 1: Host analyzer produces a manifest from preflight data.
+        $analyzer = HostAnalyzer::for_host($webhost);
+        $manifest = $analyzer->analyze($preflight_data, $abs_state_dir);
+
+        // Save the manifest so it can be inspected or re-applied later.
+        $manifest_path = $abs_state_dir . '/runtime-manifest.json';
+        $manifest->save($manifest_path);
+        $this->audit_log("APPLY-RUNTIME | wrote manifest to {$manifest_path} (source={$manifest->source}, webhost={$webhost})");
+
+        // Step 2: Runtime applier writes server-specific config files.
+        $applier = RuntimeApplier::for_runtime($runtime);
+        $summary = $applier->apply($manifest, $abs_docroot, $abs_state_dir);
+
+        foreach ($summary as $line) {
+            $this->audit_log("APPLY-RUNTIME | {$line}");
+        }
+
+        // Output the summary and manifest as structured JSON for callers,
+        // and print the human-readable summary to stderr.
+        $this->output_progress([
+            "status" => "complete",
+            "command" => "apply-runtime",
+            "runtime" => $runtime,
+            "webhost" => $webhost,
+            "manifest" => $manifest_path,
+        ]);
+
+        fwrite(STDERR, "\n");
+        fwrite(STDERR, "Runtime: {$runtime}\n");
+        fwrite(STDERR, "Source host: {$webhost}\n");
+        fwrite(STDERR, "\n");
+        foreach ($summary as $line) {
+            fwrite(STDERR, "{$line}\n");
+        }
+    }
+
     private function run_flatten_docroot(array $options): void
     {
         $flatten_to = $options["flatten_to"] ?? null;
@@ -8974,6 +9053,39 @@ if (
                 "                     with symlinks (logged to audit log)\n" .
                 "  --verbose, -v      Show detailed operation logs\n",
         ],
+        "apply-runtime" => [
+            "short" => "Generate server configuration for the imported site",
+            "detail" =>
+                "Reads the source site's environment from preflight data and generates\n" .
+                "the configuration files needed to serve the imported site on your\n" .
+                "target server. This bridges the gap between 'files are on disk' and\n" .
+                "'the site actually works' — setting PHP constants, INI directives,\n" .
+                "and request interceptors (like on-the-fly thumbnail generation).\n" .
+                "\n" .
+                "Requires a prior preflight run to detect the source host.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --runtime=RUNTIME  Target server runtime (required):\n" .
+                "                       nginx-fpm    — writes .user.ini + bootstrap.php\n" .
+                "                       php-builtin  — writes router.php + start.sh\n" .
+                "  --verbose, -v      Show detailed operation logs\n" .
+                "\n" .
+                "Output files (nginx-fpm):\n" .
+                "  (state-dir)/bootstrap.php       PHP bootstrap (constants, interceptors)\n" .
+                "  (state-dir)/runtime-manifest.json  Source environment manifest\n" .
+                "  (docroot)/.user.ini             auto_prepend_file + INI directives\n" .
+                "\n" .
+                "Output files (php-builtin):\n" .
+                "  (state-dir)/bootstrap.php       PHP bootstrap (constants, interceptors)\n" .
+                "  (state-dir)/runtime-manifest.json  Source environment manifest\n" .
+                "  (state-dir)/start.sh            Shell script to launch the server\n" .
+                "  (docroot)/router.php            Request router for php -S\n" .
+                "\n" .
+                "Example:\n" .
+                "  php import.php apply-runtime - --state-dir=/path/to/state \\\n" .
+                "    --docroot=/path/to/site --runtime=php-builtin\n" .
+                "  bash /path/to/state/start.sh\n",
+        ],
     ];
 
     // Show main help when invoked with no arguments or just --help
@@ -9290,6 +9402,8 @@ if (
             $options["flatten_to"] = substr($argv[$i], strlen("--flatten-to="));
         } elseif ($argv[$i] === "--force") {
             $options["force"] = true;
+        } elseif (strpos($argv[$i], "--runtime=") === 0) {
+            $options["runtime"] = substr($argv[$i], strlen("--runtime="));
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
