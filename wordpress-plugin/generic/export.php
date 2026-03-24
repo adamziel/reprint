@@ -1790,9 +1790,12 @@ function endpoint_preflight(array $config): array
 
                         // Capture all WP_* constants plus a few other
                         // WordPress-specific ones that don't follow the prefix.
-                        $all_constants = get_defined_constants();
+                        // We use the "user" category from get_defined_constants(true)
+                        // which only includes constants set via define(), excluding
+                        // the thousands of constants from PHP extensions.
+                        $user_constants = get_defined_constants(true)["user"] ?? [];
                         $constant_values = [];
-                        foreach ($all_constants as $name => $value) {
+                        foreach ($user_constants as $name => $value) {
                             if (strncmp($name, "WP_", 3) === 0) {
                                 $constant_values[$name] = $value;
                             }
@@ -1822,10 +1825,11 @@ function endpoint_preflight(array $config): array
                         }
                         $db["wp"]["constants"] = $constant_values;
 
-                        // Names of all defined constants (without values)
-                        // so the importer can use their presence as a
-                        // detection signal without leaking secret values.
-                        $db["wp"]["constant_names"] = array_keys($all_constants);
+                        // Names of all runtime-defined constants (without values)
+                        // so the importer can use their presence as a detection
+                        // signal without leaking secret values. Only includes
+                        // constants set via define(), not PHP extension constants.
+                        $db["wp"]["constant_names"] = array_keys($user_constants);
 
                         global $wp_version;
                         $db["wp"]["wp_version"] = isset($wp_version) && is_string($wp_version)
