@@ -1504,6 +1504,7 @@ function endpoint_preflight(array $config): array
             "paths_urls" => null,
             "multisite" => null,
             "constants" => null,
+            "constant_names" => null,
             "error" => null,
         ],
         "error" => null,
@@ -1789,16 +1790,13 @@ function endpoint_preflight(array $config): array
 
                         // Capture all WP_* constants plus a few other
                         // WordPress-specific ones that don't follow the prefix.
-                        $all_constants = get_defined_constants();
-                        $constant_values = [];
-                        foreach ($all_constants as $name => $value) {
-                            if (strncmp($name, "WP_", 3) === 0) {
-                                $constant_values[$name] = $value;
-                            }
-                        }
+                        // We use the "user" category from get_defined_constants(true)
+                        // which only includes constants set via define(), excluding
+                        // the thousands of constants from PHP extensions.
+                        $user_constants = get_defined_constants(true)["user"] ?? [];
                         // Include non-WP_* constants that are still
                         // important for understanding a WordPress site.
-                        $extra_constants = [
+                        $extra_constants_names = [
                             "WPMU_PLUGIN_DIR",
                             "WPMU_PLUGIN_URL",
                             "UPLOADS",
@@ -1814,12 +1812,19 @@ function endpoint_preflight(array $config): array
                             "FORCE_SSL_ADMIN",
                             "SAVEQUERIES",
                         ];
-                        foreach ($extra_constants as $name) {
-                            if (defined($name)) {
-                                $constant_values[$name] = constant($name);
+                        $db["wp"]["constant_values"] = [];
+                        // Names of all runtime-defined constants (without values)
+                        // so the importer can use their presence as a detection
+                        // signal without leaking secret values. Only includes
+                        // constants set via define(), not PHP extension constants.
+                        $db["wp"]["constant_names"] = [];
+                        foreach ($user_constants as $name => $value) {
+                            if (strncmp($name, "WP_", 3) === 0 || in_array($name, $extra_constants_names)) {
+                                $db["wp"]["constant_values"][$name] = $value;
+                            } else {
+                                $db["wp"]["constant_names"][] = $name;
                             }
                         }
-                        $db["wp"]["constants"] = $constant_values;
 
                         global $wp_version;
                         $db["wp"]["wp_version"] = isset($wp_version) && is_string($wp_version)
@@ -2093,6 +2098,13 @@ function endpoint_preflight(array $config): array
             "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,
             "cwd" => getcwd() ?: null,
+            // Names of all defined environment variables (no values) so the
+            // importer can use their presence as a webhost detection signal.
+            "env_names" => array_values(array_unique(array_merge(
+                array_keys($_ENV),
+                array_keys(getenv()),
+            ))),
+            '$_SERVER_names' => array_keys($_SERVER),
         ],
         "filesystem" => [
             "directories" => $dir_checks,
