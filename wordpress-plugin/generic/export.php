@@ -2102,9 +2102,9 @@ function endpoint_preflight(array $config): array
             // importer can use their presence as a webhost detection signal.
             "env_names" => array_values(array_unique(array_merge(
                 array_keys($_ENV),
-                array_keys($_SERVER),
                 array_keys(getenv()),
             ))),
+            '$_SERVER_names' => array_keys($_SERVER),
         ],
         "filesystem" => [
             "directories" => $dir_checks,
