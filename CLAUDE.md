@@ -179,14 +179,17 @@ Always consult these when working on the respective components.
 
 ### Progress Computation
 
-Progress is computed client-side by reading state files (all in `--state-dir`):
+Progress for both file sync and SQL import is consolidated in a single machine-readable file:
+- `.import-status.json`: Written atomically on every state save, contains:
+  - Top-level: `step`, `steps`, `command`, `status`, `phase`, `error`, `ts`
+  - `files`: File sync progress — `stage`, `files_indexed`, `files_imported`, `remote_files`, `files_to_download`, `current_file`, `current_file_bytes`
+  - `db`: SQL import progress — `tables`, `rows_estimated`, `index_bytes`, `sql_bytes_downloaded`, `sql_bytes_written`, `statements_executed`, `apply_bytes_read`, `apply_pct`
+
+The status file derives its data from the internal state and on-disk artifacts:
 - `.import-state.json`: Current command, status, cursor, stage
 - `.import-index.jsonl`: Local file index (line count = files indexed)
 - `.import-remote-index.jsonl`: Remote file index (for delta comparison)
 - `.import-download-list.jsonl`: Files pending download
 - `db.sql`: SQL dump file size
 
-And from `--docroot`:
-- Actual downloaded files (recursive size/count)
-
-This keeps the protocol minimal while enabling rich progress visualization.
+This keeps the protocol minimal while enabling rich progress visualization through a single file.
