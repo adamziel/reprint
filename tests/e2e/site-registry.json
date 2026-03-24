@@ -32,6 +32,7 @@
     "file-type-swaps":   { "port": 8105 },
     "file-type-cache":   { "port": 8106 },
     "preserve-local":    { "port": 8107 },
-    "url-rewriting":     { "port": 8108 }
+    "url-rewriting":     { "port": 8108 },
+    "wpcloud-flatten":   { "port": 8109 }
   }
 }
