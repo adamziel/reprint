@@ -3551,7 +3551,10 @@ class ImportClient
                 true,
             );
 
-            if (is_dir($target) && !is_link($target)) {
+            // At this point, we know $target is not a symlink (symlinks
+            // are handled above and return early). So we only need to
+            // distinguish between directories and regular files.
+            if (is_dir($target)) {
                 $this->remove_directory_recursive($target);
             } else {
                 unlink($target);

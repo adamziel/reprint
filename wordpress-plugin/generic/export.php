@@ -1632,13 +1632,16 @@ function endpoint_preflight(array $config): array
                         // Use realpath() to resolve to the physical location so
                         // the importer knows where the files actually live.
                         $wp_admin_path = null;
-                        $wp_includes_path = null;
                         if (defined("ABSPATH")) {
                             $wp_admin_candidate = ABSPATH . "wp-admin";
                             $wp_admin_real = realpath($wp_admin_candidate);
                             if ($wp_admin_real !== false && is_dir($wp_admin_real)) {
                                 $wp_admin_path = $wp_admin_real;
                             }
+                        }
+
+                        $wp_includes_path = null;
+                        if (defined("ABSPATH")) {
                             $wpinc = defined("WPINC") ? WPINC : "wp-includes";
                             $wp_includes_candidate = ABSPATH . $wpinc;
                             $wp_includes_real = realpath($wp_includes_candidate);
@@ -1654,7 +1657,7 @@ function endpoint_preflight(array $config): array
                             "wp_admin_path" => $wp_admin_path,
                             "wp_includes_path" => $wp_includes_path,
                             "content_dir" => defined("WP_CONTENT_DIR")
-                                ? rtrim(WP_CONTENT_DIR, "/")
+                                ? realpath(rtrim(WP_CONTENT_DIR, "/"))
                                 : null,
                             "content_url" => function_exists("content_url")
                                 ? content_url()
