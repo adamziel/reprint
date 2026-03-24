@@ -1504,6 +1504,7 @@ function endpoint_preflight(array $config): array
             "paths_urls" => null,
             "multisite" => null,
             "constants" => null,
+            "constant_names" => null,
             "error" => null,
         ],
         "error" => null,
@@ -1821,6 +1822,11 @@ function endpoint_preflight(array $config): array
                         }
                         $db["wp"]["constants"] = $constant_values;
 
+                        // Names of all defined constants (without values)
+                        // so the importer can use their presence as a
+                        // detection signal without leaking secret values.
+                        $db["wp"]["constant_names"] = array_keys($all_constants);
+
                         global $wp_version;
                         $db["wp"]["wp_version"] = isset($wp_version) && is_string($wp_version)
                             ? $wp_version
@@ -2093,6 +2099,13 @@ function endpoint_preflight(array $config): array
             "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,
             "cwd" => getcwd() ?: null,
+            // Names of all defined environment variables (no values) so the
+            // importer can use their presence as a webhost detection signal.
+            "env_names" => array_values(array_unique(array_merge(
+                array_keys($_ENV),
+                array_keys($_SERVER),
+                array_keys(getenv()),
+            ))),
         ],
         "filesystem" => [
             "directories" => $dir_checks,
