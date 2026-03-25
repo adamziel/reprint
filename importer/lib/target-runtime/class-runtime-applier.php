@@ -15,10 +15,10 @@ abstract class RuntimeApplier
      *
      * @param RuntimeManifest $manifest  The manifest to apply.
      * @param string          $docroot   Absolute path to the site docroot.
-     * @param string          $state_dir Absolute path to the state directory.
+     * @param string          $output_dir Absolute path to the output directory.
      * @return string[] Human-readable summary lines (printed to the user).
      */
-    abstract public function apply(RuntimeManifest $manifest, string $docroot, string $state_dir): array;
+    abstract public function apply(RuntimeManifest $manifest, string $docroot, string $output_dir): array;
 
     /**
      * Pick the right applier for a runtime name.

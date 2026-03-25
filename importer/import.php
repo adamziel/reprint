@@ -3212,9 +3212,16 @@ class ImportClient
      * Reads the detected webhost from state (set during preflight), runs the
      * appropriate host analyzer to produce a runtime manifest, then applies
      * it using the chosen runtime applier. The manifest captures what the
-     * source site needs (constants, INI directives, request interceptors);
+     * source site needs (constants, INI directives, error handlers);
      * the applier writes the files the target server needs to fulfill those
      * requirements.
+     *
+     * The effective docroot is --docroot + the remote site's document_root
+     * prefix (from preflight). For example, if the remote document_root is
+     * /srv/htdocs and --docroot is ./files, the effective docroot is
+     * ./files/srv/htdocs. If the site was flattened with flatten-docroot,
+     * pass the flattened directory as --docroot directly and the prefix
+     * is not applied.
      */
     private function run_apply_runtime(array $options): void
     {
@@ -3222,6 +3229,13 @@ class ImportClient
         if (empty($runtime)) {
             throw new InvalidArgumentException(
                 "apply-runtime requires --runtime=RUNTIME. Valid runtimes: nginx-fpm, php-builtin"
+            );
+        }
+
+        $output_dir = $options["output_dir"] ?? null;
+        if (empty($output_dir)) {
+            throw new InvalidArgumentException(
+                "apply-runtime requires --output-dir=DIR to write runtime configuration files"
             );
         }
 
@@ -3237,22 +3251,49 @@ class ImportClient
         $preflight_data = $entry["data"];
         $webhost = $this->state["webhost"] ?? "other";
 
+        // Resolve the effective docroot. The remote site's document_root
+        // tells us where the web root was on the source server. Files are
+        // downloaded into --docroot preserving the full remote path, so
+        // the effective local docroot is --docroot + document_root.
+        $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
+        if (is_string($remote_doc_root)) {
+            $remote_doc_root = rtrim($remote_doc_root, "/");
+        } else {
+            $remote_doc_root = "";
+        }
+        $effective_docroot = $this->docroot;
+        if ($remote_doc_root !== "") {
+            $candidate = $this->docroot . $remote_doc_root;
+            if (is_dir($candidate)) {
+                $effective_docroot = $candidate;
+            }
+        }
+
         // Resolve to absolute paths so generated files work from any cwd.
-        $abs_state_dir = realpath($this->state_dir) ?: $this->state_dir;
-        $abs_docroot = realpath($this->docroot) ?: $this->docroot;
+        $abs_output_dir = realpath($output_dir) ?: $output_dir;
+        $abs_docroot = realpath($effective_docroot) ?: $effective_docroot;
+
+        if (!is_dir($abs_output_dir)) {
+            if (!mkdir($abs_output_dir, 0755, true)) {
+                throw new RuntimeException(
+                    "Failed to create output directory: {$abs_output_dir}"
+                );
+            }
+            $abs_output_dir = realpath($abs_output_dir);
+        }
 
         // Step 1: Host analyzer produces a manifest from preflight data.
         $analyzer = HostAnalyzer::for_host($webhost);
         $manifest = $analyzer->analyze($preflight_data);
 
         // Save the manifest so it can be inspected or re-applied later.
-        $manifest_path = $abs_state_dir . '/runtime-manifest.json';
+        $manifest_path = $abs_output_dir . '/runtime-manifest.json';
         $manifest->save($manifest_path);
         $this->audit_log("APPLY-RUNTIME | wrote manifest to {$manifest_path} (source={$manifest->source}, webhost={$webhost})");
 
         // Step 2: Runtime applier writes server-specific config files.
         $applier = RuntimeApplier::for_runtime($runtime);
-        $summary = $applier->apply($manifest, $abs_docroot, $abs_state_dir);
+        $summary = $applier->apply($manifest, $abs_docroot, $abs_output_dir);
 
         foreach ($summary as $line) {
             $this->audit_log("APPLY-RUNTIME | {$line}");
@@ -8964,31 +9005,37 @@ if (
                 "the configuration files needed to serve the imported site on your\n" .
                 "target server. This bridges the gap between 'files are on disk' and\n" .
                 "'the site actually works' — setting PHP constants, INI directives,\n" .
-                "and request interceptors (like on-the-fly thumbnail generation).\n" .
+                "and error handlers (like on-the-fly thumbnail generation).\n" .
                 "\n" .
+                "Does not require a remote URL — reads only from local state.\n" .
                 "Requires a prior preflight run to detect the source host.\n" .
                 "\n" .
+                "The effective docroot is --docroot + the remote site's document_root\n" .
+                "prefix from preflight. If you used flatten-docroot, pass the flattened\n" .
+                "directory as --docroot.\n" .
+                "\n" .
                 "Options:\n" .
-                "  --runtime=RUNTIME  Target server runtime (required):\n" .
-                "                       nginx-fpm    — writes .user.ini + bootstrap.php\n" .
-                "                       php-builtin  — writes router.php + start.sh\n" .
-                "  --verbose, -v      Show detailed operation logs\n" .
+                "  --runtime=RUNTIME    Target server runtime (required):\n" .
+                "                         nginx-fpm    — writes .user.ini + bootstrap.php\n" .
+                "                         php-builtin  — writes router.php + start.sh\n" .
+                "  --output-dir=DIR     Directory for generated runtime files (required)\n" .
+                "  --verbose, -v        Show detailed operation logs\n" .
                 "\n" .
                 "Output files (nginx-fpm):\n" .
-                "  (state-dir)/bootstrap.php       PHP bootstrap (constants, interceptors)\n" .
-                "  (state-dir)/runtime-manifest.json  Source environment manifest\n" .
-                "  (docroot)/.user.ini             auto_prepend_file + INI directives\n" .
+                "  (output-dir)/bootstrap.php          PHP bootstrap (constants, error handlers)\n" .
+                "  (output-dir)/runtime-manifest.json   Source environment manifest\n" .
+                "  (docroot)/.user.ini                  auto_prepend_file + INI directives\n" .
                 "\n" .
                 "Output files (php-builtin):\n" .
-                "  (state-dir)/bootstrap.php       PHP bootstrap (constants, interceptors)\n" .
-                "  (state-dir)/runtime-manifest.json  Source environment manifest\n" .
-                "  (state-dir)/start.sh            Shell script to launch the server\n" .
-                "  (docroot)/router.php            Request router for php -S\n" .
+                "  (output-dir)/bootstrap.php          PHP bootstrap (constants, server vars)\n" .
+                "  (output-dir)/runtime-manifest.json   Source environment manifest\n" .
+                "  (output-dir)/router.php              Request router for php -S\n" .
+                "  (output-dir)/start.sh                Shell script to launch the server\n" .
                 "\n" .
                 "Example:\n" .
-                "  php import.php apply-runtime - --state-dir=/path/to/state \\\n" .
-                "    --docroot=/path/to/site --runtime=php-builtin\n" .
-                "  bash /path/to/state/start.sh\n",
+                "  php import.php apply-runtime --state-dir=./state \\\n" .
+                "    --docroot=./files --output-dir=./runtime --runtime=php-builtin\n" .
+                "  bash ./runtime/start.sh\n",
         ],
     ];
 
@@ -9047,12 +9094,22 @@ if (
         exit(0);
     }
 
-    $remote_url = $argv[2] ?? null;
+    // Local-only commands don't need a remote URL. For all others, the
+    // second positional argument is the export server URL.
+    $local_only_commands = ["apply-runtime", "db-domains", "db-apply", "files-stats", "flatten-docroot"];
+    $is_local_only = in_array($command, $local_only_commands, true);
 
-    if (!$remote_url) {
-        fwrite(STDERR, "Error: <remote-url> is required\n");
-        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
-        exit(1);
+    if ($is_local_only) {
+        $remote_url = "-";
+        $option_start_index = 2; // options start right after the command
+    } else {
+        $remote_url = $argv[2] ?? null;
+        if (!$remote_url) {
+            fwrite(STDERR, "Error: <remote-url> is required\n");
+            fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
+            exit(1);
+        }
+        $option_start_index = 3;
     }
 
     // Parse options (--state-dir and --docroot are required named options)
@@ -9066,7 +9123,7 @@ if (
         "tuning_config" => [],
     ];
 
-    for ($i = 3; $i < $argc; $i++) {
+    for ($i = $option_start_index; $i < $argc; $i++) {
         if (strpos($argv[$i], "--state-dir=") === 0) {
             $state_dir = substr($argv[$i], strlen("--state-dir="));
         } elseif (strpos($argv[$i], "--docroot=") === 0) {
@@ -9308,6 +9365,8 @@ if (
             $options["force"] = true;
         } elseif (strpos($argv[$i], "--runtime=") === 0) {
             $options["runtime"] = substr($argv[$i], strlen("--runtime="));
+        } elseif (strpos($argv[$i], "--output-dir=") === 0) {
+            $options["output_dir"] = substr($argv[$i], strlen("--output-dir="));
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);

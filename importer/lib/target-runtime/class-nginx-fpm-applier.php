@@ -5,9 +5,9 @@
  * PHP-FPM reads .user.ini files from the document root on every request
  * (cached for user_ini.cache_ttl seconds, default 300). This applier writes:
  *
- * 1. {state_dir}/bootstrap.php — constants, server vars, and error handlers
- * 2. {docroot}/.user.ini       — auto_prepend_file pointing to the bootstrap,
- *                                 plus any INI directives from the manifest
+ * 1. {output_dir}/bootstrap.php — constants, server vars, and error handlers
+ * 2. {docroot}/.user.ini        — auto_prepend_file pointing to the bootstrap,
+ *                                  plus any INI directives from the manifest
  *
  * Error handlers (like thumbnail generation) are inlined into the bootstrap
  * since auto_prepend_file runs before every PHP request — exactly the hook
@@ -15,12 +15,12 @@
  */
 class NginxFpmApplier extends RuntimeApplier
 {
-    public function apply(RuntimeManifest $manifest, string $docroot, string $state_dir): array
+    public function apply(RuntimeManifest $manifest, string $docroot, string $output_dir): array
     {
         $summary = [];
 
         // 1. Write bootstrap.php (constants + server vars + error handlers)
-        $bootstrap_path = $state_dir . '/bootstrap.php';
+        $bootstrap_path = $output_dir . '/bootstrap.php';
         $bootstrap = $this->generate_bootstrap($manifest, $docroot);
 
         // Append error handlers to the bootstrap — they run on every request
