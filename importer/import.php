@@ -3287,10 +3287,7 @@ class ImportClient
         $analyzer = HostAnalyzers::for_host($webhost);
         $manifest = $analyzer->analyze($preflight_data);
 
-        // Save the manifest so it can be inspected or re-applied later.
-        $manifest_path = $abs_output_dir . '/runtime-manifest.json';
-        $manifest->save($manifest_path);
-        $this->audit_log("APPLY-RUNTIME | wrote manifest to {$manifest_path} (source={$manifest->source}, webhost={$webhost})");
+        $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
 
         // Resolve host and port for the target server. If not provided on
         // the CLI, derive from the first URL rewrite target (saved by
@@ -3354,7 +3351,7 @@ class ImportClient
             "command" => "apply-runtime",
             "runtime" => $runtime,
             "webhost" => $webhost,
-            "manifest" => $manifest_path,
+            "webhost_source" => $manifest->source,
         ]);
 
         fwrite(STDERR, "\n");
@@ -9093,13 +9090,11 @@ if (
                 "\n" .
                 "Output files (nginx-fpm):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
-                "  (output-dir)/runtime-manifest.json   Source environment manifest\n" .
                 "  (output-dir)/nginx.conf              Nginx server block\n" .
                 "  (docroot)/.user.ini                  auto_prepend_file + INI directives\n" .
                 "\n" .
                 "Output files (php-builtin):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, routing, handlers)\n" .
-                "  (output-dir)/runtime-manifest.json   Source environment manifest\n" .
                 "  (output-dir)/start.sh                Shell script to launch the server\n" .
                 "\n" .
                 "Examples:\n" .
