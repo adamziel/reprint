@@ -3327,7 +3327,7 @@ class ImportClient
         }
 
         // Step 2: Runtime applier writes server-specific config files.
-        $applier = RuntimeApplier::for_runtime($runtime);
+        $applier = RuntimeAppliers::for_runtime($runtime);
         $applier_options = [];
         if ($wordpress_index !== '') {
             $applier_options['wordpress_index'] = $wordpress_index;

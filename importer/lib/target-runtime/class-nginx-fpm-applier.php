@@ -12,7 +12,7 @@
  * fastcgi_param, which is equivalent to .user.ini but configured in one
  * place alongside the rest of the server block.
  */
-class NginxFpmApplier extends RuntimeApplier
+class NginxFpmApplier implements RuntimeApplier
 {
     public function apply(RuntimeManifest $manifest, string $docroot, string $output_dir, array $options = []): array
     {
@@ -23,14 +23,14 @@ class NginxFpmApplier extends RuntimeApplier
 
         // 1. Write runtime.php
         $runtime_path = $output_dir . '/runtime.php';
-        $runtime = $this->generate_runtime_php($manifest, $docroot, $options);
-        $this->write_file($runtime_path, $runtime);
+        $runtime = generate_runtime_php($manifest, $docroot);
+        write_runtime_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
         // 2. Write nginx.conf (includes auto_prepend_file + INI directives)
         $nginx_conf_path = $output_dir . '/nginx.conf';
         $nginx_conf = $this->generate_nginx_conf($manifest, $docroot, $runtime_path, $host, $port);
-        $this->write_file($nginx_conf_path, $nginx_conf);
+        write_runtime_file($nginx_conf_path, $nginx_conf);
         $summary[] = "Wrote {$nginx_conf_path}";
 
         $summary[] = '';
@@ -46,7 +46,7 @@ class NginxFpmApplier extends RuntimeApplier
     /**
      * Generate an nginx server block that serves static files directly
      * and routes PHP requests through PHP-FPM. INI directives and
-     * auto_prepend_file are passed via fastcgi_param PHP_VALUE / PHP_ADMIN_VALUE,
+     * auto_prepend_file are passed via fastcgi_param PHP_VALUE,
      * so no .user.ini is needed in the docroot.
      */
     private function generate_nginx_conf(
