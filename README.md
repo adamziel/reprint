@@ -212,6 +212,59 @@ If the domain isn't changing, you can skip `db-apply` and import `db.sql`
 directly with a MySQL tool, or use `db-apply --target-engine=sqlite` to load it
 into SQLite through the bundled `sqlite-database-integration` driver.
 
+#### Step 6 — Generate runtime configuration.
+
+The downloaded files need server-specific configuration to actually work —
+PHP constants, INI directives, and request handlers that the source host
+relied on. `apply-runtime` reads the preflight data, detects the source
+hosting provider, and generates the configuration files your target server needs.
+
+For PHP's built-in development server:
+
+```bash
+php importer.phar apply-runtime --state-dir="$STATE_DIR" \
+    --flattened-docroot="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=php-builtin
+bash "$RUNTIME_DIR/start.sh"
+```
+
+For nginx + PHP-FPM:
+
+```bash
+php importer.phar apply-runtime --state-dir="$STATE_DIR" \
+    --flattened-docroot="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=nginx-fpm
+# Include $RUNTIME_DIR/nginx.conf in your nginx configuration, then reload
+```
+
+The command accepts either `--docroot` (the raw download directory — the remote
+`document_root` path is appended automatically) or `--flattened-docroot` (a
+directory created by `flatten-docroot`, used as-is). These are mutually exclusive.
+
+Host and port default to the URL rewrite target from `db-apply` (so the server
+listens on the same address the database was rewritten to). Override with
+`--host` and `--port`.
+
+**What gets generated:**
+
+The command produces a `runtime.php` file that sets PHP constants, server
+variables, and route handlers the source site needs. Each target runtime
+wraps it differently:
+
+| Runtime | Output files | How runtime.php loads |
+|---------|-------------|----------------------|
+| `php-builtin` | `runtime.php`, `start.sh` | Used as the router script for `php -S` |
+| `nginx-fpm` | `runtime.php`, `nginx.conf` | Loaded via `auto_prepend_file` in `fastcgi_param PHP_VALUE` |
+
+The architecture separates source host detection from target runtime
+configuration. Host analyzers read preflight data and produce a declarative
+manifest (constants, INI directives, routes). Runtime appliers consume the
+manifest and write server-specific files. Adding a new source host or target
+server is independent — you implement one interface without touching the other.
+
+Currently supported source hosts: WP Cloud (with on-the-fly thumbnail
+generation for missing image sizes), SiteGround, and a generic default.
+Currently supported target runtimes: nginx + PHP-FPM and PHP's built-in
+development server.
+
 #### Shoehorning the site onto your platform
 
 You've got a copy of the remote files in the `--docroot` directory and
@@ -393,6 +446,8 @@ php importer.phar <command> <URL> --state-dir=DIR --docroot=DIR [options]
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-sync`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
+* `flatten-docroot` — Creates a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
+* `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
 All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-sync`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-sync` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
 
