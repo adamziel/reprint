@@ -3,60 +3,53 @@
  * Host analyzer for WP Cloud (wpcom) sites.
  *
  * WP Cloud sites have a non-standard directory layout: WordPress core lives
- * at __wp__/ inside the document root, and wp-content is a separate tree.
- * The exported site only ships original-size uploads, so we need an on-the-fly
- * thumbnail generator to serve the sized variants WordPress references in
- * post meta (e.g. image-768x768.jpeg).
+ * at a versioned path (/wordpress/core/X.Y.Z/) and wp-content is a separate
+ * tree under /srv/htdocs/. After flatten-docroot, the local layout uses a
+ * __wp__ directory for core.
+ *
+ * The export only ships original-size uploads, so the manifest declares a
+ * 404 handler for thumbnail-sized image URLs. The target runtime decides
+ * how to implement it.
  */
 class WpcloudHostAnalyzer extends HostAnalyzer
 {
-    public function analyze(array $preflight_data, string $state_dir): RuntimeManifest
+    public function analyze(array $preflight_data): RuntimeManifest
     {
         $manifest = new RuntimeManifest('wpcloud');
         $manifest->php_ini = $this->extract_php_ini($preflight_data);
+        $manifest->constants = $this->extract_constants($preflight_data);
+        $manifest->server_vars = $this->extract_server_vars($preflight_data);
 
-        // WP Cloud uses a __wp__ directory for WordPress core. The flattened
-        // docroot layout places it at {docroot}/__wp__/.
-        $manifest->server_vars['WP_DIR'] = '{docroot}/__wp__/';
-
-        // wp-content and themes paths — standard locations after flatten-docroot.
-        $manifest->constants['WP_CONTENT_DIR'] = '{docroot}/wp-content';
-        $manifest->constants['THEMES_PATH_BASE'] = '{docroot}/wp-content/themes';
-
-        // The thumbnail generator intercepts requests for sized image variants
-        // (e.g. photo-300x200.jpg) that don't exist on disk, generates them
-        // from the original using GD, caches them, and serves them — all before
-        // WordPress boots. This is needed because the export only ships
-        // original-size uploads.
-        $this->install_thumbnail_interceptor($state_dir);
-        $manifest->request_interceptors[] = [
-            'name' => 'thumbnail-on-demand',
-            'phase' => 'before-wordpress',
-            'may_exit' => true,
-            'script' => 'runtime/thumbnail-on-demand.php',
+        // WP Cloud exports only ship full-size uploads. WordPress post meta
+        // references sized variants like image-768x768.jpeg that don't exist
+        // on disk. Declare a 404 handler so the target runtime can generate
+        // them on-the-fly from the originals.
+        $manifest->error_handlers[] = [
+            'type' => 'thumbnail-generator',
+            'path_pattern' => '/wp-content/uploads/.*-\d+x\d+\.\w+$',
+            'description' => 'Generate missing WordPress thumbnail sizes from originals using GD',
         ];
 
         return $manifest;
     }
 
-    /**
-     * Copy the thumbnail interceptor script into the state directory's
-     * runtime/ folder so it ships alongside the manifest.
-     */
-    private function install_thumbnail_interceptor(string $state_dir): void
+    protected function extract_server_vars(array $preflight_data): array
     {
-        $runtime_dir = $state_dir . '/runtime';
-        if (!is_dir($runtime_dir)) {
-            mkdir($runtime_dir, 0755, true);
-        }
+        // WP Cloud uses a __wp__ directory for WordPress core. After
+        // flatten-docroot, it lives at {docroot}/__wp__/.
+        return [
+            'WP_DIR' => '{docroot}/__wp__/',
+        ];
+    }
 
-        $source = __DIR__ . '/scripts/thumbnail-on-demand.php';
-        $dest = $runtime_dir . '/thumbnail-on-demand.php';
-        if (!file_exists($source)) {
-            throw new RuntimeException(
-                "Thumbnail interceptor script not found at {$source}"
-            );
-        }
-        copy($source, $dest);
+    protected function extract_constants(array $preflight_data): array
+    {
+        $result = parent::extract_constants($preflight_data);
+
+        // WP Cloud always needs THEMES_PATH_BASE since themes are under
+        // wp-content, not under the __wp__ ABSPATH.
+        $result['THEMES_PATH_BASE'] = '{docroot}/wp-content/themes';
+
+        return $result;
     }
 }

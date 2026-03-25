@@ -3,23 +3,22 @@
  * Runtime manifest — the intermediate representation between host analyzers
  * and runtime appliers.
  *
- * A host analyzer (e.g. WpcloudHostAnalyzer) reads preflight data from the
- * source site and produces a RuntimeManifest describing what that site needs
- * to run. A runtime applier (e.g. NginxFpmApplier) reads the manifest and
- * writes the configuration files appropriate for the target server.
+ * A host analyzer reads preflight data from the source site and produces a
+ * RuntimeManifest describing what that site needs to run. A runtime applier
+ * reads the manifest and writes the configuration files appropriate for the
+ * target server.
  *
- * The manifest is pure data — no executable code. It captures:
+ * The manifest is pure data — no executable code, no file paths to scripts.
+ * It captures:
  *
- * - php_ini:     INI directives the source site had (memory_limit, etc.)
- * - constants:   PHP constants to define before WordPress boots
- *                (WP_CONTENT_DIR, etc.). Values may contain {docroot} as
- *                a placeholder resolved at apply-time.
- * - server_vars: $_SERVER entries to set before WordPress boots.
- *                Values may contain {docroot}.
- * - request_interceptors: PHP scripts that must run before WordPress on
- *                every HTTP request. Each entry names a script file
- *                (shipped alongside the manifest) and declares whether
- *                it may exit() early.
+ * - php_ini:      INI directives the source site had (memory_limit, etc.)
+ * - constants:    PHP constants to define before WordPress boots.
+ *                 Values may contain {docroot} resolved at apply-time.
+ * - server_vars:  $_SERVER entries to set before WordPress boots.
+ *                 Values may contain {docroot}.
+ * - error_handlers: Declarative 404 handlers the target runtime must
+ *                 implement. Each describes a URL path pattern and the
+ *                 behavior needed — the target runtime decides *how*.
  */
 class RuntimeManifest
 {
@@ -36,11 +35,19 @@ class RuntimeManifest
     public array $server_vars = [];
 
     /**
-     * @var array<int, array{name: string, phase: string, may_exit: bool, script: string}>
-     * Scripts to run before WordPress boots on every HTTP request.
-     * "script" is a path relative to the manifest's directory.
+     * @var array<int, array{type: string, path_pattern: string, description: string}>
+     * Declarative 404 handlers. Each entry describes a class of missing files
+     * that can be generated on-the-fly. The target runtime applier is
+     * responsible for implementing the actual handler.
+     *
+     * Example:
+     *   [
+     *     'type' => 'thumbnail-generator',
+     *     'path_pattern' => '/wp-content/uploads/.*-\d+x\d+\.\w+$',
+     *     'description' => 'Generate missing WordPress thumbnails from originals'
+     *   ]
      */
-    public array $request_interceptors = [];
+    public array $error_handlers = [];
 
     public function __construct(string $source)
     {
@@ -57,7 +64,7 @@ class RuntimeManifest
             'php_ini' => $this->php_ini,
             'constants' => $this->constants,
             'server_vars' => $this->server_vars,
-            'request_interceptors' => $this->request_interceptors,
+            'error_handlers' => $this->error_handlers,
         ];
     }
 
@@ -70,7 +77,7 @@ class RuntimeManifest
         $manifest->php_ini = $data['php_ini'] ?? [];
         $manifest->constants = $data['constants'] ?? [];
         $manifest->server_vars = $data['server_vars'] ?? [];
-        $manifest->request_interceptors = $data['request_interceptors'] ?? [];
+        $manifest->error_handlers = $data['error_handlers'] ?? [];
         return $manifest;
     }
 

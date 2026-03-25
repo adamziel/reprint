@@ -5,11 +5,13 @@
  * PHP-FPM reads .user.ini files from the document root on every request
  * (cached for user_ini.cache_ttl seconds, default 300). This applier writes:
  *
- * 1. {state_dir}/bootstrap.php — constants, server vars, interceptors
+ * 1. {state_dir}/bootstrap.php — constants, server vars, and error handlers
  * 2. {docroot}/.user.ini       — auto_prepend_file pointing to the bootstrap,
  *                                 plus any INI directives from the manifest
  *
- * This is the simplest integration path for production servers running FPM.
+ * Error handlers (like thumbnail generation) are inlined into the bootstrap
+ * since auto_prepend_file runs before every PHP request — exactly the hook
+ * point we need.
  */
 class NginxFpmApplier extends RuntimeApplier
 {
@@ -17,9 +19,16 @@ class NginxFpmApplier extends RuntimeApplier
     {
         $summary = [];
 
-        // 1. Write bootstrap.php
+        // 1. Write bootstrap.php (constants + server vars + error handlers)
         $bootstrap_path = $state_dir . '/bootstrap.php';
-        $bootstrap = $this->generate_bootstrap($manifest, $docroot, $state_dir);
+        $bootstrap = $this->generate_bootstrap($manifest, $docroot);
+
+        // Append error handlers to the bootstrap — they run on every request
+        // via auto_prepend_file, before WordPress boots.
+        if ($this->has_thumbnail_handler($manifest)) {
+            $bootstrap .= $this->generate_thumbnail_handler() . "\n";
+        }
+
         $this->write_file($bootstrap_path, $bootstrap);
         $summary[] = "Wrote {$bootstrap_path}";
 

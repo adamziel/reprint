@@ -3342,7 +3342,7 @@ class ImportClient
 
         // Step 1: Host analyzer produces a manifest from preflight data.
         $analyzer = HostAnalyzer::for_host($webhost);
-        $manifest = $analyzer->analyze($preflight_data, $abs_state_dir);
+        $manifest = $analyzer->analyze($preflight_data);
 
         // Save the manifest so it can be inspected or re-applied later.
         $manifest_path = $abs_state_dir . '/runtime-manifest.json';
