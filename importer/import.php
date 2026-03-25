@@ -3189,24 +3189,6 @@ class ImportClient
     }
 
     /**
-     * Command: flatten-docroot
-     *
-     * Creates a directory at the specified --flatten-to path that mirrors
-     * a vanilla WordPress installation layout by symlinking entries from
-     * the import docroot. Uses preflight data (paths_urls) to determine
-     * where each WordPress component actually lives, rather than blindly
-     * scanning docroot top-level entries.
-     *
-     * This is essential when the source site uses a non-standard layout
-     * (e.g. WP Cloud with ABSPATH=/srv/htdocs and WP_CONTENT_DIR=/tmp/__wp__/wp-content)
-     * and the target needs a conventional wp-admin/, wp-includes/,
-     * wp-content/, wp-load.php structure.
-     *
-     * The command is idempotent: re-running refreshes all symlinks.
-     * If a path that should be a symlink is a regular file/directory,
-     * the command stops with an error unless --force is specified.
-     */
-    /**
      * Generate runtime configuration for the imported site.
      *
      * Reads the detected webhost from state (set during preflight), runs the
@@ -3384,6 +3366,24 @@ class ImportClient
         }
     }
 
+    /**
+     * Command: flatten-docroot
+     *
+     * Creates a directory at the specified --flatten-to path that mirrors
+     * a vanilla WordPress installation layout by symlinking entries from
+     * the import docroot. Uses preflight data (paths_urls) to determine
+     * where each WordPress component actually lives, rather than blindly
+     * scanning docroot top-level entries.
+     *
+     * This is essential when the source site uses a non-standard layout
+     * (e.g. WP Cloud with ABSPATH=/srv/htdocs and WP_CONTENT_DIR=/tmp/__wp__/wp-content)
+     * and the target needs a conventional wp-admin/, wp-includes/,
+     * wp-content/, wp-load.php structure.
+     *
+     * The command is idempotent: re-running refreshes all symlinks.
+     * If a path that should be a symlink is a regular file/directory,
+     * the command stops with an error unless --force is specified.
+     */
     private function run_flatten_docroot(array $options): void
     {
         $flatten_to = $options["flatten_to"] ?? null;
@@ -9170,9 +9170,10 @@ if (
         exit(0);
     }
 
-    // Local-only commands don't need a remote URL. For all others, the
-    // second positional argument is the export server URL.
-    $local_only_commands = ["apply-runtime", "db-domains", "db-apply", "files-stats", "flatten-docroot"];
+    // Only apply-runtime truly doesn't need a remote URL. Other local-only
+    // commands (db-domains, db-apply, etc.) still accept it for CLI
+    // consistency and backward compatibility with existing callers.
+    $local_only_commands = ["apply-runtime"];
     $is_local_only = in_array($command, $local_only_commands, true);
 
     if ($is_local_only) {
