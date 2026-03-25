@@ -15,11 +15,10 @@
  * For nginx/FPM: auto_prepend_file = runtime.php. Layers 1-2 run, layer 3
  * is skipped. Nginx serves static files directly.
  *
- * For php-builtin: runtime.php is both the router script AND the
- * auto_prepend_file. First execution runs all three layers. When the router
- * returns false for a .php file, php-S runs auto_prepend_file again —
- * but constants are already defined, route handlers bail on file_exists,
- * and the __ROUTED guard prevents re-entering the routing block.
+ * For php-builtin: runtime.php is the router script. PHP files are
+ * require'd by the router so they execute in the same scope where
+ * constants are already defined. Only static non-PHP files use
+ * return false to let php-S serve them directly.
  */
 abstract class RuntimeApplier
 {
@@ -117,9 +116,17 @@ abstract class RuntimeApplier
         $lines[] = '    $path = parse_url($_SERVER[\'REQUEST_URI\'] ?? \'/\', PHP_URL_PATH);';
         $lines[] = '    $file = $_SERVER[\'DOCUMENT_ROOT\'] . $path;';
         $lines[] = '';
-        $lines[] = '    // Existing files: let php -S serve them directly.';
+        $lines[] = '    // Existing non-PHP files: let php -S serve them as static.';
         $lines[] = '    if ($path !== \'/\' && file_exists($file) && is_file($file)) {';
-        $lines[] = '        return false;';
+        $lines[] = '        if (!preg_match(\'/\\.php$/\', $path)) {';
+        $lines[] = '            return false;';
+        $lines[] = '        }';
+        $lines[] = '        // PHP files: require them so they run in our scope with';
+        $lines[] = '        // constants already defined. return false would execute';
+        $lines[] = '        // them in a fresh scope without the runtime bootstrap.';
+        $lines[] = '        $_SERVER[\'SCRIPT_NAME\'] = $path;';
+        $lines[] = '        require $file;';
+        $lines[] = '        return;';
         $lines[] = '    }';
         $lines[] = '';
         $lines[] = '    // Directory requests: look for index.php or index.html.';

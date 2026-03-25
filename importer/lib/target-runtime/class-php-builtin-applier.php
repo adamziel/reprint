@@ -7,12 +7,10 @@
  *                                and CLI-server routing logic
  * 2. {output_dir}/start.sh    — shell script with the exact php -S command
  *
- * runtime.php serves double duty: it's both the router script (passed to
- * php -S) and the auto_prepend_file (via -d). First execution as the
- * router runs all three layers. When the router returns false for a .php
- * file, php-S runs that file and auto_prepend_file fires again — but
- * constants are guarded, route handlers are idempotent, and the __ROUTED
- * guard prevents re-entering the routing block.
+ * runtime.php is the router script passed to php -S. It defines constants,
+ * runs route handlers, then handles request routing. PHP files are served
+ * via require (not return false) so they execute in the same scope where
+ * constants are already defined — no auto_prepend_file needed.
  *
  * The developer just runs: bash {output_dir}/start.sh
  */
@@ -49,7 +47,8 @@ class PhpBuiltinApplier extends RuntimeApplier
 
     /**
      * Generate a shell script that starts the built-in server.
-     * runtime.php is used as both the router script and auto_prepend_file.
+     * runtime.php is the router — all PHP files are require'd through it
+     * so they share the same scope with constants already defined.
      */
     private function generate_start_script(
         RuntimeManifest $manifest,
@@ -70,11 +69,6 @@ class PhpBuiltinApplier extends RuntimeApplier
 
         $php_args = [];
         $php_args[] = 'php';
-
-        // runtime.php is auto_prepend_file so constants are defined for
-        // every PHP file php-S executes (WordPress, plugins, etc.), not
-        // just the router entry point.
-        $php_args[] = '-d auto_prepend_file=' . escapeshellarg($runtime_path);
 
         foreach ($manifest->php_ini as $key => $value) {
             $php_args[] = "-d {$key}={$value}";
