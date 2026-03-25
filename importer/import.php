@@ -1730,7 +1730,7 @@ class ImportClient
         // The host analyzers score based on preflight signals. We also
         // check the local docroot for a __wp__ symlink as a fallback
         // when the remote preflight didn't report enough filesystem data.
-        $detected_webhost = is_array($payload) ? HostAnalyzers::detect($payload) : 'other';
+        $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
         if ($detected_webhost === 'other' && is_link($this->docroot . '/__wp__')) {
             $detected_webhost = 'wpcloud';
         }
@@ -3284,7 +3284,7 @@ class ImportClient
         }
 
         // Step 1: Host analyzer produces a manifest from preflight data.
-        $analyzer = HostAnalyzers::for_host($webhost);
+        $analyzer = host_analyzer_for($webhost);
         $manifest = $analyzer->analyze($preflight_data);
 
         $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
@@ -3327,7 +3327,7 @@ class ImportClient
         }
 
         // Step 2: Runtime applier writes server-specific config files.
-        $applier = RuntimeAppliers::for_runtime($runtime);
+        $applier = runtime_applier_for($runtime);
         $applier_options = [];
         if ($wordpress_index !== '') {
             $applier_options['wordpress_index'] = $wordpress_index;

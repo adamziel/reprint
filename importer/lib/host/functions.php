@@ -1,12 +1,58 @@
 <?php
 /**
- * Shared helpers for extracting runtime requirements from preflight data.
+ * Host analyzer functions.
  *
- * These are used by host analyzer implementations to read INI directives,
- * PHP constants, and server variables from the preflight response. They're
- * standalone functions rather than methods on the HostAnalyzer interface
- * because they're shared implementation details, not part of the contract.
+ * Registry, detection logic, and shared preflight extraction helpers.
  */
+
+/**
+ * All known host analyzers.
+ *
+ * @return array<string, class-string<HostAnalyzer>>
+ */
+function host_analyzer_registry(): array
+{
+    return [
+        'wpcloud' => WpcloudHostAnalyzer::class,
+        'siteground' => SitegroundHostAnalyzer::class,
+    ];
+}
+
+/**
+ * Detect the source host from preflight data using likelihood scoring.
+ *
+ * Each registered host analyzer scores the preflight data independently.
+ * The host with the highest score wins, provided it reaches the minimum
+ * threshold of 0.5. Returns "other" if no host qualifies.
+ */
+function detect_host(array $preflight_data): string
+{
+    $threshold = 0.5;
+    $best_host = 'other';
+    $best_score = 0.0;
+
+    foreach (host_analyzer_registry() as $name => $class) {
+        $score = $class::score($preflight_data);
+        if ($score >= $threshold && $score > $best_score) {
+            $best_host = $name;
+            $best_score = $score;
+        }
+    }
+
+    return $best_host;
+}
+
+/**
+ * Instantiate the right analyzer for a detected host name.
+ */
+function host_analyzer_for(string $webhost): HostAnalyzer
+{
+    $registry = host_analyzer_registry();
+    if (isset($registry[$webhost])) {
+        return new $registry[$webhost]();
+    }
+    return new DefaultHostAnalyzer();
+}
 
 /**
  * Extract selected INI directives from preflight's ini_get_all.

@@ -1,12 +1,26 @@
 <?php
 /**
- * Shared helpers for generating runtime.php content.
+ * Target runtime functions.
  *
- * These functions produce PHP code strings that runtime appliers embed
- * in the generated runtime.php file. They're standalone functions rather
- * than methods on the RuntimeApplier interface because they're shared
- * implementation details, not part of the contract.
+ * Registry, runtime.php code generation, and shared file helpers.
  */
+
+/**
+ * Instantiate the right applier for a runtime name.
+ */
+function runtime_applier_for(string $runtime): RuntimeApplier
+{
+    switch ($runtime) {
+        case 'nginx-fpm':
+            return new NginxFpmApplier();
+        case 'php-builtin':
+            return new PhpBuiltinApplier();
+        default:
+            throw new InvalidArgumentException(
+                "Unknown runtime: {$runtime}. Valid runtimes: nginx-fpm, php-builtin"
+            );
+    }
+}
 
 /**
  * Generate the base runtime.php content: constants, server vars, and
