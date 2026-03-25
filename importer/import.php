@@ -3251,21 +3251,40 @@ class ImportClient
         $preflight_data = $entry["data"];
         $webhost = $this->state["webhost"] ?? "other";
 
-        // Resolve the effective docroot. The remote site's document_root
-        // tells us where the web root was on the source server. Files are
-        // downloaded into --docroot preserving the full remote path, so
-        // the effective local docroot is --docroot + document_root.
-        $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
-        if (is_string($remote_doc_root)) {
-            $remote_doc_root = rtrim($remote_doc_root, "/");
+        // Resolve the effective docroot from either --flattened-docroot
+        // (used as-is) or --docroot (prefixed with the remote document_root).
+        // Mutual exclusion is already enforced at the CLI level.
+        $flattened_docroot = $options["flattened_docroot"] ?? null;
+
+        if (!empty($flattened_docroot)) {
+            // --flattened-docroot: used directly as the web root.
+            $effective_docroot = rtrim($flattened_docroot, "/");
         } else {
-            $remote_doc_root = "";
-        }
-        $effective_docroot = $this->docroot;
-        if ($remote_doc_root !== "") {
-            $candidate = $this->docroot . $remote_doc_root;
-            if (is_dir($candidate)) {
-                $effective_docroot = $candidate;
+            // --docroot: the raw download directory. The remote site's
+            // document_root tells us where the web root lived on the
+            // source server. Files are downloaded preserving the full
+            // remote path, so the effective docroot is --docroot +
+            // document_root.
+            $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
+            if (is_string($remote_doc_root)) {
+                $remote_doc_root = rtrim($remote_doc_root, "/");
+            } else {
+                $remote_doc_root = "";
+            }
+
+            if ($remote_doc_root !== "") {
+                $effective_docroot = $this->docroot . $remote_doc_root;
+            } else {
+                $effective_docroot = $this->docroot;
+            }
+
+            if (!is_dir($effective_docroot)) {
+                throw new RuntimeException(
+                    "Effective docroot does not exist: {$effective_docroot}\n" .
+                    "The remote document_root was: {$remote_doc_root}\n" .
+                    "If you used flatten-docroot, pass the flattened directory " .
+                    "with --flattened-docroot instead of --docroot."
+                );
             }
         }
 
@@ -9037,33 +9056,41 @@ if (
                 "Does not require a remote URL — reads only from local state.\n" .
                 "Requires a prior preflight run to detect the source host.\n" .
                 "\n" .
-                "The effective docroot is --docroot + the remote site's document_root\n" .
-                "prefix from preflight. If you used flatten-docroot, pass the flattened\n" .
-                "directory as --docroot.\n" .
+                "Pass --docroot for the raw download directory (the remote document_root\n" .
+                "path is appended automatically), or --flattened-docroot for a directory\n" .
+                "created by flatten-docroot (used as-is). These are mutually exclusive.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --runtime=RUNTIME    Target server runtime (required):\n" .
-                "                         nginx-fpm    — writes .user.ini + bootstrap.php\n" .
-                "                         php-builtin  — writes router.php + start.sh\n" .
-                "  --output-dir=DIR     Directory for generated runtime files (required)\n" .
-                "  --host=HOST          Listen address (default: from rewrite URL, or localhost)\n" .
-                "  --port=PORT          Listen port (default: from rewrite URL, or 8881)\n" .
-                "  --verbose, -v        Show detailed operation logs\n" .
+                "  --docroot=DIR             Raw download directory (remote path appended)\n" .
+                "  --flattened-docroot=DIR   Flattened layout directory (used as-is)\n" .
+                "  --runtime=RUNTIME         Target server runtime (required):\n" .
+                "                              nginx-fpm    — writes runtime.php + .user.ini + nginx.conf\n" .
+                "                              php-builtin  — writes runtime.php + start.sh\n" .
+                "  --output-dir=DIR          Directory for generated runtime files (required)\n" .
+                "  --host=HOST               Listen address (default: from rewrite URL, or localhost)\n" .
+                "  --port=PORT               Listen port (default: from rewrite URL, or 8881)\n" .
+                "  --verbose, -v             Show detailed operation logs\n" .
                 "\n" .
                 "Output files (nginx-fpm):\n" .
-                "  (output-dir)/bootstrap.php          PHP bootstrap (constants, error handlers)\n" .
+                "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
                 "  (output-dir)/runtime-manifest.json   Source environment manifest\n" .
+                "  (output-dir)/nginx.conf              Nginx server block\n" .
                 "  (docroot)/.user.ini                  auto_prepend_file + INI directives\n" .
                 "\n" .
                 "Output files (php-builtin):\n" .
-                "  (output-dir)/bootstrap.php          PHP bootstrap (constants, server vars)\n" .
+                "  (output-dir)/runtime.php             PHP runtime (constants, routing, handlers)\n" .
                 "  (output-dir)/runtime-manifest.json   Source environment manifest\n" .
-                "  (output-dir)/router.php              Request router for php -S\n" .
                 "  (output-dir)/start.sh                Shell script to launch the server\n" .
                 "\n" .
-                "Example:\n" .
+                "Examples:\n" .
+                "  # From raw download directory:\n" .
                 "  php import.php apply-runtime --state-dir=./state \\\n" .
                 "    --docroot=./files --output-dir=./runtime --runtime=php-builtin\n" .
+                "\n" .
+                "  # From flattened layout:\n" .
+                "  php import.php apply-runtime --state-dir=./state \\\n" .
+                "    --flattened-docroot=./flat --output-dir=./runtime --runtime=php-builtin\n" .
+                "\n" .
                 "  bash ./runtime/start.sh\n",
         ],
     ];
@@ -9396,6 +9423,8 @@ if (
             $options["runtime"] = substr($argv[$i], strlen("--runtime="));
         } elseif (strpos($argv[$i], "--output-dir=") === 0) {
             $options["output_dir"] = substr($argv[$i], strlen("--output-dir="));
+        } elseif (strpos($argv[$i], "--flattened-docroot=") === 0) {
+            $options["flattened_docroot"] = substr($argv[$i], strlen("--flattened-docroot="));
         } elseif (strpos($argv[$i], "--host=") === 0) {
             $options["host"] = substr($argv[$i], strlen("--host="));
         } elseif (strpos($argv[$i], "--port=") === 0) {
@@ -9412,10 +9441,22 @@ if (
         exit(1);
     }
 
-    if (!$docroot) {
+    // apply-runtime accepts --flattened-docroot as an alternative to --docroot.
+    $flattened_docroot = $options["flattened_docroot"] ?? null;
+    if ($docroot && $flattened_docroot) {
+        fwrite(STDERR, "Error: --docroot and --flattened-docroot are mutually exclusive.\n");
+        fwrite(STDERR, "Use --docroot for the raw download directory, or --flattened-docroot for a flattened layout.\n");
+        exit(1);
+    }
+    if (!$docroot && !$flattened_docroot) {
         fwrite(STDERR, "Error: --docroot=DIR is required\n");
         fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
         exit(1);
+    }
+    if (!$docroot) {
+        // For commands that need a docroot in the constructor, use the
+        // flattened docroot. run_apply_runtime will resolve it properly.
+        $docroot = $flattened_docroot;
     }
 
     try {
