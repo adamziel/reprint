@@ -1,6 +1,6 @@
 <?php
 /**
- * WP Cloud thumbnail generator — error handler implementation.
+ * WP Cloud thumbnail generator — route handler implementation.
  *
  * Returns PHP code (as a string) that generates missing WordPress
  * thumbnail sizes on-the-fly using GD. This is a WP Cloud-specific

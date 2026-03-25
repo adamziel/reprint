@@ -8,8 +8,8 @@
  * __wp__ directory for core.
  *
  * The export only ships original-size uploads, so the manifest declares a
- * 404 handler for thumbnail-sized image URLs. The target runtime decides
- * how to implement it.
+ * route for thumbnail-sized image URLs. The target runtime decides how to
+ * implement the handler.
  */
 class WpcloudHostAnalyzer extends HostAnalyzer
 {
@@ -75,11 +75,12 @@ class WpcloudHostAnalyzer extends HostAnalyzer
 
         // WP Cloud exports only ship full-size uploads. WordPress post meta
         // references sized variants like image-768x768.jpeg that don't exist
-        // on disk. Declare a 404 handler so the target runtime can generate
-        // them on-the-fly from the originals.
-        $manifest->error_handlers[] = [
-            'type' => 'thumbnail-generator',
+        // on disk. Declare a route so the target runtime can generate them
+        // on-the-fly from the originals.
+        $manifest->routes[] = [
+            'handler' => 'wpcloud-thumbnail-generator',
             'path_pattern' => '/wp-content/uploads/.*-\d+x\d+\.\w+$',
+            'condition' => 'file_not_found',
             'description' => 'Generate missing WordPress thumbnail sizes from originals using GD',
         ];
 

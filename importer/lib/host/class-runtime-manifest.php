@@ -16,9 +16,10 @@
  *                 Values may contain {docroot} resolved at apply-time.
  * - server_vars:  $_SERVER entries to set before WordPress boots.
  *                 Values may contain {docroot}.
- * - error_handlers: Declarative 404 handlers the target runtime must
- *                 implement. Each describes a URL path pattern and the
- *                 behavior needed — the target runtime decides *how*.
+ * - routes:       Declarative request routes the target runtime must
+ *                 implement. Each describes a URL path pattern, a handler
+ *                 name, and an optional condition (e.g. "file_not_found").
+ *                 The target runtime decides how to implement the handler.
  */
 class RuntimeManifest
 {
@@ -35,19 +36,23 @@ class RuntimeManifest
     public array $server_vars = [];
 
     /**
-     * @var array<int, array{type: string, path_pattern: string, description: string}>
-     * Declarative 404 handlers. Each entry describes a class of missing files
-     * that can be generated on-the-fly. The target runtime applier is
-     * responsible for implementing the actual handler.
+     * @var array<int, array{handler: string, path_pattern: string, condition?: string, description: string}>
+     * Declarative request routes. Each entry describes a URL path pattern,
+     * the handler to invoke, and an optional condition under which it fires.
+     *
+     * The handler name maps 1:1 to an implementation file in
+     * target-runtime/route-handlers/ (e.g. "wpcloud-thumbnail-generator"
+     * maps to wpcloud-thumbnail-generator.php).
      *
      * Example:
      *   [
-     *     'type' => 'thumbnail-generator',
+     *     'handler' => 'wpcloud-thumbnail-generator',
      *     'path_pattern' => '/wp-content/uploads/.*-\d+x\d+\.\w+$',
+     *     'condition' => 'file_not_found',
      *     'description' => 'Generate missing WordPress thumbnails from originals'
      *   ]
      */
-    public array $error_handlers = [];
+    public array $routes = [];
 
     public function __construct(string $source)
     {
@@ -64,7 +69,7 @@ class RuntimeManifest
             'php_ini' => $this->php_ini,
             'constants' => $this->constants,
             'server_vars' => $this->server_vars,
-            'error_handlers' => $this->error_handlers,
+            'routes' => $this->routes,
         ];
     }
 
@@ -77,7 +82,7 @@ class RuntimeManifest
         $manifest->php_ini = $data['php_ini'] ?? [];
         $manifest->constants = $data['constants'] ?? [];
         $manifest->server_vars = $data['server_vars'] ?? [];
-        $manifest->error_handlers = $data['error_handlers'] ?? [];
+        $manifest->routes = $data['routes'] ?? [];
         return $manifest;
     }
 

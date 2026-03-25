@@ -5,8 +5,8 @@
  * A runtime applier takes a RuntimeManifest and writes the configuration
  * files needed to run the imported site on a specific server platform.
  * Every applier generates a bootstrap.php (constants and server vars) —
- * the difference is in how that bootstrap gets loaded and how error
- * handlers are implemented.
+ * the difference is in how that bootstrap gets loaded and how routes
+ * are implemented.
  */
 abstract class RuntimeApplier
 {
@@ -43,9 +43,9 @@ abstract class RuntimeApplier
     /**
      * Generate the bootstrap.php that sets constants and server vars.
      *
-     * This does NOT include error handlers — each applier implements
+     * This does NOT include route handlers — each applier implements
      * those in a way that's native to its platform (router logic for
-     * php-builtin, a separate PHP script for nginx, etc.).
+     * php-builtin, auto_prepend_file for nginx, etc.).
      */
     protected function generate_bootstrap(RuntimeManifest $manifest, string $docroot): string
     {
@@ -89,20 +89,22 @@ abstract class RuntimeApplier
     }
 
     /**
-     * Generate PHP code for all error handlers declared in the manifest.
+     * Generate PHP code for all route handlers declared in the manifest.
      *
-     * Each handler type maps to an implementation in error-handlers/.
-     * Returns empty string if no handlers are declared. Unknown handler
-     * types are silently skipped — they may be handled by a future
+     * The handler name maps 1:1 to a function in route-handlers/:
+     * "wpcloud-thumbnail-generator" → wpcloud_thumbnail_generator_code().
+     *
+     * Returns empty string if no routes are declared. Unknown handler
+     * names are silently skipped — they may be handled by a future
      * applier version.
      */
-    protected function generate_error_handler_code(RuntimeManifest $manifest): string
+    protected function generate_route_handler_code(RuntimeManifest $manifest): string
     {
         $code = '';
-        foreach ($manifest->error_handlers as $handler) {
-            $type = $handler['type'] ?? '';
-            switch ($type) {
-                case 'thumbnail-generator':
+        foreach ($manifest->routes as $route) {
+            $handler = $route['handler'] ?? '';
+            switch ($handler) {
+                case 'wpcloud-thumbnail-generator':
                     $code .= wpcloud_thumbnail_generator_code() . "\n";
                     break;
             }

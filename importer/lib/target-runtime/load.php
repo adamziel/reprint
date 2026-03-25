@@ -7,8 +7,8 @@
  * on a specific server platform.
  */
 
-// Error handler implementations (host-specific)
-require_once __DIR__ . '/error-handlers/wpcloud-thumbnail-generator.php';
+// Route handler implementations (host-specific)
+require_once __DIR__ . '/route-handlers/wpcloud-thumbnail-generator.php';
 
 require_once __DIR__ . '/class-runtime-applier.php';
 require_once __DIR__ . '/class-nginx-fpm-applier.php';
