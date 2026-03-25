@@ -9081,7 +9081,7 @@ if (
                 "  --docroot=DIR             Raw download directory (remote path appended)\n" .
                 "  --flattened-docroot=DIR   Flattened layout directory (used as-is)\n" .
                 "  --runtime=RUNTIME         Target server runtime (required):\n" .
-                "                              nginx-fpm    — writes runtime.php + .user.ini + nginx.conf\n" .
+                "                              nginx-fpm    — writes runtime.php + nginx.conf\n" .
                 "                              php-builtin  — writes runtime.php + start.sh\n" .
                 "  --output-dir=DIR          Directory for generated runtime files (required)\n" .
                 "  --host=HOST               Listen address (default: from rewrite URL, or localhost)\n" .
@@ -9091,7 +9091,6 @@ if (
                 "Output files (nginx-fpm):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
                 "  (output-dir)/nginx.conf              Nginx server block\n" .
-                "  (docroot)/.user.ini                  auto_prepend_file + INI directives\n" .
                 "\n" .
                 "Output files (php-builtin):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, routing, handlers)\n" .
