@@ -30,6 +30,12 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
 
+// Load host analyzers (produce a runtime manifest from preflight data)
+require_once __DIR__ . '/lib/host/load.php';
+
+// Load target runtime appliers (consume a manifest, write server config)
+require_once __DIR__ . '/lib/target-runtime/load.php';
+
 /**
  * The wire-protocol version this importer speaks.
  *
@@ -1302,10 +1308,11 @@ class ImportClient
                 "preflight",
                 "preflight-assert",
                 "flatten-docroot",
+                "apply-runtime",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flatten-docroot",
+                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flatten-docroot, apply-runtime",
             );
         }
 
@@ -1441,6 +1448,10 @@ class ImportClient
         }
         if ($command === "flatten-docroot") {
             $this->run_flatten_docroot($options);
+            return;
+        }
+        if ($command === "apply-runtime") {
+            $this->run_apply_runtime($options);
             return;
         }
         if ($command === "db-apply") {
@@ -1715,8 +1726,14 @@ class ImportClient
             $this->state["remote_protocol_min_version"] = (int) $payload["protocol_min_version"];
         }
 
-        // Detect webhost environment from preflight data
-        $detected_webhost = $this->detect_webhost($payload);
+        // Detect webhost environment from preflight data.
+        // The host analyzers score based on preflight signals. We also
+        // check the local docroot for a __wp__ symlink as a fallback
+        // when the remote preflight didn't report enough filesystem data.
+        $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
+        if ($detected_webhost === 'other' && is_link($this->docroot . '/__wp__')) {
+            $detected_webhost = 'wpcloud';
+        }
         $this->state["webhost"] = $detected_webhost;
         $this->audit_log("WEBHOST DETECTED | {$detected_webhost}", true);
 
@@ -1934,111 +1951,6 @@ class ImportClient
         @rmdir($dir);
     }
 
-    /**
-     * Detect the webhost environment from preflight data.
-     *
-     * Each candidate host accumulates a likelihood score based on
-     * independent signals. The host with the highest score wins.
-     * If no host reaches its minimum threshold, returns "other".
-     *
-     * Signals used:
-     * - SiteGround: plugins prefixed with "sg-" (e.g. sg-cachepress, sg-security)
-     * - WP Cloud: __wp__ symlink in the document root, PRIVACY_MODEL env variable
-     *
-     * @param array|null $preflight_data The preflight response payload
-     * @return string "siteground", "wpcloud", or "other"
-     */
-    private function detect_webhost(?array $preflight_data): string
-    {
-        if (!is_array($preflight_data)) {
-            return "other";
-        }
-
-        $scores = [
-            "siteground" => 0.0,
-            "wpcloud" => 0.0,
-        ];
-
-        // --- SiteGround signals ---
-        // Look for plugins prefixed with "sg-" across all wp-content roots.
-        // Two or more sg- plugins is a strong signal (0.9), one is weak (0.3).
-        $roots = $preflight_data["wp_content"]["roots"] ?? [];
-        $sg_count = 0;
-        foreach ($roots as $root) {
-            $plugins = $root["plugins"] ?? [];
-            foreach ($plugins as $plugin) {
-                $name = $plugin["name"] ?? "";
-                if (strpos($name, "sg-") === 0) {
-                    $sg_count++;
-                }
-            }
-        }
-        if ($sg_count >= 2) {
-            $scores["siteground"] += 0.9;
-        } elseif ($sg_count === 1) {
-            $scores["siteground"] += 0.3;
-        }
-
-        // --- WP Cloud signals ---
-
-        // Signal: __wp__ directory exists in the document root.
-        // WP Cloud sites have a __wp__ symlink in the document root pointing
-        // to the WordPress core installation.
-        $doc_root = $preflight_data["runtime"]["document_root"] ?? null;
-        if (is_string($doc_root) && $doc_root !== "") {
-            $wp_dir = rtrim($doc_root, "/") . "/__wp__";
-            // Check if __wp__ appears in the filesystem directory checks
-            $dir_checks = $preflight_data["filesystem"]["directories"] ?? [];
-            foreach ($dir_checks as $check) {
-                $path = $check["path"] ?? "";
-                if ($path === $wp_dir && ($check["exists"] ?? false)) {
-                    $scores["wpcloud"] += 0.5;
-                    break;
-                }
-            }
-        }
-
-        // Signal: WordPress detected at __wp__ inside the document root.
-        // WP Cloud typically has WordPress installed at doc_root/__wp__/.
-        $wp_roots = $preflight_data["wp_detect"]["roots"] ?? [];
-        if (is_string($doc_root) && $doc_root !== "") {
-            $wp_subdir = rtrim($doc_root, "/") . "/__wp__";
-            foreach ($wp_roots as $root) {
-                $path = $root["path"] ?? "";
-                if ($path === $wp_subdir) {
-                    $scores["wpcloud"] += 0.4;
-                    break;
-                }
-            }
-        }
-
-        // Signal: PRIVACY_MODEL environment variable is defined.
-        // WP Cloud sets this env var; its mere presence is a strong hint.
-        $env_names = $preflight_data["runtime"]["env_names"] ?? [];
-        if (in_array("PRIVACY_MODEL", $env_names, true)) {
-            $scores["wpcloud"] += 0.5;
-        }
-
-        // Signal: local docroot contains a __wp__ symlink (fallback when
-        // the remote preflight didn't report enough filesystem data).
-        if (is_link($this->docroot . "/__wp__")) {
-            $scores["wpcloud"] += 0.3;
-        }
-
-        // --- Pick the winner ---
-        // A host must reach a minimum threshold of 0.5 to be considered.
-        $threshold = 0.5;
-        $best_host = "other";
-        $best_score = 0.0;
-        foreach ($scores as $host => $score) {
-            if ($score >= $threshold && $score > $best_score) {
-                $best_host = $host;
-                $best_score = $score;
-            }
-        }
-
-        return $best_host;
-    }
 
     /**
      * Assert that a preflight has already been run and stored in state.
@@ -3274,6 +3186,181 @@ class ImportClient
                 "bytes" => $pending_bytes,
             ],
         ], JSON_PRETTY_PRINT) . "\n";
+    }
+
+    /**
+     * Generate runtime configuration for the imported site.
+     *
+     * Reads the detected webhost from state (set during preflight), runs the
+     * appropriate host analyzer to produce a runtime manifest, then applies
+     * it using the chosen runtime applier. The manifest captures what the
+     * source site needs (constants, INI directives, error handlers);
+     * the applier writes the files the target server needs to fulfill those
+     * requirements.
+     *
+     * The effective docroot is --docroot + the remote site's document_root
+     * prefix (from preflight). For example, if the remote document_root is
+     * /srv/htdocs and --docroot is ./files, the effective docroot is
+     * ./files/srv/htdocs. If the site was flattened with flatten-docroot,
+     * pass the flattened directory as --docroot directly and the prefix
+     * is not applied.
+     */
+    private function run_apply_runtime(array $options): void
+    {
+        $runtime = $options["runtime"] ?? null;
+        if (empty($runtime)) {
+            throw new InvalidArgumentException(
+                "apply-runtime requires --runtime=RUNTIME. Valid runtimes: nginx-fpm, php-builtin"
+            );
+        }
+
+        $output_dir = $options["output_dir"] ?? null;
+        if (empty($output_dir)) {
+            throw new InvalidArgumentException(
+                "apply-runtime requires --output-dir=DIR to write runtime configuration files"
+            );
+        }
+
+        // Load state to get preflight data and detected webhost.
+        $entry = $this->state["preflight"] ?? null;
+        if (!is_array($entry) || empty($entry["data"])) {
+            throw new RuntimeException(
+                "apply-runtime requires a prior preflight run. " .
+                "Run 'preflight' first to capture the source site's environment."
+            );
+        }
+
+        $preflight_data = $entry["data"];
+        $webhost = $this->state["webhost"] ?? "other";
+
+        // Resolve the effective docroot from either --flattened-docroot
+        // (used as-is) or --docroot (prefixed with the remote document_root).
+        // Mutual exclusion is already enforced at the CLI level.
+        $flattened_docroot = $options["flattened_docroot"] ?? null;
+
+        if (!empty($flattened_docroot)) {
+            // --flattened-docroot: used directly as the web root.
+            $effective_docroot = rtrim($flattened_docroot, "/");
+        } else {
+            // --docroot: the raw download directory. The remote site's
+            // document_root tells us where the web root lived on the
+            // source server. Files are downloaded preserving the full
+            // remote path, so the effective docroot is --docroot +
+            // document_root.
+            $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
+            if (is_string($remote_doc_root)) {
+                $remote_doc_root = rtrim($remote_doc_root, "/");
+            } else {
+                $remote_doc_root = "";
+            }
+
+            if ($remote_doc_root !== "") {
+                $effective_docroot = $this->docroot . $remote_doc_root;
+            } else {
+                $effective_docroot = $this->docroot;
+            }
+
+            if (!is_dir($effective_docroot)) {
+                throw new RuntimeException(
+                    "Effective docroot does not exist: {$effective_docroot}\n" .
+                    "The remote document_root was: {$remote_doc_root}\n" .
+                    "If you used flatten-docroot, pass the flattened directory " .
+                    "with --flattened-docroot instead of --docroot."
+                );
+            }
+        }
+
+        // Resolve to absolute paths so generated files work from any cwd.
+        $abs_output_dir = realpath($output_dir) ?: $output_dir;
+        $abs_docroot = realpath($effective_docroot) ?: $effective_docroot;
+
+        if (!is_dir($abs_output_dir)) {
+            if (!mkdir($abs_output_dir, 0755, true)) {
+                throw new RuntimeException(
+                    "Failed to create output directory: {$abs_output_dir}"
+                );
+            }
+            $abs_output_dir = realpath($abs_output_dir);
+        }
+
+        // Step 1: Host analyzer produces a manifest from preflight data.
+        $analyzer = host_analyzer_for($webhost);
+        $manifest = $analyzer->analyze($preflight_data);
+
+        $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
+
+        // Resolve host and port for the target server. If not provided on
+        // the CLI, derive from the first URL rewrite target (saved by
+        // db-apply). This way the dev server listens on the same address
+        // the database was rewritten to.
+        $host = $options["host"] ?? null;
+        $port = $options["port"] ?? null;
+        if ($host === null || $port === null) {
+            $rewrite_map = $this->state["apply"]["rewrite_url"] ?? [];
+            $first_target = !empty($rewrite_map) ? reset($rewrite_map) : null;
+            if (is_string($first_target)) {
+                $parsed = parse_url($first_target);
+                if ($host === null) {
+                    $host = $parsed["host"] ?? null;
+                }
+                if ($port === null && isset($parsed["port"])) {
+                    $port = $parsed["port"];
+                }
+            }
+        }
+
+        // Resolve the path to WordPress's index.php. On standard hosts it
+        // lives in the docroot. On WPCloud the ABSPATH is a different
+        // directory (e.g. /wordpress/core/X.Y.Z) which maps to
+        // download_root + abspath when using --docroot.
+        $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
+        $abspath = rtrim($paths_urls["abspath"] ?? "", "/");
+        if (!empty($flattened_docroot)) {
+            // Flattened layout: index.php is at the top level.
+            $wordpress_index = $abs_docroot . '/index.php';
+        } elseif ($abspath !== "") {
+            // Raw download: ABSPATH is relative to the download root,
+            // not the effective docroot (which is download_root + document_root).
+            $wordpress_index = realpath($this->docroot . $abspath . '/index.php') ?: '';
+        } else {
+            $wordpress_index = $abs_docroot . '/index.php';
+        }
+
+        // Step 2: Runtime applier writes server-specific config files.
+        $applier = runtime_applier_for($runtime);
+        $applier_options = [];
+        if ($wordpress_index !== '') {
+            $applier_options['wordpress_index'] = $wordpress_index;
+        }
+        if ($host !== null) {
+            $applier_options['host'] = $host;
+        }
+        if ($port !== null) {
+            $applier_options['port'] = (int) $port;
+        }
+        $summary = $applier->apply($manifest, $abs_docroot, $abs_output_dir, $applier_options);
+
+        foreach ($summary as $line) {
+            $this->audit_log("APPLY-RUNTIME | {$line}");
+        }
+
+        // Output the summary and manifest as structured JSON for callers,
+        // and print the human-readable summary to stderr.
+        $this->output_progress([
+            "status" => "complete",
+            "command" => "apply-runtime",
+            "runtime" => $runtime,
+            "webhost" => $webhost,
+            "webhost_source" => $manifest->source,
+        ]);
+
+        fwrite(STDERR, "\n");
+        fwrite(STDERR, "Runtime: {$runtime}\n");
+        fwrite(STDERR, "Source host: {$webhost}\n");
+        fwrite(STDERR, "\n");
+        foreach ($summary as $line) {
+            fwrite(STDERR, "{$line}\n");
+        }
     }
 
     /**
@@ -8974,6 +9061,52 @@ if (
                 "                     with symlinks (logged to audit log)\n" .
                 "  --verbose, -v      Show detailed operation logs\n",
         ],
+        "apply-runtime" => [
+            "short" => "Generate server configuration for the imported site",
+            "detail" =>
+                "Reads the source site's environment from preflight data and generates\n" .
+                "the configuration files needed to serve the imported site on your\n" .
+                "target server. This bridges the gap between 'files are on disk' and\n" .
+                "'the site actually works' — setting PHP constants, INI directives,\n" .
+                "and error handlers (like on-the-fly thumbnail generation).\n" .
+                "\n" .
+                "Does not require a remote URL — reads only from local state.\n" .
+                "Requires a prior preflight run to detect the source host.\n" .
+                "\n" .
+                "Pass --docroot for the raw download directory (the remote document_root\n" .
+                "path is appended automatically), or --flattened-docroot for a directory\n" .
+                "created by flatten-docroot (used as-is). These are mutually exclusive.\n" .
+                "\n" .
+                "Options:\n" .
+                "  --docroot=DIR             Raw download directory (remote path appended)\n" .
+                "  --flattened-docroot=DIR   Flattened layout directory (used as-is)\n" .
+                "  --runtime=RUNTIME         Target server runtime (required):\n" .
+                "                              nginx-fpm    — writes runtime.php + nginx.conf\n" .
+                "                              php-builtin  — writes runtime.php + start.sh\n" .
+                "  --output-dir=DIR          Directory for generated runtime files (required)\n" .
+                "  --host=HOST               Listen address (default: from rewrite URL, or localhost)\n" .
+                "  --port=PORT               Listen port (default: from rewrite URL, or 8881)\n" .
+                "  --verbose, -v             Show detailed operation logs\n" .
+                "\n" .
+                "Output files (nginx-fpm):\n" .
+                "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
+                "  (output-dir)/nginx.conf              Nginx server block\n" .
+                "\n" .
+                "Output files (php-builtin):\n" .
+                "  (output-dir)/runtime.php             PHP runtime (constants, routing, handlers)\n" .
+                "  (output-dir)/start.sh                Shell script to launch the server\n" .
+                "\n" .
+                "Examples:\n" .
+                "  # From raw download directory:\n" .
+                "  php import.php apply-runtime --state-dir=./state \\\n" .
+                "    --docroot=./files --output-dir=./runtime --runtime=php-builtin\n" .
+                "\n" .
+                "  # From flattened layout:\n" .
+                "  php import.php apply-runtime --state-dir=./state \\\n" .
+                "    --flattened-docroot=./flat --output-dir=./runtime --runtime=php-builtin\n" .
+                "\n" .
+                "  bash ./runtime/start.sh\n",
+        ],
     ];
 
     // Show main help when invoked with no arguments or just --help
@@ -9031,12 +9164,23 @@ if (
         exit(0);
     }
 
-    $remote_url = $argv[2] ?? null;
+    // Only apply-runtime truly doesn't need a remote URL. Other local-only
+    // commands (db-domains, db-apply, etc.) still accept it for CLI
+    // consistency and backward compatibility with existing callers.
+    $local_only_commands = ["apply-runtime"];
+    $is_local_only = in_array($command, $local_only_commands, true);
 
-    if (!$remote_url) {
-        fwrite(STDERR, "Error: <remote-url> is required\n");
-        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
-        exit(1);
+    if ($is_local_only) {
+        $remote_url = "-";
+        $option_start_index = 2; // options start right after the command
+    } else {
+        $remote_url = $argv[2] ?? null;
+        if (!$remote_url) {
+            fwrite(STDERR, "Error: <remote-url> is required\n");
+            fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
+            exit(1);
+        }
+        $option_start_index = 3;
     }
 
     // Parse options (--state-dir and --docroot are required named options)
@@ -9050,7 +9194,7 @@ if (
         "tuning_config" => [],
     ];
 
-    for ($i = 3; $i < $argc; $i++) {
+    for ($i = $option_start_index; $i < $argc; $i++) {
         if (strpos($argv[$i], "--state-dir=") === 0) {
             $state_dir = substr($argv[$i], strlen("--state-dir="));
         } elseif (strpos($argv[$i], "--docroot=") === 0) {
@@ -9290,6 +9434,16 @@ if (
             $options["flatten_to"] = substr($argv[$i], strlen("--flatten-to="));
         } elseif ($argv[$i] === "--force") {
             $options["force"] = true;
+        } elseif (strpos($argv[$i], "--runtime=") === 0) {
+            $options["runtime"] = substr($argv[$i], strlen("--runtime="));
+        } elseif (strpos($argv[$i], "--output-dir=") === 0) {
+            $options["output_dir"] = substr($argv[$i], strlen("--output-dir="));
+        } elseif (strpos($argv[$i], "--flattened-docroot=") === 0) {
+            $options["flattened_docroot"] = substr($argv[$i], strlen("--flattened-docroot="));
+        } elseif (strpos($argv[$i], "--host=") === 0) {
+            $options["host"] = substr($argv[$i], strlen("--host="));
+        } elseif (strpos($argv[$i], "--port=") === 0) {
+            $options["port"] = (int) substr($argv[$i], strlen("--port="));
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
@@ -9302,15 +9456,27 @@ if (
         exit(1);
     }
 
-    if (!$docroot) {
+    // apply-runtime accepts --flattened-docroot as an alternative to --docroot.
+    $flattened_docroot = $options["flattened_docroot"] ?? null;
+    if ($docroot && $flattened_docroot) {
+        fwrite(STDERR, "Error: --docroot and --flattened-docroot are mutually exclusive.\n");
+        fwrite(STDERR, "Use --docroot for the raw download directory, or --flattened-docroot for a flattened layout.\n");
+        exit(1);
+    }
+    if (!$docroot && !$flattened_docroot) {
         fwrite(STDERR, "Error: --docroot=DIR is required\n");
         fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
         exit(1);
     }
+    if (!$docroot) {
+        // For commands that need a docroot in the constructor, use the
+        // flattened docroot. run_apply_runtime will resolve it properly.
+        $docroot = $flattened_docroot;
+    }
 
     try {
         $client = new ImportClient($remote_url, $state_dir, $docroot);
-        $client->run($options);
+        $client->run($options ?? []);
         exit($client->exit_code);
     } catch (\Throwable $e) {
         $error = [
