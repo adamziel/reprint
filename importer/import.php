@@ -9477,7 +9477,7 @@ if (
 
     try {
         $client = new ImportClient($remote_url, $state_dir, $docroot);
-        $client->run($options);
+        $client->run($options ?? []);
         exit($client->exit_code);
     } catch (\Throwable $e) {
         $error = [
