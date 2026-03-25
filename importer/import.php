@@ -30,8 +30,11 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
 
-// Load runtime environment components (host analyzers, runtime appliers)
-require_once __DIR__ . '/lib/runtime/load.php';
+// Load host analyzers (produce a runtime manifest from preflight data)
+require_once __DIR__ . '/lib/host/load.php';
+
+// Load target runtime appliers (consume a manifest, write server config)
+require_once __DIR__ . '/lib/target-runtime/load.php';
 
 /**
  * The wire-protocol version this importer speaks.
