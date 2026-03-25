@@ -8,7 +8,7 @@
 
 require_once __DIR__ . '/class-runtime-manifest.php';
 require_once __DIR__ . '/preflight-extractors.php';
-require_once __DIR__ . '/class-host-analyzer.php';
+require_once __DIR__ . '/interface-host-analyzer.php';
 require_once __DIR__ . '/class-wpcloud-host-analyzer.php';
 require_once __DIR__ . '/class-siteground-host-analyzer.php';
 require_once __DIR__ . '/class-host-analyzers.php';
