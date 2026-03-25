@@ -1730,7 +1730,7 @@ class ImportClient
         // The host analyzers score based on preflight signals. We also
         // check the local docroot for a __wp__ symlink as a fallback
         // when the remote preflight didn't report enough filesystem data.
-        $detected_webhost = HostAnalyzers::detect($payload);
+        $detected_webhost = is_array($payload) ? HostAnalyzers::detect($payload) : 'other';
         if ($detected_webhost === 'other' && is_link($this->docroot . '/__wp__')) {
             $detected_webhost = 'wpcloud';
         }
