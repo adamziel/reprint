@@ -13,6 +13,59 @@
  */
 class WpcloudHostAnalyzer extends HostAnalyzer
 {
+    /**
+     * Score how likely the source site is a WP Cloud site.
+     *
+     * Signals:
+     * - __wp__ directory exists in the document root (0.5)
+     * - WordPress detected at doc_root/__wp__/ (0.4)
+     * - PRIVACY_MODEL environment variable is defined (0.5)
+     */
+    public static function score(array $preflight_data): float
+    {
+        $score = 0.0;
+
+        $doc_root = $preflight_data['runtime']['document_root'] ?? null;
+
+        // Signal: __wp__ directory exists in the document root.
+        // WP Cloud sites have a __wp__ symlink in the document root pointing
+        // to the WordPress core installation.
+        if (is_string($doc_root) && $doc_root !== '') {
+            $wp_dir = rtrim($doc_root, '/') . '/__wp__';
+            $dir_checks = $preflight_data['filesystem']['directories'] ?? [];
+            foreach ($dir_checks as $check) {
+                $path = $check['path'] ?? '';
+                if ($path === $wp_dir && ($check['exists'] ?? false)) {
+                    $score += 0.5;
+                    break;
+                }
+            }
+        }
+
+        // Signal: WordPress detected at __wp__ inside the document root.
+        // WP Cloud typically has WordPress installed at doc_root/__wp__/.
+        $wp_roots = $preflight_data['wp_detect']['roots'] ?? [];
+        if (is_string($doc_root) && $doc_root !== '') {
+            $wp_subdir = rtrim($doc_root, '/') . '/__wp__';
+            foreach ($wp_roots as $root) {
+                $path = $root['path'] ?? '';
+                if ($path === $wp_subdir) {
+                    $score += 0.4;
+                    break;
+                }
+            }
+        }
+
+        // Signal: PRIVACY_MODEL environment variable is defined.
+        // WP Cloud sets this env var; its mere presence is a strong hint.
+        $env_names = $preflight_data['runtime']['env_names'] ?? [];
+        if (in_array('PRIVACY_MODEL', $env_names, true)) {
+            $score += 0.5;
+        }
+
+        return min($score, 1.0);
+    }
+
     public function analyze(array $preflight_data): RuntimeManifest
     {
         $manifest = new RuntimeManifest('wpcloud');

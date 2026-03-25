@@ -2,14 +2,30 @@
 /**
  * Base class for host analyzers.
  *
- * A host analyzer reads preflight data from the source site and produces
- * a RuntimeManifest. The base class extracts everything that's common to
- * all hosts (INI directives, WP constants, paths). Subclasses override
- * analyze() to add host-specific concerns (e.g. wpcloud's thumbnail 404
- * handler and non-standard directory layout).
+ * A host analyzer does two things:
+ *
+ * 1. Scores how likely it is that the source site runs on its hosting
+ *    platform, based on preflight data (the static score() method).
+ * 2. Reads preflight data and produces a RuntimeManifest describing
+ *    what the site needs to run (the analyze() method).
+ *
+ * The base class provides the detection loop (detect()) and shared
+ * extraction helpers. Subclasses implement score() and analyze().
  */
 abstract class HostAnalyzer
 {
+    /**
+     * Score how likely this host matches the given preflight data.
+     *
+     * Each subclass examines preflight signals relevant to its platform
+     * and returns a float between 0.0 (no match) and 1.0 (certain match).
+     * A score >= 0.5 is considered a viable candidate.
+     *
+     * @param array $preflight_data The preflight response data.
+     * @return float Likelihood score between 0.0 and 1.0.
+     */
+    abstract public static function score(array $preflight_data): float;
+
     /**
      * Analyze preflight data and produce a runtime manifest.
      *
@@ -19,21 +35,60 @@ abstract class HostAnalyzer
     abstract public function analyze(array $preflight_data): RuntimeManifest;
 
     /**
-     * Pick the right analyzer for a detected webhost.
+     * All known host analyzers, in order of specificity.
+     * More specific hosts should come first so they win ties.
      *
-     * @param string $webhost The detected host ("wpcloud", "siteground", "other").
+     * @return array<string, class-string<HostAnalyzer>>
+     */
+    private static function registry(): array
+    {
+        return [
+            'wpcloud' => WpcloudHostAnalyzer::class,
+            'siteground' => SitegroundHostAnalyzer::class,
+        ];
+    }
+
+    /**
+     * Detect the source host from preflight data using likelihood scoring.
+     *
+     * Each registered host analyzer scores the preflight data independently.
+     * The host with the highest score wins, provided it reaches the minimum
+     * threshold of 0.5. Returns "other" if no host qualifies.
+     *
+     * @param array $preflight_data The preflight response data.
+     * @return string The detected host name ("wpcloud", "siteground", "other").
+     */
+    public static function detect(array $preflight_data): string
+    {
+        $threshold = 0.5;
+        $best_host = 'other';
+        $best_score = 0.0;
+
+        foreach (self::registry() as $name => $class) {
+            $score = $class::score($preflight_data);
+            if ($score >= $threshold && $score > $best_score) {
+                $best_host = $name;
+                $best_score = $score;
+            }
+        }
+
+        return $best_host;
+    }
+
+    /**
+     * Instantiate the right analyzer for a detected host name.
+     *
+     * @param string $webhost "wpcloud", "siteground", or "other".
      * @return self
      */
     public static function for_host(string $webhost): self
     {
-        switch ($webhost) {
-            case 'wpcloud':
-                return new WpcloudHostAnalyzer();
-            case 'siteground':
-                return new SitegroundHostAnalyzer();
-            default:
-                return new SitegroundHostAnalyzer(); // generic fallback
+        $registry = self::registry();
+        if (isset($registry[$webhost])) {
+            return new $registry[$webhost]();
         }
+        // "other" and unrecognized hosts fall back to the generic analyzer.
+        return new SitegroundHostAnalyzer();
     }
 
     /**
@@ -77,7 +132,6 @@ abstract class HostAnalyzer
      */
     protected function extract_constants(array $preflight_data): array
     {
-        $constants = $preflight_data['database']['wp']['constant_values'] ?? [];
         $paths_urls = $preflight_data['database']['wp']['paths_urls'] ?? [];
         $abspath = rtrim($paths_urls['abspath'] ?? '', '/');
         $content_dir = $paths_urls['content_dir'] ?? '';

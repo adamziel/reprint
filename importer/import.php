@@ -1726,8 +1726,14 @@ class ImportClient
             $this->state["remote_protocol_min_version"] = (int) $payload["protocol_min_version"];
         }
 
-        // Detect webhost environment from preflight data
-        $detected_webhost = $this->detect_webhost($payload);
+        // Detect webhost environment from preflight data.
+        // The host analyzers score based on preflight signals. We also
+        // check the local docroot for a __wp__ symlink as a fallback
+        // when the remote preflight didn't report enough filesystem data.
+        $detected_webhost = HostAnalyzer::detect($payload);
+        if ($detected_webhost === 'other' && is_link($this->docroot . '/__wp__')) {
+            $detected_webhost = 'wpcloud';
+        }
         $this->state["webhost"] = $detected_webhost;
         $this->audit_log("WEBHOST DETECTED | {$detected_webhost}", true);
 
@@ -1945,111 +1951,6 @@ class ImportClient
         @rmdir($dir);
     }
 
-    /**
-     * Detect the webhost environment from preflight data.
-     *
-     * Each candidate host accumulates a likelihood score based on
-     * independent signals. The host with the highest score wins.
-     * If no host reaches its minimum threshold, returns "other".
-     *
-     * Signals used:
-     * - SiteGround: plugins prefixed with "sg-" (e.g. sg-cachepress, sg-security)
-     * - WP Cloud: __wp__ symlink in the document root, PRIVACY_MODEL env variable
-     *
-     * @param array|null $preflight_data The preflight response payload
-     * @return string "siteground", "wpcloud", or "other"
-     */
-    private function detect_webhost(?array $preflight_data): string
-    {
-        if (!is_array($preflight_data)) {
-            return "other";
-        }
-
-        $scores = [
-            "siteground" => 0.0,
-            "wpcloud" => 0.0,
-        ];
-
-        // --- SiteGround signals ---
-        // Look for plugins prefixed with "sg-" across all wp-content roots.
-        // Two or more sg- plugins is a strong signal (0.9), one is weak (0.3).
-        $roots = $preflight_data["wp_content"]["roots"] ?? [];
-        $sg_count = 0;
-        foreach ($roots as $root) {
-            $plugins = $root["plugins"] ?? [];
-            foreach ($plugins as $plugin) {
-                $name = $plugin["name"] ?? "";
-                if (strpos($name, "sg-") === 0) {
-                    $sg_count++;
-                }
-            }
-        }
-        if ($sg_count >= 2) {
-            $scores["siteground"] += 0.9;
-        } elseif ($sg_count === 1) {
-            $scores["siteground"] += 0.3;
-        }
-
-        // --- WP Cloud signals ---
-
-        // Signal: __wp__ directory exists in the document root.
-        // WP Cloud sites have a __wp__ symlink in the document root pointing
-        // to the WordPress core installation.
-        $doc_root = $preflight_data["runtime"]["document_root"] ?? null;
-        if (is_string($doc_root) && $doc_root !== "") {
-            $wp_dir = rtrim($doc_root, "/") . "/__wp__";
-            // Check if __wp__ appears in the filesystem directory checks
-            $dir_checks = $preflight_data["filesystem"]["directories"] ?? [];
-            foreach ($dir_checks as $check) {
-                $path = $check["path"] ?? "";
-                if ($path === $wp_dir && ($check["exists"] ?? false)) {
-                    $scores["wpcloud"] += 0.5;
-                    break;
-                }
-            }
-        }
-
-        // Signal: WordPress detected at __wp__ inside the document root.
-        // WP Cloud typically has WordPress installed at doc_root/__wp__/.
-        $wp_roots = $preflight_data["wp_detect"]["roots"] ?? [];
-        if (is_string($doc_root) && $doc_root !== "") {
-            $wp_subdir = rtrim($doc_root, "/") . "/__wp__";
-            foreach ($wp_roots as $root) {
-                $path = $root["path"] ?? "";
-                if ($path === $wp_subdir) {
-                    $scores["wpcloud"] += 0.4;
-                    break;
-                }
-            }
-        }
-
-        // Signal: PRIVACY_MODEL environment variable is defined.
-        // WP Cloud sets this env var; its mere presence is a strong hint.
-        $env_names = $preflight_data["runtime"]["env_names"] ?? [];
-        if (in_array("PRIVACY_MODEL", $env_names, true)) {
-            $scores["wpcloud"] += 0.5;
-        }
-
-        // Signal: local docroot contains a __wp__ symlink (fallback when
-        // the remote preflight didn't report enough filesystem data).
-        if (is_link($this->docroot . "/__wp__")) {
-            $scores["wpcloud"] += 0.3;
-        }
-
-        // --- Pick the winner ---
-        // A host must reach a minimum threshold of 0.5 to be considered.
-        $threshold = 0.5;
-        $best_host = "other";
-        $best_score = 0.0;
-        foreach ($scores as $host => $score) {
-            if ($score >= $threshold && $score > $best_score) {
-                $best_host = $host;
-                $best_score = $score;
-            }
-        }
-
-        return $best_host;
-    }
 
     /**
      * Assert that a preflight has already been run and stored in state.
