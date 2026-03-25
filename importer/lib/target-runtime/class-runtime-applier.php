@@ -60,9 +60,18 @@ abstract class RuntimeApplier
      * Layer 1: Constants and server vars (always runs, guarded)
      * Layer 2: Route handlers (always runs, idempotent)
      * Layer 3: CLI-server routing (only under php -S)
+     *
+     * @param RuntimeManifest $manifest
+     * @param string          $docroot  Absolute path to the effective docroot.
+     * @param array           $options  Must include 'wordpress_index' — absolute
+     *                                  path to WordPress's index.php (may differ
+     *                                  from docroot on hosts like WPCloud).
      */
-    protected function generate_runtime_php(RuntimeManifest $manifest, string $docroot): string
+    protected function generate_runtime_php(RuntimeManifest $manifest, string $docroot, array $options = []): string
     {
+        $wp_index = $options['wordpress_index'] ?? ($docroot . '/index.php');
+        $escaped_wp_index = addslashes($wp_index);
+
         $lines = [];
         $lines[] = '<?php';
         $lines[] = '/**';
@@ -114,19 +123,38 @@ abstract class RuntimeApplier
         $lines[] = "    define('__ROUTED', true);";
         $lines[] = '';
         $lines[] = '    $path = parse_url($_SERVER[\'REQUEST_URI\'] ?? \'/\', PHP_URL_PATH);';
+        $lines[] = '';
+        $lines[] = '    // Support PATH_INFO URLs like /file.php/extra/path.';
+        $lines[] = '    // Walk the path segments to find the first .php file that exists,';
+        $lines[] = '    // then split into SCRIPT_NAME and PATH_INFO.';
+        $lines[] = '    $script_file = null;';
+        $lines[] = '    $path_info = \'\';';
+        $lines[] = '    if (preg_match(\'#\\.php(?=/|$)#\', $path)) {';
+        $lines[] = '        $segments = explode(\'/\', $path);';
+        $lines[] = '        $check = \'\';';
+        $lines[] = '        foreach ($segments as $i => $seg) {';
+        $lines[] = '            $check .= ($i > 0 ? \'/\' : \'\') . $seg;';
+        $lines[] = '            $candidate = $_SERVER[\'DOCUMENT_ROOT\'] . $check;';
+        $lines[] = '            if (is_file($candidate) && preg_match(\'/\\.php$/\', $check)) {';
+        $lines[] = '                $script_file = $candidate;';
+        $lines[] = '                $path_info = substr($path, strlen($check));';
+        $lines[] = '                $_SERVER[\'SCRIPT_NAME\'] = $check;';
+        $lines[] = '                $_SERVER[\'PATH_INFO\'] = $path_info ?: null;';
+        $lines[] = '                break;';
+        $lines[] = '            }';
+        $lines[] = '        }';
+        $lines[] = '    }';
+        $lines[] = '';
+        $lines[] = '    if ($script_file) {';
+        $lines[] = '        require $script_file;';
+        $lines[] = '        return;';
+        $lines[] = '    }';
+        $lines[] = '';
         $lines[] = '    $file = $_SERVER[\'DOCUMENT_ROOT\'] . $path;';
         $lines[] = '';
         $lines[] = '    // Existing non-PHP files: let php -S serve them as static.';
         $lines[] = '    if ($path !== \'/\' && file_exists($file) && is_file($file)) {';
-        $lines[] = '        if (!preg_match(\'/\\.php$/\', $path)) {';
-        $lines[] = '            return false;';
-        $lines[] = '        }';
-        $lines[] = '        // PHP files: require them so they run in our scope with';
-        $lines[] = '        // constants already defined. return false would execute';
-        $lines[] = '        // them in a fresh scope without the runtime bootstrap.';
-        $lines[] = '        $_SERVER[\'SCRIPT_NAME\'] = $path;';
-        $lines[] = '        require $file;';
-        $lines[] = '        return;';
+        $lines[] = '        return false;';
         $lines[] = '    }';
         $lines[] = '';
         $lines[] = '    // Directory requests: look for index.php or index.html.';
@@ -142,8 +170,10 @@ abstract class RuntimeApplier
         $lines[] = '    }';
         $lines[] = '';
         $lines[] = '    // Everything else: WordPress pretty permalinks via index.php.';
+        $lines[] = '    // WordPress index.php may live outside the document root (e.g.';
+        $lines[] = '    // WPCloud where ABSPATH differs from the document root).';
         $lines[] = '    $_SERVER[\'SCRIPT_NAME\'] = \'/index.php\';';
-        $lines[] = '    require $_SERVER[\'DOCUMENT_ROOT\'] . \'/index.php\';';
+        $lines[] = "    require '{$escaped_wp_index}';";
         $lines[] = '}';
         $lines[] = '';
 

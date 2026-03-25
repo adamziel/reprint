@@ -3330,9 +3330,29 @@ class ImportClient
             }
         }
 
+        // Resolve the path to WordPress's index.php. On standard hosts it
+        // lives in the docroot. On WPCloud the ABSPATH is a different
+        // directory (e.g. /wordpress/core/X.Y.Z) which maps to
+        // download_root + abspath when using --docroot.
+        $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
+        $abspath = rtrim($paths_urls["abspath"] ?? "", "/");
+        if (!empty($flattened_docroot)) {
+            // Flattened layout: index.php is at the top level.
+            $wordpress_index = $abs_docroot . '/index.php';
+        } elseif ($abspath !== "") {
+            // Raw download: ABSPATH is relative to the download root,
+            // not the effective docroot (which is download_root + document_root).
+            $wordpress_index = realpath($this->docroot . $abspath . '/index.php') ?: '';
+        } else {
+            $wordpress_index = $abs_docroot . '/index.php';
+        }
+
         // Step 2: Runtime applier writes server-specific config files.
         $applier = RuntimeApplier::for_runtime($runtime);
         $applier_options = [];
+        if ($wordpress_index !== '') {
+            $applier_options['wordpress_index'] = $wordpress_index;
+        }
         if ($host !== null) {
             $applier_options['host'] = $host;
         }

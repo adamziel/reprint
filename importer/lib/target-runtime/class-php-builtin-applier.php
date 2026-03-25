@@ -25,7 +25,7 @@ class PhpBuiltinApplier extends RuntimeApplier
 
         // 1. Write runtime.php (all three layers)
         $runtime_path = $output_dir . '/runtime.php';
-        $runtime = $this->generate_runtime_php($manifest, $docroot);
+        $runtime = $this->generate_runtime_php($manifest, $docroot, $options);
         $this->write_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
