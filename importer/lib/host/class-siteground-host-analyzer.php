@@ -1,12 +1,10 @@
 <?php
 /**
- * Host analyzer for SiteGround (and generic shared hosting).
+ * Host analyzer for SiteGround.
  *
  * SiteGround sites use a standard WordPress directory layout. The main
  * value is preserving PHP INI settings (memory limits, upload sizes) since
  * the target runtime may have different defaults.
- *
- * This analyzer also serves as the fallback for unrecognized hosts.
  */
 class SitegroundHostAnalyzer implements HostAnalyzer
 {

@@ -60,7 +60,6 @@ class HostAnalyzers
         if (isset($registry[$webhost])) {
             return new $registry[$webhost]();
         }
-        // "other" and unrecognized hosts fall back to the generic analyzer.
-        return new SitegroundHostAnalyzer();
+        return new DefaultHostAnalyzer();
     }
 }
