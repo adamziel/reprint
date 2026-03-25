@@ -15,7 +15,7 @@
  */
 class NginxFpmApplier extends RuntimeApplier
 {
-    public function apply(RuntimeManifest $manifest, string $docroot, string $output_dir): array
+    public function apply(RuntimeManifest $manifest, string $docroot, string $output_dir, array $options = []): array
     {
         $summary = [];
 

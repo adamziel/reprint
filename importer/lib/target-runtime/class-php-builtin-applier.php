@@ -16,11 +16,11 @@
  */
 class PhpBuiltinApplier extends RuntimeApplier
 {
-    private string $host = 'localhost';
-    private int $port = 8881;
-
-    public function apply(RuntimeManifest $manifest, string $docroot, string $output_dir): array
+    public function apply(RuntimeManifest $manifest, string $docroot, string $output_dir, array $options = []): array
     {
+        $host = $options['host'] ?? 'localhost';
+        $port = (int) ($options['port'] ?? 8881);
+
         $summary = [];
 
         // 1. Write bootstrap.php (constants + server vars)
@@ -38,7 +38,7 @@ class PhpBuiltinApplier extends RuntimeApplier
 
         // 3. Write start.sh
         $start_path = $output_dir . '/start.sh';
-        $start_script = $this->generate_start_script($manifest, $docroot, $bootstrap_path, $router_path);
+        $start_script = $this->generate_start_script($manifest, $docroot, $bootstrap_path, $router_path, $host, $port);
         $this->write_file($start_path, $start_script);
         chmod($start_path, 0755);
         $summary[] = "Wrote {$start_path}";
@@ -47,7 +47,7 @@ class PhpBuiltinApplier extends RuntimeApplier
         $summary[] = 'Start the server:';
         $summary[] = "  bash {$start_path}";
         $summary[] = '';
-        $summary[] = "Then open http://{$this->host}:{$this->port} in your browser.";
+        $summary[] = "Then open http://{$host}:{$port} in your browser.";
 
         return $summary;
     }
@@ -120,7 +120,9 @@ class PhpBuiltinApplier extends RuntimeApplier
         RuntimeManifest $manifest,
         string $docroot,
         string $bootstrap_path,
-        string $router_path
+        string $router_path,
+        string $host,
+        int $port
     ): string {
         $lines = [];
         $lines[] = '#!/usr/bin/env bash';
@@ -145,12 +147,12 @@ class PhpBuiltinApplier extends RuntimeApplier
             $php_args[] = "-d {$key}={$value}";
         }
 
-        $php_args[] = '-S ' . $this->host . ':' . $this->port;
+        $php_args[] = '-S ' . $host . ':' . $port;
         $php_args[] = '-t ' . escapeshellarg($docroot);
         $php_args[] = escapeshellarg($router_path);
 
         $lines[] = 'echo "Starting PHP built-in server..."';
-        $lines[] = 'echo "  http://' . $this->host . ':' . $this->port . '"';
+        $lines[] = 'echo "  http://' . $host . ':' . $port . '"';
         $lines[] = 'echo ""';
         $lines[] = '';
         $lines[] = implode(" \\\n    ", $php_args);

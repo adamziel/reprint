@@ -3291,9 +3291,36 @@ class ImportClient
         $manifest->save($manifest_path);
         $this->audit_log("APPLY-RUNTIME | wrote manifest to {$manifest_path} (source={$manifest->source}, webhost={$webhost})");
 
+        // Resolve host and port for the target server. If not provided on
+        // the CLI, derive from the first URL rewrite target (saved by
+        // db-apply). This way the dev server listens on the same address
+        // the database was rewritten to.
+        $host = $options["host"] ?? null;
+        $port = $options["port"] ?? null;
+        if ($host === null || $port === null) {
+            $rewrite_map = $this->state["apply"]["rewrite_url"] ?? [];
+            $first_target = !empty($rewrite_map) ? reset($rewrite_map) : null;
+            if (is_string($first_target)) {
+                $parsed = parse_url($first_target);
+                if ($host === null) {
+                    $host = $parsed["host"] ?? null;
+                }
+                if ($port === null && isset($parsed["port"])) {
+                    $port = $parsed["port"];
+                }
+            }
+        }
+
         // Step 2: Runtime applier writes server-specific config files.
         $applier = RuntimeApplier::for_runtime($runtime);
-        $summary = $applier->apply($manifest, $abs_docroot, $abs_output_dir);
+        $applier_options = [];
+        if ($host !== null) {
+            $applier_options['host'] = $host;
+        }
+        if ($port !== null) {
+            $applier_options['port'] = (int) $port;
+        }
+        $summary = $applier->apply($manifest, $abs_docroot, $abs_output_dir, $applier_options);
 
         foreach ($summary as $line) {
             $this->audit_log("APPLY-RUNTIME | {$line}");
@@ -9019,6 +9046,8 @@ if (
                 "                         nginx-fpm    — writes .user.ini + bootstrap.php\n" .
                 "                         php-builtin  — writes router.php + start.sh\n" .
                 "  --output-dir=DIR     Directory for generated runtime files (required)\n" .
+                "  --host=HOST          Listen address (default: from rewrite URL, or localhost)\n" .
+                "  --port=PORT          Listen port (default: from rewrite URL, or 8881)\n" .
                 "  --verbose, -v        Show detailed operation logs\n" .
                 "\n" .
                 "Output files (nginx-fpm):\n" .
@@ -9367,6 +9396,10 @@ if (
             $options["runtime"] = substr($argv[$i], strlen("--runtime="));
         } elseif (strpos($argv[$i], "--output-dir=") === 0) {
             $options["output_dir"] = substr($argv[$i], strlen("--output-dir="));
+        } elseif (strpos($argv[$i], "--host=") === 0) {
+            $options["host"] = substr($argv[$i], strlen("--host="));
+        } elseif (strpos($argv[$i], "--port=") === 0) {
+            $options["port"] = (int) substr($argv[$i], strlen("--port="));
         } else {
             fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
             exit(1);
