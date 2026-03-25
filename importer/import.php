@@ -1730,7 +1730,7 @@ class ImportClient
         // The host analyzers score based on preflight signals. We also
         // check the local docroot for a __wp__ symlink as a fallback
         // when the remote preflight didn't report enough filesystem data.
-        $detected_webhost = HostAnalyzer::detect($payload);
+        $detected_webhost = HostAnalyzers::detect($payload);
         if ($detected_webhost === 'other' && is_link($this->docroot . '/__wp__')) {
             $detected_webhost = 'wpcloud';
         }
@@ -3302,7 +3302,7 @@ class ImportClient
         }
 
         // Step 1: Host analyzer produces a manifest from preflight data.
-        $analyzer = HostAnalyzer::for_host($webhost);
+        $analyzer = HostAnalyzers::for_host($webhost);
         $manifest = $analyzer->analyze($preflight_data);
 
         // Save the manifest so it can be inspected or re-applied later.

@@ -2,12 +2,13 @@
 /**
  * Host analyzer loader.
  *
- * Loads the runtime manifest and all host analyzers. A host analyzer reads
- * preflight data from the source site and produces a RuntimeManifest
- * describing what that site needs to run.
+ * Loads the runtime manifest, the HostAnalyzer interface, shared preflight
+ * extraction helpers, all host analyzer implementations, and the registry.
  */
 
 require_once __DIR__ . '/class-runtime-manifest.php';
+require_once __DIR__ . '/preflight-extractors.php';
 require_once __DIR__ . '/class-host-analyzer.php';
 require_once __DIR__ . '/class-wpcloud-host-analyzer.php';
 require_once __DIR__ . '/class-siteground-host-analyzer.php';
+require_once __DIR__ . '/class-host-analyzers.php';

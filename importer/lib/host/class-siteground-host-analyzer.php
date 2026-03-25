@@ -8,7 +8,7 @@
  *
  * This analyzer also serves as the fallback for unrecognized hosts.
  */
-class SitegroundHostAnalyzer extends HostAnalyzer
+class SitegroundHostAnalyzer implements HostAnalyzer
 {
     /**
      * Score how likely the source site is on SiteGround.
@@ -43,9 +43,8 @@ class SitegroundHostAnalyzer extends HostAnalyzer
     public function analyze(array $preflight_data): RuntimeManifest
     {
         $manifest = new RuntimeManifest('siteground');
-        $manifest->php_ini = $this->extract_php_ini($preflight_data);
-        $manifest->constants = $this->extract_constants($preflight_data);
-        $manifest->server_vars = $this->extract_server_vars($preflight_data);
+        $manifest->php_ini = extract_php_ini($preflight_data);
+        $manifest->constants = extract_constants($preflight_data);
         return $manifest;
     }
 }

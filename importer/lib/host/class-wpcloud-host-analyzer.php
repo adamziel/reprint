@@ -11,7 +11,7 @@
  * route for thumbnail-sized image URLs. The target runtime decides how to
  * implement the handler.
  */
-class WpcloudHostAnalyzer extends HostAnalyzer
+class WpcloudHostAnalyzer implements HostAnalyzer
 {
     /**
      * Score how likely the source site is a WP Cloud site.
@@ -69,9 +69,13 @@ class WpcloudHostAnalyzer extends HostAnalyzer
     public function analyze(array $preflight_data): RuntimeManifest
     {
         $manifest = new RuntimeManifest('wpcloud');
-        $manifest->php_ini = $this->extract_php_ini($preflight_data);
-        $manifest->constants = $this->extract_constants($preflight_data);
-        $manifest->server_vars = $this->extract_server_vars($preflight_data);
+        $manifest->php_ini = extract_php_ini($preflight_data);
+        $manifest->constants = $this->build_constants($preflight_data);
+        $manifest->server_vars = [
+            // WP Cloud uses a __wp__ directory for WordPress core. After
+            // flatten-docroot, it lives at {docroot}/__wp__/.
+            'WP_DIR' => '{docroot}/__wp__/',
+        ];
 
         // WP Cloud exports only ship full-size uploads. WordPress post meta
         // references sized variants like image-768x768.jpeg that don't exist
@@ -87,18 +91,9 @@ class WpcloudHostAnalyzer extends HostAnalyzer
         return $manifest;
     }
 
-    protected function extract_server_vars(array $preflight_data): array
+    private function build_constants(array $preflight_data): array
     {
-        // WP Cloud uses a __wp__ directory for WordPress core. After
-        // flatten-docroot, it lives at {docroot}/__wp__/.
-        return [
-            'WP_DIR' => '{docroot}/__wp__/',
-        ];
-    }
-
-    protected function extract_constants(array $preflight_data): array
-    {
-        $result = parent::extract_constants($preflight_data);
+        $result = extract_constants($preflight_data);
 
         // WP Cloud always needs THEMES_PATH_BASE since themes are under
         // wp-content, not under the __wp__ ABSPATH.
