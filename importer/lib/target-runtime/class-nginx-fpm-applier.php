@@ -25,9 +25,7 @@ class NginxFpmApplier extends RuntimeApplier
 
         // Append error handlers to the bootstrap — they run on every request
         // via auto_prepend_file, before WordPress boots.
-        if ($this->has_thumbnail_handler($manifest)) {
-            $bootstrap .= $this->generate_thumbnail_handler() . "\n";
-        }
+        $bootstrap .= $this->generate_error_handler_code($manifest);
 
         $this->write_file($bootstrap_path, $bootstrap);
         $summary[] = "Wrote {$bootstrap_path}";

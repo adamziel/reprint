@@ -72,12 +72,12 @@ class PhpBuiltinApplier extends RuntimeApplier
         $parts[] = ' */';
         $parts[] = '';
 
-        // Inline error handlers. The thumbnail handler checks the request
-        // URI and exits if it generates a thumbnail, so it must run before
-        // the static-file and WordPress routing below.
-        if ($this->has_thumbnail_handler($manifest)) {
-            $parts[] = $this->generate_thumbnail_handler();
-            $parts[] = '';
+        // Inline error handlers (e.g. WP Cloud thumbnail generation).
+        // These check the request URI and may exit before WordPress
+        // routing, so they must come first.
+        $error_handler_code = $this->generate_error_handler_code($manifest);
+        if ($error_handler_code !== '') {
+            $parts[] = $error_handler_code;
         }
 
         $parts[] = '$uri = $_SERVER[\'REQUEST_URI\'] ?? \'/\';';
