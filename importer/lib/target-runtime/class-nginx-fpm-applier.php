@@ -8,13 +8,13 @@
  *                                and INI directives passed via fastcgi_param
  *
  * Everything lives in the output directory — nothing is written to the
- * docroot. The nginx config passes PHP_VALUE directives to FPM via
+ * fs-root. The nginx config passes PHP_VALUE directives to FPM via
  * fastcgi_param, which is equivalent to .user.ini but configured in one
  * place alongside the rest of the server block.
  */
 class NginxFpmApplier implements RuntimeApplier
 {
-    public function apply(RuntimeManifest $manifest, string $docroot, string $output_dir, array $options = []): array
+    public function apply(RuntimeManifest $manifest, string $fs_root, string $output_dir, array $options = []): array
     {
         $host = $options['host'] ?? 'localhost';
         $port = (int) ($options['port'] ?? 80);
@@ -23,13 +23,13 @@ class NginxFpmApplier implements RuntimeApplier
 
         // 1. Write runtime.php
         $runtime_path = $output_dir . '/runtime.php';
-        $runtime = generate_runtime_php($manifest, $docroot);
+        $runtime = generate_runtime_php($manifest, $fs_root);
         write_runtime_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
         // 2. Write nginx.conf (includes auto_prepend_file + INI directives)
         $nginx_conf_path = $output_dir . '/nginx.conf';
-        $nginx_conf = $this->generate_nginx_conf($manifest, $docroot, $runtime_path, $host, $port);
+        $nginx_conf = $this->generate_nginx_conf($manifest, $fs_root, $runtime_path, $host, $port);
         write_runtime_file($nginx_conf_path, $nginx_conf);
         $summary[] = "Wrote {$nginx_conf_path}";
 
@@ -47,11 +47,11 @@ class NginxFpmApplier implements RuntimeApplier
      * Generate an nginx server block that serves static files directly
      * and routes PHP requests through PHP-FPM. INI directives and
      * auto_prepend_file are passed via fastcgi_param PHP_VALUE,
-     * so no .user.ini is needed in the docroot.
+     * so no .user.ini is needed in the fs-root.
      */
     private function generate_nginx_conf(
         RuntimeManifest $manifest,
-        string $docroot,
+        string $fs_root,
         string $runtime_path,
         string $host,
         int $port
@@ -63,7 +63,7 @@ class NginxFpmApplier implements RuntimeApplier
         $lines[] = 'server {';
         $lines[] = "    listen {$port};";
         $lines[] = "    server_name {$host};";
-        $lines[] = "    root {$docroot};";
+        $lines[] = "    root {$fs_root};";
         $lines[] = '    index index.php index.html;';
         $lines[] = '';
         $lines[] = '    # Static files served directly by nginx — no PHP involved.';
@@ -81,7 +81,7 @@ class NginxFpmApplier implements RuntimeApplier
 
         // Build the PHP_VALUE string — auto_prepend_file and INI directives.
         // fastcgi_param PHP_VALUE passes these to FPM as if they were in
-        // .user.ini, but without writing anything to the docroot.
+        // .user.ini, but without writing anything to the fs-root.
         $php_values = [];
         $php_values[] = "auto_prepend_file={$runtime_path}";
         foreach ($manifest->php_ini as $key => $value) {

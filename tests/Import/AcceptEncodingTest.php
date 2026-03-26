@@ -24,7 +24,7 @@ class AcceptEncodingTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/import-encoding-test-' . uniqid();
         mkdir($this->tempDir . '/state', 0755, true);
-        mkdir($this->tempDir . '/docroot', 0755, true);
+        mkdir($this->tempDir . '/fs-root', 0755, true);
     }
 
     protected function tearDown(): void
@@ -63,7 +63,7 @@ class AcceptEncodingTest extends TestCase
         $client = new \ImportClient(
             'http://fake.url',
             $this->tempDir . '/state',
-            $this->tempDir . '/docroot'
+            $this->tempDir . '/fs-root'
         );
 
         $method = new ReflectionMethod($client, 'get_base_headers');

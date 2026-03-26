@@ -94,14 +94,14 @@ Override with environment variables if needed.
 
 ### Symlink Security
 
-Symlinks ARE automatically recreated during import. This is safe because all paths are relative to the `--docroot` directory, preventing directory traversal outside it. Errors are logged to the audit log.
+Symlinks ARE automatically recreated during import. This is safe because all paths are relative to the `--fs-root` directory, preventing directory traversal outside it. Errors are logged to the audit log.
 
-### Non-Empty Docroot Handling (`--on-docroot-nonempty`)
+### Non-Empty fs-root Handling (`--on-fs-root-nonempty`)
 
-By default, `files-sync` refuses to start if `--docroot` is non-empty (to prevent accidental overwrites). The `--on-docroot-nonempty` flag controls this behavior:
+By default, `files-sync` refuses to start if `--fs-root` is non-empty (to prevent accidental overwrites). The `--on-fs-root-nonempty` flag controls this behavior:
 
-- `--on-docroot-nonempty=error` (default): throw an error and abort.
-- `--on-docroot-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
+- `--on-fs-root-nonempty=error` (default): throw an error and abort.
+- `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
 
 In `preserve-local` mode:
 - Existing files are never overwritten — if anything (regular file, symlink, directory) already exists at a remote file's path, the remote file is skipped.
@@ -186,7 +186,7 @@ Progress is computed client-side by reading state files (all in `--state-dir`):
 - `.import-download-list.jsonl`: Files pending download
 - `db.sql`: SQL dump file size
 
-And from `--docroot`:
+And from `--fs-root`:
 - Actual downloaded files (recursive size/count)
 
 This keeps the protocol minimal while enabling rich progress visualization.

@@ -18,16 +18,16 @@ class FilesSyncStateTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $docroot;
+    private $fs_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/import-state-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->docroot = $this->tempDir . '/docroot';
+        $this->fs_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->docroot, 0755, true);
+        mkdir($this->fs_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -59,7 +59,7 @@ class FilesSyncStateTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->docroot);
+        return new \ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
     }
 
     /**
@@ -77,7 +77,7 @@ class FilesSyncStateTest extends TestCase
             "remote_protocol_min_version" => null,
             "version" => null,
             "follow_symlinks" => false,
-            "docroot_nonempty_behavior" => "preserve-local",
+            "fs_root_nonempty_behavior" => "preserve-local",
             "max_allowed_packet" => null,
         ];
         file_put_contents(
@@ -142,7 +142,7 @@ class FilesSyncStateTest extends TestCase
         $ttyProperty = $reflection->getProperty('is_tty');
         $ttyProperty->setValue($client, false);
 
-        $behaviorProp = $reflection->getProperty('docroot_nonempty_behavior');
+        $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
         $behaviorProp->setValue($client, 'preserve-local');
 
         return [$client, $reflection];
@@ -256,7 +256,7 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($remoteIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 2000, 250));
 
         // The file exists locally (downloaded during the initial sync)
-        $localFile = $this->docroot . '/wp-content/themes/flavor/style.css';
+        $localFile = $this->fs_root . '/wp-content/themes/flavor/style.css';
         mkdir(dirname($localFile), 0755, true);
         file_put_contents($localFile, 'old content');
 
@@ -294,7 +294,7 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($remoteIndex, $this->indexLine('/wp-content/object-cache.php', 1000, 500));
 
         // The file exists locally (pre-existing, e.g. hosting drop-in)
-        $localFile = $this->docroot . '/wp-content/object-cache.php';
+        $localFile = $this->fs_root . '/wp-content/object-cache.php';
         mkdir(dirname($localFile), 0755, true);
         file_put_contents($localFile, 'local drop-in');
 
@@ -330,7 +330,7 @@ class FilesSyncStateTest extends TestCase
     public function testFetchStageOverwritesPreviouslySyncedFile()
     {
         // Create the file locally (simulates a prior sync)
-        $localFile = $this->docroot . '/wp-content/themes/flavor/style.css';
+        $localFile = $this->fs_root . '/wp-content/themes/flavor/style.css';
         mkdir(dirname($localFile), 0755, true);
         file_put_contents($localFile, 'old content');
 

@@ -4,7 +4,7 @@
  *
  * WP Cloud sites have a non-standard directory layout: WordPress core lives
  * at a versioned path (/wordpress/core/X.Y.Z/) and wp-content is a separate
- * tree under /srv/htdocs/. After flatten-docroot, the local layout uses a
+ * tree under /srv/htdocs/. After flat-document-root, the local layout uses a
  * __wp__ directory for core.
  *
  * The export only ships original-size uploads, so the manifest declares a
@@ -73,8 +73,8 @@ class WpcloudHostAnalyzer implements HostAnalyzer
         $manifest->constants = $this->build_constants($preflight_data);
         $manifest->server_vars = [
             // WP Cloud uses a __wp__ directory for WordPress core. After
-            // flatten-docroot, it lives at {docroot}/__wp__/.
-            'WP_DIR' => '{docroot}/__wp__/',
+            // flat-document-root, it lives at {fs-root}/__wp__/.
+            'WP_DIR' => '{fs-root}/__wp__/',
         ];
 
         // WP Cloud exports only ship full-size uploads. WordPress post meta
@@ -97,7 +97,7 @@ class WpcloudHostAnalyzer implements HostAnalyzer
 
         // WP Cloud always needs THEMES_PATH_BASE since themes are under
         // wp-content, not under the __wp__ ABSPATH.
-        $result['THEMES_PATH_BASE'] = '{docroot}/wp-content/themes';
+        $result['THEMES_PATH_BASE'] = '{fs-root}/wp-content/themes';
 
         return $result;
     }

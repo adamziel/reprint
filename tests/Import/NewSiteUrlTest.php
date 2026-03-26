@@ -19,7 +19,7 @@ class NewSiteUrlTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/import-new-site-url-test-' . uniqid();
         mkdir($this->tempDir, 0755, true);
-        mkdir($this->tempDir . '/docroot', 0755, true);
+        mkdir($this->tempDir . '/fs-root', 0755, true);
     }
 
     protected function tearDown(): void
@@ -63,7 +63,7 @@ class NewSiteUrlTest extends TestCase
         $client = new \ImportClient(
             'https://old-site.example.com/wp-json/export',
             $this->tempDir,
-            $this->tempDir . '/docroot'
+            $this->tempDir . '/fs-root'
         );
 
         $options = ['new_site_url' => 'https://new-site.example.com'];
@@ -86,7 +86,7 @@ class NewSiteUrlTest extends TestCase
         $client = new \ImportClient(
             'http://old-site.local/export?key=abc',
             $this->tempDir,
-            $this->tempDir . '/docroot'
+            $this->tempDir . '/fs-root'
         );
 
         $options = ['new_site_url' => 'https://new-site.example.com'];
@@ -108,7 +108,7 @@ class NewSiteUrlTest extends TestCase
         $client = new \ImportClient(
             'https://old-site.example.com:8443/export',
             $this->tempDir,
-            $this->tempDir . '/docroot'
+            $this->tempDir . '/fs-root'
         );
 
         $options = ['new_site_url' => 'https://new-site.example.com'];
@@ -130,7 +130,7 @@ class NewSiteUrlTest extends TestCase
         $client = new \ImportClient(
             'https://old-site.example.com/export',
             $this->tempDir,
-            $this->tempDir . '/docroot'
+            $this->tempDir . '/fs-root'
         );
 
         $options = [
@@ -161,7 +161,7 @@ class NewSiteUrlTest extends TestCase
         $client = new \ImportClient(
             'https://old-site.example.com/export',
             $this->tempDir,
-            $this->tempDir . '/docroot'
+            $this->tempDir . '/fs-root'
         );
 
         $options = [];
@@ -175,7 +175,7 @@ class NewSiteUrlTest extends TestCase
         $client = new \ImportClient(
             '://not-a-url',
             $this->tempDir,
-            $this->tempDir . '/docroot'
+            $this->tempDir . '/fs-root'
         );
 
         $this->expectException(\InvalidArgumentException::class);
@@ -190,7 +190,7 @@ class NewSiteUrlTest extends TestCase
         $client = new \ImportClient(
             'https://old-site.example.com/export',
             $this->tempDir,
-            $this->tempDir . '/docroot'
+            $this->tempDir . '/fs-root'
         );
 
         // The new URL should be used exactly as-is, even with a trailing path

@@ -12,7 +12,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch, sha1File,
     assertFileCount, assertSiteMirror,
-    docrootDir,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -52,7 +52,7 @@ describe('Import: SHA1 Integrity', () => {
     });
 
     it('all file hashes match source', () => {
-        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
@@ -61,18 +61,18 @@ describe('Import: SHA1 Integrity', () => {
     });
 
     it('imported files form a valid WordPress site mirror', () => {
-        assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
+        assertSiteMirror(join(fsRootDir(tempDir), getSiteDir(site)));
     });
 
     it('at least 20 files with correct hashes', () => {
-        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         const importedHashes = hashDirectory(importedRoot);
         assert.ok(importedHashes.size >= 20, `Expected at least 20 files, got ${importedHashes.size}`);
     });
 
     it('large binary file (256KB) hash matches', () => {
         const sourcePath = join(getSiteDir(site), 'test-data', 'large-binary.bin');
-        const importedPath = join(docrootDir(tempDir), getSiteDir(site), 'test-data', 'large-binary.bin');
+        const importedPath = join(fsRootDir(tempDir), getSiteDir(site), 'test-data', 'large-binary.bin');
 
         assert.ok(existsSync(sourcePath), 'Expected source large-binary.bin to exist');
         assert.ok(existsSync(importedPath), 'Expected imported large-binary.bin to exist');

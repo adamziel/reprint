@@ -821,7 +821,7 @@ class ImportClient
     private $state_dir;
 
     /** @var string Directory where downloaded site files are written (no filesystem-root/ wrapper). */
-    private $docroot;
+    private $fs_root;
 
     /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
@@ -922,14 +922,14 @@ class ImportClient
     private $follow_symlinks = true;
 
     /**
-     * @var string Controls behavior when the docroot is non-empty at import start.
+     * @var string Controls behavior when the fs root is non-empty at import start.
      *
-     * 'error' (default): throw an error if the docroot is non-empty.
+     * 'error' (default): throw an error if the fs root is non-empty.
      * 'preserve-local': preserve existing files, symlinks, and directories in the
-     * docroot instead of overwriting them; non-writable directories are skipped
+     * fs root instead of overwriting them; non-writable directories are skipped
      * gracefully and logged to the audit log.
      *
-     * On the first sync, existing docroot content is left untouched — any file,
+     * On the first sync, existing fs root content is left untouched — any file,
      * symlink, or directory that already exists at a path the remote tries to write
      * is skipped and never added to the local index.
      *
@@ -938,9 +938,9 @@ class ImportClient
      * (e.g. __wp__ symlinks, drop-in symlinks, shared plugin directories) is simply
      * invisible to the diff and never touched.
      *
-     * Set via --on-docroot-nonempty, persisted in state so it survives across invocations.
+     * Set via --on-fs-root-nonempty, persisted in state so it survives across invocations.
      */
-    private $docroot_nonempty_behavior = 'error';
+    private $fs_root_nonempty_behavior = 'error';
 
     /**
      * Controls which files are downloaded during files-sync.
@@ -1008,11 +1008,11 @@ class ImportClient
      */
     public $exit_code = 0;
 
-    public function __construct(string $remote_url, string $state_dir, string $docroot)
+    public function __construct(string $remote_url, string $state_dir, string $fs_root)
     {
         $this->remote_url = rtrim($remote_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
-        $this->docroot = rtrim($docroot, "/");
+        $this->fs_root = rtrim($fs_root, "/");
         $this->state_file = $this->state_dir . "/.import-state.json";
         $this->index_file = $this->state_dir . "/.import-index.jsonl";
         $this->index_updates_file =
@@ -1048,9 +1048,9 @@ class ImportClient
                 throw new RuntimeException("Failed to create directory: {$this->state_dir}");
             }
         }
-        if (!is_dir($this->docroot)) {
-            if (!mkdir($this->docroot, 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->docroot}");
+        if (!is_dir($this->fs_root)) {
+            if (!mkdir($this->fs_root, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->fs_root}");
             }
         }
     }
@@ -1293,11 +1293,11 @@ class ImportClient
     {
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
-        if (isset($options["docroot_nonempty_behavior"])) {
-            $this->docroot_nonempty_behavior = $options["docroot_nonempty_behavior"];
-            if (!in_array($this->docroot_nonempty_behavior, ['error', 'preserve-local'])) {
+        if (isset($options["fs_root_nonempty_behavior"])) {
+            $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
+            if (!in_array($this->fs_root_nonempty_behavior, ['error', 'preserve-local'])) {
                 throw new InvalidArgumentException(
-                    "Invalid --on-docroot-nonempty value: {$this->docroot_nonempty_behavior}. " .
+                    "Invalid --on-fs-root-nonempty value: {$this->fs_root_nonempty_behavior}. " .
                         "Valid values: error, preserve-local",
                 );
             }
@@ -1309,7 +1309,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flatten-docroot",
+                "Command is required. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flat-document-root",
             );
         }
 
@@ -1324,12 +1324,12 @@ class ImportClient
                 "files-stats",
                 "preflight",
                 "preflight-assert",
-                "flatten-docroot",
+                "flat-document-root",
                 "apply-runtime",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flatten-docroot, apply-runtime",
+                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flat-document-root, apply-runtime",
             );
         }
 
@@ -1344,14 +1344,14 @@ class ImportClient
             $this->follow_symlinks = $this->state["follow_symlinks"];
         }
 
-        // Persist docroot_nonempty_behavior in state so it survives across invocations.
+        // Persist fs_root_nonempty_behavior in state so it survives across invocations.
         // 'preserve-local' preserves existing local files instead of overwriting
         // them, and gracefully skips non-writable directories.
-        if (isset($options["docroot_nonempty_behavior"])) {
-            $this->state["docroot_nonempty_behavior"] = $this->docroot_nonempty_behavior;
+        if (isset($options["fs_root_nonempty_behavior"])) {
+            $this->state["fs_root_nonempty_behavior"] = $this->fs_root_nonempty_behavior;
             $this->save_state($this->state);
         } else {
-            $this->docroot_nonempty_behavior = $this->state["docroot_nonempty_behavior"] ?? 'error';
+            $this->fs_root_nonempty_behavior = $this->state["fs_root_nonempty_behavior"] ?? 'error';
         }
 
         // Persist filter in state so it survives across resume cycles.
@@ -1490,8 +1490,8 @@ class ImportClient
             $this->run_files_stats();
             return;
         }
-        if ($command === "flatten-docroot") {
-            $this->run_flatten_docroot($options);
+        if ($command === "flat-document-root") {
+            $this->run_flat_document_root($options);
             return;
         }
         if ($command === "apply-runtime") {
@@ -1777,10 +1777,10 @@ class ImportClient
 
         // Detect webhost environment from preflight data.
         // The host analyzers score based on preflight signals. We also
-        // check the local docroot for a __wp__ symlink as a fallback
+        // check the local fs root for a __wp__ symlink as a fallback
         // when the remote preflight didn't report enough filesystem data.
         $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
-        if ($detected_webhost === 'other' && is_link($this->docroot . '/__wp__')) {
+        if ($detected_webhost === 'other' && is_link($this->fs_root . '/__wp__')) {
             $detected_webhost = 'wpcloud';
         }
         $this->state["webhost"] = $detected_webhost;
@@ -2359,7 +2359,7 @@ class ImportClient
         }
 
         $is_empty =
-            !is_dir($this->docroot) || count(scandir($this->docroot)) <= 2; // only . and ..
+            !is_dir($this->fs_root) || count(scandir($this->fs_root)) <= 2; // only . and ..
 
         // A local index from a prior completed sync means the next run is a
         // delta: re-index the remote, diff against local, fetch only changes.
@@ -2389,12 +2389,12 @@ class ImportClient
             }
         } else {
             // Starting fresh — validate that target directory is empty.
-            // A delta sync ($is_delta) naturally has a non-empty docroot
+            // A delta sync ($is_delta) naturally has a non-empty fs root
             // because we put those files there during the initial sync.
-            if (!$is_empty && !$is_delta && $this->docroot_nonempty_behavior === 'error') {
+            if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
                 throw new RuntimeException(
                     "Target directory is not empty and no cursor found. " .
-                        "Either clear the target directory, use --abort flag, or use --on-docroot-nonempty=preserve-local to sync while preserving the existing content.",
+                        "Either clear the target directory, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
                 );
             }
 
@@ -2422,7 +2422,7 @@ class ImportClient
                 }
             } else {
                 $this->audit_log(
-                    "START files-sync ({$this->docroot_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
+                    "START files-sync ({$this->fs_root_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
                     true,
                 );
 
@@ -2942,8 +2942,8 @@ class ImportClient
      *
      * Since the server indexes everything under realpath()-resolved paths,
      * the files are already downloaded to the target location (e.g.
-     * docroot/wordpress/...).  We just need to create the symlink
-     * (e.g. docroot/srv/wordpress -> /wordpress) so the directory
+     * fs-root/wordpress/...).  We just need to create the symlink
+     * (e.g. fs-root/srv/wordpress -> /wordpress) so the directory
      * layout matches the server.
      */
     private function recreate_intermediate_symlinks(): void
@@ -3412,11 +3412,11 @@ class ImportClient
      * the applier writes the files the target server needs to fulfill those
      * requirements.
      *
-     * The effective docroot is --docroot + the remote site's document_root
+     * The effective fs root is --fs-root + the remote site's document_root
      * prefix (from preflight). For example, if the remote document_root is
-     * /srv/htdocs and --docroot is ./files, the effective docroot is
-     * ./files/srv/htdocs. If the site was flattened with flatten-docroot,
-     * pass the flattened directory as --docroot directly and the prefix
+     * /srv/htdocs and --fs-root is ./files, the effective fs root is
+     * ./files/srv/htdocs. If the site was flattened with flat-document-root,
+     * pass the flattened directory as --fs-root directly and the prefix
      * is not applied.
      */
     private function run_apply_runtime(array $options): void
@@ -3447,19 +3447,19 @@ class ImportClient
         $preflight_data = $entry["data"];
         $webhost = $this->state["webhost"] ?? "other";
 
-        // Resolve the effective docroot from either --flattened-docroot
-        // (used as-is) or --docroot (prefixed with the remote document_root).
+        // Resolve the effective fs root from either --flat-document-root
+        // (used as-is) or --fs-root (prefixed with the remote document_root).
         // Mutual exclusion is already enforced at the CLI level.
-        $flattened_docroot = $options["flattened_docroot"] ?? null;
+        $flat_document_root = $options["flat_document_root"] ?? null;
 
-        if (!empty($flattened_docroot)) {
-            // --flattened-docroot: used directly as the web root.
-            $effective_docroot = rtrim($flattened_docroot, "/");
+        if (!empty($flat_document_root)) {
+            // --flat-document-root: used directly as the web root.
+            $effective_fs_root = rtrim($flat_document_root, "/");
         } else {
-            // --docroot: the raw download directory. The remote site's
+            // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
             // source server. Files are downloaded preserving the full
-            // remote path, so the effective docroot is --docroot +
+            // remote path, so the effective fs root is --fs-root +
             // document_root.
             $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
             if (is_string($remote_doc_root)) {
@@ -3469,24 +3469,24 @@ class ImportClient
             }
 
             if ($remote_doc_root !== "") {
-                $effective_docroot = $this->docroot . $remote_doc_root;
+                $effective_fs_root = $this->fs_root . $remote_doc_root;
             } else {
-                $effective_docroot = $this->docroot;
+                $effective_fs_root = $this->fs_root;
             }
 
-            if (!is_dir($effective_docroot)) {
+            if (!is_dir($effective_fs_root)) {
                 throw new RuntimeException(
-                    "Effective docroot does not exist: {$effective_docroot}\n" .
+                    "Effective fs root does not exist: {$effective_fs_root}\n" .
                     "The remote document_root was: {$remote_doc_root}\n" .
-                    "If you used flatten-docroot, pass the flattened directory " .
-                    "with --flattened-docroot instead of --docroot."
+                    "If you used flat-document-root, pass the flattened directory " .
+                    "with --flat-document-root instead of --fs-root."
                 );
             }
         }
 
         // Resolve to absolute paths so generated files work from any cwd.
         $abs_output_dir = realpath($output_dir) ?: $output_dir;
-        $abs_docroot = realpath($effective_docroot) ?: $effective_docroot;
+        $abs_fs_root = realpath($effective_fs_root) ?: $effective_fs_root;
 
         if (!is_dir($abs_output_dir)) {
             if (!mkdir($abs_output_dir, 0755, true)) {
@@ -3527,7 +3527,7 @@ class ImportClient
                 $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
                 $db_file = basename($sqlite_path);
             } else {
-                $db_dir = '{docroot}/wp-content/database/';
+                $db_dir = '{fs-root}/wp-content/database/';
                 $db_file = '.ht.sqlite';
             }
             $manifest->sqlite = [
@@ -3561,20 +3561,20 @@ class ImportClient
         }
 
         // Resolve the path to WordPress's index.php. On standard hosts it
-        // lives in the docroot. On WPCloud the ABSPATH is a different
+        // lives in the fs root. On WPCloud the ABSPATH is a different
         // directory (e.g. /wordpress/core/X.Y.Z) which maps to
-        // download_root + abspath when using --docroot.
+        // download_root + abspath when using --fs-root.
         $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
         $abspath = rtrim($paths_urls["abspath"] ?? "", "/");
-        if (!empty($flattened_docroot)) {
+        if (!empty($flat_document_root)) {
             // Flattened layout: index.php is at the top level.
-            $wordpress_index = $abs_docroot . '/index.php';
+            $wordpress_index = $abs_fs_root . '/index.php';
         } elseif ($abspath !== "") {
             // Raw download: ABSPATH is relative to the download root,
-            // not the effective docroot (which is download_root + document_root).
-            $wordpress_index = realpath($this->docroot . $abspath . '/index.php') ?: '';
+            // not the effective fs root (which is download_root + document_root).
+            $wordpress_index = realpath($this->fs_root . $abspath . '/index.php') ?: '';
         } else {
-            $wordpress_index = $abs_docroot . '/index.php';
+            $wordpress_index = $abs_fs_root . '/index.php';
         }
 
         // Step 2: Runtime applier writes server-specific config files.
@@ -3600,14 +3600,14 @@ class ImportClient
             // Replace the source path with the copied-to path so the
             // generated runtime.php points to the output directory.
             $manifest->sqlite['plugin_dir'] = $copied_plugin;
-            // Resolve {docroot} in db_dir now that we have the real path.
+            // Resolve {fs-root} in db_dir now that we have the real path.
             $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
                 $manifest->sqlite['db_dir'],
-                $abs_docroot,
+                $abs_fs_root,
             );
         }
 
-        $summary = $applier->apply($manifest, $abs_docroot, $abs_output_dir, $applier_options);
+        $summary = $applier->apply($manifest, $abs_fs_root, $abs_output_dir, $applier_options);
 
         if ($manifest->sqlite !== null) {
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
@@ -3641,13 +3641,13 @@ class ImportClient
     }
 
     /**
-     * Command: flatten-docroot
+     * Command: flat-document-root
      *
      * Creates a directory at the specified --flatten-to path that mirrors
      * a vanilla WordPress installation layout by symlinking entries from
-     * the import docroot. Uses preflight data (paths_urls) to determine
+     * the import fs root. Uses preflight data (paths_urls) to determine
      * where each WordPress component actually lives, rather than blindly
-     * scanning docroot top-level entries.
+     * scanning fs root top-level entries.
      *
      * This is essential when the source site uses a non-standard layout
      * (e.g. WP Cloud with ABSPATH=/srv/htdocs and WP_CONTENT_DIR=/tmp/__wp__/wp-content)
@@ -3658,22 +3658,22 @@ class ImportClient
      * If a path that should be a symlink is a regular file/directory,
      * the command stops with an error unless --force is specified.
      */
-    private function run_flatten_docroot(array $options): void
+    private function run_flat_document_root(array $options): void
     {
         $flatten_to = $options["flatten_to"] ?? null;
         if (empty($flatten_to)) {
             throw new InvalidArgumentException(
-                "flatten-docroot requires --flatten-to=PATH",
+                "flat-document-root requires --flatten-to=PATH",
             );
         }
 
         $flatten_to = rtrim($flatten_to, "/");
         $force = $options["force"] ?? false;
 
-        // Ensure the docroot exists
-        if (!is_dir($this->docroot)) {
+        // Ensure the fs root exists
+        if (!is_dir($this->fs_root)) {
             throw new RuntimeException(
-                "Docroot does not exist: {$this->docroot}",
+                "Fs root does not exist: {$this->fs_root}",
             );
         }
 
@@ -3718,32 +3718,32 @@ class ImportClient
             );
         }
 
-        // Map remote paths to local paths within docroot
-        $local_abspath = $this->docroot . $abspath;
+        // Map remote paths to local paths within fs root
+        $local_abspath = $this->fs_root . $abspath;
         if (!is_dir($local_abspath)) {
             throw new RuntimeException(
-                "WordPress ABSPATH directory not found in docroot: {$local_abspath} " .
+                "WordPress ABSPATH directory not found in fs root: {$local_abspath} " .
                     "(remote ABSPATH: {$abspath}). Has the file sync completed?",
             );
         }
 
         $local_wp_admin = $wp_admin_path !== null
-            ? $this->docroot . $wp_admin_path
+            ? $this->fs_root . $wp_admin_path
             : null;
         $local_wp_includes = $wp_includes_path !== null
-            ? $this->docroot . $wp_includes_path
+            ? $this->fs_root . $wp_includes_path
             : null;
         $local_content_dir = $content_dir !== null
-            ? $this->docroot . $content_dir
+            ? $this->fs_root . $content_dir
             : null;
         $local_plugins_dir = $plugins_dir !== null
-            ? $this->docroot . $plugins_dir
+            ? $this->fs_root . $plugins_dir
             : null;
         $local_mu_plugins_dir = $mu_plugins_dir !== null
-            ? $this->docroot . $mu_plugins_dir
+            ? $this->fs_root . $mu_plugins_dir
             : null;
         $local_uploads_basedir = $uploads_basedir !== null
-            ? $this->docroot . $uploads_basedir
+            ? $this->fs_root . $uploads_basedir
             : null;
 
         // Determine which components are "detached" — located outside
@@ -3781,13 +3781,13 @@ class ImportClient
                 );
             }
             $this->audit_log(
-                "FLATTEN-DOCROOT | Created directory: {$flatten_to}",
+                "FLAT-DOCUMENT-ROOT | Created directory: {$flatten_to}",
             );
         }
 
         $this->audit_log(
             sprintf(
-                "FLATTEN-DOCROOT | abspath=%s wp_admin=%s wp_includes=%s " .
+                "FLAT-DOCUMENT-ROOT | abspath=%s wp_admin=%s wp_includes=%s " .
                     "content_dir=%s content_detached=%s " .
                     "plugins_detached=%s mu_plugins_detached=%s uploads_detached=%s",
                 $abspath,
@@ -3834,7 +3834,7 @@ class ImportClient
             }
             if (isset($skip_from_abspath[$entry])) {
                 $this->audit_log(
-                    "FLATTEN-DOCROOT | Skipping '{$entry}' from ABSPATH " .
+                    "FLAT-DOCUMENT-ROOT | Skipping '{$entry}' from ABSPATH " .
                         "(will be sourced from resolved location)",
                 );
                 continue;
@@ -3970,7 +3970,7 @@ class ImportClient
                 );
             } else {
                 $this->audit_log(
-                    "FLATTEN-DOCROOT | Warning: content_dir not found in docroot: " .
+                    "FLAT-DOCUMENT-ROOT | Warning: content_dir not found in fs root: " .
                         "{$local_content_dir} (remote: {$content_dir})",
                     true,
                 );
@@ -3979,7 +3979,7 @@ class ImportClient
 
         $this->audit_log(
             sprintf(
-                "FLATTEN-DOCROOT | Complete: %d created, %d refreshed, %d force-replaced",
+                "FLAT-DOCUMENT-ROOT | Complete: %d created, %d refreshed, %d force-replaced",
                 $created,
                 $refreshed,
                 $forced,
@@ -3990,7 +3990,7 @@ class ImportClient
         $result = [
             "status" => "complete",
             "flatten_to" => $flatten_to,
-            "docroot" => $this->docroot,
+            "fs_root" => $this->fs_root,
             "abspath" => $abspath,
             "wp_admin_path" => $wp_admin_path,
             "wp_includes_path" => $wp_includes_path,
@@ -4098,7 +4098,7 @@ class ImportClient
             // Points elsewhere — remove and recreate
             unlink($target);
             $this->audit_log(
-                "FLATTEN-DOCROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
+                "FLAT-DOCUMENT-ROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
             );
             if (!symlink($link_value, $target)) {
                 throw new RuntimeException(
@@ -4122,7 +4122,7 @@ class ImportClient
 
             $type = is_dir($target) ? "directory" : "file";
             $this->audit_log(
-                "FLATTEN-DOCROOT FORCE | Removing conflicting {$type}: {$target}",
+                "FLAT-DOCUMENT-ROOT FORCE | Removing conflicting {$type}: {$target}",
                 true,
             );
 
@@ -4144,7 +4144,7 @@ class ImportClient
             );
         }
         $this->audit_log(
-            "FLATTEN-DOCROOT | Created symlink: {$target} -> {$link_value}",
+            "FLAT-DOCUMENT-ROOT | Created symlink: {$target} -> {$link_value}",
         );
         $created++;
     }
@@ -4167,7 +4167,7 @@ class ImportClient
                 );
             }
             $this->audit_log(
-                "FLATTEN-DOCROOT FORCE | Replacing symlink with real directory: {$path}",
+                "FLAT-DOCUMENT-ROOT FORCE | Replacing symlink with real directory: {$path}",
                 true,
             );
             unlink($path);
@@ -4181,7 +4181,7 @@ class ImportClient
                 );
             }
             $this->audit_log(
-                "FLATTEN-DOCROOT | Created directory: {$path}",
+                "FLAT-DOCUMENT-ROOT | Created directory: {$path}",
             );
         }
     }
@@ -5668,7 +5668,7 @@ class ImportClient
     }
 
     /**
-     * Delete a local file path safely under the docroot.
+     * Delete a local file path safely under the fs root.
      */
     private function delete_local_file_path(string $path): void
     {
@@ -6957,22 +6957,22 @@ class ImportClient
     }
 
     /**
-     * Return canonical docroot path, creating it if it doesn't exist.
+     * Return canonical fs root path, creating it if it doesn't exist.
      */
     private function get_filesystem_root_path(): string
     {
-        if (!is_dir($this->docroot)) {
-            if (!mkdir($this->docroot, 0755, true) && !is_dir($this->docroot)) {
+        if (!is_dir($this->fs_root)) {
+            if (!mkdir($this->fs_root, 0755, true) && !is_dir($this->fs_root)) {
                 throw new RuntimeException(
-                    "Failed to create docroot directory: {$this->docroot}",
+                    "Failed to create fs root directory: {$this->fs_root}",
                 );
             }
         }
 
-        $real = realpath($this->docroot);
+        $real = realpath($this->fs_root);
         if ($real === false) {
             throw new RuntimeException(
-                "Failed to resolve docroot path: {$this->docroot}",
+                "Failed to resolve fs root path: {$this->fs_root}",
             );
         }
 
@@ -6981,10 +6981,10 @@ class ImportClient
 
 
     /**
-     * Resolve a remote absolute path into a local path under the docroot.
+     * Resolve a remote absolute path into a local path under the fs root.
      *
      * Maps a remote absolute path (e.g. "/wp-content/uploads/photo.jpg") to a
-     * local path under the import docroot. Performs symlink traversal security
+     * local path under the import fs root. Performs symlink traversal security
      * checks to prevent directory traversal attacks that could write files
      * outside the import root.
      */
@@ -7214,7 +7214,7 @@ class ImportClient
      */
     private function should_skip_for_preserve_local(string $path): ?string
     {
-        if ($this->docroot_nonempty_behavior !== 'preserve-local') {
+        if ($this->fs_root_nonempty_behavior !== 'preserve-local') {
             return null;
         }
 
@@ -7274,7 +7274,7 @@ class ImportClient
      */
     private function ensure_directory_path(string $dir): void
     {
-        // Security: Ensure path is under the docroot
+        // Security: Ensure path is under the fs root
         $real_filesystem_root = $this->get_filesystem_root_path();
 
         // Resolve the target path (or what it would be)
@@ -7294,22 +7294,22 @@ class ImportClient
                 !path_is_within_root($real_check, $real_filesystem_root)
             ) {
                 // In preserve-local mode, a path that resolves outside the
-                // docroot is expected when a directory like wp-content/plugins
+                // fs root is expected when a directory like wp-content/plugins
                 // is symlinked to a shared hosting location.  Skip gracefully
                 // instead of treating it as a security violation.
-                if ($this->docroot_nonempty_behavior === 'preserve-local') {
+                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
                     throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: path resolves outside docroot via symlink: {$dir}",
+                        "PRESERVE-LOCAL: path resolves outside fs root via symlink: {$dir}",
                     );
                 }
                 throw new RuntimeException(
-                    "Security: Refusing to create directory outside docroot: {$dir}",
+                    "Security: Refusing to create directory outside fs root: {$dir}",
                 );
             }
         }
 
         if (is_dir($dir) && !is_link($dir)) {
-            if ($this->docroot_nonempty_behavior === 'preserve-local' && !is_writable($dir)) {
+            if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($dir)) {
                 throw new PreserveLocalSkipException(
                     "PRESERVE-LOCAL: directory not writable: {$dir}",
                 );
@@ -7322,7 +7322,7 @@ class ImportClient
             !str_starts_with($dir, $real_filesystem_root . "/")
         ) {
             throw new RuntimeException(
-                "Security: Refusing to create directory outside docroot: {$dir}",
+                "Security: Refusing to create directory outside fs root: {$dir}",
             );
         }
 
@@ -7339,7 +7339,7 @@ class ImportClient
             $current .= "/" . $part;
 
             if (is_link($current)) {
-                if ($this->docroot_nonempty_behavior === 'preserve-local') {
+                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
                     // Never create directories through symlinks — the symlink
                     // and its target contents are shared hosting infrastructure
                     // that must not be modified.
@@ -7363,7 +7363,7 @@ class ImportClient
 
             // Remove file if blocking directory creation
             if (is_file($current)) {
-                if ($this->docroot_nonempty_behavior === 'preserve-local') {
+                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
                     throw new PreserveLocalSkipException(
                         "PRESERVE-LOCAL: file blocks directory creation: {$current}",
                     );
@@ -7381,7 +7381,7 @@ class ImportClient
 
             // Create directory if it doesn't exist
             if (is_dir($current)) {
-                if ($this->docroot_nonempty_behavior === 'preserve-local' && !is_writable($current)) {
+                if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($current)) {
                     throw new PreserveLocalSkipException(
                         "PRESERVE-LOCAL: directory not writable: {$current}",
                     );
@@ -7397,7 +7397,7 @@ class ImportClient
             $resolved = realpath($current);
             if ($resolved === false || !path_is_within_root($resolved, $real_filesystem_root)) {
                 throw new RuntimeException(
-                    "Security: Refusing to create directory outside docroot: {$current}",
+                    "Security: Refusing to create directory outside fs root: {$current}",
                 );
             }
         }
@@ -7430,7 +7430,7 @@ class ImportClient
         // directory or via a symlink to a directory), keep it as-is.
         // Also skip if any parent component is a symlink — we never create
         // new directories through symlinked paths.
-        if ($this->docroot_nonempty_behavior === 'preserve-local') {
+        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
             if (is_dir($local_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
                 $this->show_progress_line("[skip] " . $this->display_path($path));
@@ -7516,7 +7516,7 @@ class ImportClient
         // path, keep it — whether it's a file, directory, or another symlink.
         // Also skip if any parent component is a symlink — we never create
         // new content through symlinked directories.
-        if ($this->docroot_nonempty_behavior === 'preserve-local') {
+        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
             if (file_exists($local_path) || is_link($local_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
                 $this->show_progress_line("[skip] " . $this->display_path($path));
@@ -7661,7 +7661,7 @@ class ImportClient
             true,
         );
         if ($path !== "" && $is_file_error) {
-            $local_path = $this->docroot . $path;
+            $local_path = $this->fs_root . $path;
             if ($context->file_handle && $context->file_path === $local_path) {
                 fclose($context->file_handle);
                 $context->file_handle = null;
@@ -8571,14 +8571,14 @@ class ImportClient
         $version = $this->state["version"] ?? null;
         $webhost = $this->state["webhost"] ?? null;
         $follow = $this->state["follow_symlinks"] ?? false;
-        $nonempty = $this->state["docroot_nonempty_behavior"] ?? "error";
+        $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
         $this->state["version"] = $version;
         $this->state["webhost"] = $webhost;
         $this->state["follow_symlinks"] = $follow;
-        $this->state["docroot_nonempty_behavior"] = $nonempty;
+        $this->state["fs_root_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
     }
 
@@ -8595,7 +8595,7 @@ class ImportClient
             "version" => null,
             "webhost" => null,
             "follow_symlinks" => true,
-            "docroot_nonempty_behavior" => "error",
+            "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "max_allowed_packet" => null,
             "db_index" => [
@@ -9261,7 +9261,7 @@ if (
         "files-sync" => [
             "short" => "Sync files (auto-detects initial vs delta)",
             "detail" =>
-                "Streams files from the remote server into the --docroot directory.\n" .
+                "Streams files from the remote server into the --fs-root directory.\n" .
                 "Auto-detects whether to run an initial or delta sync based on state:\n" .
                 "\n" .
                 "  - No prior sync: downloads the full directory tree (initial)\n" .
@@ -9272,8 +9272,8 @@ if (
                 "  --abort              Abort current sync and exit (keeps files and index)\n" .
                 "  --filter=MODE        Filter which files to download (none|essential-files|skipped-earlier)\n" .
                 "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n" .
-                "  --on-docroot-nonempty=MODE\n" .
-                "                       What to do when docroot is non-empty (error|preserve-local)\n" .
+                "  --on-fs-root-nonempty=MODE\n" .
+                "                       What to do when fs root is non-empty (error|preserve-local)\n" .
                 "  --secret=TOKEN       HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v        Show detailed request/response logs\n" .
                 "\n" .
@@ -9284,7 +9284,7 @@ if (
                 "  skipped-earlier   Download only files skipped by a prior essential-files run.\n" .
                 "\n" .
                 "Output files:\n" .
-                "  (docroot)/                              Downloaded files\n" .
+                "  (fs-root)/                              Downloaded files\n" .
                 "  .import-index.jsonl                     Local file index\n" .
                 "  .import-remote-index.jsonl              Remote index snapshot\n" .
                 "  .import-download-list.jsonl             Files pending download\n" .
@@ -9427,7 +9427,7 @@ if (
                 "Options:\n" .
                 "  --secret=TOKEN   HMAC shared secret for export API authentication\n",
         ],
-        "flatten-docroot" => [
+        "flat-document-root" => [
             "short" => "Create a vanilla WordPress directory layout using symlinks",
             "detail" =>
                 "Creates a directory at --flatten-to that mirrors the standard\n" .
@@ -9436,7 +9436,7 @@ if (
                 "\n" .
                 "Uses preflight paths_urls (ABSPATH, WP_CONTENT_DIR, WP_PLUGIN_DIR,\n" .
                 "WPMU_PLUGIN_DIR, uploads basedir) to locate each WordPress component\n" .
-                "within the import docroot, even when they reside in different parent\n" .
+                "within the import fs root, even when they reside in different parent\n" .
                 "directories on the source server (e.g. WP Cloud with ABSPATH at\n" .
                 "/srv/htdocs and WP_CONTENT_DIR at /tmp/__wp__/wp-content).\n" .
                 "\n" .
@@ -9464,13 +9464,13 @@ if (
                 "Does not require a remote URL — reads only from local state.\n" .
                 "Requires a prior preflight run to detect the source host.\n" .
                 "\n" .
-                "Pass --docroot for the raw download directory (the remote document_root\n" .
-                "path is appended automatically), or --flattened-docroot for a directory\n" .
-                "created by flatten-docroot (used as-is). These are mutually exclusive.\n" .
+                "Pass --fs-root for the raw download directory (the remote document_root\n" .
+                "path is appended automatically), or --flat-document-root for a directory\n" .
+                "created by flat-document-root (used as-is). These are mutually exclusive.\n" .
                 "\n" .
                 "Options:\n" .
-                "  --docroot=DIR             Raw download directory (remote path appended)\n" .
-                "  --flattened-docroot=DIR   Flattened layout directory (used as-is)\n" .
+                "  --fs-root=DIR             Raw download directory (remote path appended)\n" .
+                "  --flat-document-root=DIR   Flattened layout directory (used as-is)\n" .
                 "  --runtime=RUNTIME         Target server runtime (required):\n" .
                 "                              nginx-fpm    — writes runtime.php + nginx.conf\n" .
                 "                              php-builtin  — writes runtime.php + start.sh\n" .
@@ -9486,7 +9486,7 @@ if (
                 "  DB_USER, and DB_PASSWORD. For SQLite targets, the sqlite-database-\n" .
                 "  integration plugin is copied into the output directory and a lazy-\n" .
                 "  loading \$wpdb proxy is generated in runtime.php (Playground-style,\n" .
-                "  no files placed in the docroot).\n" .
+                "  no files placed in the fs-root).\n" .
                 "\n" .
                 "Output files (nginx-fpm):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
@@ -9502,11 +9502,11 @@ if (
                 "Examples:\n" .
                 "  # From raw download directory:\n" .
                 "  php import.php apply-runtime --state-dir=./state \\\n" .
-                "    --docroot=./files --output-dir=./runtime --runtime=php-builtin\n" .
+                "    --fs-root=./files --output-dir=./runtime --runtime=php-builtin\n" .
                 "\n" .
                 "  # From flattened layout:\n" .
                 "  php import.php apply-runtime --state-dir=./state \\\n" .
-                "    --flattened-docroot=./flat --output-dir=./runtime --runtime=php-builtin\n" .
+                "    --flat-document-root=./flat --output-dir=./runtime --runtime=php-builtin\n" .
                 "\n" .
                 "  bash ./runtime/start.sh\n",
         ],
@@ -9516,7 +9516,7 @@ if (
     if ($argc < 2 || (isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]))) {
         echo "Version " . get_importer_version() . "\n";
         echo "\n";
-        echo "Usage: php import.php <command> <remote-url> --state-dir=DIR --docroot=DIR [options]\n";
+        echo "Usage: php import.php <command> <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
         echo "\n";
         echo "Commands:\n";
         $max_len = max(array_map('strlen', array_keys($command_help)));
@@ -9528,14 +9528,14 @@ if (
         echo "\n";
         echo "Required options:\n";
         echo "  --state-dir=DIR      Directory for import state files and SQL dumps\n";
-        echo "  --docroot=DIR        Directory where downloaded site files are written\n";
+        echo "  --fs-root=DIR        Directory where downloaded site files are written\n";
         echo "\n";
         echo "Global options:\n";
         echo "  --secret=TOKEN       HMAC shared secret for export API authentication\n";
         echo "  --abort            Abort current sync and exit (preserves downloaded files)\n";
         echo "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n";
-        echo "  --on-docroot-nonempty=MODE\n";
-        echo "                       What to do when docroot is non-empty (error|preserve-local)\n";
+        echo "  --on-fs-root-nonempty=MODE\n";
+        echo "                       What to do when fs root is non-empty (error|preserve-local)\n";
         echo "  --version, -V        Print version and exit\n";
         echo "  --verbose, -v        Show detailed request/response logs\n";
         echo "  --no-adaptive        Disable adaptive request tuning\n";
@@ -9558,7 +9558,7 @@ if (
     // Per-command --help (can be requested before providing url/path)
     if (in_array("--help", array_slice($argv, 2)) || in_array("-h", array_slice($argv, 2))) {
         if (isset($command_help[$command])) {
-            echo "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n";
+            echo "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
             echo "\n";
             echo $command_help[$command]["detail"] . "\n";
         } else {
@@ -9580,15 +9580,15 @@ if (
         $remote_url = $argv[2] ?? null;
         if (!$remote_url) {
             fwrite(STDERR, "Error: <remote-url> is required\n");
-            fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
+            fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
             exit(1);
         }
         $option_start_index = 3;
     }
 
-    // Parse options (--state-dir and --docroot are required named options)
+    // Parse options (--state-dir and --fs-root are required named options)
     $state_dir = null;
-    $docroot = null;
+    $fs_root = null;
     $options = [
         "command" => $command,
         "abort" => false,
@@ -9600,8 +9600,8 @@ if (
     for ($i = $option_start_index; $i < $argc; $i++) {
         if (strpos($argv[$i], "--state-dir=") === 0) {
             $state_dir = substr($argv[$i], strlen("--state-dir="));
-        } elseif (strpos($argv[$i], "--docroot=") === 0) {
-            $docroot = substr($argv[$i], strlen("--docroot="));
+        } elseif (strpos($argv[$i], "--fs-root=") === 0) {
+            $fs_root = substr($argv[$i], strlen("--fs-root="));
         } elseif (strpos($argv[$i], "--secret=") === 0) {
             $options["secret"] = substr($argv[$i], strlen("--secret="));
         } elseif ($argv[$i] === "--abort") {
@@ -9620,10 +9620,10 @@ if (
                 exit(1);
             }
             $options["filter"] = $filter_value;
-        } elseif (strpos($argv[$i], "--on-docroot-nonempty=") === 0) {
-            $options["docroot_nonempty_behavior"] = substr(
+        } elseif (strpos($argv[$i], "--on-fs-root-nonempty=") === 0) {
+            $options["fs_root_nonempty_behavior"] = substr(
                 $argv[$i],
-                strlen("--on-docroot-nonempty="),
+                strlen("--on-fs-root-nonempty="),
             );
         } elseif (strpos($argv[$i], "--duty=") === 0) {
             $options["tuning_config"]["duty"] = (float) substr(
@@ -9849,8 +9849,8 @@ if (
             $options["runtime"] = substr($argv[$i], strlen("--runtime="));
         } elseif (strpos($argv[$i], "--output-dir=") === 0) {
             $options["output_dir"] = substr($argv[$i], strlen("--output-dir="));
-        } elseif (strpos($argv[$i], "--flattened-docroot=") === 0) {
-            $options["flattened_docroot"] = substr($argv[$i], strlen("--flattened-docroot="));
+        } elseif (strpos($argv[$i], "--flat-document-root=") === 0) {
+            $options["flat_document_root"] = substr($argv[$i], strlen("--flat-document-root="));
         } elseif (strpos($argv[$i], "--host=") === 0) {
             $options["host"] = substr($argv[$i], strlen("--host="));
         } elseif (strpos($argv[$i], "--port=") === 0) {
@@ -9863,30 +9863,30 @@ if (
 
     if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
-        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
+        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
 
-    // apply-runtime accepts --flattened-docroot as an alternative to --docroot.
-    $flattened_docroot = $options["flattened_docroot"] ?? null;
-    if ($docroot && $flattened_docroot) {
-        fwrite(STDERR, "Error: --docroot and --flattened-docroot are mutually exclusive.\n");
-        fwrite(STDERR, "Use --docroot for the raw download directory, or --flattened-docroot for a flattened layout.\n");
+    // apply-runtime accepts --flat-document-root as an alternative to --fs-root.
+    $flat_document_root = $options["flat_document_root"] ?? null;
+    if ($fs_root && $flat_document_root) {
+        fwrite(STDERR, "Error: --fs-root and --flat-document-root are mutually exclusive.\n");
+        fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$docroot && !$flattened_docroot) {
-        fwrite(STDERR, "Error: --docroot=DIR is required\n");
-        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --docroot=DIR [options]\n");
+    if (!$fs_root && !$flat_document_root) {
+        fwrite(STDERR, "Error: --fs-root=DIR is required\n");
+        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
-    if (!$docroot) {
-        // For commands that need a docroot in the constructor, use the
-        // flattened docroot. run_apply_runtime will resolve it properly.
-        $docroot = $flattened_docroot;
+    if (!$fs_root) {
+        // For commands that need an fs root in the constructor, use the
+        // flattened fs root. run_apply_runtime will resolve it properly.
+        $fs_root = $flat_document_root;
     }
 
     try {
-        $client = new ImportClient($remote_url, $state_dir, $docroot);
+        $client = new ImportClient($remote_url, $state_dir, $fs_root);
         $client->run($options ?? []);
         exit($client->exit_code);
     } catch (\Throwable $e) {

@@ -22,16 +22,16 @@ class RuntimeFilesTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $docroot;
+    private $fs_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/runtime-files-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->docroot = $this->tempDir . '/docroot';
+        $this->fs_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->docroot, 0755, true);
+        mkdir($this->fs_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -63,7 +63,7 @@ class RuntimeFilesTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->docroot);
+        return new \ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
     }
 
     private function writeState(array $state): void
@@ -78,7 +78,7 @@ class RuntimeFilesTest extends TestCase
             "remote_protocol_min_version" => null,
             "version" => null,
             "follow_symlinks" => false,
-            "docroot_nonempty_behavior" => "error",
+            "fs_root_nonempty_behavior" => "error",
             "max_allowed_packet" => null,
         ];
         file_put_contents(

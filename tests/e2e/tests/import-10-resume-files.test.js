@@ -12,7 +12,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
-    docrootDir,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -68,11 +68,11 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
     });
 
     it('imported files form a valid WordPress site mirror', () => {
-        assertSiteMirror(join(docrootDir(tempDir), getSiteDir(site)));
+        assertSiteMirror(join(fsRootDir(tempDir), getSiteDir(site)));
     });
 
     it('all files present and correct after multi-request sync', () => {
-        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 });

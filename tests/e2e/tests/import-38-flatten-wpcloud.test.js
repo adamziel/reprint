@@ -1,5 +1,5 @@
 /**
- * Test 38: flatten-docroot with WP Cloud-like directory layout
+ * Test 38: flat-document-root with WP Cloud-like directory layout
  *
  * Simulates a WP Cloud hosting environment where:
  * - ABSPATH is the document root (/srv/e2e-sites/wpcloud-flatten/)
@@ -10,7 +10,7 @@
  * Tests that:
  * 1. Preflight correctly resolves wp_admin_path / wp_includes_path via realpath()
  * 2. files-sync with --follow-symlinks downloads files at their resolved locations
- * 3. flatten-docroot creates a standard WP layout by sourcing each component
+ * 3. flat-document-root creates a standard WP layout by sourcing each component
  *    from where it physically lives
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -24,14 +24,14 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    docrootDir,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 const CORE_DIR = '/tmp/e2e-wpcloud-core';
 const CONTENT_DIR = '/tmp/e2e-wpcloud-wpcontent';
 
-describe('Import: Flatten Docroot (WP Cloud-like layout)', () => {
+describe('Import: Flat Document Root (WP Cloud-like layout)', () => {
     const site = 'wpcloud-flatten';
     let tempDir;
 
@@ -146,12 +146,12 @@ require_once ABSPATH . 'wp-settings.php';
         assert.equal(result.exitCode, 0, `files-sync failed:\n${result.stderr}`);
     });
 
-    it('wp-admin files exist at the resolved core path in docroot', () => {
+    it('wp-admin files exist at the resolved core path in fs-root', () => {
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
         const wpAdminPath = state.preflight?.data?.database?.wp?.paths_urls?.wp_admin_path;
         assert.ok(wpAdminPath, 'wp_admin_path not found in state');
 
-        const localWpAdmin = join(docrootDir(tempDir), wpAdminPath);
+        const localWpAdmin = join(fsRootDir(tempDir), wpAdminPath);
         assert.ok(
             existsSync(localWpAdmin),
             `wp-admin should exist at resolved path: ${localWpAdmin}`,
@@ -162,12 +162,12 @@ require_once ABSPATH . 'wp-settings.php';
         );
     });
 
-    it('wp-content files exist at the separate content path in docroot', () => {
+    it('wp-content files exist at the separate content path in fs-root', () => {
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
         const contentDir = state.preflight?.data?.database?.wp?.paths_urls?.content_dir;
         assert.ok(contentDir, 'content_dir not found in state');
 
-        const localContent = join(docrootDir(tempDir), contentDir);
+        const localContent = join(fsRootDir(tempDir), contentDir);
         assert.ok(
             existsSync(localContent),
             `wp-content should exist at: ${localContent}`,
@@ -178,18 +178,18 @@ require_once ABSPATH . 'wp-settings.php';
         );
     });
 
-    describe('flatten-docroot', () => {
+    describe('flat-document-root', () => {
         let flattenTo;
 
         beforeAll(() => {
             flattenTo = join(tempDir, 'flattened');
-            const result = runImporter(importUrl(), tempDir, 'flatten-docroot', {
+            const result = runImporter(importUrl(), tempDir, 'flat-document-root', {
                 secret: getSiteSecret(site),
                 extraArgs: [`--flatten-to=${flattenTo}`],
             });
             assert.equal(
                 result.exitCode, 0,
-                `flatten-docroot failed:\n${result.stderr}\n${result.stdout}`,
+                `flat-document-root failed:\n${result.stderr}\n${result.stdout}`,
             );
         });
 

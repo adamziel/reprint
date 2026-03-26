@@ -104,7 +104,7 @@ function extract_constants(array $preflight_data): array
     // (e.g. wpcloud has ABSPATH at /wordpress/core/X.Y.Z/ but wp-content
     // at /srv/htdocs/wp-content), we need to explicitly set it.
     if ($content_dir !== '' && $abspath !== '' && strpos($content_dir, $abspath) !== 0) {
-        $result['WP_CONTENT_DIR'] = '{docroot}/wp-content';
+        $result['WP_CONTENT_DIR'] = '{fs-root}/wp-content';
     }
 
     return $result;

@@ -13,9 +13,9 @@
  *
  * - php_ini:      INI directives the source site had (memory_limit, etc.)
  * - constants:    PHP constants to define before WordPress boots.
- *                 Values may contain {docroot} resolved at apply-time.
+ *                 Values may contain {fs-root} resolved at apply-time.
  * - server_vars:  $_SERVER entries to set before WordPress boots.
- *                 Values may contain {docroot}.
+ *                 Values may contain {fs-root}.
  * - routes:       Declarative request routes the target runtime must
  *                 implement. Each describes a URL path pattern, a handler
  *                 name, and an optional condition (e.g. "file_not_found").
@@ -31,10 +31,10 @@ class RuntimeManifest
     /** @var array<string, string> PHP INI directives */
     public array $php_ini = [];
 
-    /** @var array<string, string> PHP constants to define (values may use {docroot}) */
+    /** @var array<string, string> PHP constants to define (values may use {fs-root}) */
     public array $constants = [];
 
-    /** @var array<string, string> $_SERVER entries (values may use {docroot}) */
+    /** @var array<string, string> $_SERVER entries (values may use {fs-root}) */
     public array $server_vars = [];
 
     /**
@@ -69,7 +69,7 @@ class RuntimeManifest
      * SQLite database configuration.  When non-null, the target uses
      * SQLite instead of MySQL.  The runtime layer copies the plugin
      * into the output directory and generates a lazy-loading $wpdb
-     * proxy in runtime.php — no files are placed in the docroot.
+     * proxy in runtime.php — no files are placed in the fs-root.
      *
      * Keys:
      *   'plugin_source'  string  Absolute path to the sqlite-database-

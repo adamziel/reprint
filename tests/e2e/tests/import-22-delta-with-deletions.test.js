@@ -12,7 +12,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
-    docrootDir,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -48,7 +48,7 @@ describe('Import: Delta Sync with Deletions', () => {
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         const hashes = hashDirectory(importedRoot);
         assert.ok(
             [...hashes.keys()].some(p => p.includes('will-be-deleted-1.txt')),
@@ -61,7 +61,7 @@ describe('Import: Delta Sync with Deletions', () => {
     });
 
     it('initial sync hashes match source', () => {
-        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
