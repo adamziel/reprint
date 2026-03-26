@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { createConnection } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -40,6 +41,7 @@ describe('Import: Remote upload proxy', () => {
     let siteDir;
     let tempDir;
     let outputDir;
+    let effectiveRoot;
     let phpServer = null;
 
     // Content bytes keyed by relative path, so we can compare later.
@@ -108,45 +110,56 @@ describe('Import: Remote upload proxy', () => {
         // Read from the state to find the same root apply-runtime used.
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
         const remoteDocRoot = state.preflight?.data?.runtime?.document_root ?? '';
-        const effectiveRoot = remoteDocRoot
+        effectiveRoot = remoteDocRoot
             ? join(fsRootDir(tempDir), remoteDocRoot)
             : fsRootDir(tempDir);
 
+        // Ensure the document root exists — `php -S` exits with code 1
+        // if the -t directory is missing.  It may not exist when
+        // files-sync had nothing to write inside it.
+        mkdirSync(effectiveRoot, { recursive: true });
+
+        // Capture stderr from the start so we have diagnostics if
+        // the server exits early.
+        let phpStderr = '';
         phpServer = spawn('php', [
             '-S', `127.0.0.1:${TARGET_PORT}`,
             '-t', effectiveRoot,
             runtimePath,
-        ], { stdio: 'pipe' });
+        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        phpServer.stderr.on('data', (d) => { phpStderr += d; });
 
-        // Wait for the server to be ready.
+        // Wait for the server to accept TCP connections (don't send an
+        // HTTP request — that would run the router and try to boot
+        // WordPress, which isn't set up for the target).
         const deadline = Date.now() + 15000;
         let ready = false;
         while (Date.now() < deadline) {
             if (phpServer.exitCode !== null) {
-                // Collect stderr for diagnostics
-                let stderr = '';
-                phpServer.stderr?.on('data', (d) => { stderr += d; });
-                await sleep(100);
+                await sleep(100); // let stderr drain
                 throw new Error(
-                    `PHP server exited early with code ${phpServer.exitCode}\n${stderr}`
+                    `PHP server exited early with code ${phpServer.exitCode}\nstderr: ${phpStderr}`
                 );
             }
             try {
-                const res = await fetch(`http://127.0.0.1:${TARGET_PORT}/`, {
-                    method: 'HEAD',
-                    signal: AbortSignal.timeout(1000),
+                await new Promise((resolve, reject) => {
+                    const socket = createConnection(TARGET_PORT, '127.0.0.1');
+                    socket.setTimeout(500);
+                    socket.once('connect', () => { socket.destroy(); resolve(); });
+                    socket.once('error', reject);
+                    socket.once('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
                 });
-                if (res.status > 0) {
-                    ready = true;
-                    break;
-                }
+                ready = true;
+                break;
             } catch (_) {
                 // retry
             }
             await sleep(200);
         }
         if (!ready) {
-            throw new Error(`Timed out waiting for PHP server on port ${TARGET_PORT}`);
+            throw new Error(
+                `Timed out waiting for PHP server on port ${TARGET_PORT}\nstderr: ${phpStderr}`
+            );
         }
     }, 120000);
 
@@ -227,13 +240,7 @@ describe('Import: Remote upload proxy', () => {
     });
 
     it('serves locally existing files without proxying', async () => {
-        // Write a file directly into the fs-root so it exists locally.
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        const remoteDocRoot = state.preflight?.data?.runtime?.document_root ?? '';
-        const effectiveRoot = remoteDocRoot
-            ? join(fsRootDir(tempDir), remoteDocRoot)
-            : fsRootDir(tempDir);
-
+        // Write a file directly into the document root so it exists locally.
         const localContent = Buffer.from('local-file-content-xyz');
         const localDir = join(effectiveRoot, 'wp-content', 'uploads', 'local-test');
         mkdirSync(localDir, { recursive: true });
@@ -248,14 +255,18 @@ describe('Import: Remote upload proxy', () => {
             'Should serve the local file content, not proxy from source');
     });
 
-    it('does not proxy non-upload requests', async () => {
-        // Request a path outside /wp-content/uploads/ that doesn't exist.
-        // The handler should NOT proxy this — it falls through to the
-        // normal routing (which will likely 404 via WordPress or php -S).
-        const res = await fetch(targetUrl('/some-random-path.jpg'));
-        // We just verify it's NOT a 200 with proxied content.
-        // It should be a 404 or a WordPress-generated page.
-        assert.notEqual(res.status, 200,
-            'Non-upload paths should not be proxied');
+    it('does not proxy requests outside /wp-content/uploads/', async () => {
+        // Write a file outside wp-content/uploads/ and verify the handler
+        // doesn't intercept it — the server serves it as a normal static
+        // file instead.
+        const content = Buffer.from('not-an-upload');
+        writeFileSync(join(effectiveRoot, 'static-test.txt'), content);
+
+        const res = await fetch(targetUrl('/static-test.txt'));
+        assert.equal(res.status, 200,
+            `Expected 200 for static file, got ${res.status}`);
+        const body = Buffer.from(await res.arrayBuffer());
+        assert.ok(body.equals(content),
+            'Static file outside uploads should be served directly');
     });
 });
