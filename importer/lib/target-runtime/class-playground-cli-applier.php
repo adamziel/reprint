@@ -9,17 +9,16 @@
  *
  * Unlike nginx-fpm and php-builtin which write server config files,
  * Playground CLI handles most configuration through command-line flags.
- * The start.sh script uses --mount-before-install to assemble a standard
- * WordPress layout at /wordpress in the VFS from the real directories
- * on the host.
+ * The start.sh script uses --mount-before-install to place the imported
+ * files at /wordpress in the VFS, and --follow-symlinks to let Playground
+ * resolve any symlinks within the mounted directories.
  *
  * For WPCloud and similar hosts where WordPress core lives in a separate
- * directory from the document root, the applier creates multiple mounts:
- * WordPress core at /wordpress, then wp-content and wp-config.php from
- * the document root overlaid on top. Symlinks inside wp-content (themes,
+ * directory from the document root, the applier creates three mounts:
+ * WordPress core at /wordpress, wp-content and wp-config.php from the
+ * document root overlaid on top. Symlinks inside wp-content (themes,
  * plugins, mu-plugins pointing to shared host directories) are resolved
- * to their real host paths and mounted individually — this replaces
- * Playground's --follow-symlinks with deterministic, explicit mounts.
+ * automatically by Playground's --follow-symlinks flag.
  *
  * runtime.php uses /wordpress as the fs-root (the VFS path inside
  * Playground), not the host filesystem path.
@@ -90,7 +89,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         $summary[] = 'Start the server:';
         $summary[] = "  bash {$start_path}";
         $summary[] = '';
-        $summary[] = "Then open http://localhost:{$port} in your browser.";
+        $summary[] = "Then open http://127.0.0.1:{$port} in your browser.";
 
         return $summary;
     }
@@ -118,12 +117,17 @@ class PlaygroundCliApplier implements RuntimeApplier
      * WordPress directory, a single mount covers everything.
      *
      * For WPCloud and similar hosts where WordPress core lives in a
-     * separate directory, we mount the real WordPress core directory
-     * at /wordpress, then overlay wp-content and wp-config.php from
-     * the document root. Symlinks inside wp-content (themes, plugins,
-     * mu-plugins) are resolved to their real host paths and mounted
-     * individually — this replaces --follow-symlinks with explicit,
-     * deterministic mounts.
+     * separate directory (ABSPATH != document_root), we need three
+     * mounts to assemble the layout:
+     * 1. WordPress core → /wordpress (index.php, wp-load.php, wp-admin/,
+     *    wp-includes/, wp-settings.php)
+     * 2. Document root's wp-content → /wordpress/wp-content (content,
+     *    plugins, themes, uploads)
+     * 3. Document root's wp-config.php → /wordpress/wp-config.php
+     *
+     * Symlinks within wp-content (themes, plugins, mu-plugins pointing
+     * to shared host directories) are resolved by Playground's
+     * --follow-symlinks flag — no per-symlink mounts needed.
      */
     private function build_mounts(string $fs_root, array $options): array
     {
@@ -142,31 +146,14 @@ class PlaygroundCliApplier implements RuntimeApplier
 
         $real_fs_root = realpath($fs_root) ?: $fs_root;
 
-        // When the WordPress core directory differs from the document
-        // root (e.g. WPCloud where ABSPATH != document_root), we need
-        // multiple mounts to assemble a standard layout:
-        // 1. WordPress core → /wordpress (gives us index.php, wp-load.php,
-        //    wp-admin/, wp-includes/, wp-settings.php)
-        // 2. Document root's wp-content → /wordpress/wp-content (the
-        //    imported content, plugins, themes, uploads)
-        // 3. Document root's wp-config.php → /wordpress/wp-config.php
-        //    (the site's configuration)
-        // 4. Any symlinks inside wp-content → individual mounts for
-        //    each resolved target (themes, plugins, mu-plugins that
-        //    point to shared host directories)
         if ($wordpress_core_dir !== '' && $wordpress_core_dir !== $real_fs_root) {
+            // WPCloud-style layout: WordPress core is separate from the
+            // document root. Three mounts assemble the standard layout.
             $mounts[] = $wordpress_core_dir . ':/wordpress';
 
             $wp_content = $real_fs_root . '/wp-content';
             if (is_dir($wp_content)) {
                 $mounts[] = $wp_content . ':/wordpress/wp-content';
-
-                // Resolve symlinks inside wp-content so they work
-                // without --follow-symlinks.
-                $symlink_mounts = $this->resolve_wp_content_symlinks($wp_content);
-                foreach ($symlink_mounts as $mount) {
-                    $mounts[] = $mount;
-                }
             }
 
             $wp_config = $real_fs_root . '/wp-config.php';
@@ -177,56 +164,6 @@ class PlaygroundCliApplier implements RuntimeApplier
             // Standard layout: the document root IS the WordPress
             // directory. One mount covers everything.
             $mounts[] = $real_fs_root . ':/wordpress';
-        }
-
-        return $mounts;
-    }
-
-    /**
-     * Scan wp-content subdirectories for symlinks and return mount
-     * pairs that map each symlink's real host target to its VFS path.
-     *
-     * On WPCloud, themes/plugins/mu-plugins are symlinks to shared
-     * directories (e.g. themes/iotix → ../../../wordpress/themes/pub/iotix).
-     * Without --follow-symlinks these are broken in the VFS. This method
-     * resolves each symlink to its real host path and creates an explicit
-     * mount, making --follow-symlinks unnecessary.
-     *
-     * Only scans one level deep inside themes/, plugins/, and mu-plugins/
-     * — WordPress doesn't support nested plugin/theme directories.
-     */
-    private function resolve_wp_content_symlinks(string $wp_content_path): array
-    {
-        $mounts = [];
-        $subdirs = ['themes', 'plugins', 'mu-plugins'];
-
-        foreach ($subdirs as $subdir) {
-            $dir = $wp_content_path . '/' . $subdir;
-            if (!is_dir($dir)) {
-                continue;
-            }
-            $entries = @scandir($dir);
-            if ($entries === false) {
-                continue;
-            }
-            foreach ($entries as $entry) {
-                if ($entry === '.' || $entry === '..') {
-                    continue;
-                }
-                $full_path = $dir . '/' . $entry;
-                if (!is_link($full_path)) {
-                    continue;
-                }
-                $real = realpath($full_path);
-                if ($real === false) {
-                    // Dangling symlink — target doesn't exist on the
-                    // host. Skip it; WordPress will log a warning but
-                    // continue.
-                    continue;
-                }
-                $vfs_path = '/wordpress/wp-content/' . $subdir . '/' . $entry;
-                $mounts[] = $real . ':' . $vfs_path;
-            }
         }
 
         return $mounts;
@@ -258,8 +195,8 @@ class PlaygroundCliApplier implements RuntimeApplier
         $args[] = 'npx @wp-playground/cli@latest server';
 
         // Mount the WordPress directory layout. For standard sites this
-        // is a single mount. For WPCloud-style sites, we assemble the
-        // layout from multiple real directories — no symlinks needed.
+        // is a single mount. For WPCloud-style sites, three mounts
+        // assemble a standard layout from separate directories.
         foreach ($this->build_mounts($fs_root, $options) as $mount) {
             $args[] = '--mount-before-install=' . escapeshellarg($mount);
         }
@@ -273,17 +210,17 @@ class PlaygroundCliApplier implements RuntimeApplier
         // installer or download a fresh copy.
         $args[] = '--wordpress-install-mode=do-not-attempt-installing';
 
-        // Disable symlink following. Our multi-mount approach resolves
-        // all symlinks to explicit mounts, so Playground doesn't need
-        // to resolve them (which would map files to /internal/symlinks/
-        // paths and break relative path resolution).
-        $args[] = '--follow-symlinks=false';
+        // Let Playground resolve symlinks within mounted directories.
+        // WPCloud sites have symlinks in wp-content/themes, plugins, and
+        // mu-plugins pointing to shared host directories — this flag
+        // makes them work without needing individual mounts for each.
+        $args[] = '--follow-symlinks';
 
         $args[] = '--blueprint=' . escapeshellarg($output_dir . '/blueprint.json');
         $args[] = '--port=' . $port;
 
         $lines[] = 'echo "Starting WordPress Playground CLI..."';
-        $lines[] = 'echo "  http://localhost:' . $port . '"';
+        $lines[] = 'echo "  http://127.0.0.1:' . $port . '"';
         $lines[] = 'echo ""';
         $lines[] = '';
         $lines[] = implode(" \\\n    ", $args);

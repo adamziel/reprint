@@ -120,8 +120,8 @@ describe('Import: Playground CLI runtime', () => {
         const startSh = readFileSync(join(runtimeDir, 'start.sh'), 'utf-8');
         assert.ok(startSh.includes('--wordpress-install-mode=do-not-attempt-installing'),
             'start.sh should use do-not-attempt-installing');
-        assert.ok(startSh.includes('--follow-symlinks=false'),
-            'start.sh should disable follow-symlinks');
+        assert.ok(startSh.includes('--follow-symlinks'),
+            'start.sh should enable follow-symlinks');
         assert.ok(startSh.includes('--mount-before-install='),
             'start.sh should have mount-before-install flags');
         assert.ok(startSh.includes(`--port=${port}`),
