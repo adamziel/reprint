@@ -1359,8 +1359,22 @@ class ImportClient
         //   --filter=none             download everything (default)
         //   --filter=essential-files   skip uploads, download code/config/themes/plugins
         //   --filter=skipped-earlier   download only files skipped by a prior essential-files run
+        //
+        // Changing the filter mid-flight is not allowed.  The user must either
+        // start fresh (--abort) or finish the current sync before switching.
+        // The one valid transition is: essential-files (complete) → skipped-earlier.
         if (isset($options["filter"])) {
-            $this->filter = $options["filter"];
+            $prev = $this->state["filter"] ?? null;
+            $next = $options["filter"];
+            $status = $this->state["status"] ?? null;
+            $is_mid_flight = $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
+            if ($is_mid_flight) {
+                throw new RuntimeException(
+                    "Cannot change --filter from '{$prev}' to '{$next}' while a sync is in progress. " .
+                        "Finish the current sync or use --abort to start over.",
+                );
+            }
+            $this->filter = $next;
             $this->state["filter"] = $this->filter;
             $this->save_state($this->state);
         } elseif (isset($this->state["filter"])) {
@@ -2531,18 +2545,6 @@ class ImportClient
                     "FILE DELETE | {$this->skipped_download_list_file} | no skipped files to fetch",
                 );
             }
-        }
-
-        // When --filter=essential-files is added on a resume where the diff
-        // already ran without it, uploads are mixed into the main download
-        // list.  Re-split the remaining entries so uploads go to the skipped
-        // list and essential files stay in the main list.
-        if (
-            $stage === "fetch" &&
-            $this->filter === "essential-files" &&
-            !file_exists($this->skipped_download_list_file)
-        ) {
-            $this->split_download_list_for_skipped();
         }
 
         if ($stage === "fetch") {
@@ -5648,128 +5650,6 @@ class ImportClient
         }
         // Fallback: match the conventional WordPress uploads path
         return strpos($path, "wp-content/uploads/") !== false;
-    }
-
-    /**
-     * Re-split an existing download list into essential files and skipped uploads.
-     *
-     * Called when --filter=essential-files is added on a resume where the diff
-     * phase already ran without filtering.  Reads the main download list from
-     * the current fetch offset, writes non-upload entries to a new main list
-     * and upload entries to the skipped list, then updates the fetch state to
-     * point at the new file.
-     */
-    private function split_download_list_for_skipped(): void
-    {
-        if (!file_exists($this->download_list_file)) {
-            return;
-        }
-
-        $fetch_offset = (int) ($this->state["fetch"]["offset"] ?? 0);
-        $uploads_basedir = $this->get_uploads_basedir();
-
-        $this->audit_log(
-            "FILTER | re-splitting download list from offset={$fetch_offset}"
-            . " | uploads_basedir=" . ($uploads_basedir ?? "(fallback: wp-content/uploads/)"),
-        );
-
-        // Read the portion of the download list that hasn't been fetched yet.
-        $source = fopen($this->download_list_file, "r");
-        if (!$source) {
-            return;
-        }
-        if ($fetch_offset > 0) {
-            fseek($source, $fetch_offset);
-        }
-
-        $new_main = $this->download_list_file . ".split-tmp";
-        $main_handle = fopen($new_main, "w");
-        $skipped_handle = fopen($this->skipped_download_list_file, "w");
-        if (!$main_handle || !$skipped_handle) {
-            fclose($source);
-            if ($main_handle) { fclose($main_handle); @unlink($new_main); }
-            if ($skipped_handle) { fclose($skipped_handle); @unlink($this->skipped_download_list_file); }
-            return;
-        }
-
-        $essential_count = 0;
-        $skipped_count = 0;
-        while (($line = fgets($source)) !== false) {
-            $trimmed = trim($line);
-            if ($trimmed === "") {
-                continue;
-            }
-            $data = json_decode($trimmed, true);
-            $path_encoded = $data["path"] ?? "";
-            $path = base64_decode($path_encoded, true);
-
-            if ($path !== false && $this->is_uploads_path($path, $uploads_basedir)) {
-                fwrite($skipped_handle, $trimmed . "\n");
-                $skipped_count++;
-            } else {
-                fwrite($main_handle, $trimmed . "\n");
-                $essential_count++;
-            }
-        }
-
-        fclose($source);
-        fclose($main_handle);
-        fclose($skipped_handle);
-
-        // Replace the original download list with the filtered version.
-        // Prefix it with the already-fetched portion (bytes before fetch_offset)
-        // so that offset-based bookkeeping remains valid.
-        if ($fetch_offset > 0) {
-            // Copy the already-processed prefix from the original file,
-            // then append the new essential-only entries.
-            $final = $this->download_list_file . ".merged-tmp";
-            $orig = fopen($this->download_list_file, "r");
-            $out = fopen($final, "w");
-            if ($orig && $out) {
-                $remaining = $fetch_offset;
-                while ($remaining > 0) {
-                    $chunk = fread($orig, min($remaining, 65536));
-                    if ($chunk === false || $chunk === "") {
-                        break;
-                    }
-                    fwrite($out, $chunk);
-                    $remaining -= strlen($chunk);
-                }
-                fclose($orig);
-
-                // Append the split essential entries
-                $split = fopen($new_main, "r");
-                if ($split) {
-                    while (($chunk = fread($split, 65536)) !== false && $chunk !== "") {
-                        fwrite($out, $chunk);
-                    }
-                    fclose($split);
-                }
-                fclose($out);
-                @unlink($new_main);
-                rename($final, $this->download_list_file);
-            } else {
-                if ($orig) { fclose($orig); }
-                if ($out) { fclose($out); @unlink($final); }
-                // Fall back: just use the split file as-is and reset offset
-                rename($new_main, $this->download_list_file);
-                $this->state["fetch"]["offset"] = 0;
-                $this->state["fetch"]["next_offset"] = 0;
-            }
-        } else {
-            rename($new_main, $this->download_list_file);
-        }
-
-        // Clean up skipped list if it's empty
-        if ($skipped_count === 0) {
-            @unlink($this->skipped_download_list_file);
-        }
-
-        $this->audit_log(
-            "FILTER | split complete: {$essential_count} essential, {$skipped_count} skipped",
-            true,
-        );
-        $this->save_state($this->state);
     }
 
     /**
