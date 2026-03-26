@@ -3307,6 +3307,20 @@ class ImportClient
             // causes "Constant already defined" warnings. Flag this so the
             // generated runtime.php installs a handler to suppress them.
             $manifest->has_db_constants = true;
+        } elseif ($target_engine === "sqlite") {
+            $sqlite_path = $apply_state["target_sqlite_path"] ?? null;
+            if ($sqlite_path !== null && $sqlite_path !== '') {
+                $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
+                $db_file = basename($sqlite_path);
+            } else {
+                $db_dir = '{docroot}/wp-content/database/';
+                $db_file = '.ht.sqlite';
+            }
+            $manifest->sqlite = [
+                'plugin_source' => dirname(__DIR__) . '/lib/sqlite-database-integration',
+                'db_dir' => $db_dir,
+                'db_file' => $db_file,
+            ];
         }
 
         $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
@@ -3360,21 +3374,28 @@ class ImportClient
         if ($port !== null) {
             $applier_options['port'] = (int) $port;
         }
+        // Step 2b: For SQLite targets, copy the integration plugin into the
+        // output directory BEFORE the applier runs, so generate_runtime_php()
+        // can embed the resolved plugin path in the lazy-loader code.
+        if ($manifest->sqlite !== null) {
+            $copied_plugin = copy_sqlite_plugin(
+                $manifest->sqlite['plugin_source'],
+                $abs_output_dir,
+            );
+            // Replace the source path with the copied-to path so the
+            // generated runtime.php points to the output directory.
+            $manifest->sqlite['plugin_dir'] = $copied_plugin;
+            // Resolve {docroot} in db_dir now that we have the real path.
+            $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
+                $manifest->sqlite['db_dir'],
+                $abs_docroot,
+            );
+        }
+
         $summary = $applier->apply($manifest, $abs_docroot, $abs_output_dir, $applier_options);
 
-        // Step 3: For SQLite targets, copy the sqlite-database-integration
-        // plugin into the output directory and set up the db.php drop-in.
-        // The plugin lives entirely in the output directory (not in the
-        // site's wp-content/plugins/). A small db.php drop-in is placed
-        // in wp-content/ to bridge WordPress to the external plugin — this
-        // is the standard WordPress mechanism for database driver overrides.
-        if ($target_engine === "sqlite") {
-            $sqlite_summary = $this->setup_sqlite_integration(
-                $abs_output_dir,
-                $abs_docroot,
-                $apply_state["target_sqlite_path"] ?? null,
-            );
-            $summary = array_merge($summary, $sqlite_summary);
+        if ($manifest->sqlite !== null) {
+            $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
         foreach ($summary as $line) {
@@ -3401,153 +3422,6 @@ class ImportClient
         fwrite(STDERR, "\n");
         foreach ($summary as $line) {
             fwrite(STDERR, "{$line}\n");
-        }
-    }
-
-    /**
-     * Set up the SQLite database integration for a target site.
-     *
-     * Copies the sqlite-database-integration plugin into the output
-     * directory (the runtime config directory) and generates a db.php
-     * drop-in that loads it. The drop-in is symlinked into wp-content/
-     * so WordPress discovers it through its standard mechanism — the
-     * plugin code itself lives entirely outside the docroot.
-     *
-     * This mirrors how WordPress Playground sets up SQLite: the
-     * integration plugin is external, and only a thin db.php loader
-     * is placed in wp-content/.
-     *
-     * @param string $output_dir  Runtime configuration directory.
-     * @param string $docroot     Effective docroot (web root).
-     * @param string|null $sqlite_path  Path to the .ht.sqlite file.
-     * @return string[] Human-readable summary lines.
-     */
-    private function setup_sqlite_integration(
-        string $output_dir,
-        string $docroot,
-        ?string $sqlite_path,
-    ): array {
-        $summary = [];
-
-        // 1. Copy the sqlite-database-integration plugin to the output
-        //    directory. We vendor it from lib/ (git submodule) so it is
-        //    available without network access.
-        $source_plugin = dirname(__DIR__) . '/lib/sqlite-database-integration';
-        $target_plugin = $output_dir . '/sqlite-database-integration';
-
-        if (!is_dir($source_plugin)) {
-            throw new RuntimeException(
-                "sqlite-database-integration not found at {$source_plugin}. " .
-                "Run 'git submodule update --init' to fetch it.",
-            );
-        }
-
-        if (!is_dir($target_plugin)) {
-            $this->copy_directory_recursive($source_plugin, $target_plugin);
-            $summary[] = "Copied sqlite-database-integration to {$target_plugin}";
-        } else {
-            $summary[] = "sqlite-database-integration already present at {$target_plugin}";
-        }
-
-        // 2. Generate the db.php drop-in. This small file defines the
-        //    constants the integration needs and loads it from the output
-        //    directory. It is modeled after the plugin's own db.copy
-        //    template but with a hard-coded path to the external plugin.
-        $db_php_path = $output_dir . '/db.php';
-        $escaped_plugin = addslashes($target_plugin);
-
-        // Resolve the SQLite database directory and file name from the
-        // target path used by db-apply. If no path was provided, fall
-        // back to the standard wp-content/database/.ht.sqlite.
-        if ($sqlite_path !== null && $sqlite_path !== '') {
-            $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
-            $db_file = basename($sqlite_path);
-        } else {
-            $db_dir = $docroot . '/wp-content/database/';
-            $db_file = '.ht.sqlite';
-        }
-        $escaped_db_dir = addslashes($db_dir);
-        $escaped_db_file = addslashes($db_file);
-
-        $db_php = <<<PHP
-<?php
-/**
- * SQLite database drop-in — generated by apply-runtime.
- *
- * This file bridges WordPress to the sqlite-database-integration
- * plugin which lives in the runtime configuration directory,
- * outside the site's docroot.
- */
-
-define('SQLITE_DB_DROPIN_VERSION', '1.8.0');
-
-if (!defined('DB_DIR')) {
-    define('DB_DIR', '{$escaped_db_dir}');
-}
-if (!defined('DB_FILE')) {
-    define('DB_FILE', '{$escaped_db_file}');
-}
-if (!defined('DATABASE_TYPE')) {
-    define('DATABASE_TYPE', 'sqlite');
-}
-if (!defined('DB_ENGINE')) {
-    define('DB_ENGINE', 'sqlite');
-}
-
-\$sqlite_plugin = '{$escaped_plugin}';
-if (file_exists(\$sqlite_plugin . '/wp-includes/sqlite/db.php')) {
-    require_once \$sqlite_plugin . '/wp-includes/sqlite/db.php';
-}
-PHP;
-
-        file_put_contents($db_php_path, $db_php);
-        $summary[] = "Wrote {$db_php_path}";
-
-        // 3. Symlink the drop-in into wp-content/ so WordPress discovers
-        //    it through the standard require_wp_db() mechanism. This is
-        //    the only file placed inside the docroot — the actual plugin
-        //    code stays in the output directory.
-        $wp_content_db = $docroot . '/wp-content/db.php';
-        if (file_exists($wp_content_db) || is_link($wp_content_db)) {
-            // An existing db.php (from the source site or a prior run)
-            // is left in place — it may be intentional.
-            $summary[] = "wp-content/db.php already exists — skipped symlink";
-            $this->audit_log("APPLY-RUNTIME | wp-content/db.php exists, not overwriting");
-        } else {
-            if (@symlink($db_php_path, $wp_content_db)) {
-                $summary[] = "Symlinked {$wp_content_db} → {$db_php_path}";
-            } else {
-                // Symlink failed (e.g. Windows or restricted filesystem).
-                // Fall back to a direct copy.
-                copy($db_php_path, $wp_content_db);
-                $summary[] = "Copied db.php to {$wp_content_db} (symlink unavailable)";
-            }
-        }
-
-        return $summary;
-    }
-
-    /**
-     * Recursively copy a directory tree.
-     */
-    private function copy_directory_recursive(string $source, string $dest): void
-    {
-        if (!is_dir($dest)) {
-            mkdir($dest, 0755, true);
-        }
-        $iterator = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::SELF_FIRST,
-        );
-        foreach ($iterator as $item) {
-            $target = $dest . '/' . $iterator->getSubPathname();
-            if ($item->isDir()) {
-                if (!is_dir($target)) {
-                    mkdir($target, 0755, true);
-                }
-            } else {
-                copy($item->getPathname(), $target);
-            }
         }
     }
 
@@ -9303,8 +9177,9 @@ if (
                 "  engine and credentials are read from state and included in runtime.php\n" .
                 "  as DB_* constants. For MySQL targets this means DB_HOST, DB_NAME,\n" .
                 "  DB_USER, and DB_PASSWORD. For SQLite targets, the sqlite-database-\n" .
-                "  integration plugin is copied into the output directory and a db.php\n" .
-                "  drop-in is symlinked into wp-content/.\n" .
+                "  integration plugin is copied into the output directory and a lazy-\n" .
+                "  loading \$wpdb proxy is generated in runtime.php (Playground-style,\n" .
+                "  no files placed in the docroot).\n" .
                 "\n" .
                 "Output files (nginx-fpm):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
@@ -9316,8 +9191,6 @@ if (
                 "\n" .
                 "Output files (sqlite target, additional):\n" .
                 "  (output-dir)/sqlite-database-integration/   Plugin copy\n" .
-                "  (output-dir)/db.php                         Drop-in loader\n" .
-                "  (docroot)/wp-content/db.php                 Symlink to drop-in\n" .
                 "\n" .
                 "Examples:\n" .
                 "  # From raw download directory:\n" .

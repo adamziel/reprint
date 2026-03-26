@@ -20,6 +20,8 @@
  *                 implement. Each describes a URL path pattern, a handler
  *                 name, and an optional condition (e.g. "file_not_found").
  *                 The target runtime decides how to implement the handler.
+ * - sqlite:       When non-null, the target uses SQLite instead of MySQL.
+ *                 Contains the plugin source path and database file location.
  */
 class RuntimeManifest
 {
@@ -62,6 +64,22 @@ class RuntimeManifest
      * wp-config.php tries to redefine the same constants.
      */
     public bool $has_db_constants = false;
+
+    /**
+     * SQLite database configuration.  When non-null, the target uses
+     * SQLite instead of MySQL.  The runtime layer copies the plugin
+     * into the output directory and generates a lazy-loading $wpdb
+     * proxy in runtime.php — no files are placed in the docroot.
+     *
+     * Keys:
+     *   'plugin_source'  string  Absolute path to the sqlite-database-
+     *                            integration source directory (e.g. lib/).
+     *   'db_dir'         string  Directory containing the .sqlite file.
+     *   'db_file'        string  SQLite database file name.
+     *
+     * @var array{plugin_source: string, db_dir: string, db_file: string}|null
+     */
+    public ?array $sqlite = null;
 
     public function __construct(string $source)
     {

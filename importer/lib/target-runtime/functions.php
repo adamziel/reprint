@@ -78,6 +78,17 @@ function generate_runtime_php(RuntimeManifest $manifest, string $docroot): strin
         $lines[] = '';
     }
 
+    // SQLite lazy-loading proxy — replaces $wpdb before WordPress boots.
+    // WordPress's require_wp_db() sees $wpdb is already set and skips
+    // the MySQL connection. The first real database call triggers the
+    // proxy to load the SQLite integration plugin from the output
+    // directory.  This is the same approach WordPress Playground uses:
+    // no db.php in wp-content/, no wp-config.php edits.
+    if ($manifest->sqlite !== null) {
+        $lines[] = generate_sqlite_loader_code($manifest->sqlite);
+        $lines[] = '';
+    }
+
     // Route handlers
     $route_code = generate_route_handler_code($manifest);
     if ($route_code !== '') {
@@ -85,6 +96,149 @@ function generate_runtime_php(RuntimeManifest $manifest, string $docroot): strin
     }
 
     return implode("\n", $lines);
+}
+
+/**
+ * Generate PHP code that installs a lazy-loading $wpdb proxy for
+ * SQLite, following the WordPress Playground pattern.
+ *
+ * The proxy is a tiny object that intercepts property access and
+ * method calls on $wpdb.  On the first interaction it loads the
+ * sqlite-database-integration plugin (which defines WP_SQLite_DB
+ * extending wpdb), then delegates.  Because $wpdb is already set
+ * when WordPress calls require_wp_db(), WordPress never attempts a
+ * MySQL connection.
+ *
+ * A mysqli_connect() stub is defined when the function doesn't exist,
+ * because WordPress checks for it even when $wpdb is pre-set.
+ *
+ * @param array{plugin_source: string, db_dir: string, db_file: string} $sqlite
+ *     'plugin_source' is resolved at generate-time to the copied plugin
+ *     path inside the output directory (absolute).
+ */
+function generate_sqlite_loader_code(array $sqlite): string
+{
+    $plugin_dir = addslashes($sqlite['plugin_dir']);
+    $db_dir = addslashes($sqlite['db_dir']);
+    $db_file = addslashes($sqlite['db_file']);
+
+    // The heredoc below is the code that ends up in runtime.php.
+    // It runs via auto_prepend_file (nginx-fpm) or the router
+    // script (php-builtin) — before any WordPress code executes.
+    return <<<'PROXY_HEADER'
+// --- SQLite integration (Playground-style lazy loader) ---
+//
+// Instead of placing a db.php drop-in in wp-content/, we pre-set
+// $wpdb to a proxy object.  WordPress's require_wp_db() checks
+// "isset($wpdb)" and returns early, so the MySQL path is never hit.
+// The first real database call loads the SQLite integration plugin.
+PROXY_HEADER
+    . "\n"
+    . "if (!defined('DB_DIR'))  define('DB_DIR',  '{$db_dir}');\n"
+    . "if (!defined('DB_FILE')) define('DB_FILE', '{$db_file}');\n"
+    . "\n"
+    . <<<'PROXY_BODY'
+if (!function_exists('mysqli_connect')) {
+    // WordPress checks for mysqli_connect() even when it won't use
+    // MySQL.  Provide a stub so the check doesn't fatal.
+    function mysqli_connect() { return false; }
+}
+
+/**
+ * Lazy-loading $wpdb proxy.  Defers loading the SQLite integration
+ * until the first actual database call, because the integration
+ * requires wpdb (loaded by require_wp_db) to be available.
+ */
+class Streaming_SQLite_Loader {
+    private static $loaded = false;
+
+    public function __call($name, $arguments) {
+        $this->ensure_loaded();
+        return call_user_func_array([$GLOBALS['wpdb'], $name], $arguments);
+    }
+
+    public function __get($name) {
+        $this->ensure_loaded();
+        return $GLOBALS['wpdb']->$name;
+    }
+
+    public function __set($name, $value) {
+        $this->ensure_loaded();
+        $GLOBALS['wpdb']->$name = $value;
+    }
+
+    public function __isset($name) {
+        $this->ensure_loaded();
+        return isset($GLOBALS['wpdb']->$name);
+    }
+
+    private function ensure_loaded() {
+        if (self::$loaded) return;
+        self::$loaded = true;
+PROXY_BODY
+    . "\n"
+    // Inject the resolved plugin path into the loader method.
+    . "        \$integration = '{$plugin_dir}/wp-includes/sqlite/db.php';\n"
+    . <<<'PROXY_TAIL'
+        if (file_exists($integration)) {
+            require_once $integration;
+        }
+    }
+}
+
+$wpdb = $GLOBALS['wpdb'] = new Streaming_SQLite_Loader();
+// --- end SQLite integration ---
+PROXY_TAIL;
+}
+
+/**
+ * Copy the sqlite-database-integration plugin into the output
+ * directory so it is available at runtime.
+ *
+ * @param string $source_dir  Path to the source plugin (e.g. lib/sqlite-database-integration).
+ * @param string $output_dir  Runtime configuration directory.
+ * @return string Absolute path to the copied plugin directory.
+ */
+function copy_sqlite_plugin(string $source_dir, string $output_dir): string
+{
+    if (!is_dir($source_dir)) {
+        throw new RuntimeException(
+            "sqlite-database-integration not found at {$source_dir}. " .
+            "Run 'git submodule update --init' to fetch it.",
+        );
+    }
+
+    $target_dir = $output_dir . '/sqlite-database-integration';
+
+    if (!is_dir($target_dir)) {
+        copy_directory_recursive($source_dir, $target_dir);
+    }
+
+    return $target_dir;
+}
+
+/**
+ * Recursively copy a directory tree.
+ */
+function copy_directory_recursive(string $source, string $dest): void
+{
+    if (!is_dir($dest)) {
+        mkdir($dest, 0755, true);
+    }
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST,
+    );
+    foreach ($iterator as $item) {
+        $target = $dest . '/' . $iterator->getSubPathname();
+        if ($item->isDir()) {
+            if (!is_dir($target)) {
+                mkdir($target, 0755, true);
+            }
+        } else {
+            copy($item->getPathname(), $target);
+        }
+    }
 }
 
 /**
