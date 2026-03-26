@@ -2484,6 +2484,18 @@ class ImportClient
             }
         }
 
+        // When --defer-uploads is newly enabled on a resume where the diff
+        // already ran without it, uploads are mixed into the main download
+        // list.  Re-split the remaining entries so uploads go to the deferred
+        // list and essential files stay in the main list.
+        if (
+            $stage === "fetch" &&
+            $this->defer_uploads &&
+            !file_exists($this->deferred_download_list_file)
+        ) {
+            $this->split_download_list_for_deferred();
+        }
+
         if ($stage === "fetch") {
             $complete = $this->download_files_from_list(
                 $this->download_list_file,
@@ -5575,6 +5587,128 @@ class ImportClient
         }
         // Fallback: match the conventional WordPress uploads path
         return strpos($path, "wp-content/uploads/") !== false;
+    }
+
+    /**
+     * Re-split an existing download list into essential files and deferred uploads.
+     *
+     * Called when --defer-uploads is enabled on a resume where the diff phase
+     * already ran without it.  Reads the main download list from the current
+     * fetch offset, writes non-upload entries to a new main list and upload
+     * entries to the deferred list, then updates the fetch state to point at
+     * the new file.
+     */
+    private function split_download_list_for_deferred(): void
+    {
+        if (!file_exists($this->download_list_file)) {
+            return;
+        }
+
+        $fetch_offset = (int) ($this->state["fetch"]["offset"] ?? 0);
+        $uploads_basedir = $this->get_uploads_basedir();
+
+        $this->audit_log(
+            "DEFER-UPLOADS | re-splitting download list from offset={$fetch_offset}"
+            . " | uploads_basedir=" . ($uploads_basedir ?? "(fallback: wp-content/uploads/)"),
+        );
+
+        // Read the portion of the download list that hasn't been fetched yet.
+        $source = fopen($this->download_list_file, "r");
+        if (!$source) {
+            return;
+        }
+        if ($fetch_offset > 0) {
+            fseek($source, $fetch_offset);
+        }
+
+        $new_main = $this->download_list_file . ".split-tmp";
+        $main_handle = fopen($new_main, "w");
+        $deferred_handle = fopen($this->deferred_download_list_file, "w");
+        if (!$main_handle || !$deferred_handle) {
+            fclose($source);
+            if ($main_handle) { fclose($main_handle); @unlink($new_main); }
+            if ($deferred_handle) { fclose($deferred_handle); @unlink($this->deferred_download_list_file); }
+            return;
+        }
+
+        $essential_count = 0;
+        $deferred_count = 0;
+        while (($line = fgets($source)) !== false) {
+            $trimmed = trim($line);
+            if ($trimmed === "") {
+                continue;
+            }
+            $data = json_decode($trimmed, true);
+            $path_encoded = $data["path"] ?? "";
+            $path = base64_decode($path_encoded, true);
+
+            if ($path !== false && $this->is_uploads_path($path, $uploads_basedir)) {
+                fwrite($deferred_handle, $trimmed . "\n");
+                $deferred_count++;
+            } else {
+                fwrite($main_handle, $trimmed . "\n");
+                $essential_count++;
+            }
+        }
+
+        fclose($source);
+        fclose($main_handle);
+        fclose($deferred_handle);
+
+        // Replace the original download list with the filtered version.
+        // Prefix it with the already-fetched portion (bytes before fetch_offset)
+        // so that offset-based bookkeeping remains valid.
+        if ($fetch_offset > 0) {
+            // Copy the already-processed prefix from the original file,
+            // then append the new essential-only entries.
+            $final = $this->download_list_file . ".merged-tmp";
+            $orig = fopen($this->download_list_file, "r");
+            $out = fopen($final, "w");
+            if ($orig && $out) {
+                $remaining = $fetch_offset;
+                while ($remaining > 0) {
+                    $chunk = fread($orig, min($remaining, 65536));
+                    if ($chunk === false || $chunk === "") {
+                        break;
+                    }
+                    fwrite($out, $chunk);
+                    $remaining -= strlen($chunk);
+                }
+                fclose($orig);
+
+                // Append the split essential entries
+                $split = fopen($new_main, "r");
+                if ($split) {
+                    while (($chunk = fread($split, 65536)) !== false && $chunk !== "") {
+                        fwrite($out, $chunk);
+                    }
+                    fclose($split);
+                }
+                fclose($out);
+                @unlink($new_main);
+                rename($final, $this->download_list_file);
+            } else {
+                if ($orig) { fclose($orig); }
+                if ($out) { fclose($out); @unlink($final); }
+                // Fall back: just use the split file as-is and reset offset
+                rename($new_main, $this->download_list_file);
+                $this->state["fetch"]["offset"] = 0;
+                $this->state["fetch"]["next_offset"] = 0;
+            }
+        } else {
+            rename($new_main, $this->download_list_file);
+        }
+
+        // Clean up deferred list if it's empty
+        if ($deferred_count === 0) {
+            @unlink($this->deferred_download_list_file);
+        }
+
+        $this->audit_log(
+            "DEFER-UPLOADS | split complete: {$essential_count} essential, {$deferred_count} deferred",
+            true,
+        );
+        $this->save_state($this->state);
     }
 
     /**

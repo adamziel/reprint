@@ -237,4 +237,58 @@ describe('Import: --defer-uploads', () => {
                 'Expected defer_uploads to be false/absent in state');
         });
     });
+
+    // ------------------------------------------------------------------
+    // Test: --defer-uploads added mid-flight on a resume
+    //
+    // The diff phase already ran without --defer-uploads, so uploads are
+    // mixed into the main download list. Passing --defer-uploads on the
+    // next invocation should re-split the list and still defer uploads.
+    // ------------------------------------------------------------------
+    describe('--defer-uploads added mid-flight re-splits download list', () => {
+        let tempDir;
+
+        beforeAll(() => {
+            tempDir = createTempDir('e2e-defer-uploads-mid-flight');
+        });
+
+        afterAll(() => {
+            cleanupTempDir(tempDir);
+        });
+
+        it('starts files-sync without --defer-uploads, then aborts and resumes with it', () => {
+            // Run files-sync WITHOUT --defer-uploads to build the download list
+            // with uploads mixed in. Use --max-exec=1 to stop early in the
+            // fetch stage (before all files are downloaded).
+            const firstRun = runImporter(importUrl(), tempDir, 'files-sync', {
+                secret: getSiteSecret(site),
+                extraArgs: ['--max-exec=1'],
+                autoResume: false,
+            });
+            // Should be partial (exit 2) since --max-exec=1 stops early
+            assert.ok(
+                firstRun.exitCode === 0 || firstRun.exitCode === 2,
+                `Expected exit 0 or 2, got ${firstRun.exitCode}\nstderr: ${firstRun.stderr}`,
+            );
+
+            // Now resume WITH --defer-uploads — the list should be re-split
+            const resumed = runImporter(importUrl(), tempDir, 'files-sync', {
+                secret: getSiteSecret(site),
+                extraArgs: ['--defer-uploads'],
+            });
+            assert.equal(resumed.exitCode, 0,
+                `Expected exit 0\nstderr: ${resumed.stderr}\nstdout: ${resumed.stdout}`);
+        });
+
+        it('audit log shows the download list was re-split', () => {
+            const audit = readAuditLog(tempDir);
+            assert.ok(audit.includes('re-splitting download list'),
+                'Expected "re-splitting download list" in audit log');
+        });
+
+        it('all files including uploads were downloaded', () => {
+            const importedRoot = join(docrootDir(tempDir), siteDir);
+            assertTreesMatch(siteDir, importedRoot);
+        });
+    });
 });
