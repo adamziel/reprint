@@ -176,9 +176,9 @@ PROXY_BODY
     . "        \$integration = '{$plugin_dir}/wp-includes/sqlite/db.php';\n"
     . <<<'PROXY_TAIL'
         require_once $integration;
-		if($GLOBALS['wpdb'] === $this) {
-			throw new Exception('SQLite integration plugin could not be loaded');
-		}
+        if ($GLOBALS['wpdb'] === $this) {
+            throw new Exception('SQLite integration plugin could not be loaded');
+        }
     }
 }
 
