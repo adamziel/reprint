@@ -167,11 +167,6 @@ class Streaming_SQLite_Loader {
         $GLOBALS['wpdb']->$name = $value;
     }
 
-    public function __isset($name) {
-        $this->ensure_loaded();
-        return isset($GLOBALS['wpdb']->$name);
-    }
-
     private function ensure_loaded() {
         if (self::$loaded) return;
         self::$loaded = true;
@@ -180,12 +175,14 @@ PROXY_BODY
     // Inject the resolved plugin path into the loader method.
     . "        \$integration = '{$plugin_dir}/wp-includes/sqlite/db.php';\n"
     . <<<'PROXY_TAIL'
-        if (file_exists($integration)) {
-            require_once $integration;
-        }
+        require_once $integration;
+		if($GLOBALS['wpdb'] === $this) {
+			throw new Exception('SQLite integration plugin could not be loaded');
+		}
     }
 }
 
+define('DB_ENGINE', 'sqlite');
 $wpdb = $GLOBALS['wpdb'] = new Streaming_SQLite_Loader();
 // --- end SQLite integration ---
 PROXY_TAIL;
