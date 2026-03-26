@@ -54,6 +54,15 @@ class RuntimeManifest
      */
     public array $routes = [];
 
+    /**
+     * Whether the manifest includes DB_* constants that will collide
+     * with definitions in wp-config.php.  When true, the generated
+     * runtime.php installs a lightweight error handler that silences
+     * the "Constant already defined" warnings that occur when
+     * wp-config.php tries to redefine the same constants.
+     */
+    public bool $has_db_constants = false;
+
     public function __construct(string $source)
     {
         $this->source = $source;

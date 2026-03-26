@@ -39,6 +39,23 @@ function generate_runtime_php(RuntimeManifest $manifest, string $docroot): strin
     $lines[] = ' */';
     $lines[] = '';
 
+    // When runtime.php pre-defines DB_* constants (DB_HOST, DB_NAME,
+    // etc.), the source site's wp-config.php will try to redefine them
+    // with define() — which emits a warning in PHP 8+. Install a
+    // lightweight error handler that silences just those warnings.
+    if ($manifest->has_db_constants) {
+        $lines[] = '// Suppress "Constant already defined" warnings from wp-config.php.';
+        $lines[] = '// runtime.php pre-defines DB_* constants with target values; the';
+        $lines[] = '// source wp-config.php will attempt to redefine them.';
+        $lines[] = 'set_error_handler(function ($errno, $errstr) {';
+        $lines[] = '    if (strpos($errstr, \'already defined\') !== false) {';
+        $lines[] = '        return true;';
+        $lines[] = '    }';
+        $lines[] = '    return false;';
+        $lines[] = '}, E_WARNING | E_NOTICE);';
+        $lines[] = '';
+    }
+
     // Constants
     if (!empty($manifest->constants)) {
         foreach ($manifest->constants as $name => $value) {
