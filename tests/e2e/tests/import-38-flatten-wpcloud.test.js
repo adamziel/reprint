@@ -36,14 +36,18 @@ describe('Import: Flat Document Root (WP Cloud-like layout)', () => {
     let tempDir;
 
     beforeAll(async () => {
-        // Clean up previous external dirs (may be nginx-owned from prior run)
-        execSync(`sudo rm -rf ${CORE_DIR} ${CONTENT_DIR}`);
-
         await ensureSite(site, {
             afterCreate: async (siteDir) => {
                 // Simulate WP Cloud layout:
                 //   wp-admin and wp-includes live behind __wp__ in a separate dir
                 //   wp-content lives in a completely separate dir
+                //
+                // Clean up previous external dirs first (may be nginx-owned
+                // from prior run).  This must happen inside afterCreate so
+                // that the dirs are only deleted when they will be recreated.
+                // Deleting them before ensureSite breaks re-runs: the marker
+                // file still exists → afterCreate is skipped → broken symlinks.
+                execSync(`sudo rm -rf ${CORE_DIR} ${CONTENT_DIR}`);
                 mkdirSync(CORE_DIR, { recursive: true });
                 mkdirSync(CONTENT_DIR, { recursive: true });
 
