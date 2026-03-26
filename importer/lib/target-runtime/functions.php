@@ -15,9 +15,11 @@ function runtime_applier_for(string $runtime): RuntimeApplier
             return new NginxFpmApplier();
         case 'php-builtin':
             return new PhpBuiltinApplier();
+        case 'playground-cli':
+            return new PlaygroundCliApplier();
         default:
             throw new InvalidArgumentException(
-                "Unknown runtime: {$runtime}. Valid runtimes: nginx-fpm, php-builtin"
+                "Unknown runtime: {$runtime}. Valid runtimes: nginx-fpm, php-builtin, playground-cli"
             );
     }
 }

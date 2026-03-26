@@ -3424,7 +3424,7 @@ class ImportClient
         $runtime = $options["runtime"] ?? null;
         if (empty($runtime)) {
             throw new InvalidArgumentException(
-                "apply-runtime requires --runtime=RUNTIME. Valid runtimes: nginx-fpm, php-builtin"
+                "apply-runtime requires --runtime=RUNTIME. Valid runtimes: nginx-fpm, php-builtin, playground-cli"
             );
         }
 
@@ -9472,8 +9472,9 @@ if (
                 "  --fs-root=DIR             Raw download directory (remote path appended)\n" .
                 "  --flat-document-root=DIR   Flattened layout directory (used as-is)\n" .
                 "  --runtime=RUNTIME         Target server runtime (required):\n" .
-                "                              nginx-fpm    — writes runtime.php + nginx.conf\n" .
-                "                              php-builtin  — writes runtime.php + start.sh\n" .
+                "                              nginx-fpm      — writes runtime.php + nginx.conf\n" .
+                "                              php-builtin    — writes runtime.php + start.sh\n" .
+                "                              playground-cli — writes runtime.php + blueprint.json\n" .
                 "  --output-dir=DIR          Directory for generated runtime files (required)\n" .
                 "  --host=HOST               Listen address (default: from rewrite URL, or localhost)\n" .
                 "  --port=PORT               Listen port (default: from rewrite URL, or 8881)\n" .
@@ -9495,6 +9496,10 @@ if (
                 "Output files (php-builtin):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, routing, handlers)\n" .
                 "  (output-dir)/start.sh                Shell script to launch the server\n" .
+                "\n" .
+                "Output files (playground-cli):\n" .
+                "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
+                "  (output-dir)/blueprint.json          Playground Blueprint\n" .
                 "\n" .
                 "Output files (sqlite target, additional):\n" .
                 "  (output-dir)/sqlite-database-integration/   Plugin copy\n" .
