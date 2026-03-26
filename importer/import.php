@@ -3163,6 +3163,11 @@ class ImportClient
 
             $this->download_db_index();
 
+            // Timeout during db-index — state already saved, exit partial.
+            if (($this->state["status"] ?? null) === "partial") {
+                return;
+            }
+
             $tables = (int) ($this->state["db_index"]["tables"] ?? 0);
             $this->audit_log(
                 sprintf("db-sync db-index stage complete: %d tables", $tables),
@@ -3181,6 +3186,11 @@ class ImportClient
         ]);
 
         $this->download_sql();
+
+        // Timeout during SQL download — state already saved, exit partial.
+        if (($this->state["status"] ?? null) === "partial") {
+            return;
+        }
 
         // Mark as complete
         $this->state["status"] = "complete";
@@ -5004,13 +5014,33 @@ class ImportClient
         };
 
         $request_start = microtime(true);
-        $this->fetch_streaming(
-            $url,
-            $cursor,
-            $context,
-            $post_data,
-            "file_fetch",
-        );
+        try {
+            $this->fetch_streaming(
+                $url,
+                $cursor,
+                $context,
+                $post_data,
+                "file_fetch",
+            );
+        } catch (CurlTimeoutException $e) {
+            // Save state so the next invocation resumes from the
+            // last cursor instead of crashing with exit code 1.
+            $this->state[$state_key]["cursor"] = $cursor;
+            $this->finalize_index_updates();
+            if ($context->file_handle && $context->file_path) {
+                fflush($context->file_handle);
+                $this->state["current_file"] = $context->file_path;
+                $this->state["current_file_bytes"] = $context->file_bytes_written;
+            }
+            $this->state["status"] = "partial";
+            $this->save_state($this->state);
+            $this->audit_log(
+                "CURL TIMEOUT | file_fetch | saved state for resumption | cursor=" .
+                    ($cursor ? substr($cursor, 0, 20) . "..." : "none"),
+                true,
+            );
+            return false;
+        }
         $wall_time = microtime(true) - $request_start;
 
         $this->finalize_tuned_request(
@@ -5203,7 +5233,20 @@ class ImportClient
         };
 
         $request_start = microtime(true);
-        $this->fetch_streaming($url, $cursor, $context, null, "file_index");
+        try {
+            $this->fetch_streaming($url, $cursor, $context, null, "file_index");
+        } catch (CurlTimeoutException $e) {
+            fclose($handle);
+            $this->state["index"] = ["cursor" => $cursor];
+            $this->state["status"] = "partial";
+            $this->save_state($this->state);
+            $this->audit_log(
+                "CURL TIMEOUT | file_index | saved state for resumption | cursor=" .
+                    ($cursor ? substr($cursor, 0, 20) . "..." : "none"),
+                true,
+            );
+            return false;
+        }
         $wall_time = microtime(true) - $request_start;
         $this->finalize_tuned_request(
             "file_index",
@@ -6450,7 +6493,27 @@ class ImportClient
                 };
 
                 $request_start = microtime(true);
-                $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
+                try {
+                    $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
+                } catch (CurlTimeoutException $e) {
+                    // Save state so the next invocation resumes from the
+                    // last cursor instead of crashing with exit code 1.
+                    if ($sql_handle) {
+                        fflush($sql_handle);
+                    }
+                    $this->state["cursor"] = $cursor;
+                    $this->state["sql_bytes"] = $sql_bytes_written;
+                    $this->state["sql_statements_counted"] = $sql_statements_counted;
+                    $this->state["status"] = "partial";
+                    $this->save_state($this->state);
+                    $this->audit_log(
+                        "CURL TIMEOUT | sql_chunk | saved state for resumption | cursor=" .
+                            ($cursor ? substr($cursor, 0, 20) . "..." : "none") .
+                            " | sql_bytes={$sql_bytes_written}",
+                        true,
+                    );
+                    return;
+                }
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
                     "sql_chunk",
@@ -6894,13 +6957,32 @@ class ImportClient
                 };
 
                 $request_start = microtime(true);
-                $this->fetch_streaming(
-                    $url,
-                    $cursor,
-                    $context,
-                    null,
-                    "db_index",
-                );
+                try {
+                    $this->fetch_streaming(
+                        $url,
+                        $cursor,
+                        $context,
+                        null,
+                        "db_index",
+                    );
+                } catch (CurlTimeoutException $e) {
+                    fflush($handle);
+                    $this->state["cursor"] = $cursor;
+                    $this->state["db_index"] = [
+                        "file" => $tables_file,
+                        "tables" => $tables_written,
+                        "rows_estimated" => $rows_estimated,
+                        "bytes" => $bytes_written,
+                        "updated_at" => time(),
+                    ];
+                    $this->state["status"] = "partial";
+                    $this->save_state($this->state);
+                    $this->audit_log(
+                        "CURL TIMEOUT | db_index | saved state for resumption",
+                        true,
+                    );
+                    return;
+                }
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
                     "db_index",
@@ -8134,6 +8216,9 @@ class ImportClient
             : 28;
         $this->last_curl_errno = $errno;
         $this->last_curl_timeout = $errno === $timeout_errno;
+        if ($this->last_curl_timeout) {
+            throw new CurlTimeoutException("cURL error: {$error}");
+        }
         throw new RuntimeException("cURL error: {$error}");
     }
 
@@ -8218,7 +8303,7 @@ class ImportClient
     /**
      * Fetch URL with streaming multipart parsing.
      */
-    private function fetch_streaming(
+    protected function fetch_streaming(
         string $url,
         ?string $cursor,
         StreamingContext $context,
@@ -9217,6 +9302,14 @@ class StreamingContext
  * Callers catch this to skip the current file/directory/symlink gracefully.
  */
 class PreserveLocalSkipException extends RuntimeException {}
+
+/**
+ * Thrown when a cURL request times out (CURLE_OPERATION_TIMEDOUT).
+ * Callers catch this to save state and exit with "partial" status instead
+ * of crashing with a fatal error — the next invocation resumes from the
+ * last saved cursor.
+ */
+class CurlTimeoutException extends RuntimeException {}
 
 // ============================================================================
 // CLI Entry Point
