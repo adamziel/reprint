@@ -6309,6 +6309,7 @@ class ImportClient
             false,
         );
 
+        $curl_timed_out = false;
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
@@ -6512,7 +6513,13 @@ class ImportClient
                             " | sql_bytes={$sql_bytes_written}",
                         true,
                     );
-                    return;
+                    // Discard any pending SQL buffer — it's incomplete and
+                    // will be re-fetched on the next invocation. Setting
+                    // this to "" also prevents the finally block from
+                    // throwing about un-executed buffered SQL.
+                    $sql_buffer = "";
+                    $curl_timed_out = true;
+                    break;
                 }
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
@@ -6597,6 +6604,10 @@ class ImportClient
                     );
                 }
             }
+        }
+
+        if ($curl_timed_out) {
+            return;
         }
     }
 
