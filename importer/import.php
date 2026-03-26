@@ -881,6 +881,9 @@ class ImportClient
     /** @var string Path to .import-download-list.jsonl — files to download, computed by diffing remote vs local index. */
     private $download_list_file;
 
+    /** @var string Path to .import-download-list-deferred.jsonl — deferred uploads to download after essential files. */
+    private $deferred_download_list_file;
+
     /** @var string Path to .import-audit.log — append-only log of every operation for debugging. */
     private $audit_log;
 
@@ -938,6 +941,17 @@ class ImportClient
      * Set via --on-docroot-nonempty, persisted in state so it survives across invocations.
      */
     private $docroot_nonempty_behavior = 'error';
+
+    /**
+     * When true, the diff phase routes uploads into a separate deferred
+     * download list so that essential files (code, config, themes, plugins)
+     * are fetched first.  The pipeline then transitions through a
+     * "fetch-deferred" stage for uploads, giving the orchestrator a clear
+     * signal to bring the site online between the two fetches.
+     *
+     * Set via --defer-uploads, persisted in state so it survives across invocations.
+     */
+    private $defer_uploads = false;
 
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
@@ -1006,6 +1020,8 @@ class ImportClient
             $this->state_dir . "/.import-remote-index.jsonl";
         $this->download_list_file =
             $this->state_dir . "/.import-download-list.jsonl";
+        $this->deferred_download_list_file =
+            $this->state_dir . "/.import-download-list-deferred.jsonl";
         $this->audit_log = $this->state_dir . "/.import-audit.log";
         $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
         $this->status_file = $this->state_dir . "/.import-status.json";
@@ -1337,6 +1353,17 @@ class ImportClient
             $this->docroot_nonempty_behavior = $this->state["docroot_nonempty_behavior"] ?? 'error';
         }
 
+        // Persist defer_uploads in state so it survives across invocations.
+        // When enabled, essential files are fetched before uploads so the
+        // orchestrator can bring the site online before media downloads finish.
+        if (isset($options["defer_uploads"])) {
+            $this->defer_uploads = (bool) $options["defer_uploads"];
+            $this->state["defer_uploads"] = $this->defer_uploads;
+            $this->save_state($this->state);
+        } elseif (isset($this->state["defer_uploads"])) {
+            $this->defer_uploads = (bool) $this->state["defer_uploads"];
+        }
+
         // Persist max_allowed_packet in state so it survives across invocations.
         // The client sends this to the server so SQL statements are capped to a
         // size the client's MySQL instance can actually import.
@@ -1574,12 +1601,17 @@ class ImportClient
                     @unlink($this->download_list_file);
                     $this->audit_log("FILE DELETE | {$this->download_list_file}");
                 }
+                if (file_exists($this->deferred_download_list_file)) {
+                    @unlink($this->deferred_download_list_file);
+                    $this->audit_log("FILE DELETE | {$this->deferred_download_list_file}");
+                }
                 if (file_exists($this->volatile_files_file)) {
                     @unlink($this->volatile_files_file);
                     $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
                 }
                 $this->state["index"] = $this->default_state()["index"];
                 $this->state["fetch"] = $this->default_state()["fetch"];
+                $this->state["fetch_deferred"] = $this->default_state()["fetch_deferred"];
 
                 $this->save_state($this->state);
                 break;
@@ -2309,6 +2341,7 @@ class ImportClient
             $this->state["diff"] = $this->default_state()["diff"];
             $this->state["index"] = $this->default_state()["index"];
             $this->state["fetch"] = $this->default_state()["fetch"];
+            $this->state["fetch_deferred"] = $this->default_state()["fetch_deferred"];
             $this->save_state($this->state);
 
             if ($is_delta) {
@@ -2401,6 +2434,12 @@ class ImportClient
                     "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
                 );
             }
+            if (file_exists($this->deferred_download_list_file)) {
+                @unlink($this->deferred_download_list_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->deferred_download_list_file} | clearing before diff stage",
+                );
+            }
             $this->save_state($this->state);
             $stage = "diff";
         }
@@ -2416,9 +2455,20 @@ class ImportClient
             $has_downloads =
                 file_exists($this->download_list_file) &&
                 filesize($this->download_list_file) > 0;
-            $this->state["stage"] = $has_downloads ? "fetch" : null;
+            $has_deferred =
+                file_exists($this->deferred_download_list_file) &&
+                filesize($this->deferred_download_list_file) > 0;
+
+            // Determine the first fetch stage to run.
+            if ($has_downloads) {
+                $stage = "fetch";
+            } elseif ($has_deferred) {
+                $stage = "fetch-deferred";
+            } else {
+                $stage = null;
+            }
+            $this->state["stage"] = $stage;
             $this->save_state($this->state);
-            $stage = $has_downloads ? "fetch" : null;
 
             if (!$has_downloads && file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
@@ -2426,23 +2476,71 @@ class ImportClient
                     "FILE DELETE | {$this->download_list_file} | no files to fetch",
                 );
             }
+            if (!$has_deferred && file_exists($this->deferred_download_list_file)) {
+                @unlink($this->deferred_download_list_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->deferred_download_list_file} | no deferred files to fetch",
+                );
+            }
         }
 
         if ($stage === "fetch") {
-            $complete = $this->download_files_from_list();
+            $complete = $this->download_files_from_list(
+                $this->download_list_file,
+                "fetch",
+            );
+            if (!$complete) {
+                $this->state["status"] = "partial";
+                $this->save_state($this->state);
+                return;
+            }
+            $this->state["fetch"] = $this->default_state()["fetch"];
+
+            if (file_exists($this->download_list_file)) {
+                @unlink($this->download_list_file);
+                $this->audit_log(
+                    "FILE DELETE | {$this->download_list_file} | fetch complete",
+                );
+            }
+
+            // If there are deferred uploads to download, transition to that
+            // stage. The orchestrator can detect stage="fetch-deferred" in the
+            // state file and know that all essential files are on disk — safe
+            // to apply the database and bring the site online.
+            $has_deferred =
+                file_exists($this->deferred_download_list_file) &&
+                filesize($this->deferred_download_list_file) > 0;
+            $this->state["stage"] = $has_deferred ? "fetch-deferred" : null;
+            $this->save_state($this->state);
+            $stage = $has_deferred ? "fetch-deferred" : null;
+
+            if ($has_deferred) {
+                $this->audit_log(
+                    "ESSENTIAL FILES COMPLETE | transitioning to deferred uploads",
+                    true,
+                );
+                $this->write_status_file();
+            }
+        }
+
+        if ($stage === "fetch-deferred") {
+            $complete = $this->download_files_from_list(
+                $this->deferred_download_list_file,
+                "fetch_deferred",
+            );
             if (!$complete) {
                 $this->state["status"] = "partial";
                 $this->save_state($this->state);
                 return;
             }
             $this->state["stage"] = null;
-            $this->state["fetch"] = $this->default_state()["fetch"];
+            $this->state["fetch_deferred"] = $this->default_state()["fetch_deferred"];
             $this->save_state($this->state);
 
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
+            if (file_exists($this->deferred_download_list_file)) {
+                @unlink($this->deferred_download_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | fetch complete",
+                    "FILE DELETE | {$this->deferred_download_list_file} | deferred fetch complete",
                 );
             }
         }
@@ -3139,13 +3237,16 @@ class ImportClient
         $indexed_count = count($size_by_path);
         $indexed_bytes = array_sum($size_by_path);
 
-        // Walk the download list to count pending files. The download
+        // Walk the download list(s) to count pending files. The download
         // list only stores paths, so look up sizes from the map above.
         // Files before the fetch byte offset have already been downloaded.
         $pending_count = 0;
         $pending_bytes = 0;
-        $fetch_offset = $this->state["fetch"]["offset"] ?? 0;
+        $deferred_pending_count = 0;
+        $deferred_pending_bytes = 0;
 
+        // Count pending in the main download list
+        $fetch_offset = $this->state["fetch"]["offset"] ?? 0;
         if (is_file($download_list)) {
             $handle = fopen($download_list, "r");
             if ($handle) {
@@ -3176,7 +3277,37 @@ class ImportClient
             }
         }
 
-        echo json_encode([
+        // Count pending in the deferred download list (uploads)
+        $deferred_offset = $this->state["fetch_deferred"]["offset"] ?? 0;
+        $deferred_list = $this->deferred_download_list_file;
+        if (is_file($deferred_list)) {
+            $handle = fopen($deferred_list, "r");
+            if ($handle) {
+                if ($deferred_offset > 0) {
+                    fseek($handle, $deferred_offset);
+                }
+                while (($line = fgets($handle)) !== false) {
+                    $line = trim($line);
+                    if ($line === "") {
+                        continue;
+                    }
+                    $data = json_decode($line, true);
+                    if (!is_array($data)) {
+                        continue;
+                    }
+                    $path_encoded = $data["path"] ?? "";
+                    $path = base64_decode($path_encoded, true);
+                    if ($path === false || $path === "") {
+                        continue;
+                    }
+                    $deferred_pending_count++;
+                    $deferred_pending_bytes += $size_by_path[$path] ?? 0;
+                }
+                fclose($handle);
+            }
+        }
+
+        $result = [
             "indexed" => [
                 "files" => $indexed_count,
                 "bytes" => $indexed_bytes,
@@ -3185,7 +3316,15 @@ class ImportClient
                 "files" => $pending_count,
                 "bytes" => $pending_bytes,
             ],
-        ], JSON_PRETTY_PRINT) . "\n";
+        ];
+        if ($deferred_pending_count > 0 || is_file($deferred_list)) {
+            $result["pending_deferred"] = [
+                "files" => $deferred_pending_count,
+                "bytes" => $deferred_pending_bytes,
+            ];
+        }
+
+        echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
     }
 
     /**
@@ -4631,9 +4770,10 @@ class ImportClient
      */
     private function download_file_fetch(
         ?array $post_data,
-        ?string $cursor
+        ?string $cursor,
+        string $state_key = "fetch"
     ): bool {
-        $cursor = $cursor ?? ($this->state["fetch"]["cursor"] ?? null);
+        $cursor = $cursor ?? ($this->state[$state_key]["cursor"] ?? null);
         $complete = false;
         $this->chunks_since_save = 0;
 
@@ -4699,7 +4839,8 @@ class ImportClient
         $context->on_chunk = function ($chunk) use (
             &$cursor,
             &$complete,
-            $context
+            $context,
+            $state_key
         ) {
             if ($this->shutdown_requested) {
                 throw new RuntimeException("Shutdown requested");
@@ -4711,7 +4852,7 @@ class ImportClient
 
             $this->chunks_since_save++;
             if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                $this->state["fetch"]["cursor"] = $cursor;
+                $this->state[$state_key]["cursor"] = $cursor;
                 // Track current file for crash recovery
                 if ($context->file_handle && $context->file_path) {
                     // Flush to ensure bytes are on disk before saving state
@@ -4802,7 +4943,7 @@ class ImportClient
             $wall_time,
             $context->response_stats ?? [],
         );
-        $this->state["fetch"]["cursor"] = $cursor;
+        $this->state[$state_key]["cursor"] = $cursor;
         $this->finalize_index_updates();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
@@ -5031,6 +5172,31 @@ class ImportClient
             throw new RuntimeException("Failed to open download list file");
         }
 
+        // When --defer-uploads is active, uploads go to a separate list so
+        // essential files (code, config, themes, plugins) are fetched first.
+        $deferred_handle = null;
+        $uploads_basedir = null;
+        if ($this->defer_uploads) {
+            if ($download_mode === "w") {
+                $this->audit_log(
+                    "FILE CREATE | {$this->deferred_download_list_file} | building deferred download list (uploads)",
+                );
+            } else {
+                $this->audit_log(
+                    "FILE APPEND | {$this->deferred_download_list_file} | resuming deferred download list build",
+                );
+            }
+            $deferred_handle = fopen($this->deferred_download_list_file, $download_mode);
+            if (!$deferred_handle) {
+                fclose($download_handle);
+                throw new RuntimeException("Failed to open deferred download list file");
+            }
+            $uploads_basedir = $this->get_uploads_basedir();
+            $this->audit_log(
+                "DEFER-UPLOADS | uploads_basedir=" . ($uploads_basedir ?? "(fallback: wp-content/uploads/)"),
+            );
+        }
+
         $remote_handle = fopen($this->remote_index_file, "r");
         if (!$remote_handle) {
             fclose($download_handle);
@@ -5090,9 +5256,12 @@ class ImportClient
                     // Always re-download — this file is in our local index,
                     // meaning we synced it before; preserve-local does not
                     // protect files we own.
+                    $target_handle = ($deferred_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                        ? $deferred_handle
+                        : $download_handle;
                     $this->append_download_list(
                         $remote["path"],
-                        $download_handle,
+                        $target_handle,
                     );
                 }
                 $local_after = $local["path"];
@@ -5106,7 +5275,10 @@ class ImportClient
                     $this->audit_log($skip_reason, true);
                     $this->show_progress_line("[skip] " . $this->display_path($remote["path"]));
                 } else {
-                    $this->append_download_list($remote["path"], $download_handle);
+                    $target_handle = ($deferred_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                        ? $deferred_handle
+                        : $download_handle;
+                    $this->append_download_list($remote["path"], $target_handle);
                 }
             }
 
@@ -5132,6 +5304,9 @@ class ImportClient
         }
         fclose($remote_handle);
         fclose($download_handle);
+        if ($deferred_handle !== null) {
+            fclose($deferred_handle);
+        }
 
         $this->state["diff"] = [
             "remote_offset" => $remote_offset,
@@ -5146,24 +5321,30 @@ class ImportClient
 
     /**
      * Download files from a prepared list.
+     *
+     * @param string $list_file   Path to the JSONL download list to process.
+     * @param string $state_key   Key in $this->state that holds fetch progress
+     *                            (e.g. "fetch" or "fetch_deferred").
      */
-    private function download_files_from_list(): bool
-    {
-        if (!file_exists($this->download_list_file)) {
+    private function download_files_from_list(
+        string $list_file,
+        string $state_key,
+    ): bool {
+        if (!file_exists($list_file)) {
             return true;
         }
 
-        if (filesize($this->download_list_file) === 0) {
+        if (filesize($list_file) === 0) {
             return true;
         }
-        $fetch_state = $this->state["fetch"] ?? $this->default_state()["fetch"];
+        $fetch_state = $this->state[$state_key] ?? $this->default_state()[$state_key];
         $batch_file = $fetch_state["batch_file"] ?? null;
         $batch_offset = (int) ($fetch_state["offset"] ?? 0);
         $next_offset = (int) ($fetch_state["next_offset"] ?? 0);
         $cursor = $fetch_state["cursor"] ?? null;
 
         if ($batch_file === null || !file_exists($batch_file)) {
-            $batch = $this->prepare_fetch_batch($batch_offset);
+            $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
             if ($batch === null) {
                 return true;
             }
@@ -5171,7 +5352,7 @@ class ImportClient
             $batch_offset = $batch["offset"];
             $next_offset = $batch["next_offset"];
             $cursor = null;
-            $this->state["fetch"] = [
+            $this->state[$state_key] = [
                 "offset" => $batch_offset,
                 "next_offset" => $next_offset,
                 "batch_file" => $batch_file,
@@ -5188,7 +5369,7 @@ class ImportClient
             ),
         ];
 
-        $complete = $this->download_file_fetch($post_data, $cursor);
+        $complete = $this->download_file_fetch($post_data, $cursor, $state_key);
         if (!$complete) {
             return false;
         }
@@ -5198,7 +5379,7 @@ class ImportClient
             $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
         }
 
-        $this->state["fetch"] = [
+        $this->state[$state_key] = [
             "offset" => $next_offset,
             "next_offset" => $next_offset,
             "batch_file" => null,
@@ -5206,7 +5387,7 @@ class ImportClient
         ];
         $this->save_state($this->state);
 
-        return $next_offset >= filesize($this->download_list_file);
+        return $next_offset >= filesize($list_file);
     }
 
     /**
@@ -5220,11 +5401,12 @@ class ImportClient
      * The batch file is written to a temp file and intended to be uploaded as
      * the request body for the file_fetch endpoint.
      *
-     * @param int $offset Byte offset into the download list file.
+     * @param string $list_file Path to the JSONL download list.
+     * @param int    $offset    Byte offset into the download list file.
      * @return array{file: string, offset: int, next_offset: int}|null
      *         The temp file path and byte offsets, or null if no paths remain.
      */
-    private function prepare_fetch_batch(int $offset): ?array
+    private function prepare_fetch_batch(string $list_file, int $offset): ?array
     {
         // Cap the batch at 80% of the server's max request size so the
         // multipart envelope and headers still fit.  Floor at 256 KB so
@@ -5233,7 +5415,7 @@ class ImportClient
         $limit = (int) max(256 * 1024, $max_request * 0.8);
 
         // Open the download list and seek to where the previous batch left off.
-        $handle = fopen($this->download_list_file, "r");
+        $handle = fopen($list_file, "r");
         if (!$handle) {
             throw new RuntimeException("Failed to open download list file");
         }
@@ -5359,6 +5541,40 @@ class ImportClient
         }
 
         return $max_request;
+    }
+
+    /**
+     * Return the uploads basedir from preflight data (e.g. "/wp-content/uploads").
+     *
+     * Falls back to a heuristic pattern match if the preflight doesn't contain
+     * explicit uploads path information.
+     */
+    private function get_uploads_basedir(): ?string
+    {
+        $paths_urls = $this->state["preflight"]["data"]["database"]["wp"]["paths_urls"] ?? null;
+        if (!is_array($paths_urls)) {
+            return null;
+        }
+        $basedir = $paths_urls["uploads"]["basedir"] ?? null;
+        if (!is_string($basedir) || $basedir === "") {
+            return null;
+        }
+        return rtrim($basedir, "/") . "/";
+    }
+
+    /**
+     * Check whether a remote path belongs to the uploads directory.
+     *
+     * Uses the preflight-reported uploads basedir when available, otherwise
+     * falls back to matching "wp-content/uploads/" anywhere in the path.
+     */
+    private function is_uploads_path(string $path, ?string $uploads_basedir): bool
+    {
+        if ($uploads_basedir !== null) {
+            return strpos($path, $uploads_basedir) !== false;
+        }
+        // Fallback: match the conventional WordPress uploads path
+        return strpos($path, "wp-content/uploads/") !== false;
     }
 
     /**
@@ -8305,6 +8521,7 @@ class ImportClient
             "webhost" => null,
             "follow_symlinks" => true,
             "docroot_nonempty_behavior" => "error",
+            "defer_uploads" => false,
             "max_allowed_packet" => null,
             "db_index" => [
                 "file" => null,
@@ -8321,6 +8538,12 @@ class ImportClient
                 "cursor" => null,
             ],
             "fetch" => [
+                "offset" => 0,
+                "next_offset" => 0,
+                "batch_file" => null,
+                "cursor" => null,
+            ],
+            "fetch_deferred" => [
                 "offset" => 0,
                 "next_offset" => 0,
                 "batch_file" => null,
@@ -8972,19 +9195,28 @@ if (
                 "\n" .
                 "Options:\n" .
                 "  --abort              Abort current sync and exit (keeps files and index)\n" .
+                "  --defer-uploads      Download essential files first, defer uploads to a second pass\n" .
                 "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n" .
                 "  --on-docroot-nonempty=MODE\n" .
                 "                       What to do when docroot is non-empty (error|preserve-local)\n" .
                 "  --secret=TOKEN       HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v        Show detailed request/response logs\n" .
                 "\n" .
+                "With --defer-uploads, the pipeline splits the fetch into two stages:\n" .
+                "  1. fetch           — downloads all non-upload files (code, config, themes, plugins)\n" .
+                "  2. fetch-deferred  — downloads uploads (media library)\n" .
+                "The state file reports stage=\"fetch-deferred\" between the two, giving the\n" .
+                "orchestrator a clear signal to apply the database and bring the site online\n" .
+                "before media downloads finish.\n" .
+                "\n" .
                 "Output files:\n" .
-                "  (docroot)/                    Downloaded files\n" .
-                "  .import-index.jsonl           Local file index\n" .
-                "  .import-remote-index.jsonl    Remote index snapshot\n" .
-                "  .import-download-list.jsonl   Files pending download\n" .
-                "  .import-state.json            Resumable state\n" .
-                "  .import-audit.log             Audit log\n",
+                "  (docroot)/                              Downloaded files\n" .
+                "  .import-index.jsonl                     Local file index\n" .
+                "  .import-remote-index.jsonl              Remote index snapshot\n" .
+                "  .import-download-list.jsonl             Files pending download\n" .
+                "  .import-download-list-deferred.jsonl    Deferred uploads (when --defer-uploads)\n" .
+                "  .import-state.json                      Resumable state\n" .
+                "  .import-audit.log                       Audit log\n",
         ],
         "files-index" => [
             "short" => "Download the remote file index without fetching file contents",
@@ -9306,6 +9538,10 @@ if (
             $options["follow_symlinks"] = true;
         } elseif ($argv[$i] === "--no-follow-symlinks") {
             $options["follow_symlinks"] = false;
+        } elseif ($argv[$i] === "--defer-uploads") {
+            $options["defer_uploads"] = true;
+        } elseif ($argv[$i] === "--no-defer-uploads") {
+            $options["defer_uploads"] = false;
         } elseif (strpos($argv[$i], "--on-docroot-nonempty=") === 0) {
             $options["docroot_nonempty_behavior"] = substr(
                 $argv[$i],

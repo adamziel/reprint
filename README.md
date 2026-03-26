@@ -103,6 +103,26 @@ the `--on-docroot-nonempty` flag controls this behavior. It takes the following 
 - `--on-docroot-nonempty=error` (default): throw an error and abort.
 - `--on-docroot-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
 
+**Deferred uploads**
+
+Large media libraries can contain tens of gigabytes of images and videos that aren't needed for the site to function.
+With `--defer-uploads`, the importer splits the download into two stages so you can bring the site online sooner:
+
+```bash
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" --defer-uploads
+```
+
+The pipeline proceeds as usual through indexing and diffing, then:
+
+1. **fetch** — downloads all non-upload files (code, config, themes, plugins).
+2. The state file transitions to `stage="fetch-deferred"`. At this point all essential files are on disk — the orchestrator can apply the database and bring the site online.
+3. **fetch-deferred** — downloads uploads (the media library).
+
+The orchestrator loop detects the transition by reading `.import-state.json`: when `stage` changes to
+`"fetch-deferred"`, it knows the site is ready to go live while uploads continue downloading in the background.
+
+The uploads directory is detected from the preflight data (`uploads.basedir`), falling back to `wp-content/uploads/` if unavailable.
+
 #### Step 3 — Download the database.
 
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
@@ -324,7 +344,7 @@ The file contains a flat JSON object:
 | `steps`   | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
 | `command` | `string \| null`  | Current command name (`preflight`, `files-sync`, `db-sync`, etc.). |
 | `status`  | `string`          | One of `in_progress`, `partial`, `complete`, `error`, `aborted`. |
-| `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`), or `null`. Derived from the internal state's `stage` field. |
+| `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`, `fetch-deferred`), or `null`. Derived from the internal state's `stage` field. |
 | `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
 | `ts`      | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
 
@@ -365,11 +385,18 @@ If the JSON is invalid on load, the importer renames it to
   "index": {
     "cursor": "..."               // file_index cursor
   },
+  "defer_uploads": false,         // --defer-uploads flag (persisted)
   "fetch": {
     "offset": 512,                // byte offset into download list
     "next_offset": 1024,
     "batch_file": null,
     "cursor": "..."               // file_fetch cursor
+  },
+  "fetch_deferred": {             // only used when defer_uploads is true
+    "offset": 0,
+    "next_offset": 0,
+    "batch_file": null,
+    "cursor": null
   },
 
   // Crash recovery: if the importer dies mid-write, these let it
