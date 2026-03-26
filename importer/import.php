@@ -8403,7 +8403,12 @@ class ImportClient
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_TIMEOUT => 300,
+            // Don't cap total transfer time — streaming responses can
+            // legitimately run for 20+ minutes. Instead, detect stalled
+            // connections: timeout only when fewer than 1 byte/sec is
+            // received for 300 consecutive seconds.
+            CURLOPT_LOW_SPEED_LIMIT => 1,
+            CURLOPT_LOW_SPEED_TIME => 300,
             CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
