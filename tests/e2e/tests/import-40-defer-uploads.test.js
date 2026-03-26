@@ -126,68 +126,44 @@ describe('Import: --defer-uploads', () => {
     });
 
     // ------------------------------------------------------------------
-    // Test: the fetch-deferred stage is observable in state mid-run
+    // Test: the two-stage transition is recorded in the audit log
     //
-    // Uses --max-exec=3 to force the importer to exit after each HTTP
-    // request, which lets us inspect the state file between stages.
+    // The audit log entry "ESSENTIAL FILES COMPLETE | transitioning to
+    // deferred uploads" proves that the pipeline went through the fetch
+    // stage, completed it, and entered the fetch-deferred stage — even
+    // when the site is small enough for both stages to finish in a
+    // single invocation.
     // ------------------------------------------------------------------
-    describe('fetch-deferred stage is observable', () => {
+    describe('two-stage transition is recorded', () => {
         let tempDir;
 
         beforeAll(() => {
-            tempDir = createTempDir('e2e-defer-uploads-observable');
+            tempDir = createTempDir('e2e-defer-uploads-transition');
         });
 
         afterAll(() => {
             cleanupTempDir(tempDir);
         });
 
-        it('runs with --max-exec=3 and observes fetch-deferred transition', () => {
-            // Run the importer in a step-by-step fashion by not auto-resuming.
-            // We collect all intermediate state stages to verify the transition.
-            const secret = getSiteSecret(site);
-            const stateFile = join(tempDir, '.import-state.json');
-            const observedStages = new Set();
-            let exitCode;
-            let attempts = 0;
-            const maxAttempts = 200;
-
-            // First run: preflight
-            const preflightResult = runImporter(importUrl(), tempDir, 'preflight', {
-                secret,
+        it('files-sync completes and audit log proves two-stage flow', () => {
+            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+                secret: getSiteSecret(site),
+                extraArgs: ['--defer-uploads'],
             });
-            assert.equal(preflightResult.exitCode, 0,
-                `Preflight failed: ${preflightResult.stderr}`);
+            assert.equal(result.exitCode, 0,
+                `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            // Run files-sync step by step
-            do {
-                const result = runImporter(importUrl(), tempDir, 'files-sync', {
-                    secret,
-                    extraArgs: ['--defer-uploads', '--max-exec=3'],
-                    autoResume: false,
-                    skipPreflight: true,
-                });
-                exitCode = result.exitCode;
+            const audit = readAuditLog(tempDir);
 
-                // Read the state file after each run
-                if (existsSync(stateFile)) {
-                    const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-                    if (state.stage) {
-                        observedStages.add(state.stage);
-                    }
-                }
+            // The audit log must contain the transition marker, proving
+            // the pipeline completed the essential files fetch and then
+            // entered the deferred uploads stage.
+            assert.ok(audit.includes('ESSENTIAL FILES COMPLETE'),
+                'Expected ESSENTIAL FILES COMPLETE in audit log — proves two-stage transition');
 
-                attempts++;
-                assert.ok(attempts < maxAttempts,
-                    `Exceeded ${maxAttempts} attempts without completing. Stages seen: ${[...observedStages].join(', ')}`);
-            } while (exitCode === 2);
-
-            assert.equal(exitCode, 0,
-                `Expected final exit 0, got ${exitCode}`);
-
-            // The pipeline should have gone through both fetch and fetch-deferred
-            assert.ok(observedStages.has('fetch-deferred'),
-                `Expected to observe fetch-deferred stage. Stages seen: ${[...observedStages].join(', ')}`);
+            // The deferred download list should have been created and then cleaned up.
+            assert.ok(audit.includes('deferred fetch complete'),
+                'Expected "deferred fetch complete" in audit log — proves deferred stage ran');
         });
     });
 

@@ -5328,7 +5328,7 @@ class ImportClient
      */
     private function download_files_from_list(
         string $list_file,
-        string $state_key,
+        string $state_key
     ): bool {
         if (!file_exists($list_file)) {
             return true;
