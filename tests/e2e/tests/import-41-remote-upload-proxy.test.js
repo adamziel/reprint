@@ -15,13 +15,13 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir,
+    fsRootDir, IMPORTER_PATH,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { randomBytes } from 'node:crypto';
@@ -81,14 +81,22 @@ describe('Import: Remote upload proxy', () => {
             `files-sync failed:\n${filesSync.stderr}`);
 
         // 3. Generate runtime config with the proxy handler.
-        const applyRuntime = runImporter(importUrl(), tempDir, 'apply-runtime', {
-            secret: getSiteSecret(site),
-            extraArgs: [
+        //    apply-runtime doesn't take a URL argument (it's a local-only
+        //    command), so we call it directly instead of via runImporter.
+        let applyRuntime;
+        try {
+            const result = execFileSync('php', [
+                IMPORTER_PATH,
+                'apply-runtime',
+                `--state-dir=${tempDir}`,
+                `--fs-root=${fsRootDir(tempDir)}`,
                 '--runtime=php-builtin',
                 `--output-dir=${outputDir}`,
-            ],
-            skipPreflight: true,
-        });
+            ], { encoding: 'utf-8', timeout: 60000, maxBuffer: 50 * 1024 * 1024 });
+            applyRuntime = { stdout: result, stderr: '', exitCode: 0 };
+        } catch (e) {
+            applyRuntime = { stdout: e.stdout || '', stderr: e.stderr || '', exitCode: e.status || 1 };
+        }
         assert.equal(applyRuntime.exitCode, 0,
             `apply-runtime failed:\n${applyRuntime.stderr}\n${applyRuntime.stdout}`);
 
