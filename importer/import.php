@@ -953,6 +953,14 @@ class ImportClient
      */
     private $defer_uploads = false;
 
+    /**
+     * True when --defer-uploads was explicitly passed on THIS invocation
+     * (as opposed to being restored from persisted state).  Used to
+     * distinguish "user wants to keep deferring" from "user just didn't
+     * pass the flag" when the sync is already complete.
+     */
+    private $defer_uploads_explicit = false;
+
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
@@ -1358,6 +1366,7 @@ class ImportClient
         // orchestrator can bring the site online before media downloads finish.
         if (isset($options["defer_uploads"])) {
             $this->defer_uploads = (bool) $options["defer_uploads"];
+            $this->defer_uploads_explicit = true;
             $this->state["defer_uploads"] = $this->defer_uploads;
             $this->save_state($this->state);
         } elseif (isset($this->state["defer_uploads"])) {
@@ -2292,7 +2301,12 @@ class ImportClient
                 file_exists($this->deferred_download_list_file) &&
                 filesize($this->deferred_download_list_file) > 0;
 
-            if ($has_deferred && !$this->defer_uploads) {
+            // Check whether --defer-uploads was explicitly passed on THIS
+            // invocation.  If the user simply omitted the flag, the persisted
+            // state still says defer_uploads=true — but omitting the flag on
+            // a completed sync means "I'm ready to download uploads now."
+            $explicitly_deferring = $this->defer_uploads_explicit && $this->defer_uploads;
+            if ($has_deferred && !$explicitly_deferring) {
                 $this->audit_log(
                     "RESUME DEFERRED | files-sync was complete but deferred uploads remain — downloading now",
                     true,
