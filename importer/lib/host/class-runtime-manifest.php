@@ -74,10 +74,12 @@ class RuntimeManifest
      * Keys:
      *   'plugin_source'  string  Absolute path to the sqlite-database-
      *                            integration source directory (e.g. lib/).
+     *   'plugin_dir'     string  Absolute path to the copied plugin in
+     *                            the output directory (set after copying).
      *   'db_dir'         string  Directory containing the .sqlite file.
      *   'db_file'        string  SQLite database file name.
      *
-     * @var array{plugin_source: string, db_dir: string, db_file: string}|null
+     * @var array{plugin_source: string, plugin_dir: string, db_dir: string, db_file: string}|null
      */
     public ?array $sqlite = null;
 

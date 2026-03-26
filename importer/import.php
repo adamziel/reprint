@@ -3318,6 +3318,7 @@ class ImportClient
             }
             $manifest->sqlite = [
                 'plugin_source' => dirname(__DIR__) . '/lib/sqlite-database-integration',
+                'plugin_dir' => '',  // resolved after copy_sqlite_plugin()
                 'db_dir' => $db_dir,
                 'db_file' => $db_file,
             ];

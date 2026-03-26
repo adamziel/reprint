@@ -112,9 +112,9 @@ function generate_runtime_php(RuntimeManifest $manifest, string $docroot): strin
  * A mysqli_connect() stub is defined when the function doesn't exist,
  * because WordPress checks for it even when $wpdb is pre-set.
  *
- * @param array{plugin_source: string, db_dir: string, db_file: string} $sqlite
- *     'plugin_source' is resolved at generate-time to the copied plugin
- *     path inside the output directory (absolute).
+ * @param array{plugin_dir: string, db_dir: string, db_file: string} $sqlite
+ *     'plugin_dir' is the absolute path to the copied plugin inside the
+ *     output directory (set by the caller after copy_sqlite_plugin()).
  */
 function generate_sqlite_loader_code(array $sqlite): string
 {
