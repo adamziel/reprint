@@ -881,8 +881,8 @@ class ImportClient
     /** @var string Path to .import-download-list.jsonl — files to download, computed by diffing remote vs local index. */
     private $download_list_file;
 
-    /** @var string Path to .import-download-list-deferred.jsonl — deferred uploads to download after essential files. */
-    private $deferred_download_list_file;
+    /** @var string Path to .import-download-list-skipped.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
+    private $skipped_download_list_file;
 
     /** @var string Path to .import-audit.log — append-only log of every operation for debugging. */
     private $audit_log;
@@ -943,23 +943,16 @@ class ImportClient
     private $docroot_nonempty_behavior = 'error';
 
     /**
-     * When true, the diff phase routes uploads into a separate deferred
-     * download list so that essential files (code, config, themes, plugins)
-     * are fetched first.  The pipeline then transitions through a
-     * "fetch-deferred" stage for uploads, giving the orchestrator a clear
-     * signal to bring the site online between the two fetches.
+     * Controls which files are downloaded during files-sync.
      *
-     * Set via --defer-uploads, persisted in state so it survives across invocations.
+     *   "none"             — download everything (default)
+     *   "essential-files"  — skip uploads, download only code/config/themes/plugins
+     *   "skipped-earlier"  — download only files that a prior --filter=essential-files skipped
+     *
+     * Set via --filter=<value>, persisted in state so it survives across
+     * resume cycles within the same run.
      */
-    private $defer_uploads = false;
-
-    /**
-     * True when --defer-uploads was explicitly passed on THIS invocation
-     * (as opposed to being restored from persisted state).  Used to
-     * distinguish "user wants to keep deferring" from "user just didn't
-     * pass the flag" when the sync is already complete.
-     */
-    private $defer_uploads_explicit = false;
+    private $filter = "none";
 
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
@@ -1028,8 +1021,8 @@ class ImportClient
             $this->state_dir . "/.import-remote-index.jsonl";
         $this->download_list_file =
             $this->state_dir . "/.import-download-list.jsonl";
-        $this->deferred_download_list_file =
-            $this->state_dir . "/.import-download-list-deferred.jsonl";
+        $this->skipped_download_list_file =
+            $this->state_dir . "/.import-download-list-skipped.jsonl";
         $this->audit_log = $this->state_dir . "/.import-audit.log";
         $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
         $this->status_file = $this->state_dir . "/.import-status.json";
@@ -1361,16 +1354,17 @@ class ImportClient
             $this->docroot_nonempty_behavior = $this->state["docroot_nonempty_behavior"] ?? 'error';
         }
 
-        // Persist defer_uploads in state so it survives across invocations.
-        // When enabled, essential files are fetched before uploads so the
-        // orchestrator can bring the site online before media downloads finish.
-        if (isset($options["defer_uploads"])) {
-            $this->defer_uploads = (bool) $options["defer_uploads"];
-            $this->defer_uploads_explicit = true;
-            $this->state["defer_uploads"] = $this->defer_uploads;
+        // Persist filter in state so it survives across resume cycles.
+        //
+        //   --filter=none             download everything (default)
+        //   --filter=essential-files   skip uploads, download code/config/themes/plugins
+        //   --filter=skipped-earlier   download only files skipped by a prior essential-files run
+        if (isset($options["filter"])) {
+            $this->filter = $options["filter"];
+            $this->state["filter"] = $this->filter;
             $this->save_state($this->state);
-        } elseif (isset($this->state["defer_uploads"])) {
-            $this->defer_uploads = (bool) $this->state["defer_uploads"];
+        } elseif (isset($this->state["filter"])) {
+            $this->filter = $this->state["filter"];
         }
 
         // Persist max_allowed_packet in state so it survives across invocations.
@@ -1610,9 +1604,9 @@ class ImportClient
                     @unlink($this->download_list_file);
                     $this->audit_log("FILE DELETE | {$this->download_list_file}");
                 }
-                if (file_exists($this->deferred_download_list_file)) {
-                    @unlink($this->deferred_download_list_file);
-                    $this->audit_log("FILE DELETE | {$this->deferred_download_list_file}");
+                if (file_exists($this->skipped_download_list_file)) {
+                    @unlink($this->skipped_download_list_file);
+                    $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
                 }
                 if (file_exists($this->volatile_files_file)) {
                     @unlink($this->volatile_files_file);
@@ -1620,7 +1614,7 @@ class ImportClient
                 }
                 $this->state["index"] = $this->default_state()["index"];
                 $this->state["fetch"] = $this->default_state()["fetch"];
-                $this->state["fetch_deferred"] = $this->default_state()["fetch_deferred"];
+                $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
 
                 $this->save_state($this->state);
                 break;
@@ -2289,33 +2283,30 @@ class ImportClient
         $this->recover_index_updates();
 
         // Already completed.
-        //
-        // If there is a deferred download list on disk and the user is no
-        // longer deferring uploads (--defer-uploads was removed or
-        // --no-defer-uploads was passed), transition straight into the
-        // fetch-deferred stage to download the uploads now.
-        //
-        // Otherwise, refuse to proceed without --abort.
         if ($current_status === "complete") {
-            $has_deferred =
-                file_exists($this->deferred_download_list_file) &&
-                filesize($this->deferred_download_list_file) > 0;
+            $has_skipped =
+                file_exists($this->skipped_download_list_file) &&
+                filesize($this->skipped_download_list_file) > 0;
 
-            // Check whether --defer-uploads was explicitly passed on THIS
-            // invocation.  If the user simply omitted the flag, the persisted
-            // state still says defer_uploads=true — but omitting the flag on
-            // a completed sync means "I'm ready to download uploads now."
-            $explicitly_deferring = $this->defer_uploads_explicit && $this->defer_uploads;
-            if ($has_deferred && !$explicitly_deferring) {
+            // --filter=skipped-earlier: download only the files that a prior
+            // --filter=essential-files run skipped.  This is the only way to
+            // resume downloading those files — no implicit behavior.
+            if ($this->filter === "skipped-earlier") {
+                if (!$has_skipped) {
+                    throw new RuntimeException(
+                        "--filter=skipped-earlier was requested but there is no skipped file list. " .
+                            "Run files-sync with --filter=essential-files first.",
+                    );
+                }
                 $this->audit_log(
-                    "RESUME DEFERRED | files-sync was complete but deferred uploads remain — downloading now",
+                    "FETCH SKIPPED | files-sync was complete — downloading previously skipped files",
                     true,
                 );
                 if ($this->is_tty && !$this->verbose_mode) {
-                    fwrite($this->progress_fd, "Downloading deferred uploads\n");
+                    fwrite($this->progress_fd, "Downloading previously skipped files\n");
                 }
                 $this->state["status"] = "in_progress";
-                $this->state["stage"] = "fetch-deferred";
+                $this->state["stage"] = "fetch-skipped";
                 $this->save_state($this->state);
                 $this->run_files_sync_pipeline();
                 return;
@@ -2324,23 +2315,33 @@ class ImportClient
             $index_size = $this->index_count();
             $this->clear_progress_line();
 
-            $deferred_note = $has_deferred
-                ? " (uploads deferred — re-run without --defer-uploads to download them)"
+            $skipped_note = $has_skipped
+                ? " (some files were skipped — re-run with --filter=skipped-earlier to download them)"
                 : "";
             $this->audit_log(
-                sprintf("files-sync already complete: %d files indexed%s", $index_size, $deferred_note),
+                sprintf("files-sync already complete: %d files indexed%s", $index_size, $skipped_note),
                 true,
             );
 
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "files-sync already complete: {$index_size} files indexed\n");
-                if ($has_deferred) {
-                    fwrite($this->progress_fd, "Uploads were deferred. Re-run without --defer-uploads to download them.\n");
+                if ($has_skipped) {
+                    fwrite($this->progress_fd, "Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
                 } else {
                     fwrite($this->progress_fd, "To re-sync, run with --abort first to clear state.\n");
                 }
             }
             return;
+        }
+
+        // --filter=skipped-earlier is only valid after a completed
+        // --filter=essential-files run.  It doesn't make sense as a fresh
+        // start or resume of an in-progress sync.
+        if ($this->filter === "skipped-earlier") {
+            throw new RuntimeException(
+                "--filter=skipped-earlier was requested but there is no completed sync with skipped files. " .
+                    "Run files-sync with --filter=essential-files first.",
+            );
         }
 
         $is_empty =
@@ -2389,7 +2390,7 @@ class ImportClient
             $this->state["diff"] = $this->default_state()["diff"];
             $this->state["index"] = $this->default_state()["index"];
             $this->state["fetch"] = $this->default_state()["fetch"];
-            $this->state["fetch_deferred"] = $this->default_state()["fetch_deferred"];
+            $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
             $this->save_state($this->state);
 
             if ($is_delta) {
@@ -2482,10 +2483,10 @@ class ImportClient
                     "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
                 );
             }
-            if (file_exists($this->deferred_download_list_file)) {
-                @unlink($this->deferred_download_list_file);
+            if (file_exists($this->skipped_download_list_file)) {
+                @unlink($this->skipped_download_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->deferred_download_list_file} | clearing before diff stage",
+                    "FILE DELETE | {$this->skipped_download_list_file} | clearing before diff stage",
                 );
             }
             $this->save_state($this->state);
@@ -2503,15 +2504,15 @@ class ImportClient
             $has_downloads =
                 file_exists($this->download_list_file) &&
                 filesize($this->download_list_file) > 0;
-            $has_deferred =
-                file_exists($this->deferred_download_list_file) &&
-                filesize($this->deferred_download_list_file) > 0;
+            $has_skipped =
+                file_exists($this->skipped_download_list_file) &&
+                filesize($this->skipped_download_list_file) > 0;
 
             // Determine the first fetch stage to run.
             if ($has_downloads) {
                 $stage = "fetch";
-            } elseif ($has_deferred) {
-                $stage = "fetch-deferred";
+            } elseif ($has_skipped) {
+                $stage = "fetch-skipped";
             } else {
                 $stage = null;
             }
@@ -2524,24 +2525,24 @@ class ImportClient
                     "FILE DELETE | {$this->download_list_file} | no files to fetch",
                 );
             }
-            if (!$has_deferred && file_exists($this->deferred_download_list_file)) {
-                @unlink($this->deferred_download_list_file);
+            if (!$has_skipped && file_exists($this->skipped_download_list_file)) {
+                @unlink($this->skipped_download_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->deferred_download_list_file} | no deferred files to fetch",
+                    "FILE DELETE | {$this->skipped_download_list_file} | no skipped files to fetch",
                 );
             }
         }
 
-        // When --defer-uploads is newly enabled on a resume where the diff
+        // When --filter=essential-files is added on a resume where the diff
         // already ran without it, uploads are mixed into the main download
-        // list.  Re-split the remaining entries so uploads go to the deferred
+        // list.  Re-split the remaining entries so uploads go to the skipped
         // list and essential files stay in the main list.
         if (
             $stage === "fetch" &&
-            $this->defer_uploads &&
-            !file_exists($this->deferred_download_list_file)
+            $this->filter === "essential-files" &&
+            !file_exists($this->skipped_download_list_file)
         ) {
-            $this->split_download_list_for_deferred();
+            $this->split_download_list_for_skipped();
         }
 
         if ($stage === "fetch") {
@@ -2563,28 +2564,28 @@ class ImportClient
                 );
             }
 
-            $has_deferred =
-                file_exists($this->deferred_download_list_file) &&
-                filesize($this->deferred_download_list_file) > 0;
+            $has_skipped =
+                file_exists($this->skipped_download_list_file) &&
+                filesize($this->skipped_download_list_file) > 0;
 
-            if ($has_deferred && $this->defer_uploads) {
-                // Uploads are deferred — mark the sync as complete now.
-                // The deferred list stays on disk so a later run without
-                // --defer-uploads can pick it up and download the uploads.
+            if ($has_skipped && $this->filter === "essential-files") {
+                // Essential files are done — mark the sync as complete.
+                // The skipped list stays on disk for a later
+                // --filter=skipped-earlier run.
                 $this->state["stage"] = null;
                 $this->save_state($this->state);
                 $this->audit_log(
-                    "ESSENTIAL FILES COMPLETE | uploads deferred — not downloading until --defer-uploads is removed",
+                    "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_download_list_file} — run with --filter=skipped-earlier to download them",
                     true,
                 );
                 $stage = null;
-            } elseif ($has_deferred) {
-                // Deferred list exists but defer_uploads is off — download now.
-                $this->state["stage"] = "fetch-deferred";
+            } elseif ($has_skipped) {
+                // Skipped list exists but filter is "none" — download now.
+                $this->state["stage"] = "fetch-skipped";
                 $this->save_state($this->state);
-                $stage = "fetch-deferred";
+                $stage = "fetch-skipped";
                 $this->audit_log(
-                    "ESSENTIAL FILES COMPLETE | transitioning to deferred uploads",
+                    "ESSENTIAL FILES COMPLETE | transitioning to skipped files",
                     true,
                 );
                 $this->write_status_file();
@@ -2595,10 +2596,10 @@ class ImportClient
             }
         }
 
-        if ($stage === "fetch-deferred") {
+        if ($stage === "fetch-skipped") {
             $complete = $this->download_files_from_list(
-                $this->deferred_download_list_file,
-                "fetch_deferred",
+                $this->skipped_download_list_file,
+                "fetch_skipped",
             );
             if (!$complete) {
                 $this->state["status"] = "partial";
@@ -2606,13 +2607,13 @@ class ImportClient
                 return;
             }
             $this->state["stage"] = null;
-            $this->state["fetch_deferred"] = $this->default_state()["fetch_deferred"];
+            $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
             $this->save_state($this->state);
 
-            if (file_exists($this->deferred_download_list_file)) {
-                @unlink($this->deferred_download_list_file);
+            if (file_exists($this->skipped_download_list_file)) {
+                @unlink($this->skipped_download_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->deferred_download_list_file} | deferred fetch complete",
+                    "FILE DELETE | {$this->skipped_download_list_file} | skipped files fetch complete",
                 );
             }
         }
@@ -3314,8 +3315,8 @@ class ImportClient
         // Files before the fetch byte offset have already been downloaded.
         $pending_count = 0;
         $pending_bytes = 0;
-        $deferred_pending_count = 0;
-        $deferred_pending_bytes = 0;
+        $skipped_pending_count = 0;
+        $skipped_pending_bytes = 0;
 
         // Count pending in the main download list
         $fetch_offset = $this->state["fetch"]["offset"] ?? 0;
@@ -3349,14 +3350,14 @@ class ImportClient
             }
         }
 
-        // Count pending in the deferred download list (uploads)
-        $deferred_offset = $this->state["fetch_deferred"]["offset"] ?? 0;
-        $deferred_list = $this->deferred_download_list_file;
-        if (is_file($deferred_list)) {
-            $handle = fopen($deferred_list, "r");
+        // Count pending in the skipped download list (uploads filtered out by --filter=essential-files)
+        $skipped_offset = $this->state["fetch_skipped"]["offset"] ?? 0;
+        $skipped_list = $this->skipped_download_list_file;
+        if (is_file($skipped_list)) {
+            $handle = fopen($skipped_list, "r");
             if ($handle) {
-                if ($deferred_offset > 0) {
-                    fseek($handle, $deferred_offset);
+                if ($skipped_offset > 0) {
+                    fseek($handle, $skipped_offset);
                 }
                 while (($line = fgets($handle)) !== false) {
                     $line = trim($line);
@@ -3372,8 +3373,8 @@ class ImportClient
                     if ($path === false || $path === "") {
                         continue;
                     }
-                    $deferred_pending_count++;
-                    $deferred_pending_bytes += $size_by_path[$path] ?? 0;
+                    $skipped_pending_count++;
+                    $skipped_pending_bytes += $size_by_path[$path] ?? 0;
                 }
                 fclose($handle);
             }
@@ -3389,10 +3390,10 @@ class ImportClient
                 "bytes" => $pending_bytes,
             ],
         ];
-        if ($deferred_pending_count > 0 || is_file($deferred_list)) {
-            $result["pending_deferred"] = [
-                "files" => $deferred_pending_count,
-                "bytes" => $deferred_pending_bytes,
+        if ($skipped_pending_count > 0 || is_file($skipped_list)) {
+            $result["pending_skipped"] = [
+                "files" => $skipped_pending_count,
+                "bytes" => $skipped_pending_bytes,
             ];
         }
 
@@ -5244,28 +5245,28 @@ class ImportClient
             throw new RuntimeException("Failed to open download list file");
         }
 
-        // When --defer-uploads is active, uploads go to a separate list so
-        // essential files (code, config, themes, plugins) are fetched first.
-        $deferred_handle = null;
+        // When --filter=essential-files is active, uploads go to a separate
+        // "skipped" list so only essential files are fetched in this run.
+        $skipped_handle = null;
         $uploads_basedir = null;
-        if ($this->defer_uploads) {
+        if ($this->filter === "essential-files") {
             if ($download_mode === "w") {
                 $this->audit_log(
-                    "FILE CREATE | {$this->deferred_download_list_file} | building deferred download list (uploads)",
+                    "FILE CREATE | {$this->skipped_download_list_file} | building skipped download list (uploads)",
                 );
             } else {
                 $this->audit_log(
-                    "FILE APPEND | {$this->deferred_download_list_file} | resuming deferred download list build",
+                    "FILE APPEND | {$this->skipped_download_list_file} | resuming skipped download list build",
                 );
             }
-            $deferred_handle = fopen($this->deferred_download_list_file, $download_mode);
-            if (!$deferred_handle) {
+            $skipped_handle = fopen($this->skipped_download_list_file, $download_mode);
+            if (!$skipped_handle) {
                 fclose($download_handle);
-                throw new RuntimeException("Failed to open deferred download list file");
+                throw new RuntimeException("Failed to open skipped download list file");
             }
             $uploads_basedir = $this->get_uploads_basedir();
             $this->audit_log(
-                "DEFER-UPLOADS | uploads_basedir=" . ($uploads_basedir ?? "(fallback: wp-content/uploads/)"),
+                "FILTER | essential-files | uploads_basedir=" . ($uploads_basedir ?? "(fallback: wp-content/uploads/)"),
             );
         }
 
@@ -5328,8 +5329,8 @@ class ImportClient
                     // Always re-download — this file is in our local index,
                     // meaning we synced it before; preserve-local does not
                     // protect files we own.
-                    $target_handle = ($deferred_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
-                        ? $deferred_handle
+                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                        ? $skipped_handle
                         : $download_handle;
                     $this->append_download_list(
                         $remote["path"],
@@ -5347,8 +5348,8 @@ class ImportClient
                     $this->audit_log($skip_reason, true);
                     $this->show_progress_line("[skip] " . $this->display_path($remote["path"]));
                 } else {
-                    $target_handle = ($deferred_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
-                        ? $deferred_handle
+                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                        ? $skipped_handle
                         : $download_handle;
                     $this->append_download_list($remote["path"], $target_handle);
                 }
@@ -5376,8 +5377,8 @@ class ImportClient
         }
         fclose($remote_handle);
         fclose($download_handle);
-        if ($deferred_handle !== null) {
-            fclose($deferred_handle);
+        if ($skipped_handle !== null) {
+            fclose($skipped_handle);
         }
 
         $this->state["diff"] = [
@@ -5396,7 +5397,7 @@ class ImportClient
      *
      * @param string $list_file   Path to the JSONL download list to process.
      * @param string $state_key   Key in $this->state that holds fetch progress
-     *                            (e.g. "fetch" or "fetch_deferred").
+     *                            (e.g. "fetch" or "fetch_skipped").
      */
     private function download_files_from_list(
         string $list_file,
@@ -5650,15 +5651,15 @@ class ImportClient
     }
 
     /**
-     * Re-split an existing download list into essential files and deferred uploads.
+     * Re-split an existing download list into essential files and skipped uploads.
      *
-     * Called when --defer-uploads is enabled on a resume where the diff phase
-     * already ran without it.  Reads the main download list from the current
-     * fetch offset, writes non-upload entries to a new main list and upload
-     * entries to the deferred list, then updates the fetch state to point at
-     * the new file.
+     * Called when --filter=essential-files is added on a resume where the diff
+     * phase already ran without filtering.  Reads the main download list from
+     * the current fetch offset, writes non-upload entries to a new main list
+     * and upload entries to the skipped list, then updates the fetch state to
+     * point at the new file.
      */
-    private function split_download_list_for_deferred(): void
+    private function split_download_list_for_skipped(): void
     {
         if (!file_exists($this->download_list_file)) {
             return;
@@ -5668,7 +5669,7 @@ class ImportClient
         $uploads_basedir = $this->get_uploads_basedir();
 
         $this->audit_log(
-            "DEFER-UPLOADS | re-splitting download list from offset={$fetch_offset}"
+            "FILTER | re-splitting download list from offset={$fetch_offset}"
             . " | uploads_basedir=" . ($uploads_basedir ?? "(fallback: wp-content/uploads/)"),
         );
 
@@ -5683,16 +5684,16 @@ class ImportClient
 
         $new_main = $this->download_list_file . ".split-tmp";
         $main_handle = fopen($new_main, "w");
-        $deferred_handle = fopen($this->deferred_download_list_file, "w");
-        if (!$main_handle || !$deferred_handle) {
+        $skipped_handle = fopen($this->skipped_download_list_file, "w");
+        if (!$main_handle || !$skipped_handle) {
             fclose($source);
             if ($main_handle) { fclose($main_handle); @unlink($new_main); }
-            if ($deferred_handle) { fclose($deferred_handle); @unlink($this->deferred_download_list_file); }
+            if ($skipped_handle) { fclose($skipped_handle); @unlink($this->skipped_download_list_file); }
             return;
         }
 
         $essential_count = 0;
-        $deferred_count = 0;
+        $skipped_count = 0;
         while (($line = fgets($source)) !== false) {
             $trimmed = trim($line);
             if ($trimmed === "") {
@@ -5703,8 +5704,8 @@ class ImportClient
             $path = base64_decode($path_encoded, true);
 
             if ($path !== false && $this->is_uploads_path($path, $uploads_basedir)) {
-                fwrite($deferred_handle, $trimmed . "\n");
-                $deferred_count++;
+                fwrite($skipped_handle, $trimmed . "\n");
+                $skipped_count++;
             } else {
                 fwrite($main_handle, $trimmed . "\n");
                 $essential_count++;
@@ -5713,7 +5714,7 @@ class ImportClient
 
         fclose($source);
         fclose($main_handle);
-        fclose($deferred_handle);
+        fclose($skipped_handle);
 
         // Replace the original download list with the filtered version.
         // Prefix it with the already-fetched portion (bytes before fetch_offset)
@@ -5759,13 +5760,13 @@ class ImportClient
             rename($new_main, $this->download_list_file);
         }
 
-        // Clean up deferred list if it's empty
-        if ($deferred_count === 0) {
-            @unlink($this->deferred_download_list_file);
+        // Clean up skipped list if it's empty
+        if ($skipped_count === 0) {
+            @unlink($this->skipped_download_list_file);
         }
 
         $this->audit_log(
-            "DEFER-UPLOADS | split complete: {$essential_count} essential, {$deferred_count} deferred",
+            "FILTER | split complete: {$essential_count} essential, {$skipped_count} skipped",
             true,
         );
         $this->save_state($this->state);
@@ -8715,7 +8716,7 @@ class ImportClient
             "webhost" => null,
             "follow_symlinks" => true,
             "docroot_nonempty_behavior" => "error",
-            "defer_uploads" => false,
+            "filter" => "none",
             "max_allowed_packet" => null,
             "db_index" => [
                 "file" => null,
@@ -8737,7 +8738,7 @@ class ImportClient
                 "batch_file" => null,
                 "cursor" => null,
             ],
-            "fetch_deferred" => [
+            "fetch_skipped" => [
                 "offset" => 0,
                 "next_offset" => 0,
                 "batch_file" => null,
@@ -9389,26 +9390,25 @@ if (
                 "\n" .
                 "Options:\n" .
                 "  --abort              Abort current sync and exit (keeps files and index)\n" .
-                "  --defer-uploads      Download essential files first, defer uploads to a second pass\n" .
+                "  --filter=MODE        Filter which files to download (none|essential-files|skipped-earlier)\n" .
                 "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n" .
                 "  --on-docroot-nonempty=MODE\n" .
                 "                       What to do when docroot is non-empty (error|preserve-local)\n" .
                 "  --secret=TOKEN       HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v        Show detailed request/response logs\n" .
                 "\n" .
-                "With --defer-uploads, only non-upload files are downloaded (code, config,\n" .
-                "themes, plugins). Uploads are skipped and listed in a deferred download\n" .
-                "list. The sync completes without downloading any media.\n" .
-                "\n" .
-                "To download the uploads later, re-run without --defer-uploads. The importer\n" .
-                "detects the deferred list and downloads only the uploads. No --abort needed.\n" .
+                "Filter modes:\n" .
+                "  none             Download all files (default)\n" .
+                "  essential-files   Skip uploads, download only code/config/themes/plugins.\n" .
+                "                    The skipped file list is saved for later retrieval.\n" .
+                "  skipped-earlier   Download only files skipped by a prior essential-files run.\n" .
                 "\n" .
                 "Output files:\n" .
                 "  (docroot)/                              Downloaded files\n" .
                 "  .import-index.jsonl                     Local file index\n" .
                 "  .import-remote-index.jsonl              Remote index snapshot\n" .
                 "  .import-download-list.jsonl             Files pending download\n" .
-                "  .import-download-list-deferred.jsonl    Deferred uploads (when --defer-uploads)\n" .
+                "  .import-download-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
                 "  .import-state.json                      Resumable state\n" .
                 "  .import-audit.log                       Audit log\n",
         ],
@@ -9732,10 +9732,14 @@ if (
             $options["follow_symlinks"] = true;
         } elseif ($argv[$i] === "--no-follow-symlinks") {
             $options["follow_symlinks"] = false;
-        } elseif ($argv[$i] === "--defer-uploads") {
-            $options["defer_uploads"] = true;
-        } elseif ($argv[$i] === "--no-defer-uploads") {
-            $options["defer_uploads"] = false;
+        } elseif (strpos($argv[$i], "--filter=") === 0) {
+            $filter_value = substr($argv[$i], strlen("--filter="));
+            $valid_filters = ["none", "essential-files", "skipped-earlier"];
+            if (!in_array($filter_value, $valid_filters, true)) {
+                fwrite(STDERR, "Invalid --filter value: {$filter_value}. Valid values: " . implode(", ", $valid_filters) . "\n");
+                exit(1);
+            }
+            $options["filter"] = $filter_value;
         } elseif (strpos($argv[$i], "--on-docroot-nonempty=") === 0) {
             $options["docroot_nonempty_behavior"] = substr(
                 $argv[$i],

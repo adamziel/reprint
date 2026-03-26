@@ -103,29 +103,34 @@ the `--on-docroot-nonempty` flag controls this behavior. It takes the following 
 - `--on-docroot-nonempty=error` (default): throw an error and abort.
 - `--on-docroot-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
 
-**Deferred uploads**
+**Filtering files**
 
-Large media libraries can contain tens of gigabytes of images and videos that aren't needed for the site to function.
-With `--defer-uploads`, the importer splits the download into two stages so you can bring the site online sooner:
-
-```bash
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" --defer-uploads
-```
-
-The pipeline proceeds as usual through indexing and diffing, but only downloads non-upload files
-(code, config, themes, plugins). When the essential files are done, the sync marks itself **complete**
-and stops — uploads are not downloaded. The deferred file list stays on disk at
-`.import-download-list-deferred.jsonl`.
-
-To download the uploads later, re-run the same command without `--defer-uploads`:
+The `--filter` flag controls which files are downloaded. This is useful when the media library is large
+and you want to bring the site online before downloading all the uploads:
 
 ```bash
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+# Step 1: download only essential files (code, config, themes, plugins)
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+    --filter=essential-files
 ```
 
-The importer detects the deferred list and downloads the uploads. No `--abort` needed.
+The pipeline proceeds as usual through indexing and diffing, but skips uploads. When the essential
+files are done, the sync marks itself **complete**. The skipped file list stays on disk at
+`.import-download-list-skipped.jsonl`. At this point you can apply the database and bring the site online.
 
-The uploads directory is detected from the preflight data (`uploads.basedir`), falling back to
+```bash
+# Step 2: download the uploads
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+    --filter=skipped-earlier
+```
+
+The three filter values:
+
+- `--filter=none` (default): download all files.
+- `--filter=essential-files`: skip uploads, download only code/config/themes/plugins.
+- `--filter=skipped-earlier`: download only files that a prior `--filter=essential-files` run skipped.
+
+The uploads directory is detected from preflight data (`uploads.basedir`), falling back to
 `wp-content/uploads/` if unavailable.
 
 #### Step 3 — Download the database.
@@ -349,7 +354,7 @@ The file contains a flat JSON object:
 | `steps`   | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
 | `command` | `string \| null`  | Current command name (`preflight`, `files-sync`, `db-sync`, etc.). |
 | `status`  | `string`          | One of `in_progress`, `partial`, `complete`, `error`, `aborted`. |
-| `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`, `fetch-deferred`), or `null`. Derived from the internal state's `stage` field. |
+| `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`, `fetch-skipped`), or `null`. Derived from the internal state's `stage` field. |
 | `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
 | `ts`      | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
 
@@ -390,14 +395,14 @@ If the JSON is invalid on load, the importer renames it to
   "index": {
     "cursor": "..."               // file_index cursor
   },
-  "defer_uploads": false,         // --defer-uploads flag (persisted)
+  "filter": "none",               // "none" | "essential-files" | "skipped-earlier"
   "fetch": {
     "offset": 512,                // byte offset into download list
     "next_offset": 1024,
     "batch_file": null,
     "cursor": "..."               // file_fetch cursor
   },
-  "fetch_deferred": {             // only used when defer_uploads is true
+  "fetch_skipped": {              // used when --filter=skipped-earlier
     "offset": 0,
     "next_offset": 0,
     "batch_file": null,

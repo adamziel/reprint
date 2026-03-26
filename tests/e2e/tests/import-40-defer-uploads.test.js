@@ -1,23 +1,13 @@
 /**
- * Test 40: --defer-uploads
+ * Test 40: --filter=essential-files / --filter=skipped-earlier
  *
- * Tests that --defer-uploads skips uploads during files-sync and only
- * downloads them when the flag is removed on a subsequent run.
+ * Tests that --filter=essential-files skips uploads during files-sync
+ * and that --filter=skipped-earlier downloads them in a separate run.
  *
  * The remote site has:
  *   - Standard WordPress files (wp-admin, wp-includes, wp-content/themes, etc.)
  *   - Test data files
  *   - Explicit upload files under wp-content/uploads/2024/{01,06}/
- *
- * With --defer-uploads, the importer should:
- *   1. Route uploads to .import-download-list-deferred.jsonl during diff
- *   2. Download non-upload files only (fetch stage)
- *   3. Complete — uploads are NOT downloaded
- *   4. Leave the deferred list on disk
- *
- * Without --defer-uploads on the next run:
- *   5. Detect the deferred list and download uploads (fetch-deferred stage)
- *   6. Clean up the deferred list
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -40,14 +30,14 @@ const UPLOAD_FILES = [
     'wp-content/uploads/2024/06/summer.jpg',
 ];
 
-describe('Import: --defer-uploads', () => {
+describe('Import: --filter', () => {
     const site = 'defer-uploads';
     let siteDir;
 
     beforeAll(async () => {
         await ensureSite(site, {
             afterCreate: async (remoteSiteDir) => {
-                // Create upload files that should be deferred
+                // Create upload files that should be filtered out by essential-files
                 const uploadsDir = join(remoteSiteDir, 'wp-content', 'uploads', '2024', '01');
                 mkdirSync(uploadsDir, { recursive: true });
                 writeFileSync(join(uploadsDir, 'photo.jpg'), randomBytes(4096));
@@ -67,44 +57,44 @@ describe('Import: --defer-uploads', () => {
     }
 
     // ------------------------------------------------------------------
-    // Test: --defer-uploads skips uploads, second run downloads them
+    // Test: essential-files skips uploads, skipped-earlier downloads them
     // ------------------------------------------------------------------
-    describe('deferred uploads: skip then download', () => {
+    describe('essential-files then skipped-earlier', () => {
         let tempDir;
 
         beforeAll(() => {
-            tempDir = createTempDir('e2e-defer-uploads-basic');
+            tempDir = createTempDir('e2e-filter-essential');
         });
 
         afterAll(() => {
             cleanupTempDir(tempDir);
         });
 
-        it('files-sync with --defer-uploads completes', () => {
+        it('--filter=essential-files completes', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--defer-uploads'],
+                extraArgs: ['--filter=essential-files'],
             });
             assert.equal(result.exitCode, 0,
                 `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('state shows complete with defer_uploads persisted', () => {
+        it('state shows complete with filter persisted', () => {
             const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
             assert.equal(state.command, 'files-sync');
             assert.equal(state.status, 'complete');
-            assert.equal(state.defer_uploads, true);
+            assert.equal(state.filter, 'essential-files');
         });
 
-        it('upload files are NOT in the docroot yet', () => {
+        it('upload files are NOT in the docroot', () => {
             const importedRoot = join(docrootDir(tempDir), siteDir);
             for (const f of UPLOAD_FILES) {
                 assert.ok(!existsSync(join(importedRoot, f)),
-                    `Expected upload file to NOT exist yet: ${f}`);
+                    `Expected upload file to NOT exist: ${f}`);
             }
         });
 
-        it('essential files (non-uploads) were downloaded', () => {
+        it('essential files were downloaded', () => {
             const importedRoot = join(docrootDir(tempDir), siteDir);
             assert.ok(existsSync(join(importedRoot, 'wp-load.php')),
                 'Expected wp-load.php to exist');
@@ -114,24 +104,22 @@ describe('Import: --defer-uploads', () => {
                 'Expected test-data/hello.txt to exist');
         });
 
-        it('deferred download list remains on disk', () => {
-            const deferredList = join(tempDir, '.import-download-list-deferred.jsonl');
-            assert.ok(existsSync(deferredList),
-                'Expected deferred download list to remain on disk');
+        it('skipped download list remains on disk', () => {
+            assert.ok(existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
+                'Expected skipped download list to remain on disk');
         });
 
-        it('audit log shows uploads were deferred', () => {
+        it('audit log shows essential files complete', () => {
             const audit = readAuditLog(tempDir);
             assert.ok(audit.includes('ESSENTIAL FILES COMPLETE'),
                 'Expected ESSENTIAL FILES COMPLETE in audit log');
-            assert.ok(audit.includes('uploads deferred'),
-                'Expected "uploads deferred" in audit log');
         });
 
-        // Now run again without --defer-uploads to download the uploads
-        it('re-running without --defer-uploads downloads the uploads', () => {
+        // Now download the skipped files
+        it('--filter=skipped-earlier downloads the uploads', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
+                extraArgs: ['--filter=skipped-earlier'],
             });
             assert.equal(result.exitCode, 0,
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -141,14 +129,13 @@ describe('Import: --defer-uploads', () => {
             const importedRoot = join(docrootDir(tempDir), siteDir);
             for (const f of UPLOAD_FILES) {
                 assert.ok(existsSync(join(importedRoot, f)),
-                    `Expected upload file to exist after second run: ${f}`);
+                    `Expected upload file to exist after skipped-earlier: ${f}`);
             }
         });
 
-        it('deferred download list was cleaned up', () => {
-            const deferredList = join(tempDir, '.import-download-list-deferred.jsonl');
-            assert.ok(!existsSync(deferredList),
-                'Expected deferred download list to be cleaned up after uploads downloaded');
+        it('skipped download list was cleaned up', () => {
+            assert.ok(!existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
+                'Expected skipped download list to be cleaned up');
         });
 
         it('all files match source', () => {
@@ -158,13 +145,13 @@ describe('Import: --defer-uploads', () => {
     });
 
     // ------------------------------------------------------------------
-    // Test: --defer-uploads survives resume cycles (essential files only)
+    // Test: essential-files survives resume cycles
     // ------------------------------------------------------------------
-    describe('--defer-uploads survives resume', () => {
+    describe('--filter=essential-files survives resume', () => {
         let tempDir;
 
         beforeAll(() => {
-            tempDir = createTempDir('e2e-defer-uploads-resume');
+            tempDir = createTempDir('e2e-filter-resume');
         });
 
         afterAll(() => {
@@ -174,16 +161,16 @@ describe('Import: --defer-uploads', () => {
         it('completes with forced resume via --max-exec=3', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--defer-uploads', '--max-exec=3'],
+                extraArgs: ['--filter=essential-files', '--max-exec=3'],
                 timeout: 120000,
             });
             assert.equal(result.exitCode, 0,
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('state preserves defer_uploads across resume cycles', () => {
+        it('state preserves filter across resume cycles', () => {
             const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-            assert.equal(state.defer_uploads, true);
+            assert.equal(state.filter, 'essential-files');
             assert.equal(state.status, 'complete');
         });
 
@@ -195,27 +182,27 @@ describe('Import: --defer-uploads', () => {
             }
         });
 
-        it('deferred list remains on disk', () => {
-            assert.ok(existsSync(join(tempDir, '.import-download-list-deferred.jsonl')),
-                'Expected deferred download list to remain');
+        it('skipped list remains on disk', () => {
+            assert.ok(existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
+                'Expected skipped download list to remain');
         });
     });
 
     // ------------------------------------------------------------------
-    // Test: without --defer-uploads, everything downloads in one shot
+    // Test: without --filter, everything downloads in one shot
     // ------------------------------------------------------------------
-    describe('without --defer-uploads, no deferred list', () => {
+    describe('no filter downloads everything', () => {
         let tempDir;
 
         beforeAll(() => {
-            tempDir = createTempDir('e2e-defer-uploads-disabled');
+            tempDir = createTempDir('e2e-filter-none');
         });
 
         afterAll(() => {
             cleanupTempDir(tempDir);
         });
 
-        it('files-sync without --defer-uploads completes', () => {
+        it('files-sync without --filter completes', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
             });
@@ -223,10 +210,9 @@ describe('Import: --defer-uploads', () => {
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('no deferred download list was created', () => {
-            const deferredList = join(tempDir, '.import-download-list-deferred.jsonl');
-            assert.ok(!existsSync(deferredList),
-                'Expected no deferred download list without --defer-uploads');
+        it('no skipped download list was created', () => {
+            assert.ok(!existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
+                'Expected no skipped download list without --filter');
         });
 
         it('uploads were downloaded normally', () => {
@@ -238,4 +224,32 @@ describe('Import: --defer-uploads', () => {
         });
     });
 
+    // ------------------------------------------------------------------
+    // Test: --filter=skipped-earlier without prior essential-files errors
+    // ------------------------------------------------------------------
+    describe('skipped-earlier without prior essential-files errors', () => {
+        let tempDir;
+
+        beforeAll(() => {
+            tempDir = createTempDir('e2e-filter-skipped-no-prior');
+        });
+
+        afterAll(() => {
+            cleanupTempDir(tempDir);
+        });
+
+        it('errors when no prior essential-files run exists', () => {
+            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+                secret: getSiteSecret(site),
+                extraArgs: ['--filter=skipped-earlier'],
+                autoResume: false,
+            });
+            assert.equal(result.exitCode, 1,
+                `Expected exit 1\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+            assert.ok(
+                result.stderr.includes('skipped-earlier') || result.stderr.includes('essential-files'),
+                `Expected error about missing essential-files run, got: ${result.stderr}`,
+            );
+        });
+    });
 });
