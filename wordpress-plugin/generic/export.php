@@ -1664,13 +1664,13 @@ function endpoint_preflight(array $config): array
                                 ? content_url()
                                 : (defined("WP_CONTENT_URL") ? WP_CONTENT_URL : null),
                             "plugins_dir" => defined("WP_PLUGIN_DIR")
-                                ? rtrim(WP_PLUGIN_DIR, "/")
+                                ? realpath(rtrim(WP_PLUGIN_DIR, "/"))
                                 : null,
                             "plugins_url" => function_exists("plugins_url")
                                 ? plugins_url()
                                 : (defined("WP_PLUGIN_URL") ? WP_PLUGIN_URL : null),
                             "mu_plugins_dir" => defined("WPMU_PLUGIN_DIR")
-                                ? rtrim(WPMU_PLUGIN_DIR, "/")
+                                ? realpath(rtrim(WPMU_PLUGIN_DIR, "/"))
                                 : null,
                             "mu_plugins_url" => function_exists("content_url")
                                 ? content_url("/mu-plugins")
@@ -1697,8 +1697,9 @@ function endpoint_preflight(array $config): array
                         if (function_exists("wp_upload_dir")) {
                             $uploads = wp_upload_dir(null, false);
                             if (is_array($uploads)) {
+                                $raw_basedir = $uploads["basedir"] ?? null;
                                 $paths_urls["uploads"]["basedir"] =
-                                    $uploads["basedir"] ?? null;
+                                    is_string($raw_basedir) ? realpath($raw_basedir) : null;
                                 $paths_urls["uploads"]["baseurl"] =
                                     $uploads["baseurl"] ?? null;
                                 $paths_urls["uploads"]["subdir"] =
