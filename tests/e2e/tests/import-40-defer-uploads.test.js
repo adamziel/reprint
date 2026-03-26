@@ -1,21 +1,23 @@
 /**
  * Test 40: --defer-uploads
  *
- * Tests that the --defer-uploads flag splits the file download into two
- * stages: essential files first (code, config, themes, plugins), then
- * uploads (the media library) second.
+ * Tests that --defer-uploads skips uploads during files-sync and only
+ * downloads them when the flag is removed on a subsequent run.
  *
  * The remote site has:
  *   - Standard WordPress files (wp-admin, wp-includes, wp-content/themes, etc.)
  *   - Test data files
- *   - Explicit upload files under wp-content/uploads/2024/01/
+ *   - Explicit upload files under wp-content/uploads/2024/{01,06}/
  *
  * With --defer-uploads, the importer should:
  *   1. Route uploads to .import-download-list-deferred.jsonl during diff
- *   2. Download non-upload files first (fetch stage)
- *   3. Transition to fetch-deferred stage (state file shows stage="fetch-deferred")
- *   4. Download uploads (fetch-deferred stage)
- *   5. Complete successfully with all files on disk
+ *   2. Download non-upload files only (fetch stage)
+ *   3. Complete — uploads are NOT downloaded
+ *   4. Leave the deferred list on disk
+ *
+ * Without --defer-uploads on the next run:
+ *   5. Detect the deferred list and download uploads (fetch-deferred stage)
+ *   6. Clean up the deferred list
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -30,6 +32,13 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+
+const UPLOAD_FILES = [
+    'wp-content/uploads/2024/01/photo.jpg',
+    'wp-content/uploads/2024/01/banner.png',
+    'wp-content/uploads/2024/01/document.pdf',
+    'wp-content/uploads/2024/06/summer.jpg',
+];
 
 describe('Import: --defer-uploads', () => {
     const site = 'defer-uploads';
@@ -58,9 +67,9 @@ describe('Import: --defer-uploads', () => {
     }
 
     // ------------------------------------------------------------------
-    // Test: basic --defer-uploads completes and produces correct files
+    // Test: --defer-uploads skips uploads, second run downloads them
     // ------------------------------------------------------------------
-    describe('basic deferred uploads flow', () => {
+    describe('deferred uploads: skip then download', () => {
         let tempDir;
 
         beforeAll(() => {
@@ -71,7 +80,7 @@ describe('Import: --defer-uploads', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('files-sync with --defer-uploads completes successfully', () => {
+        it('files-sync with --defer-uploads completes', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--defer-uploads'],
@@ -80,95 +89,76 @@ describe('Import: --defer-uploads', () => {
                 `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('state file shows complete with defer_uploads persisted', () => {
-            const stateFile = join(tempDir, '.import-state.json');
-            assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
-            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        it('state shows complete with defer_uploads persisted', () => {
+            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
             assert.equal(state.command, 'files-sync');
             assert.equal(state.status, 'complete');
-            assert.equal(state.defer_uploads, true,
-                'Expected defer_uploads to be persisted in state');
+            assert.equal(state.defer_uploads, true);
         });
 
-        it('all files were downloaded (essential + uploads)', () => {
+        it('upload files are NOT in the docroot yet', () => {
             const importedRoot = join(docrootDir(tempDir), siteDir);
-            assert.ok(existsSync(importedRoot), `Expected ${importedRoot} to exist`);
-            assertTreesMatch(siteDir, importedRoot);
-        });
-
-        it('upload files exist in the docroot', () => {
-            const importedRoot = join(docrootDir(tempDir), siteDir);
-            const uploadFiles = [
-                'wp-content/uploads/2024/01/photo.jpg',
-                'wp-content/uploads/2024/01/banner.png',
-                'wp-content/uploads/2024/01/document.pdf',
-                'wp-content/uploads/2024/06/summer.jpg',
-            ];
-            for (const f of uploadFiles) {
-                assert.ok(existsSync(join(importedRoot, f)),
-                    `Expected upload file to exist: ${f}`);
+            for (const f of UPLOAD_FILES) {
+                assert.ok(!existsSync(join(importedRoot, f)),
+                    `Expected upload file to NOT exist yet: ${f}`);
             }
         });
 
-        it('audit log shows deferred uploads activity', () => {
-            const audit = readAuditLog(tempDir);
-            assert.ok(audit.includes('DEFER-UPLOADS'),
-                'Expected DEFER-UPLOADS entry in audit log');
-            assert.ok(audit.includes('ESSENTIAL FILES COMPLETE'),
-                'Expected ESSENTIAL FILES COMPLETE entry in audit log');
+        it('essential files (non-uploads) were downloaded', () => {
+            const importedRoot = join(docrootDir(tempDir), siteDir);
+            assert.ok(existsSync(join(importedRoot, 'wp-load.php')),
+                'Expected wp-load.php to exist');
+            assert.ok(existsSync(join(importedRoot, 'wp-config.php')),
+                'Expected wp-config.php to exist');
+            assert.ok(existsSync(join(importedRoot, 'test-data', 'hello.txt')),
+                'Expected test-data/hello.txt to exist');
         });
 
-        it('deferred download list was cleaned up after completion', () => {
+        it('deferred download list remains on disk', () => {
             const deferredList = join(tempDir, '.import-download-list-deferred.jsonl');
-            assert.ok(!existsSync(deferredList),
-                'Expected deferred download list to be cleaned up after completion');
-        });
-    });
-
-    // ------------------------------------------------------------------
-    // Test: the two-stage transition is recorded in the audit log
-    //
-    // The audit log entry "ESSENTIAL FILES COMPLETE | transitioning to
-    // deferred uploads" proves that the pipeline went through the fetch
-    // stage, completed it, and entered the fetch-deferred stage — even
-    // when the site is small enough for both stages to finish in a
-    // single invocation.
-    // ------------------------------------------------------------------
-    describe('two-stage transition is recorded', () => {
-        let tempDir;
-
-        beforeAll(() => {
-            tempDir = createTempDir('e2e-defer-uploads-transition');
+            assert.ok(existsSync(deferredList),
+                'Expected deferred download list to remain on disk');
         });
 
-        afterAll(() => {
-            cleanupTempDir(tempDir);
+        it('audit log shows uploads were deferred', () => {
+            const audit = readAuditLog(tempDir);
+            assert.ok(audit.includes('ESSENTIAL FILES COMPLETE'),
+                'Expected ESSENTIAL FILES COMPLETE in audit log');
+            assert.ok(audit.includes('uploads deferred'),
+                'Expected "uploads deferred" in audit log');
         });
 
-        it('files-sync completes and audit log proves two-stage flow', () => {
+        // Now run again without --defer-uploads to download the uploads
+        it('re-running without --defer-uploads downloads the uploads', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--defer-uploads'],
             });
             assert.equal(result.exitCode, 0,
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        });
 
-            const audit = readAuditLog(tempDir);
+        it('upload files now exist in the docroot', () => {
+            const importedRoot = join(docrootDir(tempDir), siteDir);
+            for (const f of UPLOAD_FILES) {
+                assert.ok(existsSync(join(importedRoot, f)),
+                    `Expected upload file to exist after second run: ${f}`);
+            }
+        });
 
-            // The audit log must contain the transition marker, proving
-            // the pipeline completed the essential files fetch and then
-            // entered the deferred uploads stage.
-            assert.ok(audit.includes('ESSENTIAL FILES COMPLETE'),
-                'Expected ESSENTIAL FILES COMPLETE in audit log — proves two-stage transition');
+        it('deferred download list was cleaned up', () => {
+            const deferredList = join(tempDir, '.import-download-list-deferred.jsonl');
+            assert.ok(!existsSync(deferredList),
+                'Expected deferred download list to be cleaned up after uploads downloaded');
+        });
 
-            // The deferred download list should have been created and then cleaned up.
-            assert.ok(audit.includes('deferred fetch complete'),
-                'Expected "deferred fetch complete" in audit log — proves deferred stage ran');
+        it('all files match source', () => {
+            const importedRoot = join(docrootDir(tempDir), siteDir);
+            assertTreesMatch(siteDir, importedRoot);
         });
     });
 
     // ------------------------------------------------------------------
-    // Test: --defer-uploads survives resume cycles
+    // Test: --defer-uploads survives resume cycles (essential files only)
     // ------------------------------------------------------------------
     describe('--defer-uploads survives resume', () => {
         let tempDir;
@@ -197,14 +187,22 @@ describe('Import: --defer-uploads', () => {
             assert.equal(state.status, 'complete');
         });
 
-        it('all files including uploads were downloaded', () => {
+        it('uploads were NOT downloaded', () => {
             const importedRoot = join(docrootDir(tempDir), siteDir);
-            assertTreesMatch(siteDir, importedRoot);
+            for (const f of UPLOAD_FILES) {
+                assert.ok(!existsSync(join(importedRoot, f)),
+                    `Expected upload file to NOT exist: ${f}`);
+            }
+        });
+
+        it('deferred list remains on disk', () => {
+            assert.ok(existsSync(join(tempDir, '.import-download-list-deferred.jsonl')),
+                'Expected deferred download list to remain');
         });
     });
 
     // ------------------------------------------------------------------
-    // Test: without --defer-uploads, no deferred list is created
+    // Test: without --defer-uploads, everything downloads in one shot
     // ------------------------------------------------------------------
     describe('without --defer-uploads, no deferred list', () => {
         let tempDir;
@@ -231,19 +229,17 @@ describe('Import: --defer-uploads', () => {
                 'Expected no deferred download list without --defer-uploads');
         });
 
-        it('state does not have defer_uploads set', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-            assert.ok(!state.defer_uploads,
-                'Expected defer_uploads to be false/absent in state');
+        it('uploads were downloaded normally', () => {
+            const importedRoot = join(docrootDir(tempDir), siteDir);
+            for (const f of UPLOAD_FILES) {
+                assert.ok(existsSync(join(importedRoot, f)),
+                    `Expected upload file to exist: ${f}`);
+            }
         });
     });
 
     // ------------------------------------------------------------------
-    // Test: --defer-uploads added mid-flight on a resume
-    //
-    // The diff phase already ran without --defer-uploads, so uploads are
-    // mixed into the main download list. Passing --defer-uploads on the
-    // next invocation should re-split the list and still defer uploads.
+    // Test: --defer-uploads added mid-flight re-splits the download list
     // ------------------------------------------------------------------
     describe('--defer-uploads added mid-flight re-splits download list', () => {
         let tempDir;
@@ -256,22 +252,21 @@ describe('Import: --defer-uploads', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('starts files-sync without --defer-uploads, then aborts and resumes with it', () => {
-            // Run files-sync WITHOUT --defer-uploads to build the download list
-            // with uploads mixed in. Use --max-exec=1 to stop early in the
-            // fetch stage (before all files are downloaded).
+        it('starts without --defer-uploads, stops early, resumes with it', () => {
+            // Run files-sync WITHOUT --defer-uploads. Use --max-exec=1 to
+            // stop early in the fetch stage with uploads still in the main list.
             const firstRun = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--max-exec=1'],
                 autoResume: false,
             });
-            // Should be partial (exit 2) since --max-exec=1 stops early
             assert.ok(
                 firstRun.exitCode === 0 || firstRun.exitCode === 2,
                 `Expected exit 0 or 2, got ${firstRun.exitCode}\nstderr: ${firstRun.stderr}`,
             );
 
-            // Now resume WITH --defer-uploads — the list should be re-split
+            // Resume WITH --defer-uploads — the list should be re-split and
+            // the importer should complete without downloading uploads.
             const resumed = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--defer-uploads'],
@@ -286,7 +281,29 @@ describe('Import: --defer-uploads', () => {
                 'Expected "re-splitting download list" in audit log');
         });
 
-        it('all files including uploads were downloaded', () => {
+        it('uploads were NOT downloaded (deferred)', () => {
+            const importedRoot = join(docrootDir(tempDir), siteDir);
+            for (const f of UPLOAD_FILES) {
+                assert.ok(!existsSync(join(importedRoot, f)),
+                    `Expected upload file to NOT exist: ${f}`);
+            }
+        });
+
+        it('deferred list remains on disk', () => {
+            assert.ok(existsSync(join(tempDir, '.import-download-list-deferred.jsonl')),
+                'Expected deferred download list to remain');
+        });
+
+        // Now download the uploads
+        it('re-running without --defer-uploads downloads them', () => {
+            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+                secret: getSiteSecret(site),
+            });
+            assert.equal(result.exitCode, 0,
+                `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        });
+
+        it('all files match source after uploading deferred files', () => {
             const importedRoot = join(docrootDir(tempDir), siteDir);
             assertTreesMatch(siteDir, importedRoot);
         });

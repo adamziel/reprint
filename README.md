@@ -112,16 +112,21 @@ With `--defer-uploads`, the importer splits the download into two stages so you 
 php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" --defer-uploads
 ```
 
-The pipeline proceeds as usual through indexing and diffing, then:
+The pipeline proceeds as usual through indexing and diffing, but only downloads non-upload files
+(code, config, themes, plugins). When the essential files are done, the sync marks itself **complete**
+and stops — uploads are not downloaded. The deferred file list stays on disk at
+`.import-download-list-deferred.jsonl`.
 
-1. **fetch** — downloads all non-upload files (code, config, themes, plugins).
-2. The state file transitions to `stage="fetch-deferred"`. At this point all essential files are on disk — the orchestrator can apply the database and bring the site online.
-3. **fetch-deferred** — downloads uploads (the media library).
+To download the uploads later, re-run the same command without `--defer-uploads`:
 
-The orchestrator loop detects the transition by reading `.import-state.json`: when `stage` changes to
-`"fetch-deferred"`, it knows the site is ready to go live while uploads continue downloading in the background.
+```bash
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+```
 
-The uploads directory is detected from the preflight data (`uploads.basedir`), falling back to `wp-content/uploads/` if unavailable.
+The importer detects the deferred list and downloads the uploads. No `--abort` needed.
+
+The uploads directory is detected from the preflight data (`uploads.basedir`), falling back to
+`wp-content/uploads/` if unavailable.
 
 #### Step 3 — Download the database.
 

@@ -2279,18 +2279,52 @@ class ImportClient
 
         $this->recover_index_updates();
 
-        // Already completed → refuse to proceed without --abort
+        // Already completed.
+        //
+        // If there is a deferred download list on disk and the user is no
+        // longer deferring uploads (--defer-uploads was removed or
+        // --no-defer-uploads was passed), transition straight into the
+        // fetch-deferred stage to download the uploads now.
+        //
+        // Otherwise, refuse to proceed without --abort.
         if ($current_status === "complete") {
+            $has_deferred =
+                file_exists($this->deferred_download_list_file) &&
+                filesize($this->deferred_download_list_file) > 0;
+
+            if ($has_deferred && !$this->defer_uploads) {
+                $this->audit_log(
+                    "RESUME DEFERRED | files-sync was complete but deferred uploads remain — downloading now",
+                    true,
+                );
+                if ($this->is_tty && !$this->verbose_mode) {
+                    fwrite($this->progress_fd, "Downloading deferred uploads\n");
+                }
+                $this->state["status"] = "in_progress";
+                $this->state["stage"] = "fetch-deferred";
+                $this->save_state($this->state);
+                $this->run_files_sync_pipeline();
+                return;
+            }
+
             $index_size = $this->index_count();
             $this->clear_progress_line();
+
+            $deferred_note = $has_deferred
+                ? " (uploads deferred — re-run without --defer-uploads to download them)"
+                : "";
             $this->audit_log(
-                sprintf("files-sync already complete: %d files indexed", $index_size),
+                sprintf("files-sync already complete: %d files indexed%s", $index_size, $deferred_note),
                 true,
             );
 
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "files-sync already complete: {$index_size} files indexed\n");
-                fwrite($this->progress_fd, "To re-sync, run with --abort first to clear state.\n");
+                if ($has_deferred) {
+                    fwrite($this->progress_fd, "Uploads were deferred. Re-run without --defer-uploads to download them.\n");
+                } else {
+                    fwrite($this->progress_fd, "To re-sync, run with --abort first to clear state.\n");
+                }
             }
             return;
         }
@@ -2515,23 +2549,35 @@ class ImportClient
                 );
             }
 
-            // If there are deferred uploads to download, transition to that
-            // stage. The orchestrator can detect stage="fetch-deferred" in the
-            // state file and know that all essential files are on disk — safe
-            // to apply the database and bring the site online.
             $has_deferred =
                 file_exists($this->deferred_download_list_file) &&
                 filesize($this->deferred_download_list_file) > 0;
-            $this->state["stage"] = $has_deferred ? "fetch-deferred" : null;
-            $this->save_state($this->state);
-            $stage = $has_deferred ? "fetch-deferred" : null;
 
-            if ($has_deferred) {
+            if ($has_deferred && $this->defer_uploads) {
+                // Uploads are deferred — mark the sync as complete now.
+                // The deferred list stays on disk so a later run without
+                // --defer-uploads can pick it up and download the uploads.
+                $this->state["stage"] = null;
+                $this->save_state($this->state);
+                $this->audit_log(
+                    "ESSENTIAL FILES COMPLETE | uploads deferred — not downloading until --defer-uploads is removed",
+                    true,
+                );
+                $stage = null;
+            } elseif ($has_deferred) {
+                // Deferred list exists but defer_uploads is off — download now.
+                $this->state["stage"] = "fetch-deferred";
+                $this->save_state($this->state);
+                $stage = "fetch-deferred";
                 $this->audit_log(
                     "ESSENTIAL FILES COMPLETE | transitioning to deferred uploads",
                     true,
                 );
                 $this->write_status_file();
+            } else {
+                $this->state["stage"] = null;
+                $this->save_state($this->state);
+                $stage = null;
             }
         }
 
@@ -9336,12 +9382,12 @@ if (
                 "  --secret=TOKEN       HMAC shared secret for export API authentication\n" .
                 "  --verbose, -v        Show detailed request/response logs\n" .
                 "\n" .
-                "With --defer-uploads, the pipeline splits the fetch into two stages:\n" .
-                "  1. fetch           — downloads all non-upload files (code, config, themes, plugins)\n" .
-                "  2. fetch-deferred  — downloads uploads (media library)\n" .
-                "The state file reports stage=\"fetch-deferred\" between the two, giving the\n" .
-                "orchestrator a clear signal to apply the database and bring the site online\n" .
-                "before media downloads finish.\n" .
+                "With --defer-uploads, only non-upload files are downloaded (code, config,\n" .
+                "themes, plugins). Uploads are skipped and listed in a deferred download\n" .
+                "list. The sync completes without downloading any media.\n" .
+                "\n" .
+                "To download the uploads later, re-run without --defer-uploads. The importer\n" .
+                "detects the deferred list and downloads only the uploads. No --abort needed.\n" .
                 "\n" .
                 "Output files:\n" .
                 "  (docroot)/                              Downloaded files\n" .
