@@ -255,6 +255,9 @@ function generate_route_handler_code(RuntimeManifest $manifest): string
             case 'wpcloud-thumbnail-generator':
                 $code .= wpcloud_thumbnail_generator_code() . "\n";
                 break;
+            case 'remote-upload-proxy':
+                $code .= remote_upload_proxy_code() . "\n";
+                break;
         }
     }
     return $code;

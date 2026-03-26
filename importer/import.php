@@ -3538,6 +3538,21 @@ class ImportClient
             ];
         }
 
+        // Remote upload proxy: while files-sync is still running, uploaded
+        // files may not exist locally yet.  Add a route handler that fetches
+        // missing uploads from the source site and streams the response to
+        // the client.  The source site URL comes from preflight wp_options.
+        $source_siteurl = $preflight_data["database"]["wp"]["siteurl"] ?? "";
+        if (is_string($source_siteurl) && $source_siteurl !== "") {
+            $manifest->constants["STREAMING_REMOTE_SITE_URL"] = $source_siteurl;
+            $manifest->routes[] = [
+                "handler" => "remote-upload-proxy",
+                "path_pattern" => "/wp-content/uploads/.*",
+                "condition" => "file_not_found",
+                "description" => "Proxy missing uploads from the source site during migration",
+            ];
+        }
+
         $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
 
         // Resolve host and port for the target server. If not provided on
