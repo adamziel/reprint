@@ -40,6 +40,7 @@
 
     "files": [
         "importer/VERSION",
+        "lib/sqlite-database-integration/constants.php",
         "lib/sqlite-database-integration/php-polyfills.php",
         "lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php",
         "lib/sqlite-database-integration/version.php",

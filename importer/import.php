@@ -3287,6 +3287,43 @@ class ImportClient
         $analyzer = host_analyzer_for($webhost);
         $manifest = $analyzer->analyze($preflight_data);
 
+        // Step 1b: Merge target database configuration from db-apply state.
+        // db-apply persists the target engine and connection details so that
+        // apply-runtime can generate the matching DB_* constants and, for
+        // SQLite targets, set up the database integration plugin.
+        $apply_state = $this->state["apply"] ?? [];
+        $target_engine = $apply_state["target_engine"] ?? null;
+        if ($target_engine === "mysql") {
+            $manifest->constants["DB_NAME"] = $apply_state["target_db"] ?? "";
+            $manifest->constants["DB_USER"] = $apply_state["target_user"] ?? "";
+            $manifest->constants["DB_PASSWORD"] = $apply_state["target_pass"] ?? "";
+            $host_value = $apply_state["target_host"] ?? "127.0.0.1";
+            $port_value = (int) ($apply_state["target_port"] ?? 3306);
+            if ($port_value !== 3306) {
+                $host_value .= ":" . $port_value;
+            }
+            $manifest->constants["DB_HOST"] = $host_value;
+            // runtime.php defines DB_* before wp-config.php loads, which
+            // causes "Constant already defined" warnings. Flag this so the
+            // generated runtime.php installs a handler to suppress them.
+            $manifest->has_db_constants = true;
+        } elseif ($target_engine === "sqlite") {
+            $sqlite_path = $apply_state["target_sqlite_path"] ?? null;
+            if ($sqlite_path !== null && $sqlite_path !== '') {
+                $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
+                $db_file = basename($sqlite_path);
+            } else {
+                $db_dir = '{docroot}/wp-content/database/';
+                $db_file = '.ht.sqlite';
+            }
+            $manifest->sqlite = [
+                'plugin_source' => dirname(__DIR__) . '/lib/sqlite-database-integration',
+                'plugin_dir' => '',  // resolved after copy_sqlite_plugin()
+                'db_dir' => $db_dir,
+                'db_file' => $db_file,
+            ];
+        }
+
         $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
 
         // Resolve host and port for the target server. If not provided on
@@ -3338,7 +3375,29 @@ class ImportClient
         if ($port !== null) {
             $applier_options['port'] = (int) $port;
         }
+        // Step 2b: For SQLite targets, copy the integration plugin into the
+        // output directory BEFORE the applier runs, so generate_runtime_php()
+        // can embed the resolved plugin path in the lazy-loader code.
+        if ($manifest->sqlite !== null) {
+            $copied_plugin = copy_sqlite_plugin(
+                $manifest->sqlite['plugin_source'],
+                $abs_output_dir,
+            );
+            // Replace the source path with the copied-to path so the
+            // generated runtime.php points to the output directory.
+            $manifest->sqlite['plugin_dir'] = $copied_plugin;
+            // Resolve {docroot} in db_dir now that we have the real path.
+            $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
+                $manifest->sqlite['db_dir'],
+                $abs_docroot,
+            );
+        }
+
         $summary = $applier->apply($manifest, $abs_docroot, $abs_output_dir, $applier_options);
+
+        if ($manifest->sqlite !== null) {
+            $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
+        }
 
         foreach ($summary as $line) {
             $this->audit_log("APPLY-RUNTIME | {$line}");
@@ -3352,11 +3411,15 @@ class ImportClient
             "runtime" => $runtime,
             "webhost" => $webhost,
             "webhost_source" => $manifest->source,
+            "target_engine" => $target_engine,
         ]);
 
         fwrite(STDERR, "\n");
         fwrite(STDERR, "Runtime: {$runtime}\n");
         fwrite(STDERR, "Source host: {$webhost}\n");
+        if ($target_engine !== null) {
+            fwrite(STDERR, "Target database: {$target_engine}\n");
+        }
         fwrite(STDERR, "\n");
         foreach ($summary as $line) {
             fwrite(STDERR, "{$line}\n");
@@ -4070,6 +4133,11 @@ class ImportClient
                 fwrite(STDERR, "[db-apply] No --target-sqlite-path specified, defaulting to: $target_path\n");
             }
 
+            // Persist target database configuration for apply-runtime.
+            $this->state["apply"]["target_engine"] = "sqlite";
+            $this->state["apply"]["target_db"] = $target_db;
+            $this->state["apply"]["target_sqlite_path"] = $target_path;
+
             return [
                 $this->create_sqlite_target_pdo($target_path, $target_db),
                 sprintf(
@@ -4091,6 +4159,14 @@ class ImportClient
                 "db-apply with --target-engine=mysql requires --target-user and --target-db.",
             );
         }
+
+        // Persist target database configuration for apply-runtime.
+        $this->state["apply"]["target_engine"] = "mysql";
+        $this->state["apply"]["target_db"] = $target_db;
+        $this->state["apply"]["target_host"] = $target_host;
+        $this->state["apply"]["target_port"] = $target_port;
+        $this->state["apply"]["target_user"] = $target_user;
+        $this->state["apply"]["target_pass"] = $target_pass;
 
         $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
         try {
@@ -8261,6 +8337,15 @@ class ImportClient
                 "statements_executed" => 0,
                 "bytes_read" => 0,
                 "rewrite_url" => null,
+                // Target database configuration — persisted by db-apply
+                // so that apply-runtime can generate DB_* constants.
+                "target_engine" => null,
+                "target_db" => null,
+                "target_host" => null,
+                "target_port" => null,
+                "target_user" => null,
+                "target_pass" => null,
+                "target_sqlite_path" => null,
             ],
             // SQL output mode (file, stdout, mysql) — persisted for resume
             "sql_output" => null,
@@ -9088,6 +9173,15 @@ if (
                 "  --port=PORT               Listen port (default: from rewrite URL, or 8881)\n" .
                 "  --verbose, -v             Show detailed operation logs\n" .
                 "\n" .
+                "Database configuration:\n" .
+                "  When db-apply has been run before apply-runtime, the target database\n" .
+                "  engine and credentials are read from state and included in runtime.php\n" .
+                "  as DB_* constants. For MySQL targets this means DB_HOST, DB_NAME,\n" .
+                "  DB_USER, and DB_PASSWORD. For SQLite targets, the sqlite-database-\n" .
+                "  integration plugin is copied into the output directory and a lazy-\n" .
+                "  loading \$wpdb proxy is generated in runtime.php (Playground-style,\n" .
+                "  no files placed in the docroot).\n" .
+                "\n" .
                 "Output files (nginx-fpm):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
                 "  (output-dir)/nginx.conf              Nginx server block\n" .
@@ -9095,6 +9189,9 @@ if (
                 "Output files (php-builtin):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, routing, handlers)\n" .
                 "  (output-dir)/start.sh                Shell script to launch the server\n" .
+                "\n" .
+                "Output files (sqlite target, additional):\n" .
+                "  (output-dir)/sqlite-database-integration/   Plugin copy\n" .
                 "\n" .
                 "Examples:\n" .
                 "  # From raw download directory:\n" .
