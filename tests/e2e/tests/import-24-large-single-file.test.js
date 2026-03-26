@@ -13,7 +13,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, sha1File,
-    docrootDir,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -51,7 +51,7 @@ describe('Import: Large Single File', { timeout: 180000 }, () => {
     });
 
     it('large file exists in import output', () => {
-        const importedPath = join(docrootDir(tempDir), getSiteDir(site), largeName);
+        const importedPath = join(fsRootDir(tempDir), getSiteDir(site), largeName);
         assert.ok(existsSync(importedPath), `Expected ${largeName} in output`);
 
         const stat = statSync(importedPath);
@@ -60,7 +60,7 @@ describe('Import: Large Single File', { timeout: 180000 }, () => {
 
     it('large file SHA1 matches source', () => {
         const sourcePath = join(getSiteDir(site), largeName);
-        const importedPath = join(docrootDir(tempDir), getSiteDir(site), largeName);
+        const importedPath = join(fsRootDir(tempDir), getSiteDir(site), largeName);
 
         const sourceHash = sha1File(sourcePath);
         const importedHash = sha1File(importedPath);
@@ -68,7 +68,7 @@ describe('Import: Large Single File', { timeout: 180000 }, () => {
     });
 
     it('all downloaded files have correct hashes', () => {
-        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         // allowMissing: large 12MB file transfer may leave sync incomplete
         assertTreesMatch(getSiteDir(site), importedRoot, { allowMissing: true });
     });

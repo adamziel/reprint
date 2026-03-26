@@ -29,7 +29,7 @@ function runtime_applier_for(string $runtime): RuntimeApplier
  * Appliers may append platform-specific code to the result (e.g. the
  * php-builtin applier adds CLI-server routing).
  */
-function generate_runtime_php(RuntimeManifest $manifest, string $docroot): string
+function generate_runtime_php(RuntimeManifest $manifest, string $fs_root): string
 {
     $lines = [];
     $lines[] = '<?php';
@@ -59,7 +59,7 @@ function generate_runtime_php(RuntimeManifest $manifest, string $docroot): strin
     // Constants
     if (!empty($manifest->constants)) {
         foreach ($manifest->constants as $name => $value) {
-            $resolved = resolve_runtime_placeholders($value, $docroot);
+            $resolved = resolve_runtime_placeholders($value, $fs_root);
             $escaped = addslashes($resolved);
             $lines[] = "if (!defined('{$name}')) {";
             $lines[] = "    define('{$name}', '{$escaped}');";
@@ -71,7 +71,7 @@ function generate_runtime_php(RuntimeManifest $manifest, string $docroot): strin
     // Server variables
     if (!empty($manifest->server_vars)) {
         foreach ($manifest->server_vars as $name => $value) {
-            $resolved = resolve_runtime_placeholders($value, $docroot);
+            $resolved = resolve_runtime_placeholders($value, $fs_root);
             $escaped = addslashes($resolved);
             $lines[] = "\$_SERVER['{$name}'] = '{$escaped}';";
         }
@@ -261,11 +261,11 @@ function generate_route_handler_code(RuntimeManifest $manifest): string
 }
 
 /**
- * Replace {docroot} placeholders with the actual docroot path.
+ * Replace {fs-root} placeholders with the actual fs-root path.
  */
-function resolve_runtime_placeholders(string $value, string $docroot): string
+function resolve_runtime_placeholders(string $value, string $fs_root): string
 {
-    return str_replace('{docroot}', rtrim($docroot, '/'), $value);
+    return str_replace('{fs-root}', rtrim($fs_root, '/'), $value);
 }
 
 /**

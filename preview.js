@@ -9,7 +9,7 @@
  * thinks it's on its original domain.
  *
  * Usage:
- *   node preview.js --state-dir=DIR --docroot=DIR [--url=<original-url>] [--port=<port>]
+ *   node preview.js --state-dir=DIR --fs-root=DIR [--url=<original-url>] [--port=<port>]
  *
  * Environment variables (all optional):
  *   DB_HOST          MySQL host          (default: 127.0.0.1)
@@ -28,15 +28,15 @@ import http from 'node:http';
 
 const args = process.argv.slice(2);
 let stateDir = null;
-let docroot = null;
+let fsRoot = null;
 let urlOverride = null;
 let port = null;
 
 for (const arg of args) {
 	if (arg.startsWith('--state-dir=')) {
 		stateDir = arg.slice('--state-dir='.length);
-	} else if (arg.startsWith('--docroot=')) {
-		docroot = arg.slice('--docroot='.length);
+	} else if (arg.startsWith('--fs-root=')) {
+		fsRoot = arg.slice('--fs-root='.length);
 	} else if (arg.startsWith('--url=')) {
 		urlOverride = arg.slice('--url='.length);
 	} else if (arg.startsWith('--port=')) {
@@ -44,13 +44,13 @@ for (const arg of args) {
 	}
 }
 
-if (!stateDir || !docroot) {
-	console.error('Usage: node preview.js --state-dir=DIR --docroot=DIR [--url=<original-url>] [--port=<port>]');
+if (!stateDir || !fsRoot) {
+	console.error('Usage: node preview.js --state-dir=DIR --fs-root=DIR [--url=<original-url>] [--port=<port>]');
 	process.exit(1);
 }
 
 stateDir = path.resolve(stateDir);
-docroot = path.resolve(docroot);
+fsRoot = path.resolve(fsRoot);
 
 const DB_HOST = process.env.DB_HOST || '127.0.0.1';
 const DB_USER = process.env.DB_USER || 'root';
@@ -110,8 +110,8 @@ function findDir(root, name, maxDepth = 6) {
 
 // ── Layout detection ────────────────────────────────────────────────
 
-if (!fs.existsSync(docroot)) {
-	console.error(`Error: docroot not found: ${docroot}`);
+if (!fs.existsSync(fsRoot)) {
+	console.error(`Error: fs-root not found: ${fsRoot}`);
 	process.exit(1);
 }
 
@@ -119,8 +119,8 @@ if (!fs.existsSync(docroot)) {
 // (__wp__ contains core, wp-config.php lives in the parent htdocs dir).
 // Check for standard layout first — a standard WP install might contain
 // a stray __wp__ directory inside a plugin or cache.
-const wpConfigFile = findFile(docroot, 'wp-config.php');
-const wpCoreDir = findDir(docroot, '__wp__');
+const wpConfigFile = findFile(fsRoot, 'wp-config.php');
+const wpCoreDir = findDir(fsRoot, '__wp__');
 const isWpcom = !!wpCoreDir && (!wpConfigFile || path.dirname(wpConfigFile) === path.dirname(wpCoreDir));
 
 let wpRoot;     // standard: dir containing wp-config.php; wpcom: __wp__ dir
@@ -140,7 +140,7 @@ if (isWpcom) {
 	console.log('Detected standard WordPress layout');
 	console.log(`  root: ${wpRoot}`);
 } else {
-	console.error(`Error: Could not detect WordPress layout under ${docroot}`);
+	console.error(`Error: Could not detect WordPress layout under ${fsRoot}`);
 	console.error('  No wp-config.php or __wp__ directory found.');
 	process.exit(1);
 }

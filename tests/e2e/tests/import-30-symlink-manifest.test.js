@@ -16,7 +16,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, readAuditLog,
     assertSiteMirror,
-    docrootDir,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -56,7 +56,7 @@ describe('Import: Symlink Handling', () => {
     });
 
     it('regular files are still downloaded correctly', () => {
-        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
@@ -71,7 +71,7 @@ describe('Import: Symlink Handling', () => {
     });
 
     it('external-link symlink is handled in the import', () => {
-        const importedRoot = join(docrootDir(tempDir), getSiteDir(site));
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         const externalLinkPath = join(importedRoot, 'test-data', 'external-link');
 
         if (existsSync(externalLinkPath)) {

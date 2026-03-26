@@ -17,7 +17,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, readAuditLog,
-    docrootDir,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -86,8 +86,8 @@ describe('Import: --filter', () => {
             assert.equal(state.filter, 'essential-files');
         });
 
-        it('upload files are NOT in the docroot', () => {
-            const importedRoot = join(docrootDir(tempDir), siteDir);
+        it('upload files are NOT in the fs-root', () => {
+            const importedRoot = join(fsRootDir(tempDir), siteDir);
             for (const f of UPLOAD_FILES) {
                 assert.ok(!existsSync(join(importedRoot, f)),
                     `Expected upload file to NOT exist: ${f}`);
@@ -95,7 +95,7 @@ describe('Import: --filter', () => {
         });
 
         it('essential files were downloaded', () => {
-            const importedRoot = join(docrootDir(tempDir), siteDir);
+            const importedRoot = join(fsRootDir(tempDir), siteDir);
             assert.ok(existsSync(join(importedRoot, 'wp-load.php')),
                 'Expected wp-load.php to exist');
             assert.ok(existsSync(join(importedRoot, 'wp-config.php')),
@@ -125,8 +125,8 @@ describe('Import: --filter', () => {
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('upload files now exist in the docroot', () => {
-            const importedRoot = join(docrootDir(tempDir), siteDir);
+        it('upload files now exist in the fs-root', () => {
+            const importedRoot = join(fsRootDir(tempDir), siteDir);
             for (const f of UPLOAD_FILES) {
                 assert.ok(existsSync(join(importedRoot, f)),
                     `Expected upload file to exist after skipped-earlier: ${f}`);
@@ -139,7 +139,7 @@ describe('Import: --filter', () => {
         });
 
         it('all files match source', () => {
-            const importedRoot = join(docrootDir(tempDir), siteDir);
+            const importedRoot = join(fsRootDir(tempDir), siteDir);
             assertTreesMatch(siteDir, importedRoot);
         });
     });
@@ -175,7 +175,7 @@ describe('Import: --filter', () => {
         });
 
         it('uploads were NOT downloaded', () => {
-            const importedRoot = join(docrootDir(tempDir), siteDir);
+            const importedRoot = join(fsRootDir(tempDir), siteDir);
             for (const f of UPLOAD_FILES) {
                 assert.ok(!existsSync(join(importedRoot, f)),
                     `Expected upload file to NOT exist: ${f}`);
@@ -216,7 +216,7 @@ describe('Import: --filter', () => {
         });
 
         it('uploads were downloaded normally', () => {
-            const importedRoot = join(docrootDir(tempDir), siteDir);
+            const importedRoot = join(fsRootDir(tempDir), siteDir);
             for (const f of UPLOAD_FILES) {
                 assert.ok(existsSync(join(importedRoot, f)),
                     `Expected upload file to exist: ${f}`);

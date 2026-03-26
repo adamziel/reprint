@@ -4,7 +4,7 @@
  * Tests importing into a pre-existing WordPress hosting environment that uses
  * symlinks for shared infrastructure: WP core, plugins, themes, drop-ins, and
  * mu-plugins all live in a shared read-only directory and are symlinked into
- * the site docroot.
+ * the site fs-root.
  *
  * Pre-existing structure (mirrors real Atomic hosting):
  *
@@ -40,7 +40,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     readAuditLog,
-    docrootDir,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -76,17 +76,17 @@ describe('Import: --preserve-local', () => {
     }
 
     // ----------------------------------------------------------------
-    // Helper: build the realistic hosting structure inside a docroot.
+    // Helper: build the realistic hosting structure inside a fs-root.
     //
     // Places a shared "wordpress/" directory as a sibling of the site
-    // directory (both under docroot/srv/e2e-sites/), then creates all
+    // directory (both under fs-root/srv/e2e-sites/), then creates all
     // the hosting symlinks inside the site root.  The shared directory
     // is made read-only (chmod 555) so that files under symlinked dirs
     // cannot be written — matching real hosting constraints.
     // ----------------------------------------------------------------
-    function buildHostingStructureInLocalDocroot(docroot) {
-        const siteRoot = join(docroot, siteDir);
-        const wpShared = join(docroot, dirname(siteDir), 'wordpress');
+    function buildHostingStructureInLocalFsRoot(fsRoot) {
+        const siteRoot = join(fsRoot, siteDir);
+        const wpShared = join(fsRoot, dirname(siteDir), 'wordpress');
 
         // -- shared wordpress directory (read-only after setup) --------
         const dirs = [
@@ -196,11 +196,11 @@ describe('Import: --preserve-local', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-preserve-local-no-flag');
-            buildHostingStructureInLocalDocroot(docrootDir(tempDir));
+            buildHostingStructureInLocalFsRoot(fsRootDir(tempDir));
         });
 
         afterAll(() => {
-            unlockSharedDir(join(docrootDir(tempDir), dirname(siteDir), 'wordpress'));
+            unlockSharedDir(join(fsRootDir(tempDir), dirname(siteDir), 'wordpress'));
             cleanupTempDir(tempDir);
         });
 
@@ -227,7 +227,7 @@ describe('Import: --preserve-local', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-preserve-local-hosting');
-            const built = buildHostingStructureInLocalDocroot(docrootDir(tempDir));
+            const built = buildHostingStructureInLocalFsRoot(fsRootDir(tempDir));
             wpShared = built.wpShared;
             localSiteRoot = built.siteRoot;
         });
@@ -240,7 +240,7 @@ describe('Import: --preserve-local', () => {
         it('files-sync completes with --preserve-local', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-docroot-nonempty=preserve-local'],
+                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
             });
             assert.equal(
                 result.exitCode, 0,
@@ -252,7 +252,7 @@ describe('Import: --preserve-local', () => {
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.status, 'complete');
-            assert.equal(state.docroot_nonempty_behavior, 'preserve-local');
+            assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
         });
 
         // -- file symlinks preserved ----------------------------------
@@ -392,7 +392,7 @@ describe('Import: --preserve-local', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-preserve-local-resume');
-            const built = buildHostingStructureInLocalDocroot(docrootDir(tempDir));
+            const built = buildHostingStructureInLocalFsRoot(fsRootDir(tempDir));
             wpShared = built.wpShared;
             localSiteRoot = built.siteRoot;
         });
@@ -405,7 +405,7 @@ describe('Import: --preserve-local', () => {
         it('completes after forced resume with --max-exec=3', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-docroot-nonempty=preserve-local', '--max-exec=3'],
+                extraArgs: ['--on-fs-root-nonempty=preserve-local', '--max-exec=3'],
                 timeout: 120000,
             });
             assert.equal(
@@ -423,7 +423,7 @@ describe('Import: --preserve-local', () => {
 
         it('state preserves preserve_local across resume cycles', () => {
             const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-            assert.equal(state.docroot_nonempty_behavior, 'preserve-local');
+            assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
         });
     });
 
@@ -437,7 +437,7 @@ describe('Import: --preserve-local', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-preserve-local-delta');
-            const built = buildHostingStructureInLocalDocroot(docrootDir(tempDir));
+            const built = buildHostingStructureInLocalFsRoot(fsRootDir(tempDir));
             wpShared = built.wpShared;
             localSiteRoot = built.siteRoot;
         });
@@ -450,7 +450,7 @@ describe('Import: --preserve-local', () => {
         it('initial import completes', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-docroot-nonempty=preserve-local'],
+                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
             });
             assert.equal(result.exitCode, 0,
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -519,15 +519,15 @@ describe('Import: --preserve-local', () => {
     });
 
     // ------------------------------------------------------------------
-    // Test: directory-level symlink pointing outside docroot
+    // Test: directory-level symlink pointing outside fs-root
     //
     // This covers the case where an entire directory like wp-content/plugins
-    // is a symlink to a location outside the docroot (e.g., a shared hosting
+    // is a symlink to a location outside the fs-root (e.g., a shared hosting
     // plugins pool).  When the remote site has files under that directory,
     // they should all be skipped gracefully — we should never see "Security:
-    // Refusing to create directory outside docroot".
+    // Refusing to create directory outside fs-root".
     // ------------------------------------------------------------------
-    describe('directory-level symlink pointing outside docroot', () => {
+    describe('directory-level symlink pointing outside fs-root', () => {
         let tempDir;
         let localSiteRoot;
         let sharedPluginsDir;
@@ -535,20 +535,20 @@ describe('Import: --preserve-local', () => {
         beforeAll(() => {
             tempDir = createTempDir('e2e-preserve-local-dirlink');
 
-            const docroot = docrootDir(tempDir);
-            localSiteRoot = join(docroot, siteDir);
+            const fsRoot = fsRootDir(tempDir);
+            localSiteRoot = join(fsRoot, siteDir);
 
             // Create the site structure with wp-content/plugins as a
             // directory-level symlink rather than per-plugin symlinks.
             // The symlink target is a sibling of the site root, completely
-            // outside the docroot tree that the importer considers safe.
-            sharedPluginsDir = join(docroot, dirname(siteDir), 'shared-plugins-pool');
+            // outside the fs-root tree that the importer considers safe.
+            sharedPluginsDir = join(fsRoot, dirname(siteDir), 'shared-plugins-pool');
             mkdirSync(sharedPluginsDir, { recursive: true });
 
             // Build minimal site structure (no per-plugin symlinks this time)
             mkdirSync(join(localSiteRoot, 'wp-content'), { recursive: true });
 
-            // wp-content/plugins is itself a symlink outside the docroot.
+            // wp-content/plugins is itself a symlink outside the fs-root.
             // From wp-content/, ../../ goes to dirname(siteRoot) where the
             // shared pool lives.
             symlinkSync(
@@ -570,14 +570,14 @@ describe('Import: --preserve-local', () => {
         it('files-sync completes without security errors', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                extraArgs: ['--on-docroot-nonempty=preserve-local'],
+                extraArgs: ['--on-fs-root-nonempty=preserve-local'],
             });
             assert.equal(
                 result.exitCode, 0,
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
             );
             assert.ok(
-                !result.stderr.includes('Security: Refusing to create directory outside docroot'),
+                !result.stderr.includes('Security: Refusing to create directory outside fs-root'),
                 `Should not see security error, got: ${result.stderr}`,
             );
         });
@@ -591,7 +591,7 @@ describe('Import: --preserve-local', () => {
 
         it('no remote plugin files leaked into shared directory', () => {
             // The remote site has akismet/akismet.php and akismet/readme.txt.
-            // Since wp-content/plugins points outside the docroot, these
+            // Since wp-content/plugins points outside the fs-root, these
             // should be skipped — nothing should appear in the shared pool.
             const akismetDir = join(sharedPluginsDir, 'akismet');
             assert.ok(!existsSync(akismetDir),

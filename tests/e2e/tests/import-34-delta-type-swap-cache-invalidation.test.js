@@ -15,7 +15,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteSecret, getSiteDir,
-    docrootDir,
+    fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -38,8 +38,8 @@ describe('Import: Delta type swaps cache invalidation', () => {
     };
 
     async function startApiServer() {
-        const docRoot = getSiteDir(site);
-        apiServer = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', docRoot], {
+        const fsRoot = getSiteDir(site);
+        apiServer = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', fsRoot], {
             stdio: 'ignore',
         });
 
@@ -136,7 +136,7 @@ chown -R nginx:nginx ${sh(remoteRoot)}
     it('delta keeps symlink->file transition', () => {
         const tempDir = runScenarioOnce('e2e-delta-cache-type-swaps-file');
         try {
-            const root = join(docrootDir(tempDir), remoteRoot);
+            const root = join(fsRootDir(tempDir), remoteRoot);
             const symlinkToDirToFile = join(root, 'symlink-to-dir-to-file');
             assert.ok(lstatSync(symlinkToDirToFile).isFile(), 'Expected symlink-to-dir-to-file to become a regular file');
             assert.equal(readFileSync(symlinkToDirToFile, 'utf-8'), 'became-file\n');
@@ -148,7 +148,7 @@ chown -R nginx:nginx ${sh(remoteRoot)}
     it('delta keeps symlink->directory transition with nested data', () => {
         const tempDir = runScenarioOnce('e2e-delta-cache-type-swaps-dir');
         try {
-            const root = join(docrootDir(tempDir), remoteRoot);
+            const root = join(fsRootDir(tempDir), remoteRoot);
             const nestedFile = join(root, 'symlink-to-file-to-dir', 'x', 'y', 'z', 'value.txt');
             assert.ok(existsSync(nestedFile), `Expected nested file at ${nestedFile}`);
             assert.equal(readFileSync(nestedFile, 'utf-8'), 'became-directory\n');

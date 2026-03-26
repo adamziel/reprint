@@ -211,17 +211,17 @@ function parseMultipart(body, boundary) {
 }
 
 /**
- * Return the docroot path for a given output directory.
- * By convention, E2E tests place downloaded files in outputDir/docroot.
+ * Return the fs-root path for a given output directory.
+ * By convention, E2E tests place downloaded files in outputDir/fs-root.
  */
-export function docrootDir(outputDir) {
-    return join(outputDir, 'docroot');
+export function fsRootDir(outputDir) {
+    return join(outputDir, 'fs-root');
 }
 
 /**
  * Run the importer CLI.
  * @param {string} url - Export URL
- * @param {string} outputDir - Local output directory (state files live here; docroot is outputDir/docroot)
+ * @param {string} outputDir - Local output directory (state files live here; fs-root is outputDir/fs-root)
  * @param {string} command - Import command (files-sync, db-sync, etc.)
  * @param {Object} options - Additional options
  * @returns {Object} { stdout, stderr, exitCode }
@@ -237,7 +237,7 @@ export function runImporter(url, outputDir, command, options = {}) {
             cmd,
             url,
             `--state-dir=${outputDir}`,
-            `--docroot=${docrootDir(outputDir)}`,
+            `--fs-root=${fsRootDir(outputDir)}`,
         ];
         if (secret) {
             args.push(`--secret=${secret}`);

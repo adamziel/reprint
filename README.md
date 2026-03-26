@@ -51,7 +51,7 @@ All commands below use the same base invocation. We'll use `$URL` and `$DIR` as 
 ```bash
 URL="https://example.com/?site-export-api"
 STATE_DIR="./local-directory-where-the-migration-state-will-be-tracked"
-DOCROOT="./local-directory-where-the-remote-site-files-will-be-recreated"
+FS_ROOT="./local-directory-where-the-remote-site-files-will-be-recreated"
 SECRET="your-shared-secret"
 ```
 
@@ -60,7 +60,7 @@ SECRET="your-shared-secret"
 First, we'll make sure the server is reachable and the environment is in a good shape:
 
 ```bash
-php importer.phar preflight "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
@@ -71,7 +71,7 @@ To run very basic diagnostics that confirms the remote server replied and it has
 sound-looking filesystem and a database connection, run:
 
 ```bash
-php importer.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 For hosting platform-specific checks, such as database version compatibility or
@@ -84,7 +84,7 @@ This first builds a full index of the remote directory tree, then streams every 
 It can be interrupted and resumed at any time — just re-run the same command:
 
 ```bash
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -95,13 +95,13 @@ The command returns one of three exit codes:
 
 Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
 
-**Non-empty local docroot**
+**Non-empty local fs-root**
 
-By default, `files-sync` refuses to start if `--docroot` is non-empty. If you need to use a non-empty local docroot,
-the `--on-docroot-nonempty` flag controls this behavior. It takes the following values:
+By default, `files-sync` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
+the `--on-fs-root-nonempty` flag controls this behavior. It takes the following values:
 
-- `--on-docroot-nonempty=error` (default): throw an error and abort.
-- `--on-docroot-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
+- `--on-fs-root-nonempty=error` (default): throw an error and abort.
+- `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
 
 **Filtering files**
 
@@ -110,7 +110,7 @@ and you want to bring the site online before downloading all the uploads:
 
 ```bash
 # Step 1: download only essential files (code, config, themes, plugins)
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --filter=essential-files
 ```
 
@@ -120,7 +120,7 @@ files are done, the sync marks itself **complete**. The skipped file list stays 
 
 ```bash
 # Step 2: download the uploads
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --filter=skipped-earlier
 ```
 
@@ -138,7 +138,7 @@ The uploads directory is detected from preflight data (`uploads.basedir`), falli
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
 
 ```bash
-php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 You can also pipe the SQL directly to stdout or stream it into a MySQL server
@@ -146,11 +146,11 @@ without writing a file to disk. Use `--sql-output` to choose the mode:
 
 ```bash
 # Pipe to stdout — useful for feeding into mysql CLI or another tool
-php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=stdout | mysql -u root my_database
 
 # Stream directly into MySQL — no intermediate file, no pipe
-php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=root --mysql-password=secret
 ```
 
@@ -182,7 +182,7 @@ First, we must abort the previous files-sync. Otherwise, it would just
 tell us it's completed and refuse to proceed:
 
 ```bash
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" --abort
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --abort
 ```
 
 From here, we can run the `files-sync` command again. It will index
@@ -190,7 +190,7 @@ the remote filesystem once again, compute which files have changed
 since the initial sync, and apply that delta in the local directory:
 
 ```bash
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET"
+php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -208,7 +208,7 @@ the SQL dump into a target database while rewriting all URLs in one pass.
 MySQL target:
 
 ```bash
-php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
 ```
@@ -216,7 +216,7 @@ php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" 
 SQLite target:
 
 ```bash
-php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --target-engine=sqlite --target-sqlite-path="$STATE_DIR/wordpress.sqlite" \
     --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
@@ -232,7 +232,7 @@ are recalculated, JSON is re-encoded, and block comment attributes are updated.
 You can map multiple domains by repeating the flag:
 
 ```bash
-php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --docroot="$DOCROOT" --secret="$SECRET" \
+php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com \
     --rewrite-url https://cdn.old-site.com https://cdn.new-site.com
@@ -253,7 +253,7 @@ For PHP's built-in development server:
 
 ```bash
 php importer.phar apply-runtime --state-dir="$STATE_DIR" \
-    --flattened-docroot="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=php-builtin
+    --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=php-builtin
 bash "$RUNTIME_DIR/start.sh"
 ```
 
@@ -261,13 +261,13 @@ For nginx + PHP-FPM:
 
 ```bash
 php importer.phar apply-runtime --state-dir="$STATE_DIR" \
-    --flattened-docroot="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=nginx-fpm
+    --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=nginx-fpm
 # Include $RUNTIME_DIR/nginx.conf in your nginx configuration, then reload
 ```
 
-The command accepts either `--docroot` (the raw download directory — the remote
-`document_root` path is appended automatically) or `--flattened-docroot` (a
-directory created by `flatten-docroot`, used as-is). These are mutually exclusive.
+The command accepts either `--fs-root` (the raw download directory — the remote
+`document_root` path is appended automatically) or `--flat-document-root` (a
+directory created by `flat-document-root`, used as-is). These are mutually exclusive.
 
 Host and port default to the URL rewrite target from `db-apply` (so the server
 listens on the same address the database was rewritten to). Override with
@@ -297,7 +297,7 @@ development server.
 
 #### Shoehorning the site onto your platform
 
-You've got a copy of the remote files in the `--docroot` directory and
+You've got a copy of the remote files in the `--fs-root` directory and
 the database either already applied (via `db-apply`) or in `--state-dir/db.sql`.
 From here, you need to figure out how to run that on your platform.
 
@@ -471,7 +471,7 @@ This is useful for debugging but noisy for production use.
 The importer accepts the following commands:
 
 ```
-php importer.phar <command> <URL> --state-dir=DIR --docroot=DIR [options]
+php importer.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 ```
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
@@ -483,7 +483,7 @@ php importer.phar <command> <URL> --state-dir=DIR --docroot=DIR [options]
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-sync`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
-* `flatten-docroot` — Creates a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
+* `flat-document-root` — Creates a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
 All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-sync`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-sync` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
@@ -592,13 +592,13 @@ the **migration target** chooses how to handle it. A few choices are:
 
 Symlinks are automatically recreated during import. The importer receives symlink chunks from the
 export stream and calls `symlink()` to recreate them locally. This is safe because all paths are
-constrained to the `--docroot` directory.
+constrained to the `--fs-root` directory.
 
 Some symlinks may point to places on the remote filesystem that are
 outside of the requested directory root. By default, the importer
 follows these symlinks — it asks the server to expand them into real
 files and recreates the symlink structure locally, constrained within
-the `--docroot`.
+the `--fs-root`.
 
 To disable this behavior, pass `--no-follow-symlinks`. Symlinks pointing
 outside the directory root will then be skipped instead of followed.
