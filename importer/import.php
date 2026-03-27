@@ -814,6 +814,13 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
 
+    /**
+     * Maximum number of consecutive cURL timeouts with no cursor progress
+     * before the importer gives up. This prevents infinite retry loops
+     * when the remote server is genuinely unresponsive.
+     */
+    private const MAX_CONSECUTIVE_TIMEOUTS = 3;
+
     /** @var string Export server URL. */
     private $remote_url;
 
@@ -3163,6 +3170,11 @@ class ImportClient
 
             $this->download_db_index();
 
+            // Timeout during db-index — state already saved, exit partial.
+            if (($this->state["status"] ?? null) === "partial") {
+                return;
+            }
+
             $tables = (int) ($this->state["db_index"]["tables"] ?? 0);
             $this->audit_log(
                 sprintf("db-sync db-index stage complete: %d tables", $tables),
@@ -3181,6 +3193,11 @@ class ImportClient
         ]);
 
         $this->download_sql();
+
+        // Timeout during SQL download — state already saved, exit partial.
+        if (($this->state["status"] ?? null) === "partial") {
+            return;
+        }
 
         // Mark as complete
         $this->state["status"] = "complete";
@@ -5003,14 +5020,34 @@ class ImportClient
             }
         };
 
+        $cursor_before = $cursor;
         $request_start = microtime(true);
-        $this->fetch_streaming(
-            $url,
-            $cursor,
-            $context,
-            $post_data,
-            "file_fetch",
-        );
+        try {
+            $this->fetch_streaming(
+                $url,
+                $cursor,
+                $context,
+                $post_data,
+                "file_fetch",
+            );
+        } catch (CurlTimeoutException $e) {
+            // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
+            // with no progress, so we don't retry forever.
+            $this->assert_can_retry_consecutive_timeout("file_fetch", $cursor_before, $cursor);
+            // Save state so the next invocation resumes from the
+            // last cursor instead of crashing with exit code 1.
+            $this->state[$state_key]["cursor"] = $cursor;
+            $this->finalize_index_updates();
+            if ($context->file_handle && $context->file_path) {
+                fflush($context->file_handle);
+                $this->state["current_file"] = $context->file_path;
+                $this->state["current_file_bytes"] = $context->file_bytes_written;
+            }
+            $this->state["status"] = "partial";
+            $this->save_state($this->state);
+            return false;
+        }
+        $this->state["consecutive_timeouts"] = 0;
         $wall_time = microtime(true) - $request_start;
 
         $this->finalize_tuned_request(
@@ -5202,8 +5239,21 @@ class ImportClient
             }
         };
 
+        $cursor_before = $cursor;
         $request_start = microtime(true);
-        $this->fetch_streaming($url, $cursor, $context, null, "file_index");
+        try {
+            $this->fetch_streaming($url, $cursor, $context, null, "file_index");
+        } catch (CurlTimeoutException $e) {
+            // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
+            // with no progress, so we don't retry forever.
+            $this->assert_can_retry_consecutive_timeout("file_index", $cursor_before, $cursor);
+            fclose($handle);
+            $this->state["index"] = ["cursor" => $cursor];
+            $this->state["status"] = "partial";
+            $this->save_state($this->state);
+            return false;
+        }
+        $this->state["consecutive_timeouts"] = 0;
         $wall_time = microtime(true) - $request_start;
         $this->finalize_tuned_request(
             "file_index",
@@ -6266,6 +6316,7 @@ class ImportClient
             false,
         );
 
+        $curl_timed_out = false;
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
@@ -6449,8 +6500,33 @@ class ImportClient
                     }
                 };
 
+                $cursor_before = $cursor;
                 $request_start = microtime(true);
-                $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
+                try {
+                    $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
+                } catch (CurlTimeoutException $e) {
+                    // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
+                    // with no progress, so we don't retry forever.
+                    $this->assert_can_retry_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
+                    // Save state so the next invocation resumes from the
+                    // last cursor instead of crashing with exit code 1.
+                    if ($sql_handle) {
+                        fflush($sql_handle);
+                    }
+                    $this->state["cursor"] = $cursor;
+                    $this->state["sql_bytes"] = $sql_bytes_written;
+                    $this->state["sql_statements_counted"] = $sql_statements_counted;
+                    $this->state["status"] = "partial";
+                    $this->save_state($this->state);
+                    // Discard any pending SQL buffer — it's incomplete and
+                    // will be re-fetched on the next invocation. Setting
+                    // this to "" also prevents the finally block from
+                    // throwing about un-executed buffered SQL.
+                    $sql_buffer = "";
+                    $curl_timed_out = true;
+                    break;
+                }
+                $this->state["consecutive_timeouts"] = 0;
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
                     "sql_chunk",
@@ -6534,6 +6610,10 @@ class ImportClient
                     );
                 }
             }
+        }
+
+        if ($curl_timed_out) {
+            return;
         }
     }
 
@@ -6893,14 +6973,34 @@ class ImportClient
                     }
                 };
 
+                $cursor_before = $cursor;
                 $request_start = microtime(true);
-                $this->fetch_streaming(
-                    $url,
-                    $cursor,
-                    $context,
-                    null,
-                    "db_index",
-                );
+                try {
+                    $this->fetch_streaming(
+                        $url,
+                        $cursor,
+                        $context,
+                        null,
+                        "db_index",
+                    );
+                } catch (CurlTimeoutException $e) {
+                    // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
+                    // with no progress, so we don't retry forever.
+                    $this->assert_can_retry_consecutive_timeout("db_index", $cursor_before, $cursor);
+                    fflush($handle);
+                    $this->state["cursor"] = $cursor;
+                    $this->state["db_index"] = [
+                        "file" => $tables_file,
+                        "tables" => $tables_written,
+                        "rows_estimated" => $rows_estimated,
+                        "bytes" => $bytes_written,
+                        "updated_at" => time(),
+                    ];
+                    $this->state["status"] = "partial";
+                    $this->save_state($this->state);
+                    return;
+                }
+                $this->state["consecutive_timeouts"] = 0;
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
                     "db_index",
@@ -8134,7 +8234,54 @@ class ImportClient
             : 28;
         $this->last_curl_errno = $errno;
         $this->last_curl_timeout = $errno === $timeout_errno;
+        if ($this->last_curl_timeout) {
+            throw new CurlTimeoutException("cURL error: {$error}");
+        }
         throw new RuntimeException("cURL error: {$error}");
+    }
+
+    /**
+     * Track consecutive cURL timeouts and decide whether to retry or give up.
+     *
+     * Compares the cursor before and after the request. If the cursor advanced
+     * (we got some data before stalling), the counter resets — the stall was
+     * transient and resuming makes sense. If the cursor didn't move, the
+     * counter increments. After MAX_CONSECUTIVE_TIMEOUTS with no progress,
+     * throws a RuntimeException so the runner sees exit code 1 and stops.
+     *
+     * @param string $phase   Human-readable phase name for logs (e.g. "sql_chunk")
+     * @param ?string $cursor_before Cursor value at the start of the request
+     * @param ?string $cursor_after  Cursor value when the timeout fired
+     */
+    protected function assert_can_retry_consecutive_timeout(
+        string $phase,
+        ?string $cursor_before,
+        ?string $cursor_after
+    ): void {
+        if ($cursor_after !== null && $cursor_after !== $cursor_before) {
+            // Progress was made — reset the counter.
+            $this->state["consecutive_timeouts"] = 0;
+        } else {
+            $this->state["consecutive_timeouts"] =
+                ($this->state["consecutive_timeouts"] ?? 0) + 1;
+        }
+
+        $count = $this->state["consecutive_timeouts"];
+
+        $this->audit_log(
+            "CURL TIMEOUT | {$phase} | consecutive_timeouts={$count}/" .
+                self::MAX_CONSECUTIVE_TIMEOUTS .
+                " | cursor_moved=" .
+                ($cursor_after !== $cursor_before ? "yes" : "no"),
+            true,
+        );
+
+        if ($count >= self::MAX_CONSECUTIVE_TIMEOUTS) {
+            throw new RuntimeException(
+                "Remote server appears unreachable: {$count} consecutive " .
+                "cURL timeouts with no progress during {$phase}. Giving up.",
+            );
+        }
     }
 
     /**
@@ -8218,7 +8365,7 @@ class ImportClient
     /**
      * Fetch URL with streaming multipart parsing.
      */
-    private function fetch_streaming(
+    protected function fetch_streaming(
         string $url,
         ?string $cursor,
         StreamingContext $context,
@@ -8307,7 +8454,12 @@ class ImportClient
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_TIMEOUT => 300,
+            // Don't cap total transfer time — streaming responses can
+            // legitimately run for 20+ minutes. Instead, detect stalled
+            // connections: timeout only when fewer than 1 byte/sec is
+            // received for 300 consecutive seconds.
+            CURLOPT_LOW_SPEED_LIMIT => 1,
+            CURLOPT_LOW_SPEED_TIME => 300,
             CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
@@ -8652,6 +8804,11 @@ class ImportClient
             "mysql_port" => null,
             "mysql_user" => null,
             "mysql_database" => null,
+            // Consecutive cURL timeout counter — tracks how many times in a
+            // row a timeout fired without the cursor advancing. After
+            // MAX_CONSECUTIVE_TIMEOUTS with no progress, the importer gives
+            // up instead of retrying forever.
+            "consecutive_timeouts" => 0,
             // Adaptive tuning state/config
             "tuning" => [
                 "config" => [],
@@ -9217,6 +9374,14 @@ class StreamingContext
  * Callers catch this to skip the current file/directory/symlink gracefully.
  */
 class PreserveLocalSkipException extends RuntimeException {}
+
+/**
+ * Thrown when a cURL request times out (CURLE_OPERATION_TIMEDOUT).
+ * Callers catch this to save state and exit with "partial" status instead
+ * of crashing with a fatal error — the next invocation resumes from the
+ * last saved cursor.
+ */
+class CurlTimeoutException extends RuntimeException {}
 
 // ============================================================================
 // CLI Entry Point
