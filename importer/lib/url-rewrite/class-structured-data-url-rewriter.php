@@ -35,12 +35,25 @@ class StructuredDataUrlRewriter
     /** @var array<string, string> URL mapping: source_url => target_url */
     private array $url_mapping;
 
+    /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
+    private array $source_domains;
+
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
      */
     public function __construct(array $url_mapping)
     {
         $this->url_mapping = $url_mapping;
+
+        // Extract unique source domains for the quick-reject check.
+        $domains = [];
+        foreach (array_keys($url_mapping) as $from_url) {
+            $host = parse_url($from_url, PHP_URL_HOST);
+            if ($host !== null && $host !== false) {
+                $domains[$host] = true;
+            }
+        }
+        $this->source_domains = array_keys($domains);
     }
 
     /**
@@ -63,6 +76,14 @@ class StructuredDataUrlRewriter
 
         if ($content_type === null) {
             $content_type = self::PLAIN_TEXT;
+        }
+
+        // Quick-reject: if the value doesn't contain href=", src=", or any
+        // source domain, there's nothing to rewrite. This avoids expensive
+        // parsing (serialized PHP, JSON, block markup) for the vast majority
+        // of values that don't contain any rewritable URLs.
+        if (!$this->maybe_contains_rewritable_urls($value)) {
+            return $value;
         }
 
         // Try serialized PHP: the parser validates the entire structure
@@ -93,23 +114,37 @@ class StructuredDataUrlRewriter
             return $iter->get_result();
         }
 
-        // Try base64 as a transport encoding. Decode, recurse on the
-        // decoded content, and re-encode if the recursive call changed
-        // anything. No format guessing on the decoded content — the
-        // recursive call tries the real parsers.
-        $decoded = base64_decode($value, true);
-        if ($decoded !== false && $decoded !== '') {
-            $rewritten = $this->rewrite($decoded, $content_type);
-            if ($rewritten !== $decoded) {
-                return base64_encode($rewritten);
-            }
-        }
+        // Base64 decoding is temporarily disabled for performance.
+        // The base64 transport layer in SQL is already handled by
+        // Base64ValueScanner in SqlStatementRewriter — this block
+        // was for base64-within-base64 nesting which is rare in practice.
 
         return self::rewrite_urls([
             'content' => $value,
             'content_type' => $content_type,
             'url-mapping' => $this->url_mapping,
         ]);
+    }
+
+    /**
+     * Quick-reject check: returns false when the value certainly doesn't
+     * contain any rewritable URLs, avoiding expensive parsing.
+     *
+     * A value is considered potentially rewritable if it contains:
+     * - href=" or src=" (HTML attributes that carry URLs), OR
+     * - any source domain from the url_mapping (bare URL occurrences)
+     */
+    private function maybe_contains_rewritable_urls(string $value): bool
+    {
+        if (strpos($value, 'href="') !== false || strpos($value, 'src="') !== false) {
+            return true;
+        }
+        foreach ($this->source_domains as $domain) {
+            if (strpos($value, $domain) !== false) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
