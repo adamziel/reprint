@@ -36,9 +36,13 @@ function remote_upload_proxy_code(): string
 
 	// Once files-sync finishes, it writes a marker file to the document
 	// root.  When that marker exists the proxy is no longer needed — all
-	// uploads are available locally.
+	// uploads are available locally.  clearstatcache() is needed because
+	// php -S is a long-running process and the stat cache may hold stale
+	// entries for files created after the server started.
 	$doc_root = $_SERVER['DOCUMENT_ROOT'] ?? '';
-	if ($doc_root !== '' && file_exists($doc_root . '/.streaming-uploads-synced')) return;
+	$marker   = $doc_root . '/.streaming-uploads-synced';
+	clearstatcache(true, $marker);
+	if ($doc_root !== '' && file_exists($marker)) return;
 
 	$uri  = $_SERVER['REQUEST_URI'] ?? '';
 	$path = parse_url($uri, PHP_URL_PATH);

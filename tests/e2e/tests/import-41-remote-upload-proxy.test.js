@@ -14,7 +14,7 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
@@ -258,18 +258,21 @@ describe('Import: Remote upload proxy', () => {
     it('stops proxying once the sync-complete marker exists', async () => {
         // The remote-upload-proxy checks for a .streaming-uploads-synced
         // marker file in the document root.  When it exists, the proxy
-        // returns early and the server handles the request normally (404).
+        // returns early and the request falls through to the normal
+        // server routing (WordPress).  Verify by checking the response
+        // body — it must NOT match the source file content.
         const markerPath = join(effectiveRoot, '.streaming-uploads-synced');
         writeFileSync(markerPath, '');
         try {
-            const path = '/wp-content/uploads/2024/01/photo.jpg';
-            const res = await fetch(targetUrl(path));
-            // The file doesn't exist locally, so without the proxy it's a 404.
-            assert.equal(res.status, 404,
-                `Expected 404 when sync marker exists, got ${res.status}`);
+            const relPath = 'wp-content/uploads/2024/01/photo.jpg';
+            const res = await fetch(targetUrl('/' + relPath));
+            const body = Buffer.from(await res.arrayBuffer());
+            const expected = sourceContent[relPath];
+            assert.ok(expected, 'Test setup should have source content for photo.jpg');
+            assert.ok(!body.equals(expected),
+                'Response body should NOT match the source file — proxy should be disabled');
         } finally {
             // Remove the marker so subsequent tests still exercise the proxy.
-            const { unlinkSync } = await import('node:fs');
             unlinkSync(markerPath);
         }
     });
