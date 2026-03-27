@@ -8256,7 +8256,7 @@ class ImportClient
     protected function track_consecutive_timeout(
         string $phase,
         ?string $cursor_before,
-        ?string $cursor_after,
+        ?string $cursor_after
     ): void {
         if ($cursor_after !== null && $cursor_after !== $cursor_before) {
             // Progress was made — reset the counter.

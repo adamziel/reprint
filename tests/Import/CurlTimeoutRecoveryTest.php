@@ -500,7 +500,7 @@ class TimeoutTestClient extends \ImportClient
 {
     protected function fetch_streaming(
         string $url,
-        ?string &$cursor,
+        ?string $cursor,
         \StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
@@ -519,7 +519,7 @@ class SuccessTestClient extends \ImportClient
 {
     protected function fetch_streaming(
         string $url,
-        ?string &$cursor,
+        ?string $cursor,
         \StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
