@@ -3557,6 +3557,7 @@ class ImportClient
         $source_siteurl = $preflight_data["database"]["wp"]["siteurl"] ?? "";
         if (is_string($source_siteurl) && $source_siteurl !== "") {
             $manifest->constants["STREAMING_REMOTE_SITE_URL"] = $source_siteurl;
+            $manifest->constants["STREAMING_SYNC_MARKER"] = $this->fs_root . '/.streaming-uploads-synced';
             $manifest->routes[] = [
                 "handler" => "remote-upload-proxy",
                 "path_pattern" => "/wp-content/uploads/.*",

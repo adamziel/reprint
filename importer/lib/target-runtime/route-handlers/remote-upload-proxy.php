@@ -34,15 +34,17 @@ function remote_upload_proxy_code(): string
 		: '';
 	if ($remote_site === '') return;
 
-	// Once files-sync finishes, it writes a marker file to the document
-	// root.  When that marker exists the proxy is no longer needed — all
-	// uploads are available locally.  clearstatcache() is needed because
-	// php -S is a long-running process and the stat cache may hold stale
-	// entries for files created after the server started.
-	$doc_root = $_SERVER['DOCUMENT_ROOT'] ?? '';
-	$marker   = $doc_root . '/.streaming-uploads-synced';
-	clearstatcache(true, $marker);
-	if ($doc_root !== '' && file_exists($marker)) return;
+	// Once files-sync finishes, it writes a marker file whose path is
+	// baked into the STREAMING_SYNC_MARKER constant at apply-runtime time.
+	// When that marker exists the proxy is no longer needed — all uploads
+	// are available locally.  clearstatcache() is needed because php -S is
+	// a long-running process and the stat cache may hold stale entries for
+	// files created after the server started.
+	$marker = defined('STREAMING_SYNC_MARKER') ? STREAMING_SYNC_MARKER : '';
+	if ($marker !== '') {
+		clearstatcache(true, $marker);
+		if (file_exists($marker)) return;
+	}
 
 	$uri  = $_SERVER['REQUEST_URI'] ?? '';
 	$path = parse_url($uri, PHP_URL_PATH);
@@ -52,8 +54,11 @@ function remote_upload_proxy_code(): string
 	if (strpos($path, '/wp-content/uploads/') === false) return;
 
 	// If the file already exists locally, let the server handle it.
-	// $doc_root is set above (DOCUMENT_ROOT works for both php -S and
-	// nginx/fpm, regardless of whether WP_CONTENT_DIR is defined).
+	// Use DOCUMENT_ROOT (set by both php -S and nginx/fpm) so the
+	// handler works regardless of whether WP_CONTENT_DIR is defined
+	// in the runtime constants — it isn't for standard layouts where
+	// wp-content lives inside ABSPATH.
+	$doc_root   = $_SERVER['DOCUMENT_ROOT'] ?? '';
 	$local_path = $doc_root . $path;
 	if ($doc_root !== '' && file_exists($local_path)) return;
 

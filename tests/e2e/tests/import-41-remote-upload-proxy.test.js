@@ -257,11 +257,12 @@ describe('Import: Remote upload proxy', () => {
 
     it('stops proxying once the sync-complete marker exists', async () => {
         // The remote-upload-proxy checks for a .streaming-uploads-synced
-        // marker file in the document root.  When it exists, the proxy
-        // returns early and the request falls through to the normal
-        // server routing (WordPress).  Verify by checking the response
-        // body — it must NOT match the source file content.
-        const markerPath = join(effectiveRoot, '.streaming-uploads-synced');
+        // marker file whose path is baked into runtime.php as the
+        // STREAMING_SYNC_MARKER constant (set to fs-root + marker name).
+        // When it exists, the proxy returns early and the request falls
+        // through to the normal server routing.  Verify by checking the
+        // response body — it must NOT match the source file content.
+        const markerPath = join(fsRootDir(tempDir), '.streaming-uploads-synced');
         writeFileSync(markerPath, '');
         try {
             const relPath = 'wp-content/uploads/2024/01/photo.jpg';
