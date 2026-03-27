@@ -9725,6 +9725,14 @@ if (
 
     $command = $argv[1];
 
+    // Backward-compatible command aliases (not advertised in help)
+    $command_aliases = [
+        "flatten-docroot" => "flat-document-root",
+    ];
+    if (isset($command_aliases[$command])) {
+        $command = $command_aliases[$command];
+    }
+
     // Per-command --help (can be requested before providing url/path)
     if (in_array("--help", array_slice($argv, 2)) || in_array("-h", array_slice($argv, 2))) {
         if (isset($command_help[$command])) {
@@ -9772,6 +9780,9 @@ if (
             $state_dir = substr($argv[$i], strlen("--state-dir="));
         } elseif (strpos($argv[$i], "--fs-root=") === 0) {
             $fs_root = substr($argv[$i], strlen("--fs-root="));
+        } elseif (strpos($argv[$i], "--docroot=") === 0) {
+            // Backward-compatible alias for --fs-root
+            $fs_root = substr($argv[$i], strlen("--docroot="));
         } elseif (strpos($argv[$i], "--secret=") === 0) {
             $options["secret"] = substr($argv[$i], strlen("--secret="));
         } elseif ($argv[$i] === "--abort") {
@@ -9794,6 +9805,12 @@ if (
             $options["fs_root_nonempty_behavior"] = substr(
                 $argv[$i],
                 strlen("--on-fs-root-nonempty="),
+            );
+        } elseif (strpos($argv[$i], "--on-docroot-nonempty=") === 0) {
+            // Backward-compatible alias for --on-fs-root-nonempty
+            $options["fs_root_nonempty_behavior"] = substr(
+                $argv[$i],
+                strlen("--on-docroot-nonempty="),
             );
         } elseif (strpos($argv[$i], "--duty=") === 0) {
             $options["tuning_config"]["duty"] = (float) substr(
@@ -10021,6 +10038,9 @@ if (
             $options["output_dir"] = substr($argv[$i], strlen("--output-dir="));
         } elseif (strpos($argv[$i], "--flat-document-root=") === 0) {
             $options["flat_document_root"] = substr($argv[$i], strlen("--flat-document-root="));
+        } elseif (strpos($argv[$i], "--flattened-docroot=") === 0) {
+            // Backward-compatible alias for --flat-document-root
+            $options["flat_document_root"] = substr($argv[$i], strlen("--flattened-docroot="));
         } elseif (strpos($argv[$i], "--host=") === 0) {
             $options["host"] = substr($argv[$i], strlen("--host="));
         } elseif (strpos($argv[$i], "--port=") === 0) {
