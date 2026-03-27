@@ -1,0 +1,111 @@
+<?php
+
+namespace ImportTests;
+
+use PHPUnit\Framework\TestCase;
+
+require_once __DIR__ . '/../../importer/lib/host/class-runtime-manifest.php';
+require_once __DIR__ . '/../../importer/lib/target-runtime/load.php';
+
+class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
+{
+    private $tempDir;
+    private $fsRoot;
+    private $outputDir;
+    private $stateFile;
+    private $skippedFile;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->tempDir = sys_get_temp_dir() . '/playground-remote-upload-proxy-' . uniqid();
+        $this->fsRoot = $this->tempDir . '/fs-root';
+        $this->outputDir = $this->tempDir . '/runtime';
+        $stateDir = $this->tempDir . '/state';
+
+        mkdir($this->fsRoot, 0755, true);
+        mkdir($this->outputDir, 0755, true);
+        mkdir($stateDir, 0755, true);
+
+        file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
+        $this->stateFile = $stateDir . '/.import-state.json';
+        $this->skippedFile = $stateDir . '/.import-download-list-skipped.jsonl';
+        file_put_contents($this->stateFile, "{\"command\":\"files-sync\",\"status\":\"partial\"}\n");
+        file_put_contents($this->skippedFile, "{\"path\":\"/wp-content/uploads/test.jpg\"}\n");
+    }
+
+    protected function tearDown(): void
+    {
+        $this->recursiveDelete($this->tempDir);
+        parent::tearDown();
+    }
+
+    private function recursiveDelete(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+
+        foreach (scandir($dir) as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+
+            $path = $dir . '/' . $item;
+            if (is_link($path) || is_file($path)) {
+                unlink($path);
+                continue;
+            }
+
+            if (is_dir($path)) {
+                $this->recursiveDelete($path);
+            }
+        }
+
+        rmdir($dir);
+    }
+
+    public function testPlaygroundMountsProxyStateFilesIntoVfs(): void
+    {
+        $manifest = new \RuntimeManifest('other');
+        $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL'] =
+            'https://source.example/wp-content/uploads';
+        $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE'] =
+            $this->stateFile;
+        $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'] =
+            $this->skippedFile;
+        $manifest->routes[] = [
+            'handler' => 'remote-upload-proxy',
+            'path_pattern' => '/wp-content/uploads/.*',
+            'condition' => 'file_not_found',
+            'description' => 'Proxy missing uploads',
+        ];
+
+        $applier = new \PlaygroundCliApplier();
+        $applier->apply($manifest, $this->fsRoot, $this->outputDir, [
+            'port' => 9400,
+            'wordpress_index' => $this->fsRoot . '/index.php',
+        ]);
+
+        $runtime = file_get_contents($this->outputDir . '/runtime.php');
+        $startSh = file_get_contents($this->outputDir . '/start.sh');
+
+        $this->assertStringContainsString(
+            "/tmp/streaming-site-migration/.import-state.json",
+            $runtime,
+        );
+        $this->assertStringContainsString(
+            "/tmp/streaming-site-migration/.import-download-list-skipped.jsonl",
+            $runtime,
+        );
+        $this->assertStringNotContainsString($this->stateFile, $runtime);
+        $this->assertStringContainsString(
+            "--mount='" . $this->stateFile . ":/tmp/streaming-site-migration/.import-state.json'",
+            $startSh,
+        );
+        $this->assertStringContainsString(
+            "--mount='" . $this->skippedFile . ":/tmp/streaming-site-migration/.import-download-list-skipped.jsonl'",
+            $startSh,
+        );
+    }
+}
