@@ -77,10 +77,15 @@ async function startPhpServer(docRoot, routerPath, port = TARGET_PORT) {
     );
 }
 
-function stopPhpServer(proc) {
-    if (proc && proc.exitCode === null) {
-        proc.kill('SIGTERM');
-    }
+async function stopPhpServer(proc) {
+    if (!proc || proc.exitCode !== null) return;
+    proc.kill('SIGTERM');
+    // Wait for the process to actually exit so the port is freed.
+    await new Promise((resolve) => {
+        proc.on('exit', resolve);
+        // Safety timeout — don't hang forever.
+        setTimeout(() => { proc.kill('SIGKILL'); resolve(); }, 5000);
+    });
 }
 
 describe('Import: Remote upload proxy', () => {
@@ -170,8 +175,8 @@ describe('Import: Remote upload proxy', () => {
         phpServer = await startPhpServer(effectiveRoot, runtimePath);
     }, 120000);
 
-    afterAll(() => {
-        stopPhpServer(phpServer);
+    afterAll(async () => {
+        await stopPhpServer(phpServer);
         cleanupTempDir(tempDir);
     });
 
@@ -281,8 +286,9 @@ describe('Import: Remote upload proxy', () => {
         assert.notEqual(original, patched, 'runtime.php should have been patched');
         writeFileSync(runtimePath, patched);
 
-        // Restart the server with the patched runtime.
-        stopPhpServer(phpServer);
+        // Restart the server with the patched runtime.  We must wait for
+        // the old process to fully exit so the port is freed.
+        await stopPhpServer(phpServer);
         phpServer = await startPhpServer(effectiveRoot, runtimePath);
 
         try {
@@ -294,10 +300,10 @@ describe('Import: Remote upload proxy', () => {
             assert.ok(!body.equals(expected),
                 'Response body should NOT match the source file — proxy should be disabled');
         } finally {
-            // Restore runtime.php and restart so subsequent tests (if any)
-            // still have the proxy active.
+            // Restore runtime.php and restart so subsequent tests still
+            // have the proxy active.
             writeFileSync(runtimePath, original);
-            stopPhpServer(phpServer);
+            await stopPhpServer(phpServer);
             phpServer = await startPhpServer(effectiveRoot, runtimePath);
         }
     });
