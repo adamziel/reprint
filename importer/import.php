@@ -2452,8 +2452,8 @@ class ImportClient
         // Skip the marker when --filter=essential-files was used because
         // uploads were not downloaded in that mode.
         if ($this->filter !== 'essential-files') {
-            $marker = $this->fs_root . '/.streaming-uploads-synced';
-            if ($this->fs_root !== null && !file_exists($marker)) {
+            $marker = $this->state_dir . '/.streaming-uploads-synced';
+            if (!file_exists($marker)) {
                 file_put_contents($marker, '');
             }
         }
@@ -3557,7 +3557,7 @@ class ImportClient
         $source_siteurl = $preflight_data["database"]["wp"]["siteurl"] ?? "";
         if (is_string($source_siteurl) && $source_siteurl !== "") {
             $manifest->constants["STREAMING_REMOTE_SITE_URL"] = $source_siteurl;
-            $manifest->constants["STREAMING_SYNC_MARKER"] = $this->fs_root . '/.streaming-uploads-synced';
+            $manifest->constants["STREAMING_SYNC_MARKER"] = $this->state_dir . '/.streaming-uploads-synced';
             $manifest->routes[] = [
                 "handler" => "remote-upload-proxy",
                 "path_pattern" => "/wp-content/uploads/.*",
