@@ -2446,6 +2446,13 @@ class ImportClient
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
+        // Disable the remote-upload-proxy in runtime.php now that all
+        // files are available locally.  Skip when --filter=essential-files
+        // was used because uploads were not downloaded in that mode.
+        if ($this->filter !== 'essential-files') {
+            $this->disable_upload_proxy();
+        }
+
         $this->clear_progress_line();
         $index_size = $this->index_count();
         $label = $is_delta ? "files-sync (delta)" : "files-sync";
@@ -3545,7 +3552,6 @@ class ImportClient
         $source_siteurl = $preflight_data["database"]["wp"]["siteurl"] ?? "";
         if (is_string($source_siteurl) && $source_siteurl !== "") {
             $manifest->constants["STREAMING_REMOTE_SITE_URL"] = $source_siteurl;
-            $manifest->constants["STREAMING_IMPORT_STATE"] = $this->state_file;
             $manifest->routes[] = [
                 "handler" => "remote-upload-proxy",
                 "path_pattern" => "/wp-content/uploads/.*",
@@ -3625,6 +3631,13 @@ class ImportClient
 
         $summary = $applier->apply($manifest, $abs_fs_root, $abs_output_dir, $applier_options);
 
+        // Persist the output dir so that files-sync can patch runtime.php
+        // to disable the upload proxy once sync completes.
+        $this->state["apply_runtime"] = [
+            "output_dir" => $abs_output_dir,
+        ];
+        $this->save_state($this->state);
+
         if ($manifest->sqlite !== null) {
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
@@ -3653,6 +3666,46 @@ class ImportClient
         fwrite(STDERR, "\n");
         foreach ($summary as $line) {
             fwrite(STDERR, "{$line}\n");
+        }
+    }
+
+    /**
+     * Disable the remote-upload-proxy by blanking STREAMING_REMOTE_SITE_URL
+     * in the generated runtime.php.  Called after files-sync completes so
+     * the proxy stops intercepting requests for uploaded files.
+     *
+     * The proxy checks `if ($remote_site === '') return;` at the top of
+     * its IIFE, so setting the constant to an empty string is enough to
+     * disable it without removing any code.
+     */
+    private function disable_upload_proxy(): void
+    {
+        $output_dir = $this->state["apply_runtime"]["output_dir"] ?? null;
+        if ($output_dir === null) {
+            return;
+        }
+
+        $runtime_path = $output_dir . '/runtime.php';
+        if (!file_exists($runtime_path)) {
+            return;
+        }
+
+        $content = file_get_contents($runtime_path);
+        if ($content === false) {
+            return;
+        }
+
+        // Match the define() call for STREAMING_REMOTE_SITE_URL and
+        // replace the value with an empty string.
+        $updated = preg_replace(
+            "/define\('STREAMING_REMOTE_SITE_URL',\s*'[^']*'\)/",
+            "define('STREAMING_REMOTE_SITE_URL', '')",
+            $content,
+        );
+
+        if ($updated !== null && $updated !== $content) {
+            file_put_contents($runtime_path, $updated);
+            $this->audit_log("UPLOAD-PROXY | disabled in {$runtime_path}");
         }
     }
 

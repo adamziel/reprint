@@ -202,11 +202,13 @@ describe('Import: Remote upload proxy', () => {
             'Expected remote upload proxy handler in runtime.php');
     });
 
-    it('runtime.php contains STREAMING_IMPORT_STATE pointing to state file', () => {
+    it('runtime.php contains a non-empty STREAMING_REMOTE_SITE_URL', () => {
         const runtime = readFileSync(join(outputDir, 'runtime.php'), 'utf-8');
-        const expectedState = join(tempDir, '.import-state.json');
-        assert.ok(runtime.includes(expectedState),
-            `Expected STREAMING_IMPORT_STATE to contain ${expectedState} in runtime.php`);
+        // The constant should have a real URL, not an empty string.
+        const match = runtime.match(/define\('STREAMING_REMOTE_SITE_URL',\s*'([^']*)'\)/);
+        assert.ok(match, 'Expected STREAMING_REMOTE_SITE_URL define in runtime.php');
+        assert.ok(match[1].length > 0,
+            'STREAMING_REMOTE_SITE_URL should not be empty');
     });
 
     // ------------------------------------------------------------------
@@ -262,16 +264,18 @@ describe('Import: Remote upload proxy', () => {
             'Should serve the local file content, not proxy from source');
     });
 
-    it('stops proxying once files-sync is complete in state', async () => {
-        // The remote-upload-proxy reads the import state file (path baked
-        // into runtime.php as STREAMING_IMPORT_STATE).  When the state
-        // shows files-sync is complete, the proxy returns early.
-        const stateFile = join(tempDir, '.import-state.json');
-        const originalState = readFileSync(stateFile, 'utf-8');
-        const state = JSON.parse(originalState);
-        state.command = 'files-sync';
-        state.status = 'complete';
-        writeFileSync(stateFile, JSON.stringify(state));
+    it('stops proxying once STREAMING_REMOTE_SITE_URL is blanked', async () => {
+        // When files-sync completes, it blanks the STREAMING_REMOTE_SITE_URL
+        // constant in runtime.php.  The proxy checks this constant and
+        // returns early when it's empty.  Simulate by patching runtime.php.
+        const runtimePath = join(outputDir, 'runtime.php');
+        const original = readFileSync(runtimePath, 'utf-8');
+        const patched = original.replace(
+            /define\('STREAMING_REMOTE_SITE_URL',\s*'[^']*'\)/,
+            "define('STREAMING_REMOTE_SITE_URL', '')",
+        );
+        assert.notEqual(original, patched, 'runtime.php should have been patched');
+        writeFileSync(runtimePath, patched);
         try {
             const relPath = 'wp-content/uploads/2024/01/photo.jpg';
             const res = await fetch(targetUrl('/' + relPath));
@@ -281,8 +285,8 @@ describe('Import: Remote upload proxy', () => {
             assert.ok(!body.equals(expected),
                 'Response body should NOT match the source file — proxy should be disabled');
         } finally {
-            // Restore the original state so subsequent tests still exercise the proxy.
-            writeFileSync(stateFile, originalState);
+            // Restore so subsequent tests still exercise the proxy.
+            writeFileSync(runtimePath, original);
         }
     });
 

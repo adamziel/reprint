@@ -34,26 +34,6 @@ function remote_upload_proxy_code(): string
 		: '';
 	if ($remote_site === '') return;
 
-	// Once files-sync finishes, the proxy is no longer needed — all
-	// uploads are available locally.  Check the import state file to see
-	// if files-sync has completed.  The state file path is baked into the
-	// STREAMING_IMPORT_STATE constant at apply-runtime time.
-	$state_file = defined('STREAMING_IMPORT_STATE') ? STREAMING_IMPORT_STATE : '';
-	if ($state_file !== '') {
-		clearstatcache(true, $state_file);
-		$raw = @file_get_contents($state_file);
-		if ($raw !== false) {
-			$state = @json_decode($raw, true);
-			if (
-				is_array($state) &&
-				($state['command'] ?? '') === 'files-sync' &&
-				($state['status'] ?? '') === 'complete'
-			) {
-				return;
-			}
-		}
-	}
-
 	$uri  = $_SERVER['REQUEST_URI'] ?? '';
 	$path = parse_url($uri, PHP_URL_PATH);
 	if (!$path) return;
