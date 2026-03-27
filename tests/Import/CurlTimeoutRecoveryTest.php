@@ -13,6 +13,10 @@ require_once __DIR__ . '/../../importer/import.php';
  * Each download method (download_sql, download_file_fetch, download_remote_index,
  * download_db_index) is tested by injecting a CurlTimeoutException via a
  * subclass that overrides fetch_streaming.
+ *
+ * Also verifies the consecutive-timeout safety net: after
+ * MAX_CONSECUTIVE_TIMEOUTS with no cursor progress, the importer gives up
+ * with a RuntimeException instead of retrying forever.
  */
 class CurlTimeoutRecoveryTest extends TestCase
 {
@@ -85,11 +89,13 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     /**
-     * Prepare a TimeoutTestClient with state loaded and TTY disabled.
+     * Prepare a client test double with state loaded and TTY disabled.
+     *
+     * @param class-string $clientClass  Which test double to instantiate
      */
-    private function prepareClient(): array
+    private function prepareClient(string $clientClass = TimeoutTestClient::class): array
     {
-        $client = new TimeoutTestClient(
+        $client = new $clientClass(
             'http://fake.url',
             $this->stateDir,
             $this->fs_root,
@@ -316,17 +322,185 @@ class CurlTimeoutRecoveryTest extends TestCase
         $e = new \CurlTimeoutException("Operation timed out");
         $this->assertInstanceOf(\RuntimeException::class, $e);
     }
+
+    // ---------------------------------------------------------------
+    // Consecutive timeout counter
+    // ---------------------------------------------------------------
+
+    /**
+     * track_consecutive_timeout increments the counter when cursor didn't
+     * move. After MAX_CONSECUTIVE_TIMEOUTS it throws RuntimeException.
+     */
+    public function testTrackConsecutiveTimeoutIncrementsOnNoProgress()
+    {
+        $this->writeState([
+            "command" => "db-sync",
+            "status" => "in_progress",
+            "consecutive_timeouts" => 0,
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $state = $reflection->getProperty('state');
+
+        $method = $reflection->getMethod('track_consecutive_timeout');
+
+        // First call — no progress (same cursor before and after)
+        $method->invoke($client, "sql_chunk", "abc", "abc");
+        $this->assertEquals(1, $state->getValue($client)["consecutive_timeouts"]);
+
+        // Second call — still no progress
+        $method->invoke($client, "sql_chunk", "abc", "abc");
+        $this->assertEquals(2, $state->getValue($client)["consecutive_timeouts"]);
+    }
+
+    public function testTrackConsecutiveTimeoutResetsOnProgress()
+    {
+        $this->writeState([
+            "command" => "db-sync",
+            "status" => "in_progress",
+            "consecutive_timeouts" => 2,
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $state = $reflection->getProperty('state');
+
+        $method = $reflection->getMethod('track_consecutive_timeout');
+
+        // Cursor advanced — should reset to 0
+        $method->invoke($client, "sql_chunk", "abc", "def");
+        $this->assertEquals(0, $state->getValue($client)["consecutive_timeouts"]);
+    }
+
+    public function testTrackConsecutiveTimeoutThrowsAtMax()
+    {
+        $this->writeState([
+            "command" => "db-sync",
+            "status" => "in_progress",
+            "consecutive_timeouts" => 2,
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+
+        $method = $reflection->getMethod('track_consecutive_timeout');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('consecutive');
+
+        // 3rd no-progress timeout should throw
+        $method->invoke($client, "sql_chunk", "abc", "abc");
+    }
+
+    /**
+     * End-to-end: download_sql with counter already at MAX-1 and no
+     * cursor progress should throw RuntimeException.
+     */
+    public function testSqlDownloadGivesUpAfterMaxConsecutiveTimeouts()
+    {
+        $this->writeState([
+            "command" => "db-sync",
+            "status" => "in_progress",
+            "stage" => "sql",
+            "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            "sql_bytes" => 1024,
+            "consecutive_timeouts" => 2,
+        ]);
+
+        $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
+        file_put_contents($this->stateDir . '/db.sql', $sql_content);
+
+        [$client, $reflection] = $this->prepareClient();
+
+        $modeProp = $reflection->getProperty('sql_output_mode');
+        $modeProp->setValue($client, 'file');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('consecutive');
+
+        $downloadSql = $reflection->getMethod('download_sql');
+        $downloadSql->invoke($client);
+    }
+
+    public function testFirstTimeoutIncrementsCounterInState()
+    {
+        $this->writeState([
+            "command" => "db-sync",
+            "status" => "in_progress",
+            "stage" => "sql",
+            "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            "sql_bytes" => 1024,
+            "consecutive_timeouts" => 0,
+        ]);
+
+        $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
+        file_put_contents($this->stateDir . '/db.sql', $sql_content);
+
+        [$client, $reflection] = $this->prepareClient();
+
+        $modeProp = $reflection->getProperty('sql_output_mode');
+        $modeProp->setValue($client, 'file');
+
+        $downloadSql = $reflection->getMethod('download_sql');
+        $downloadSql->invoke($client);
+
+        $state = $this->readState();
+        $this->assertEquals("partial", $state["status"]);
+        $this->assertEquals(
+            1,
+            $state["consecutive_timeouts"],
+            "First no-progress timeout should increment counter to 1"
+        );
+    }
+
+    public function testSuccessfulRequestResetsCounter()
+    {
+        $this->writeState([
+            "command" => "files-sync",
+            "status" => "in_progress",
+            "stage" => "index",
+            "index" => [
+                "cursor" => base64_encode('{"dir":"/wp-content","offset":500}'),
+            ],
+            "consecutive_timeouts" => 2,
+            "preflight" => [
+                "data" => [
+                    "ok" => true,
+                    "wp_detect" => [
+                        "roots" => [
+                            ["path" => "/srv/htdocs"],
+                        ],
+                    ],
+                ],
+                "http_code" => 200,
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient(
+            SuccessTestClient::class,
+        );
+
+        $downloadIndex = $reflection->getMethod('download_remote_index');
+        $downloadIndex->invoke($client);
+
+        $state = $this->readState();
+        $this->assertEquals(
+            0,
+            $state["consecutive_timeouts"],
+            "Successful request should reset consecutive_timeouts to 0"
+        );
+    }
+
 }
 
 /**
  * Test double that throws CurlTimeoutException from fetch_streaming,
  * simulating a cURL timeout without making real HTTP requests.
+ * The cursor is NOT advanced — simulates a complete stall.
  */
 class TimeoutTestClient extends \ImportClient
 {
     protected function fetch_streaming(
         string $url,
-        ?string $cursor,
+        ?string &$cursor,
         \StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
@@ -334,5 +508,23 @@ class TimeoutTestClient extends \ImportClient
         throw new \CurlTimeoutException(
             "cURL error: Operation timed out after 300001 milliseconds with 0 bytes received"
         );
+    }
+}
+
+/**
+ * Test double that completes successfully without throwing,
+ * simulating a normal request that finishes.
+ */
+class SuccessTestClient extends \ImportClient
+{
+    protected function fetch_streaming(
+        string $url,
+        ?string &$cursor,
+        \StreamingContext $context,
+        ?array $post_data = null,
+        ?string $endpoint = null
+    ): void {
+        // Signal completion
+        $context->saw_completion = true;
     }
 }
