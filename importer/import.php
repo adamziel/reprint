@@ -5033,7 +5033,7 @@ class ImportClient
         } catch (CurlTimeoutException $e) {
             // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
             // with no progress, so we don't retry forever.
-            $this->track_consecutive_timeout("file_fetch", $cursor_before, $cursor);
+            $this->assert_can_retry_consecutive_timeout("file_fetch", $cursor_before, $cursor);
             // Save state so the next invocation resumes from the
             // last cursor instead of crashing with exit code 1.
             $this->state[$state_key]["cursor"] = $cursor;
@@ -5246,7 +5246,7 @@ class ImportClient
         } catch (CurlTimeoutException $e) {
             // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
             // with no progress, so we don't retry forever.
-            $this->track_consecutive_timeout("file_index", $cursor_before, $cursor);
+            $this->assert_can_retry_consecutive_timeout("file_index", $cursor_before, $cursor);
             fclose($handle);
             $this->state["index"] = ["cursor" => $cursor];
             $this->state["status"] = "partial";
@@ -6507,7 +6507,7 @@ class ImportClient
                 } catch (CurlTimeoutException $e) {
                     // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
                     // with no progress, so we don't retry forever.
-                    $this->track_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
+                    $this->assert_can_retry_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
                     // Save state so the next invocation resumes from the
                     // last cursor instead of crashing with exit code 1.
                     if ($sql_handle) {
@@ -6986,7 +6986,7 @@ class ImportClient
                 } catch (CurlTimeoutException $e) {
                     // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
                     // with no progress, so we don't retry forever.
-                    $this->track_consecutive_timeout("db_index", $cursor_before, $cursor);
+                    $this->assert_can_retry_consecutive_timeout("db_index", $cursor_before, $cursor);
                     fflush($handle);
                     $this->state["cursor"] = $cursor;
                     $this->state["db_index"] = [
@@ -8253,7 +8253,7 @@ class ImportClient
      * @param ?string $cursor_before Cursor value at the start of the request
      * @param ?string $cursor_after  Cursor value when the timeout fired
      */
-    protected function track_consecutive_timeout(
+    protected function assert_can_retry_consecutive_timeout(
         string $phase,
         ?string $cursor_before,
         ?string $cursor_after

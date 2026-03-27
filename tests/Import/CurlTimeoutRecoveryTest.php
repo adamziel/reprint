@@ -328,7 +328,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     // ---------------------------------------------------------------
 
     /**
-     * track_consecutive_timeout increments the counter when cursor didn't
+     * assert_can_retry_consecutive_timeout increments the counter when cursor didn't
      * move. After MAX_CONSECUTIVE_TIMEOUTS it throws RuntimeException.
      */
     public function testTrackConsecutiveTimeoutIncrementsOnNoProgress()
@@ -342,7 +342,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
         $state = $reflection->getProperty('state');
 
-        $method = $reflection->getMethod('track_consecutive_timeout');
+        $method = $reflection->getMethod('assert_can_retry_consecutive_timeout');
 
         // First call — no progress (same cursor before and after)
         $method->invoke($client, "sql_chunk", "abc", "abc");
@@ -364,7 +364,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
         $state = $reflection->getProperty('state');
 
-        $method = $reflection->getMethod('track_consecutive_timeout');
+        $method = $reflection->getMethod('assert_can_retry_consecutive_timeout');
 
         // Cursor advanced — should reset to 0
         $method->invoke($client, "sql_chunk", "abc", "def");
@@ -381,7 +381,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $method = $reflection->getMethod('track_consecutive_timeout');
+        $method = $reflection->getMethod('assert_can_retry_consecutive_timeout');
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('consecutive');
