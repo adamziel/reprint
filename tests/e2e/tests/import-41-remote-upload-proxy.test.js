@@ -14,7 +14,7 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
@@ -202,11 +202,11 @@ describe('Import: Remote upload proxy', () => {
             'Expected remote upload proxy handler in runtime.php');
     });
 
-    it('runtime.php contains STREAMING_SYNC_MARKER pointing to state dir', () => {
+    it('runtime.php contains STREAMING_IMPORT_STATE pointing to state file', () => {
         const runtime = readFileSync(join(outputDir, 'runtime.php'), 'utf-8');
-        const expectedMarker = join(tempDir, '.streaming-uploads-synced');
-        assert.ok(runtime.includes(expectedMarker),
-            `Expected STREAMING_SYNC_MARKER to contain ${expectedMarker} in runtime.php`);
+        const expectedState = join(tempDir, '.import-state.json');
+        assert.ok(runtime.includes(expectedState),
+            `Expected STREAMING_IMPORT_STATE to contain ${expectedState} in runtime.php`);
     });
 
     // ------------------------------------------------------------------
@@ -262,15 +262,16 @@ describe('Import: Remote upload proxy', () => {
             'Should serve the local file content, not proxy from source');
     });
 
-    it('stops proxying once the sync-complete marker exists', async () => {
-        // The remote-upload-proxy checks for a .streaming-uploads-synced
-        // marker file whose path is baked into runtime.php as the
-        // STREAMING_SYNC_MARKER constant (set to state-dir + marker name).
-        // When it exists, the proxy returns early and the request falls
-        // through to the normal server routing.  Verify by checking the
-        // response body — it must NOT match the source file content.
-        const markerPath = join(tempDir, '.streaming-uploads-synced');
-        writeFileSync(markerPath, '');
+    it('stops proxying once files-sync is complete in state', async () => {
+        // The remote-upload-proxy reads the import state file (path baked
+        // into runtime.php as STREAMING_IMPORT_STATE).  When the state
+        // shows files-sync is complete, the proxy returns early.
+        const stateFile = join(tempDir, '.import-state.json');
+        const originalState = readFileSync(stateFile, 'utf-8');
+        const state = JSON.parse(originalState);
+        state.command = 'files-sync';
+        state.status = 'complete';
+        writeFileSync(stateFile, JSON.stringify(state));
         try {
             const relPath = 'wp-content/uploads/2024/01/photo.jpg';
             const res = await fetch(targetUrl('/' + relPath));
@@ -280,8 +281,8 @@ describe('Import: Remote upload proxy', () => {
             assert.ok(!body.equals(expected),
                 'Response body should NOT match the source file — proxy should be disabled');
         } finally {
-            // Remove the marker so subsequent tests still exercise the proxy.
-            unlinkSync(markerPath);
+            // Restore the original state so subsequent tests still exercise the proxy.
+            writeFileSync(stateFile, originalState);
         }
     });
 

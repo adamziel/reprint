@@ -34,16 +34,24 @@ function remote_upload_proxy_code(): string
 		: '';
 	if ($remote_site === '') return;
 
-	// Once files-sync finishes, it writes a marker file whose path is
-	// baked into the STREAMING_SYNC_MARKER constant at apply-runtime time.
-	// When that marker exists the proxy is no longer needed — all uploads
-	// are available locally.  clearstatcache() is needed because php -S is
-	// a long-running process and the stat cache may hold stale entries for
-	// files created after the server started.
-	$marker = defined('STREAMING_SYNC_MARKER') ? STREAMING_SYNC_MARKER : '';
-	if ($marker !== '') {
-		clearstatcache(true, $marker);
-		if (file_exists($marker)) return;
+	// Once files-sync finishes, the proxy is no longer needed — all
+	// uploads are available locally.  Check the import state file to see
+	// if files-sync has completed.  The state file path is baked into the
+	// STREAMING_IMPORT_STATE constant at apply-runtime time.
+	$state_file = defined('STREAMING_IMPORT_STATE') ? STREAMING_IMPORT_STATE : '';
+	if ($state_file !== '') {
+		clearstatcache(true, $state_file);
+		$raw = @file_get_contents($state_file);
+		if ($raw !== false) {
+			$state = @json_decode($raw, true);
+			if (
+				is_array($state) &&
+				($state['command'] ?? '') === 'files-sync' &&
+				($state['status'] ?? '') === 'complete'
+			) {
+				return;
+			}
+		}
 	}
 
 	$uri  = $_SERVER['REQUEST_URI'] ?? '';
