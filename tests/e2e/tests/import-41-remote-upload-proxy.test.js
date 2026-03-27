@@ -36,12 +36,60 @@ const UPLOAD_FILES = {
 // Port for the target PHP built-in server (not in site-registry).
 const TARGET_PORT = 8200;
 
+/**
+ * Start a php -S server with the given document root and router script.
+ * Returns the child process once it's accepting TCP connections.
+ */
+async function startPhpServer(docRoot, routerPath, port = TARGET_PORT) {
+    let stderr = '';
+    const proc = spawn('php', [
+        '-S', `127.0.0.1:${port}`,
+        '-t', docRoot,
+        routerPath,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    proc.stderr.on('data', (d) => { stderr += d; });
+
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+        if (proc.exitCode !== null) {
+            await sleep(100);
+            throw new Error(
+                `PHP server exited early with code ${proc.exitCode}\nstderr: ${stderr}`
+            );
+        }
+        try {
+            await new Promise((resolve, reject) => {
+                const socket = createConnection(port, '127.0.0.1');
+                socket.setTimeout(500);
+                socket.once('connect', () => { socket.destroy(); resolve(); });
+                socket.once('error', reject);
+                socket.once('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
+            });
+            return proc;
+        } catch (_) {
+            // retry
+        }
+        await sleep(200);
+    }
+    proc.kill('SIGTERM');
+    throw new Error(
+        `Timed out waiting for PHP server on port ${port}\nstderr: ${stderr}`
+    );
+}
+
+function stopPhpServer(proc) {
+    if (proc && proc.exitCode === null) {
+        proc.kill('SIGTERM');
+    }
+}
+
 describe('Import: Remote upload proxy', () => {
     const site = 'remote-proxy';
     let siteDir;
     let tempDir;
     let outputDir;
     let effectiveRoot;
+    let runtimePath;
     let phpServer = null;
 
     // Content bytes keyed by relative path, so we can compare later.
@@ -103,7 +151,7 @@ describe('Import: Remote upload proxy', () => {
             `apply-runtime failed:\n${applyRuntime.stderr}\n${applyRuntime.stdout}`);
 
         // 4. Start the PHP built-in server with the generated runtime.
-        const runtimePath = join(outputDir, 'runtime.php');
+        runtimePath = join(outputDir, 'runtime.php');
         assert.ok(existsSync(runtimePath), 'runtime.php should exist');
 
         // The effective document root: fs-root + remote document root.
@@ -119,54 +167,11 @@ describe('Import: Remote upload proxy', () => {
         // files-sync had nothing to write inside it.
         mkdirSync(effectiveRoot, { recursive: true });
 
-        // Capture stderr from the start so we have diagnostics if
-        // the server exits early.
-        let phpStderr = '';
-        phpServer = spawn('php', [
-            '-S', `127.0.0.1:${TARGET_PORT}`,
-            '-t', effectiveRoot,
-            runtimePath,
-        ], { stdio: ['ignore', 'pipe', 'pipe'] });
-        phpServer.stderr.on('data', (d) => { phpStderr += d; });
-
-        // Wait for the server to accept TCP connections (don't send an
-        // HTTP request — that would run the router and try to boot
-        // WordPress, which isn't set up for the target).
-        const deadline = Date.now() + 15000;
-        let ready = false;
-        while (Date.now() < deadline) {
-            if (phpServer.exitCode !== null) {
-                await sleep(100); // let stderr drain
-                throw new Error(
-                    `PHP server exited early with code ${phpServer.exitCode}\nstderr: ${phpStderr}`
-                );
-            }
-            try {
-                await new Promise((resolve, reject) => {
-                    const socket = createConnection(TARGET_PORT, '127.0.0.1');
-                    socket.setTimeout(500);
-                    socket.once('connect', () => { socket.destroy(); resolve(); });
-                    socket.once('error', reject);
-                    socket.once('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
-                });
-                ready = true;
-                break;
-            } catch (_) {
-                // retry
-            }
-            await sleep(200);
-        }
-        if (!ready) {
-            throw new Error(
-                `Timed out waiting for PHP server on port ${TARGET_PORT}\nstderr: ${phpStderr}`
-            );
-        }
+        phpServer = await startPhpServer(effectiveRoot, runtimePath);
     }, 120000);
 
     afterAll(() => {
-        if (phpServer && phpServer.exitCode === null) {
-            phpServer.kill('SIGTERM');
-        }
+        stopPhpServer(phpServer);
         cleanupTempDir(tempDir);
     });
 
@@ -204,7 +209,6 @@ describe('Import: Remote upload proxy', () => {
 
     it('runtime.php contains a non-empty STREAMING_REMOTE_SITE_URL', () => {
         const runtime = readFileSync(join(outputDir, 'runtime.php'), 'utf-8');
-        // The constant should have a real URL, not an empty string.
         const match = runtime.match(/define\('STREAMING_REMOTE_SITE_URL',\s*'([^']*)'\)/);
         assert.ok(match, 'Expected STREAMING_REMOTE_SITE_URL define in runtime.php');
         assert.ok(match[1].length > 0,
@@ -264,11 +268,11 @@ describe('Import: Remote upload proxy', () => {
             'Should serve the local file content, not proxy from source');
     });
 
-    it('stops proxying once STREAMING_REMOTE_SITE_URL is blanked', async () => {
-        // When files-sync completes, it blanks the STREAMING_REMOTE_SITE_URL
-        // constant in runtime.php.  The proxy checks this constant and
-        // returns early when it's empty.  Simulate by patching runtime.php.
-        const runtimePath = join(outputDir, 'runtime.php');
+    it('stops proxying after files-sync disables the proxy', async () => {
+        // When files-sync completes it blanks STREAMING_REMOTE_SITE_URL
+        // in runtime.php.  The proxy sees the empty constant and returns
+        // early.  php -S caches the compiled router in memory, so we must
+        // restart the server for the patched file to take effect.
         const original = readFileSync(runtimePath, 'utf-8');
         const patched = original.replace(
             /define\('STREAMING_REMOTE_SITE_URL',\s*'[^']*'\)/,
@@ -276,6 +280,11 @@ describe('Import: Remote upload proxy', () => {
         );
         assert.notEqual(original, patched, 'runtime.php should have been patched');
         writeFileSync(runtimePath, patched);
+
+        // Restart the server with the patched runtime.
+        stopPhpServer(phpServer);
+        phpServer = await startPhpServer(effectiveRoot, runtimePath);
+
         try {
             const relPath = 'wp-content/uploads/2024/01/photo.jpg';
             const res = await fetch(targetUrl('/' + relPath));
@@ -285,8 +294,11 @@ describe('Import: Remote upload proxy', () => {
             assert.ok(!body.equals(expected),
                 'Response body should NOT match the source file — proxy should be disabled');
         } finally {
-            // Restore so subsequent tests still exercise the proxy.
+            // Restore runtime.php and restart so subsequent tests (if any)
+            // still have the proxy active.
             writeFileSync(runtimePath, original);
+            stopPhpServer(phpServer);
+            phpServer = await startPhpServer(effectiveRoot, runtimePath);
         }
     });
 
