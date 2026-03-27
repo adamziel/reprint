@@ -255,6 +255,25 @@ describe('Import: Remote upload proxy', () => {
             'Should serve the local file content, not proxy from source');
     });
 
+    it('stops proxying once the sync-complete marker exists', async () => {
+        // The remote-upload-proxy checks for a .streaming-uploads-synced
+        // marker file in the document root.  When it exists, the proxy
+        // returns early and the server handles the request normally (404).
+        const markerPath = join(effectiveRoot, '.streaming-uploads-synced');
+        writeFileSync(markerPath, '');
+        try {
+            const path = '/wp-content/uploads/2024/01/photo.jpg';
+            const res = await fetch(targetUrl(path));
+            // The file doesn't exist locally, so without the proxy it's a 404.
+            assert.equal(res.status, 404,
+                `Expected 404 when sync marker exists, got ${res.status}`);
+        } finally {
+            // Remove the marker so subsequent tests still exercise the proxy.
+            const { unlinkSync } = await import('node:fs');
+            unlinkSync(markerPath);
+        }
+    });
+
     it('does not proxy requests outside /wp-content/uploads/', async () => {
         // Write a file outside wp-content/uploads/ and verify the handler
         // doesn't intercept it — the server serves it as a normal static

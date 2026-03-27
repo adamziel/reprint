@@ -2446,6 +2446,18 @@ class ImportClient
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
+        // Signal the remote-upload-proxy that all uploads are available
+        // locally.  The proxy checks for this marker file and skips the
+        // cURL fetch when it exists — no more proxying once sync is done.
+        // Skip the marker when --filter=essential-files was used because
+        // uploads were not downloaded in that mode.
+        if ($this->filter !== 'essential-files') {
+            $marker = $this->fs_root . '/.streaming-uploads-synced';
+            if ($this->fs_root !== null && !file_exists($marker)) {
+                file_put_contents($marker, '');
+            }
+        }
+
         $this->clear_progress_line();
         $index_size = $this->index_count();
         $label = $is_delta ? "files-sync (delta)" : "files-sync";

@@ -34,6 +34,12 @@ function remote_upload_proxy_code(): string
 		: '';
 	if ($remote_site === '') return;
 
+	// Once files-sync finishes, it writes a marker file to the document
+	// root.  When that marker exists the proxy is no longer needed — all
+	// uploads are available locally.
+	$doc_root = $_SERVER['DOCUMENT_ROOT'] ?? '';
+	if ($doc_root !== '' && file_exists($doc_root . '/.streaming-uploads-synced')) return;
+
 	$uri  = $_SERVER['REQUEST_URI'] ?? '';
 	$path = parse_url($uri, PHP_URL_PATH);
 	if (!$path) return;
@@ -42,11 +48,8 @@ function remote_upload_proxy_code(): string
 	if (strpos($path, '/wp-content/uploads/') === false) return;
 
 	// If the file already exists locally, let the server handle it.
-	// Use DOCUMENT_ROOT (set by both php -S and nginx/fpm) so the
-	// handler works regardless of whether WP_CONTENT_DIR is defined
-	// in the runtime constants — it isn't for standard layouts where
-	// wp-content lives inside ABSPATH.
-	$doc_root   = $_SERVER['DOCUMENT_ROOT'] ?? '';
+	// $doc_root is set above (DOCUMENT_ROOT works for both php -S and
+	// nginx/fpm, regardless of whether WP_CONTENT_DIR is defined).
 	$local_path = $doc_root . $path;
 	if ($doc_root !== '' && file_exists($local_path)) return;
 
