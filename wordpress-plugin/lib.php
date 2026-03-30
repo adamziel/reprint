@@ -134,13 +134,40 @@ function _site_export_verify_hmac(string $secret): ?string {
 }
 
 /**
+ * Default HMAC authentication handler.
+ *
+ * Reads the shared secret from SITE_EXPORT_SECRET_FILE and verifies
+ * the request's HMAC signature. Calls _site_export_error() on failure.
+ */
+function _site_export_default_authenticate(): void {
+    $secret_file = SITE_EXPORT_SECRET_FILE;
+    if (!file_exists($secret_file)) {
+        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.');
+    }
+
+    $secret = require $secret_file;
+    if (empty($secret) || !is_string($secret)) {
+        _site_export_error(503, 'Invalid secret configuration. Please reconfigure in WordPress admin.');
+    }
+
+    $auth_error = _site_export_verify_hmac($secret);
+    if ($auth_error !== null) {
+        _site_export_error(403, $auth_error);
+    }
+}
+
+/**
  * Handle an export API request.
  *
  * WordPress is already loaded at this point — DB credentials, $table_prefix,
  * and the database layer (including the SQLite db.php drop-in when present)
  * are all available.
+ *
+ * @param array $options Optional overrides:
+ *   - 'authenticate' (callable): Called to authenticate the request.
+ *        Defaults to _site_export_default_authenticate().
  */
-function _site_export_handle_api_request(): void {
+function _site_export_handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
     // have enabled display_errors based on WP_DEBUG_DISPLAY).
     @ini_set('display_errors', '0');
@@ -201,20 +228,8 @@ function _site_export_handle_api_request(): void {
     });
 
     // -- Authenticate --
-    $secret_file = SITE_EXPORT_SECRET_FILE;
-    if (!file_exists($secret_file)) {
-        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.');
-    }
-
-    $secret = require $secret_file;
-    if (empty($secret) || !is_string($secret)) {
-        _site_export_error(503, 'Invalid secret configuration. Please reconfigure in WordPress admin.');
-    }
-
-    $auth_error = _site_export_verify_hmac($secret);
-    if ($auth_error !== null) {
-        _site_export_error(403, $auth_error);
-    }
+    $authenticate = $options['authenticate'] ?? '_site_export_default_authenticate';
+    $authenticate();
 
     // -- Set up defaults for export.php --
     if (!isset($_GET['directory']) && !isset($_POST['directory'])) {
