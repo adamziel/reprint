@@ -3,8 +3,9 @@
  * Admin interface for Site Export plugin.
  *
  * This plugin provides a WordPress admin UI for configuring the export API.
- * The export API is triggered via `?site-export-api` during plugin load,
- * before WordPress finishes booting. It reads the secret from secret.php.
+ * By default, the export API is triggered via `?site-export-api` during
+ * plugin load, before WordPress finishes booting. It reads the secret from
+ * secret.php.
  *
  * Authentication uses HMAC signatures: the importing side generates a secret,
  * the user enters it here, and all requests must include a valid signature
@@ -119,12 +120,13 @@ class Site_Export_Plugin {
         $content .= " */\n";
         $content .= "return " . var_export($secret, true) . ";\n";
 
-        $result = file_put_contents(SITE_EXPORT_SECRET_FILE, $content);
+        $secret_file = _site_export_get_secret_file();
+        $result = file_put_contents($secret_file, $content);
 
         if ($result === false) {
             return new WP_Error(
                 'write_failed',
-                'Could not write to ' . SITE_EXPORT_SECRET_FILE . '. Check file permissions.'
+                'Could not write to ' . $secret_file . '. Check file permissions.'
             );
         }
 
@@ -137,11 +139,13 @@ class Site_Export_Plugin {
      * @return string
      */
     private function load_secret(): string {
-        if (!file_exists(SITE_EXPORT_SECRET_FILE)) {
+        $secret_file = _site_export_get_secret_file();
+
+        if (!file_exists($secret_file)) {
             return '';
         }
 
-        $secret = require SITE_EXPORT_SECRET_FILE;
+        $secret = require $secret_file;
         return is_string($secret) ? $secret : '';
     }
 
@@ -154,7 +158,7 @@ class Site_Export_Plugin {
         }
 
         $secret = $this->load_secret();
-        $api_url = home_url('?site-export-api');
+        $api_url = _site_export_get_api_url();
         $is_configured = !empty($secret);
 
         ?>
@@ -359,13 +363,17 @@ class Site_Export_Plugin {
 
 // Initialize
 add_action('plugins_loaded', function() {
+    if (!_site_export_is_ui_enabled()) {
+        return;
+    }
+
     Site_Export_Plugin::get_instance();
 });
 
 // On activation: set a transient so we can redirect on the next admin page load.
 register_activation_hook(SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
     // Only redirect when activated through the admin UI (not via WP-CLI or bulk).
-    if (!wp_doing_ajax() && is_admin()) {
+    if (_site_export_is_ui_enabled() && !wp_doing_ajax() && is_admin()) {
         set_transient('site_export_activated', 1, 30);
     }
 
@@ -377,6 +385,11 @@ register_activation_hook(SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
 
 // Redirect to settings page after activation.
 add_action('admin_init', function() {
+    if (!_site_export_is_ui_enabled()) {
+        delete_transient('site_export_activated');
+        return;
+    }
+
     if (get_transient('site_export_activated')) {
         delete_transient('site_export_activated');
         if (!isset($_GET['activate-multi'])) {

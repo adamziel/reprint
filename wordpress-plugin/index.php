@@ -23,10 +23,97 @@ define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
  */
 define('SITE_EXPORT_TIMESTAMP_TOLERANCE', 300);
 
+/**
+ * Get the query arg name used by the default front-controller route.
+ */
+function _site_export_get_api_query_arg(): string {
+    $query_arg = apply_filters('site_export_api_query_arg', 'site-export-api');
+
+    if (!is_string($query_arg) || $query_arg === '') {
+        return 'site-export-api';
+    }
+
+    return $query_arg;
+}
+
+/**
+ * Determine whether the current request should be handled by the export API.
+ */
+function _site_export_is_api_request(): bool {
+    $query_arg = _site_export_get_api_query_arg();
+    $is_api_request = isset($_GET[$query_arg]);
+
+    return (bool) apply_filters('site_export_is_api_request', $is_api_request, $query_arg);
+}
+
+/**
+ * Get the API URL shown in the admin UI.
+ */
+function _site_export_get_api_url(): string {
+    $query_arg = _site_export_get_api_query_arg();
+    $api_url = home_url('/?' . rawurlencode($query_arg));
+    $filtered_url = apply_filters('site_export_api_url', $api_url, $query_arg);
+
+    if (!is_string($filtered_url) || $filtered_url === '') {
+        return $api_url;
+    }
+
+    return $filtered_url;
+}
+
+/**
+ * Get the path to the shared secret file.
+ */
+function _site_export_get_secret_file(): string {
+    $secret_file = apply_filters('site_export_secret_file', SITE_EXPORT_SECRET_FILE);
+
+    if (!is_string($secret_file) || $secret_file === '') {
+        return SITE_EXPORT_SECRET_FILE;
+    }
+
+    return $secret_file;
+}
+
+/**
+ * Get the request authorization callback.
+ *
+ * The callback must return:
+ * - null or true on success
+ * - a string or WP_Error on failure
+ */
+function _site_export_get_authorization_callback() {
+    $default_callback = '_site_export_authorize_request_with_secret';
+    $callback = apply_filters('site_export_authorization_callback', $default_callback);
+
+    if (!is_callable($callback)) {
+        return $default_callback;
+    }
+
+    return $callback;
+}
+
+/**
+ * Check whether the plugin is using its default secret-based authorization.
+ */
+function _site_export_uses_default_secret_authorization(): bool {
+    return _site_export_get_authorization_callback() === '_site_export_authorize_request_with_secret';
+}
+
+/**
+ * Determine whether the admin UI should be registered.
+ *
+ * By default, the UI is enabled only for the built-in secret/HMAC flow.
+ */
+function _site_export_is_ui_enabled(): bool {
+    $enabled = _site_export_uses_default_secret_authorization();
+
+    return (bool) apply_filters('site_export_enable_ui', $enabled);
+}
+
 // Intercept export API requests as early as possible.
 // WordPress loads plugin files before firing `plugins_loaded`,
 // so this runs before almost anything else in the WordPress stack.
-if (isset($_GET['site-export-api'])) {
+if (_site_export_is_api_request()) {
     _site_export_handle_api_request();
     exit;
 }
@@ -102,17 +189,7 @@ function _site_export_handle_api_request(): void {
     });
 
     // -- Authenticate --
-    $secret_file = SITE_EXPORT_SECRET_FILE;
-    if (!file_exists($secret_file)) {
-        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.');
-    }
-
-    $secret = require $secret_file;
-    if (empty($secret) || !is_string($secret)) {
-        _site_export_error(503, 'Invalid secret configuration. Please reconfigure in WordPress admin.');
-    }
-
-    $auth_error = _site_export_verify_hmac($secret);
+    $auth_error = _site_export_authorize_request();
     if ($auth_error !== null) {
         _site_export_error(403, $auth_error);
     }
@@ -239,6 +316,59 @@ function _site_export_error(int $code, string $message): void {
     header('Content-Type: application/json');
     echo json_encode(['error' => $message, 'code' => $code]);
     exit;
+}
+
+/**
+ * Authorize the current request using the configured callback.
+ */
+function _site_export_authorize_request(): ?string {
+    $callback = _site_export_get_authorization_callback();
+    $result = call_user_func($callback, [
+        'secret_file' => _site_export_get_secret_file(),
+        'request_method' => $_SERVER['REQUEST_METHOD'] ?? 'GET',
+    ]);
+
+    if ($result === null || $result === true) {
+        return null;
+    }
+
+    if ($result instanceof WP_Error) {
+        return $result->get_error_message();
+    }
+
+    if (is_string($result) && $result !== '') {
+        return $result;
+    }
+
+    if ($result === false) {
+        return 'Authorization failed.';
+    }
+
+    return 'Invalid Site Export authorization result.';
+}
+
+/**
+ * Default authorization callback using the shared secret file and HMAC.
+ *
+ * @param array<string, mixed> $context Request context.
+ */
+function _site_export_authorize_request_with_secret(array $context): ?string {
+    $secret_file = $context['secret_file'] ?? _site_export_get_secret_file();
+
+    if (!is_string($secret_file) || $secret_file === '') {
+        $secret_file = _site_export_get_secret_file();
+    }
+
+    if (!file_exists($secret_file)) {
+        return 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.';
+    }
+
+    $secret = require $secret_file;
+    if (empty($secret) || !is_string($secret)) {
+        return 'Invalid secret configuration. Please reconfigure in WordPress admin.';
+    }
+
+    return _site_export_verify_hmac($secret);
 }
 
 /**
