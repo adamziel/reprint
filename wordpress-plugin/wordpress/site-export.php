@@ -120,13 +120,12 @@ class Site_Export_Plugin {
         $content .= " */\n";
         $content .= "return " . var_export($secret, true) . ";\n";
 
-        $secret_file = _site_export_get_secret_file();
-        $result = file_put_contents($secret_file, $content);
+        $result = file_put_contents(SITE_EXPORT_SECRET_FILE, $content);
 
         if ($result === false) {
             return new WP_Error(
                 'write_failed',
-                'Could not write to ' . $secret_file . '. Check file permissions.'
+                'Could not write to ' . SITE_EXPORT_SECRET_FILE . '. Check file permissions.'
             );
         }
 
@@ -139,13 +138,11 @@ class Site_Export_Plugin {
      * @return string
      */
     private function load_secret(): string {
-        $secret_file = _site_export_get_secret_file();
-
-        if (!file_exists($secret_file)) {
+        if (!file_exists(SITE_EXPORT_SECRET_FILE)) {
             return '';
         }
 
-        $secret = require $secret_file;
+        $secret = require SITE_EXPORT_SECRET_FILE;
         return is_string($secret) ? $secret : '';
     }
 

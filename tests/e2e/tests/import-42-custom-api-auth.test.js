@@ -24,11 +24,6 @@ describe('Import: Custom Site Export route and auth', () => {
                 writeFileSync(
                     join(muPluginsDir, 'site-export-custom-auth.php'),
                     `<?php
-add_filter('site_export_is_api_request', function ($is_api_request) {
-    $path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
-    return $path === '/wp/v2/streaming-export';
-}, 10, 1);
-
 add_filter('site_export_api_url', function () {
     return home_url('/wp/v2/streaming-export');
 });

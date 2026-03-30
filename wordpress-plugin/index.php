@@ -24,54 +24,17 @@ define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
 define('SITE_EXPORT_TIMESTAMP_TOLERANCE', 300);
 
 /**
- * Get the query arg name used by the default front-controller route.
- */
-function _site_export_get_api_query_arg(): string {
-    $query_arg = apply_filters('site_export_api_query_arg', 'site-export-api');
-
-    if (!is_string($query_arg) || $query_arg === '') {
-        return 'site-export-api';
-    }
-
-    return $query_arg;
-}
-
-/**
- * Determine whether the current request should be handled by the export API.
- */
-function _site_export_is_api_request(): bool {
-    $query_arg = _site_export_get_api_query_arg();
-    $is_api_request = isset($_GET[$query_arg]);
-
-    return (bool) apply_filters('site_export_is_api_request', $is_api_request, $query_arg);
-}
-
-/**
  * Get the API URL shown in the admin UI.
  */
 function _site_export_get_api_url(): string {
-    $query_arg = _site_export_get_api_query_arg();
-    $api_url = home_url('/?' . rawurlencode($query_arg));
-    $filtered_url = apply_filters('site_export_api_url', $api_url, $query_arg);
+    $api_url = home_url('/?site-export-api');
+    $filtered_url = apply_filters('site_export_api_url', $api_url);
 
     if (!is_string($filtered_url) || $filtered_url === '') {
         return $api_url;
     }
 
     return $filtered_url;
-}
-
-/**
- * Get the path to the shared secret file.
- */
-function _site_export_get_secret_file(): string {
-    $secret_file = apply_filters('site_export_secret_file', SITE_EXPORT_SECRET_FILE);
-
-    if (!is_string($secret_file) || $secret_file === '') {
-        return SITE_EXPORT_SECRET_FILE;
-    }
-
-    return $secret_file;
 }
 
 /**
@@ -108,6 +71,54 @@ function _site_export_is_ui_enabled(): bool {
     $enabled = _site_export_uses_default_secret_authorization();
 
     return (bool) apply_filters('site_export_enable_ui', $enabled);
+}
+
+/**
+ * Determine whether the current request matches the configured API URL.
+ */
+function _site_export_request_matches_api_url(string $api_url): bool {
+    $api_parts = wp_parse_url($api_url);
+    if (!is_array($api_parts)) {
+        return false;
+    }
+
+    $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+    $request_parts = wp_parse_url($request_uri);
+    if (!is_array($request_parts)) {
+        return false;
+    }
+
+    $api_path = $api_parts['path'] ?? '/';
+    $request_path = $request_parts['path'] ?? '/';
+    if (untrailingslashit($request_path) !== untrailingslashit($api_path)) {
+        return false;
+    }
+
+    $api_query = [];
+    parse_str($api_parts['query'] ?? '', $api_query);
+
+    foreach ($api_query as $key => $value) {
+        if (!array_key_exists($key, $_GET)) {
+            return false;
+        }
+
+        $request_value = $_GET[$key];
+        if ($value !== '' && (string) $request_value !== (string) $value) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Determine whether the current request should be handled by the export API.
+ */
+function _site_export_is_api_request(): bool {
+    $api_url = _site_export_get_api_url();
+    $is_api_request = _site_export_request_matches_api_url($api_url);
+
+    return (bool) apply_filters('site_export_is_api_request', $is_api_request, $api_url);
 }
 
 // Intercept export API requests as early as possible.
@@ -324,7 +335,6 @@ function _site_export_error(int $code, string $message): void {
 function _site_export_authorize_request(): ?string {
     $callback = _site_export_get_authorization_callback();
     $result = call_user_func($callback, [
-        'secret_file' => _site_export_get_secret_file(),
         'request_method' => $_SERVER['REQUEST_METHOD'] ?? 'GET',
     ]);
 
@@ -353,17 +363,11 @@ function _site_export_authorize_request(): ?string {
  * @param array<string, mixed> $context Request context.
  */
 function _site_export_authorize_request_with_secret(array $context): ?string {
-    $secret_file = $context['secret_file'] ?? _site_export_get_secret_file();
-
-    if (!is_string($secret_file) || $secret_file === '') {
-        $secret_file = _site_export_get_secret_file();
-    }
-
-    if (!file_exists($secret_file)) {
+    if (!file_exists(SITE_EXPORT_SECRET_FILE)) {
         return 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.';
     }
 
-    $secret = require $secret_file;
+    $secret = require SITE_EXPORT_SECRET_FILE;
     if (empty($secret) || !is_string($secret)) {
         return 'Invalid secret configuration. Please reconfigure in WordPress admin.';
     }

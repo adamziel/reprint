@@ -22,16 +22,12 @@ This gives us a clean execution environment while using WordPress's front contro
 
 The plugin keeps the current behavior by default, but key integration points are filterable:
 
-- `site_export_api_query_arg`
-  Changes the default front-controller query arg. Default: `site-export-api`.
-- `site_export_is_api_request`
-  Overrides request matching entirely. Use this when the API should live on a custom path instead of a query arg.
 - `site_export_api_url`
-  Controls the endpoint URL shown in the admin UI.
+  Controls both the endpoint URL shown in the admin UI and the default request matching logic. Default: `https://example.com/?site-export-api`.
+- `site_export_is_api_request`
+  Overrides request matching entirely when URL-based matching is not enough.
 - `site_export_authorization_callback`
   Replaces the built-in secret-file + HMAC authorization callback.
-- `site_export_secret_file`
-  Changes the file path used by the built-in secret-based authorization flow.
 - `site_export_enable_ui`
   Enables or disables all Site Export admin UI additions. By default, the UI is only enabled when using the built-in secret/HMAC flow.
 
@@ -40,10 +36,6 @@ Route matching and request authorization happen during plugin load, before `plug
 Example:
 
 ```php
-add_filter('site_export_api_query_arg', function () {
-    return 'my-export-api';
-});
-
 add_filter('site_export_api_url', function () {
     return home_url('/api/site-export');
 });
