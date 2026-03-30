@@ -1,14 +1,24 @@
 <?php
 /**
- * Site Export library – function declarations only, no request handling.
+ * Site Export library – constants and function declarations, no request handling.
  *
  * Require this file to get access to the export API functions without
- * triggering any HTTP dispatch. Callers must define these constants
- * before invoking the functions:
- *
- *   SITE_EXPORT_SECRET_FILE       – path to the PHP file that returns the HMAC secret
- *   SITE_EXPORT_TIMESTAMP_TOLERANCE – max age of a request timestamp in seconds
+ * triggering any HTTP dispatch.
  */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+define('SITE_EXPORT_VERSION', '1.0.0');
+define('SITE_EXPORT_PLUGIN_DIR', plugin_dir_path(__FILE__));
+define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
+
+/**
+ * Maximum age of a request timestamp in seconds.
+ * Requests older than this are rejected to prevent replay attacks.
+ */
+define('SITE_EXPORT_TIMESTAMP_TOLERANCE', 300);
 
 /** Sends a JSON error response and terminates. */
 function _site_export_error(int $code, string $message): void {
