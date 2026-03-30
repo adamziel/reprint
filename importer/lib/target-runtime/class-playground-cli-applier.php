@@ -49,6 +49,11 @@ class PlaygroundCliApplier implements RuntimeApplier
         $saved_sqlite = $manifest->sqlite;
         $manifest->sqlite = null;
 
+        // Route handlers that need importer state must use VFS paths inside
+        // Playground. Rewrite those constants and mount the underlying host
+        // files into the VM before we generate runtime.php/start.sh.
+        $extra_mounts = $this->prepare_extra_mounts($manifest);
+
         // 1. Write runtime.php using the VFS path (/wordpress) as fs-root.
         //    Inside Playground, the host's fs-root is mounted at /wordpress,
         //    so all resolved {fs-root} paths must reference /wordpress.
@@ -80,7 +85,15 @@ class PlaygroundCliApplier implements RuntimeApplier
 
         // 3. Write start.sh
         $start_path = $output_dir . '/start.sh';
-        $start_script = $this->generate_start_script($manifest, $fs_root, $output_dir, $runtime_path, $port, $options);
+        $start_script = $this->generate_start_script(
+            $manifest,
+            $fs_root,
+            $output_dir,
+            $runtime_path,
+            $port,
+            $options,
+            $extra_mounts,
+        );
         write_runtime_file($start_path, $start_script);
         chmod($start_path, 0755);
         $summary[] = "Wrote {$start_path}";
@@ -107,6 +120,42 @@ class PlaygroundCliApplier implements RuntimeApplier
             '$schema' => 'https://playground.wordpress.net/blueprint-schema.json',
             'landingPage' => '/',
         ];
+    }
+
+    /**
+     * Rewrite host-side runtime helper files to VFS paths and return the
+     * corresponding Playground mounts.
+     *
+     * Some route handlers need importer metadata produced outside the mounted
+     * WordPress tree, for example the files-sync state used by the temporary
+     * remote uploads proxy. Playground can only see files that are mounted
+     * explicitly, so we map those constants to /tmp paths in the VM.
+     *
+     * @return string[]
+     */
+    private function prepare_extra_mounts(RuntimeManifest $manifest): array
+    {
+        $mounts = [];
+        $runtime_file_mounts = [
+            'STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE'
+                => '/tmp/streaming-site-migration/.import-state.json',
+            'STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'
+                => '/tmp/streaming-site-migration/.import-download-list-skipped.jsonl',
+        ];
+
+        foreach ($runtime_file_mounts as $constant_name => $vfs_path) {
+            $host_path = $manifest->constants[$constant_name] ?? null;
+            if (!is_string($host_path) || $host_path === '') {
+                continue;
+            }
+
+            $manifest->constants[$constant_name] = $vfs_path;
+            if (file_exists($host_path)) {
+                $mounts[] = $host_path . ':' . $vfs_path;
+            }
+        }
+
+        return $mounts;
     }
 
     /**
@@ -179,7 +228,8 @@ class PlaygroundCliApplier implements RuntimeApplier
         string $output_dir,
         string $runtime_path,
         int $port,
-        array $options
+        array $options,
+        array $extra_mounts = []
     ): string {
         $lines = [];
         $lines[] = '#!/usr/bin/env bash';
@@ -205,6 +255,11 @@ class PlaygroundCliApplier implements RuntimeApplier
         // before other mu-plugins. mu-plugins don't need a Plugin Name
         // header and load on every request.
         $args[] = '--mount=' . escapeshellarg($runtime_path . ':/wordpress/wp-content/mu-plugins/0-playground-runtime.php');
+
+        // Mount additional runtime helper files needed by specific handlers.
+        foreach ($extra_mounts as $mount) {
+            $args[] = '--mount=' . escapeshellarg($mount);
+        }
 
         // The site is already installed — don't run Playground's WordPress
         // installer or download a fresh copy.

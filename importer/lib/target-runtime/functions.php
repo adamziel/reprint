@@ -254,6 +254,9 @@ function generate_route_handler_code(RuntimeManifest $manifest): string
     foreach ($manifest->routes as $route) {
         $handler = $route['handler'] ?? '';
         switch ($handler) {
+            case 'remote-upload-proxy':
+                $code .= remote_upload_proxy_code() . "\n";
+                break;
             case 'wpcloud-thumbnail-generator':
                 $code .= wpcloud_thumbnail_generator_code() . "\n";
                 break;

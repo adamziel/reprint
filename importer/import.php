@@ -3517,6 +3517,7 @@ class ImportClient
         // Step 1: Host analyzer produces a manifest from preflight data.
         $analyzer = host_analyzer_for($webhost);
         $manifest = $analyzer->analyze($preflight_data);
+        $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
 
         // Step 1b: Merge target database configuration from db-apply state.
         // db-apply persists the target engine and connection details so that
@@ -3655,6 +3656,96 @@ class ImportClient
         foreach ($summary as $line) {
             fwrite(STDERR, "{$line}\n");
         }
+    }
+
+    /**
+     * Enable the temporary remote upload proxy when uploads may still be
+     * missing locally.
+     *
+     * The proxy is active in two cases:
+     * - files-sync is still incomplete
+     * - a prior --filter=essential-files run left skipped uploads on disk
+     */
+    private function maybe_enable_remote_upload_proxy(RuntimeManifest $manifest, array $preflight_data): void
+    {
+        if (!$this->should_enable_remote_upload_proxy()) {
+            return;
+        }
+
+        $base_url = $this->get_remote_upload_proxy_base_url($preflight_data);
+        if ($base_url === null) {
+            $this->audit_log(
+                "APPLY-RUNTIME | remote upload proxy skipped (no source uploads URL available)",
+                true,
+            );
+            return;
+        }
+
+        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL"] = $base_url;
+        $state_dir = realpath($this->state_dir) ?: $this->state_dir;
+        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
+            rtrim($state_dir, "/") . "/.import-state.json";
+        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
+            rtrim($state_dir, "/") . "/.import-download-list-skipped.jsonl";
+        $manifest->routes[] = [
+            "handler" => "remote-upload-proxy",
+            "path_pattern" => "/wp-content/uploads/.*",
+            "condition" => "file_not_found",
+            "description" => "Proxy missing uploads from the source site until files-sync completes",
+        ];
+        $this->audit_log(
+            "APPLY-RUNTIME | enabled remote upload proxy ({$base_url})",
+            true,
+        );
+    }
+
+    /**
+     * Decide whether runtime should proxy missing uploads from the source.
+     *
+     * Once files-sync is fully complete and no skipped uploads remain, the
+     * proxy is disabled so requests are served only from local files.
+     */
+    private function should_enable_remote_upload_proxy(): bool
+    {
+        if (
+            file_exists($this->skipped_download_list_file) &&
+            filesize($this->skipped_download_list_file) > 0
+        ) {
+            return true;
+        }
+
+        if (($this->state["command"] ?? null) !== "files-sync") {
+            return false;
+        }
+
+        $status = $this->state["status"] ?? null;
+        return $status !== null && $status !== "complete";
+    }
+
+    /**
+     * Resolve the source uploads base URL used by the temporary runtime proxy.
+     */
+    private function get_remote_upload_proxy_base_url(array $preflight_data): ?string
+    {
+        $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
+        $uploads_baseurl = $paths_urls["uploads"]["baseurl"] ?? null;
+        if (is_string($uploads_baseurl) && $uploads_baseurl !== "") {
+            return rtrim($uploads_baseurl, "/");
+        }
+
+        $site_urls = [
+            $paths_urls["home_url"] ?? null,
+            $paths_urls["site_url"] ?? null,
+            $preflight_data["database"]["wp"]["home"] ?? null,
+            $preflight_data["database"]["wp"]["siteurl"] ?? null,
+        ];
+        foreach ($site_urls as $site_url) {
+            if (is_string($site_url) && $site_url !== "") {
+                return rtrim($site_url, "/") . "/wp-content/uploads";
+            }
+        }
+
+        return null;
     }
 
     /**
