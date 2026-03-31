@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "f4bbe19261f51b3c3402e5fddd73016e",
+    "content-hash": "f7a4f01756ca139c35987d6afbada94d",
     "packages": [
         {
             "name": "wp-php-toolkit/bytestream",
@@ -323,14 +323,15 @@
             "dist": {
                 "type": "path",
                 "url": "../packages/streaming-exporter",
-                "reference": "4840cbc74c86641603e15ebc2edac59aa666daa5"
+                "reference": "5ec326906d624d679685079525c4101be8d54acf"
             },
             "require": {
                 "ext-pdo": "*",
                 "ext-pdo_mysql": "*",
                 "php": ">=7.4",
                 "wp-php-toolkit/data-liberation": "^0.4",
-                "wp-php-toolkit/html": "^0.4"
+                "wp-php-toolkit/html": "^0.4",
+                "wp-php-toolkit/streaming-shared": "*@dev"
             },
             "type": "library",
             "autoload": {
@@ -342,7 +343,30 @@
                     "src/class-file-tree-producer.php",
                     "src/class-hmac-client.php",
                     "src/class-sqlite-driver-pdo.php"
-                ],
+                ]
+            },
+            "license": [
+                "GPL-2.0-or-later"
+            ],
+            "description": "Streaming export engine used by the Site Export WordPress plugin",
+            "transport-options": {
+                "symlink": false,
+                "relative": true
+            }
+        },
+        {
+            "name": "wp-php-toolkit/streaming-shared",
+            "version": "dev-trunk",
+            "dist": {
+                "type": "path",
+                "url": "../packages/streaming-shared",
+                "reference": "8e3455028c02c627cb934975af0b9c0b7d0f5830"
+            },
+            "require": {
+                "php": ">=7.4"
+            },
+            "type": "library",
+            "autoload": {
                 "files": [
                     "src/utils.php"
                 ]
@@ -350,7 +374,7 @@
             "license": [
                 "GPL-2.0-or-later"
             ],
-            "description": "Streaming export engine used by the Site Export WordPress plugin",
+            "description": "Shared utilities for the streaming site migration system",
             "transport-options": {
                 "symlink": false,
                 "relative": true
