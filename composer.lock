@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "e21abdea677e191878779abd9c299941",
+    "content-hash": "370c98a78216c07f85b90b708f7185dd",
     "packages": [
         {
             "name": "wp-php-toolkit/bytestream",
@@ -323,14 +323,15 @@
             "dist": {
                 "type": "path",
                 "url": "packages/streaming-exporter",
-                "reference": "4840cbc74c86641603e15ebc2edac59aa666daa5"
+                "reference": "5ec326906d624d679685079525c4101be8d54acf"
             },
             "require": {
                 "ext-pdo": "*",
                 "ext-pdo_mysql": "*",
                 "php": ">=7.4",
                 "wp-php-toolkit/data-liberation": "^0.4",
-                "wp-php-toolkit/html": "^0.4"
+                "wp-php-toolkit/html": "^0.4",
+                "wp-php-toolkit/streaming-shared": "*@dev"
             },
             "type": "library",
             "autoload": {
@@ -342,9 +343,6 @@
                     "src/class-file-tree-producer.php",
                     "src/class-hmac-client.php",
                     "src/class-sqlite-driver-pdo.php"
-                ],
-                "files": [
-                    "src/utils.php"
                 ]
             },
             "license": [
@@ -362,7 +360,7 @@
             "dist": {
                 "type": "path",
                 "url": "packages/streaming-importer",
-                "reference": "0e2c91b745e3b45e2a9c1fd4ed77f65e02527153"
+                "reference": "3141d579e0177e8faf99845832035d52c7f12690"
             },
             "require": {
                 "ext-pdo": "*",
@@ -370,7 +368,7 @@
                 "php": ">=7.4",
                 "wp-php-toolkit/data-liberation": "^0.4",
                 "wp-php-toolkit/html": "^0.4",
-                "wp-php-toolkit/streaming-exporter": "*@dev"
+                "wp-php-toolkit/streaming-shared": "*@dev"
             },
             "bin": [
                 "bin/streaming-importer"
@@ -380,6 +378,32 @@
                 "GPL-2.0-or-later"
             ],
             "description": "Streaming site importer with CLI and PHAR distribution support",
+            "transport-options": {
+                "symlink": false,
+                "relative": true
+            }
+        },
+        {
+            "name": "wp-php-toolkit/streaming-shared",
+            "version": "dev-trunk",
+            "dist": {
+                "type": "path",
+                "url": "packages/streaming-shared",
+                "reference": "8e3455028c02c627cb934975af0b9c0b7d0f5830"
+            },
+            "require": {
+                "php": ">=7.4"
+            },
+            "type": "library",
+            "autoload": {
+                "files": [
+                    "src/utils.php"
+                ]
+            },
+            "license": [
+                "GPL-2.0-or-later"
+            ],
+            "description": "Shared utilities for the streaming site migration system",
             "transport-options": {
                 "symlink": false,
                 "relative": true
@@ -2402,7 +2426,8 @@
     "minimum-stability": "dev",
     "stability-flags": {
         "wp-php-toolkit/streaming-exporter": 20,
-        "wp-php-toolkit/streaming-importer": 20
+        "wp-php-toolkit/streaming-importer": 20,
+        "wp-php-toolkit/streaming-shared": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,

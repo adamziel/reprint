@@ -9,7 +9,8 @@
         "ext-pdo": "*",
         "ext-pdo_mysql": "*",
         "wp-php-toolkit/data-liberation": "^0.4",
-        "wp-php-toolkit/html": "^0.4"
+        "wp-php-toolkit/html": "^0.4",
+        "wp-php-toolkit/streaming-shared": "*@dev"
     },
     "autoload": {
         "psr-4": {
@@ -20,9 +21,6 @@
             "src/class-file-tree-producer.php",
             "src/class-hmac-client.php",
             "src/class-sqlite-driver-pdo.php"
-        ],
-        "files": [
-            "src/utils.php"
         ]
     }
 }

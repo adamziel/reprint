@@ -8,6 +8,13 @@
     "repositories": [
         {
             "type": "path",
+            "url": "../packages/streaming-shared",
+            "options": {
+                "symlink": false
+            }
+        },
+        {
+            "type": "path",
             "url": "../packages/streaming-exporter",
             "options": {
                 "symlink": false

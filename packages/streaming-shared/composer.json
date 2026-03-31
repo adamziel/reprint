@@ -1,0 +1,15 @@
+{
+    "name": "wp-php-toolkit/streaming-shared",
+    "description": "Shared utilities for the streaming site migration system",
+    "type": "library",
+    "version": "dev-trunk",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=7.4"
+    },
+    "autoload": {
+        "files": [
+            "src/utils.php"
+        ]
+    }
+}

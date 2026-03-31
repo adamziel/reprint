@@ -10,7 +10,7 @@
         "ext-pdo_mysql": "*",
         "wp-php-toolkit/data-liberation": "^0.4",
         "wp-php-toolkit/html": "^0.4",
-        "wp-php-toolkit/streaming-exporter": "*@dev"
+        "wp-php-toolkit/streaming-shared": "*@dev"
     },
     "bin": [
         "bin/streaming-importer"

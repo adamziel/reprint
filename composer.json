@@ -8,6 +8,13 @@
     "repositories": [
         {
             "type": "path",
+            "url": "packages/streaming-shared",
+            "options": {
+                "symlink": false
+            }
+        },
+        {
+            "type": "path",
             "url": "packages/streaming-exporter",
             "options": {
                 "symlink": false
@@ -25,6 +32,7 @@
         "php": ">=7.4",
         "ext-pdo": "*",
         "ext-pdo_mysql": "*",
+        "wp-php-toolkit/streaming-shared": "*@dev",
         "wp-php-toolkit/streaming-exporter": "*@dev",
         "wp-php-toolkit/streaming-importer": "*@dev"
     },
@@ -41,7 +49,7 @@
         "test:coverage": "cd tests && ./run-tests.sh coverage",
         "build:phar": "./bin/build-importer-phar.sh",
         "analyze": "phpstan analyze --memory-limit=1G",
-        "compat": "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps packages/streaming-exporter/src packages/streaming-importer/src wordpress-plugin --ignore=wordpress-plugin/wordpress"
+        "compat": "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps packages/streaming-shared/src packages/streaming-exporter/src packages/streaming-importer/src wordpress-plugin --ignore=wordpress-plugin/wordpress"
     },
     "config": {
         "allow-plugins": {
