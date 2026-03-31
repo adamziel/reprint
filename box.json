@@ -1,10 +1,10 @@
 {
-    "main": "importer/import.php",
+    "main": "packages/streaming-importer/src/import.php",
     "output": "importer.phar",
     "check-requirements": false,
 
     "directories": [
-        "importer"
+        "packages/streaming-importer"
     ],
 
     "finder": [
@@ -39,13 +39,11 @@
     ],
 
     "files": [
-        "importer/VERSION",
+        "packages/streaming-importer/src/VERSION",
         "lib/sqlite-database-integration/constants.php",
         "lib/sqlite-database-integration/php-polyfills.php",
         "lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php",
         "lib/sqlite-database-integration/version.php",
-        "wordpress-plugin/generic/utils.php",
-        "wordpress-plugin/generic/class-hmac-client.php",
         "vendor/autoload.php"
     ],
 

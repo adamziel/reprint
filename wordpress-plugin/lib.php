@@ -29,6 +29,39 @@ function _site_export_error(int $code, string $message): void {
 }
 
 /**
+ * Resolve and load the exporter package runtime.
+ *
+ * Supports both plugin release bundles (with wordpress-plugin/vendor/) and
+ * the monorepo checkout (root vendor/ + vendor/wordpress/streaming-exporter).
+ *
+ * @return string|null Absolute path to export.php, or null when the runtime is missing.
+ */
+function _site_export_load_exporter_runtime(): ?string {
+    $repo_root = dirname(SITE_EXPORT_PLUGIN_DIR);
+    $candidates = [
+        [
+            'autoload' => SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php',
+            'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wordpress/streaming-exporter/src/export.php',
+        ],
+        [
+            'autoload' => $repo_root . '/vendor/autoload.php',
+            'export' => $repo_root . '/vendor/wordpress/streaming-exporter/src/export.php',
+        ],
+    ];
+
+    foreach ($candidates as $candidate) {
+        if (!file_exists($candidate['autoload']) || !file_exists($candidate['export'])) {
+            continue;
+        }
+
+        require_once $candidate['autoload'];
+        return $candidate['export'];
+    }
+
+    return null;
+}
+
+/**
  * Reads a request header by name, trying both Apache (getallheaders) and
  * CGI/FastCGI ($_SERVER HTTP_ prefix) conventions.
  */
@@ -241,7 +274,15 @@ function _site_export_handle_api_request(array $options = []): void {
     define('SECRET_KEY', 'hmac_authenticated');
     $_GET['SECRET_KEY'] = SECRET_KEY;
 
-    require_once __DIR__ . '/generic/export.php';
+    $export_runtime = _site_export_load_exporter_runtime();
+    if ($export_runtime === null) {
+        _site_export_error(
+            500,
+            'Site Export runtime is incomplete. Run composer install in wordpress-plugin or rebuild the release package.'
+        );
+    }
+
+    require_once $export_runtime;
 
     // -- Dispatch --
     try {

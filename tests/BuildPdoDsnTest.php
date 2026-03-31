@@ -2,8 +2,6 @@
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/../wordpress-plugin/generic/utils.php';
-
 use PHPUnit\Framework\TestCase;
 
 class BuildPdoDsnTest extends TestCase

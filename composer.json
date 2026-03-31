@@ -1,25 +1,38 @@
 {
-    "name": "wordpress/mysql-dump-producer",
-    "description": "MySQL dump producer with cursor-based reentrancy for WordPress data liberation",
-    "type": "library",
+    "name": "wordpress/streaming-site-migration",
+    "description": "Monorepo for the streaming importer, exporter, and release artifacts",
+    "type": "project",
     "license": "GPL-2.0-or-later",
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "repositories": [
+        {
+            "type": "path",
+            "url": "packages/streaming-exporter",
+            "options": {
+                "symlink": false
+            }
+        },
+        {
+            "type": "path",
+            "url": "packages/streaming-importer",
+            "options": {
+                "symlink": false
+            }
+        }
+    ],
     "require": {
         "php": ">=7.4",
         "ext-pdo": "*",
         "ext-pdo_mysql": "*",
-        "wp-php-toolkit/data-liberation": "^0.4",
-        "wp-php-toolkit/html": "^0.4"
+        "wordpress/streaming-exporter": "*@dev",
+        "wordpress/streaming-importer": "*@dev"
     },
     "require-dev": {
         "phpunit/phpunit": "^10.0",
         "phpstan/phpstan": "^1.0",
         "phpcompatibility/php-compatibility": "^9.3",
         "dealerdirect/phpcodesniffer-composer-installer": "^1.2"
-    },
-    "autoload": {
-        "psr-4": {
-            "WordPress\\DataLiberation\\": "wordpress-plugin/generic/"
-        }
     },
     "scripts": {
         "test": "cd tests && phpunit --testdox --colors",
@@ -28,7 +41,7 @@
         "test:coverage": "cd tests && ./run-tests.sh coverage",
         "build:phar": "./bin/build-importer-phar.sh",
         "analyze": "phpstan analyze --memory-limit=1G",
-        "compat": "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps wordpress-plugin/ importer/ --ignore=wordpress-plugin/wordpress"
+        "compat": "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps packages/streaming-exporter/src packages/streaming-importer/src wordpress-plugin --ignore=wordpress-plugin/wordpress"
     },
     "config": {
         "allow-plugins": {

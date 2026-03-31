@@ -4,8 +4,8 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/lib/host/class-runtime-manifest.php';
-require_once __DIR__ . '/../../importer/lib/target-runtime/load.php';
+require_once __DIR__ . '/../../packages/streaming-importer/src/lib/host/class-runtime-manifest.php';
+require_once __DIR__ . '/../../packages/streaming-importer/src/lib/target-runtime/load.php';
 
 class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 {

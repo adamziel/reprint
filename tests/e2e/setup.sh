@@ -2,10 +2,13 @@
 set -euo pipefail
 
 # Install Composer dependencies (vendor/ is gitignored).
-# Needed for url-rewriting classes from wp-php-toolkit/data-liberation.
+# Needed for the importer package and the bundled plugin runtime.
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/composer.json" ]; then
     composer install --no-dev --no-interaction --prefer-dist --working-dir="$PROJECT_ROOT"
+fi
+if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/wordpress-plugin/composer.json" ]; then
+    composer install --no-dev --no-interaction --prefer-dist --working-dir="$PROJECT_ROOT/wordpress-plugin"
 fi
 
 cd "$(dirname "$0")"

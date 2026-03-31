@@ -6,8 +6,8 @@
  * tools (curl, tar, mysql, wp-cli).
  */
 import {
-    existsSync, writeFileSync, mkdirSync, readdirSync,
-    copyFileSync, symlinkSync, chmodSync, readFileSync,
+    cpSync, existsSync, writeFileSync, mkdirSync,
+    symlinkSync, chmodSync,
     openSync, closeSync, unlinkSync, constants,
 } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -18,23 +18,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { randomBytes } from 'node:crypto';
 
 const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
-
-/**
- * Copy a file, falling back to read+write if copyFileSync fails with EPERM.
- * Node's copyFileSync uses copy_file_range/sendfile which can fail on some
- * filesystem/ownership combinations even when the destination is writable.
- */
-export function safeCopyFile(src, dest) {
-    try {
-        copyFileSync(src, dest);
-    } catch (e) {
-        if (e.code === 'EPERM') {
-            writeFileSync(dest, readFileSync(src));
-        } else {
-            throw e;
-        }
-    }
-}
 
 export const SITE_ROOT = REGISTRY.siteRoot;
 const DB_HOST = REGISTRY.dbHost;
@@ -254,7 +237,7 @@ export async function ensureSite(name, options = {}) {
     execSync(`sudo chmod -R 777 "${siteDir}"`, { timeout: 30000 });
 
     // Create directories (writable now, no sudo needed)
-    mkdirSync(join(siteDir, 'wp-content', 'plugins', 'site-export', 'generic'), { recursive: true });
+    mkdirSync(join(siteDir, 'wp-content', 'plugins'), { recursive: true });
     mkdirSync(join(siteDir, 'test-data'), { recursive: true });
 
     // Write full wp-config.php with admin creds (needed for wp core install)
@@ -266,32 +249,12 @@ export async function ensureSite(name, options = {}) {
         `<?php return '${secret}';\n`
     );
 
-    // Copy plugin source files
-    safeCopyFile(
-        join(PLUGIN_SRC, 'index.php'),
-        join(siteDir, 'wp-content', 'plugins', 'site-export', 'index.php')
+    // Copy the built plugin bundle, including its bundled Composer vendor tree.
+    cpSync(
+        PLUGIN_SRC,
+        join(siteDir, 'wp-content', 'plugins', 'site-export'),
+        { recursive: true }
     );
-    safeCopyFile(
-        join(PLUGIN_SRC, 'lib.php'),
-        join(siteDir, 'wp-content', 'plugins', 'site-export', 'lib.php')
-    );
-    for (const f of readdirSync(join(PLUGIN_SRC, 'generic')).filter(f => f.endsWith('.php'))) {
-        safeCopyFile(
-            join(PLUGIN_SRC, 'generic', f),
-            join(siteDir, 'wp-content', 'plugins', 'site-export', 'generic', f)
-        );
-    }
-    // Copy wordpress/ subdirectory (admin settings page)
-    const wpSubdir = join(PLUGIN_SRC, 'wordpress');
-    if (existsSync(wpSubdir)) {
-        mkdirSync(join(siteDir, 'wp-content', 'plugins', 'site-export', 'wordpress'), { recursive: true });
-        for (const f of readdirSync(wpSubdir).filter(f => f.endsWith('.php'))) {
-            safeCopyFile(
-                join(wpSubdir, f),
-                join(siteDir, 'wp-content', 'plugins', 'site-export', 'wordpress', f)
-            );
-        }
-    }
     log('Files copied');
 
     // Create database and run wp core install

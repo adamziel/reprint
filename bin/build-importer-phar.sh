@@ -57,7 +57,7 @@ else
     LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
     VERSION="${LATEST_TAG:-v0.0.0}-trunk"
 fi
-echo "$VERSION" > importer/VERSION
+echo "$VERSION" > packages/streaming-importer/src/VERSION
 echo "Version: $VERSION"
 
 # ── Build ─────────────────────────────────────────────────────────

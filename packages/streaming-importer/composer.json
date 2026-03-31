@@ -1,0 +1,18 @@
+{
+    "name": "wordpress/streaming-importer",
+    "description": "Streaming site importer with CLI and PHAR distribution support",
+    "type": "library",
+    "version": "dev-trunk",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=7.4",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "wp-php-toolkit/data-liberation": "^0.4",
+        "wp-php-toolkit/html": "^0.4",
+        "wordpress/streaming-exporter": "*@dev"
+    },
+    "bin": [
+        "bin/streaming-importer"
+    ]
+}
