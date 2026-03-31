@@ -24,18 +24,19 @@ jobs:
           GH_ORG: ${{ secrets.GH_ORG }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          git config user.name "${GH_ORG} codesplit"
+          git config user.name "github-actions[bot]"
           git config user.email "${GH_CODESPLIT_EMAIL}"
           git config --global --unset-all http.https://github.com/.extraheader || true
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
           git subtree push \
             --prefix=packages/streaming-exporter \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GH_ORG}/streaming-exporter.git" \
+            "https://github.com/${GH_ORG}/streaming-exporter.git" \
             main
 
           git subtree push \
             --prefix=packages/streaming-importer \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GH_ORG}/streaming-importer.git" \
+            "https://github.com/${GH_ORG}/streaming-importer.git" \
             main
 
       - name: Notify Packagist
