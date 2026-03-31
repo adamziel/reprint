@@ -1,9 +1,36 @@
 # WordPress Site Export - File Sync Architecture
 
+## Composer packages
+
+The exporter and importer are published as separate Composer packages:
+
+- [`wp-php-toolkit/streaming-exporter`](https://packagist.org/packages/wp-php-toolkit/streaming-exporter) — Streaming export engine (SQL dumps, file trees, cursor-based resumption).
+- [`wp-php-toolkit/streaming-importer`](https://packagist.org/packages/wp-php-toolkit/streaming-importer) — Streaming site importer with CLI and PHAR support.
+
+Install whichever you need:
+
+```bash
+composer require wp-php-toolkit/streaming-exporter
+composer require wp-php-toolkit/streaming-importer
+```
+
+Or add them to your `composer.json`:
+
+```json
+{
+    "require": {
+        "wp-php-toolkit/streaming-exporter": "dev-main",
+        "wp-php-toolkit/streaming-importer": "dev-main"
+    }
+}
+```
+
+Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org/packages/wp-php-toolkit/data-liberation) and [`wp-php-toolkit/html`](https://packagist.org/packages/wp-php-toolkit/html), which Composer pulls in automatically.
+
 ## Repository layout
 
-- `packages/streaming-exporter` — Composer package with the shared export engine.
-- `packages/streaming-importer` — Composer package with the importer CLI/runtime.
+- `packages/streaming-exporter` — Source for the `wp-php-toolkit/streaming-exporter` Composer package.
+- `packages/streaming-importer` — Source for the `wp-php-toolkit/streaming-importer` Composer package.
 - `wordpress-plugin` — WordPress plugin distribution that bundles `streaming-exporter`.
 - `importer/import.php` — thin compatibility wrapper for the importer package entrypoint.
 
