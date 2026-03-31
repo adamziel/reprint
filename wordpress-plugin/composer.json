@@ -1,5 +1,5 @@
 {
-    "name": "wordpress/site-export-plugin",
+    "name": "wp-php-toolkit/site-export-plugin",
     "description": "WordPress plugin wrapper for the streaming exporter package",
     "type": "project",
     "license": "GPL-2.0-or-later",
@@ -16,6 +16,6 @@
     ],
     "require": {
         "php": ">=7.4",
-        "wordpress/streaming-exporter": "*@dev"
+        "wp-php-toolkit/streaming-exporter": "*@dev"
     }
 }

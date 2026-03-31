@@ -1,5 +1,5 @@
 {
-    "name": "wordpress/streaming-site-migration",
+    "name": "wp-php-toolkit/streaming-site-migration",
     "description": "Monorepo for the streaming importer, exporter, and release artifacts",
     "type": "project",
     "license": "GPL-2.0-or-later",
@@ -25,8 +25,8 @@
         "php": ">=7.4",
         "ext-pdo": "*",
         "ext-pdo_mysql": "*",
-        "wordpress/streaming-exporter": "*@dev",
-        "wordpress/streaming-importer": "*@dev"
+        "wp-php-toolkit/streaming-exporter": "*@dev",
+        "wp-php-toolkit/streaming-importer": "*@dev"
     },
     "require-dev": {
         "phpunit/phpunit": "^10.0",

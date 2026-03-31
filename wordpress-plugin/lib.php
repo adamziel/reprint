@@ -32,7 +32,7 @@ function _site_export_error(int $code, string $message): void {
  * Resolve and load the exporter package runtime.
  *
  * Supports both plugin release bundles (with wordpress-plugin/vendor/) and
- * the monorepo checkout (root vendor/ + vendor/wordpress/streaming-exporter).
+ * the monorepo checkout (root vendor/ + vendor/wp-php-toolkit/streaming-exporter).
  *
  * @return string|null Absolute path to export.php, or null when the runtime is missing.
  */
@@ -41,11 +41,11 @@ function _site_export_load_exporter_runtime(): ?string {
     $candidates = [
         [
             'autoload' => SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php',
-            'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wordpress/streaming-exporter/src/export.php',
+            'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/streaming-exporter/src/export.php',
         ],
         [
             'autoload' => $repo_root . '/vendor/autoload.php',
-            'export' => $repo_root . '/vendor/wordpress/streaming-exporter/src/export.php',
+            'export' => $repo_root . '/vendor/wp-php-toolkit/streaming-exporter/src/export.php',
         ],
     ];
 
