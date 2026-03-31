@@ -243,17 +243,17 @@ export async function ensureSite(name, options = {}) {
     // Write full wp-config.php with admin creds (needed for wp core install)
     writeFullWpConfig(siteDir, DB_HOST, dbName, DB_USER, DB_PASS);
 
-    // Write secret.php
-    writeFileSync(
-        join(siteDir, 'wp-content', 'plugins', 'site-export', 'secret.php'),
-        `<?php return '${secret}';\n`
-    );
-
     // Copy the built plugin bundle, including its bundled Composer vendor tree.
     cpSync(
         PLUGIN_SRC,
         join(siteDir, 'wp-content', 'plugins', 'site-export'),
         { recursive: true }
+    );
+
+    // Write secret.php after copying the plugin bundle so the target directory exists.
+    writeFileSync(
+        join(siteDir, 'wp-content', 'plugins', 'site-export', 'secret.php'),
+        `<?php return '${secret}';\n`
     );
     log('Files copied');
 
