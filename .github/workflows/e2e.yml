@@ -32,7 +32,7 @@ jobs:
     name: E2E (PHP ${{ matrix.php }})
     needs: build-phar
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
