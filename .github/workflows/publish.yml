@@ -26,6 +26,8 @@ jobs:
         run: |
           set -euxo pipefail
           export GIT_TERMINAL_PROMPT=0
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git config --global --unset-all http.https://github.com/.extraheader || true
 
           gh --version
           gh api user --jq '{login: .login, id: .id, type: .type}'
@@ -51,6 +53,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "${GH_CODESPLIT_EMAIL}"
+          git config --local --unset-all http.https://github.com/.extraheader || true
           git config --global --unset-all http.https://github.com/.extraheader || true
           git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
