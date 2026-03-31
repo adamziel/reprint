@@ -4,47 +4,8 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "071110416102a6132c09c3ca7da82794",
+    "content-hash": "f4bbe19261f51b3c3402e5fddd73016e",
     "packages": [
-        {
-            "name": "wordpress/streaming-exporter",
-            "version": "dev-trunk",
-            "dist": {
-                "type": "path",
-                "url": "../packages/streaming-exporter",
-                "reference": "7624010763191bf7893ea6e734c4bd6e64510df0"
-            },
-            "require": {
-                "ext-pdo": "*",
-                "ext-pdo_mysql": "*",
-                "php": ">=7.4",
-                "wp-php-toolkit/data-liberation": "^0.4",
-                "wp-php-toolkit/html": "^0.4"
-            },
-            "type": "library",
-            "autoload": {
-                "psr-4": {
-                    "WordPress\\DataLiberation\\": "src/"
-                },
-                "classmap": [
-                    "src/class-mysql-dump-producer.php",
-                    "src/class-file-tree-producer.php",
-                    "src/class-hmac-client.php",
-                    "src/class-sqlite-driver-pdo.php"
-                ],
-                "files": [
-                    "src/utils.php"
-                ]
-            },
-            "license": [
-                "GPL-2.0-or-later"
-            ],
-            "description": "Streaming export engine used by the Site Export WordPress plugin",
-            "transport-options": {
-                "symlink": false,
-                "relative": true
-            }
-        },
         {
             "name": "wp-php-toolkit/bytestream",
             "version": "v0.4.1",
@@ -357,6 +318,45 @@
             "time": "2025-11-20T12:04:55+00:00"
         },
         {
+            "name": "wp-php-toolkit/streaming-exporter",
+            "version": "dev-trunk",
+            "dist": {
+                "type": "path",
+                "url": "../packages/streaming-exporter",
+                "reference": "4840cbc74c86641603e15ebc2edac59aa666daa5"
+            },
+            "require": {
+                "ext-pdo": "*",
+                "ext-pdo_mysql": "*",
+                "php": ">=7.4",
+                "wp-php-toolkit/data-liberation": "^0.4",
+                "wp-php-toolkit/html": "^0.4"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "WordPress\\DataLiberation\\": "src/"
+                },
+                "classmap": [
+                    "src/class-mysql-dump-producer.php",
+                    "src/class-file-tree-producer.php",
+                    "src/class-hmac-client.php",
+                    "src/class-sqlite-driver-pdo.php"
+                ],
+                "files": [
+                    "src/utils.php"
+                ]
+            },
+            "license": [
+                "GPL-2.0-or-later"
+            ],
+            "description": "Streaming export engine used by the Site Export WordPress plugin",
+            "transport-options": {
+                "symlink": false,
+                "relative": true
+            }
+        },
+        {
             "name": "wp-php-toolkit/xml",
             "version": "v0.4.0",
             "source": {
@@ -412,7 +412,7 @@
     "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
-        "wordpress/streaming-exporter": 20
+        "wp-php-toolkit/streaming-exporter": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,
