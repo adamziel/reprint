@@ -4,7 +4,7 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
+import { cpSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -22,14 +22,10 @@ describe('Import: Custom WP Content', () => {
     beforeAll(async () => {
         await ensureSite(site, {
             afterCreate: async (siteDir) => {
-                const customPlugin = join(siteDir, 'custom-content', 'plugins', 'site-export', 'generic');
+                const customPlugin = join(siteDir, 'custom-content', 'plugins', 'site-export');
                 const srcPlugin = join(siteDir, 'wp-content', 'plugins', 'site-export');
-                mkdirSync(customPlugin, { recursive: true });
-                copyFileSync(join(srcPlugin, 'index.php'), join(customPlugin, '..', 'index.php'));
-                for (const f of readdirSync(join(srcPlugin, 'generic')).filter(f => f.endsWith('.php'))) {
-                    copyFileSync(join(srcPlugin, 'generic', f), join(customPlugin, f));
-                }
-                copyFileSync(join(srcPlugin, 'secret.php'), join(customPlugin, '..', 'secret.php'));
+                mkdirSync(join(siteDir, 'custom-content', 'plugins'), { recursive: true });
+                cpSync(srcPlugin, customPlugin, { recursive: true });
             },
         });
         tempDir = createTempDir('e2e-import-custom-wp');

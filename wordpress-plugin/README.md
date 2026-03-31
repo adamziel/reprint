@@ -1,5 +1,9 @@
 # Site Export WordPress Plugin
 
+When working from this monorepo checkout, run `composer install` in
+`wordpress-plugin/` to populate the bundled `vendor/` directory used by the
+plugin runtime. GitHub release ZIPs already include that vendor tree.
+
 ## API Routing
 
 Many shared hosts (SiteGround, GoDaddy, etc.) block direct PHP execution inside `wp-content/plugins/` at the web server level, returning a 403 before the request ever reaches PHP. To work around this, export API requests are routed through WordPress's front controller (`index.php` at the site root), which hosts never block.

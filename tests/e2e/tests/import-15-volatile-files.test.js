@@ -176,7 +176,10 @@ describe('Import: Volatile Files', () => {
             // files from subdir should not be indexed or downloaded.
             const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
             const allFiles = [...hashDirectory(importedRoot).keys()];
-            const subdirFiles = allFiles.filter(p => p.includes('subdir'));
+            const deletedSubdirPrefix = join('test-data', 'subdir');
+            const subdirFiles = allFiles.filter(
+                p => p === deletedSubdirPrefix || p.startsWith(`${deletedSubdirPrefix}/`)
+            );
             assert.equal(
                 subdirFiles.length, 0,
                 `Expected no files from deleted subdir, but found: ${subdirFiles.join(', ')}`

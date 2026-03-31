@@ -1,5 +1,12 @@
 # WordPress Site Export - File Sync Architecture
 
+## Repository layout
+
+- `packages/streaming-exporter` — Composer package with the shared export engine.
+- `packages/streaming-importer` — Composer package with the importer CLI/runtime.
+- `wordpress-plugin` — WordPress plugin distribution that bundles `streaming-exporter`.
+- `importer/import.php` — thin compatibility wrapper for the importer package entrypoint.
+
 ### Technical requirements
 
 On the **migration source** side:

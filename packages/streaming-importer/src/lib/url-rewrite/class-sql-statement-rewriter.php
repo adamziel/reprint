@@ -338,7 +338,21 @@ class SqlStatementRewriter
     private static function get_grammar(): WP_Parser_Grammar
     {
         if (self::$grammar === null) {
-            $path = dirname(__DIR__, 3) . '/lib/sqlite-database-integration/wp-includes/mysql/mysql-grammar.php';
+            $path = null;
+            foreach ([
+                dirname(__DIR__, 5) . '/lib/sqlite-database-integration/wp-includes/mysql/mysql-grammar.php',
+                dirname(__DIR__, 6) . '/lib/sqlite-database-integration/wp-includes/mysql/mysql-grammar.php',
+            ] as $candidate) {
+                if (file_exists($candidate)) {
+                    $path = $candidate;
+                    break;
+                }
+            }
+            if ($path === null) {
+                throw new RuntimeException(
+                    'sqlite-database-integration is missing. Run: git submodule update --init'
+                );
+            }
             $data = require $path;
             self::$grammar = new WP_Parser_Grammar($data);
         }

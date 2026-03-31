@@ -1,0 +1,28 @@
+{
+    "name": "wordpress/streaming-exporter",
+    "description": "Streaming export engine used by the Site Export WordPress plugin",
+    "type": "library",
+    "version": "dev-trunk",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=7.4",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "wp-php-toolkit/data-liberation": "^0.4",
+        "wp-php-toolkit/html": "^0.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "WordPress\\DataLiberation\\": "src/"
+        },
+        "classmap": [
+            "src/class-mysql-dump-producer.php",
+            "src/class-file-tree-producer.php",
+            "src/class-hmac-client.php",
+            "src/class-sqlite-driver-pdo.php"
+        ],
+        "files": [
+            "src/utils.php"
+        ]
+    }
+}

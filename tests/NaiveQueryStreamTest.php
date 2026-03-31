@@ -3,7 +3,7 @@
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../vendor/autoload.php';
-require_once __DIR__ . '/../importer/lib/mysql-query-stream/load.php';
+require_once __DIR__ . '/../packages/streaming-importer/src/lib/mysql-query-stream/load.php';
 
 class NaiveQueryStreamTest extends TestCase
 {

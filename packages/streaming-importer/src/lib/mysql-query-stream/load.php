@@ -10,7 +10,22 @@
  *   git submodule update --init
  */
 
-$sdi = dirname(__DIR__, 3) . '/lib/sqlite-database-integration/wp-includes';
+$sdi = null;
+foreach ([
+    dirname(__DIR__, 5) . '/lib/sqlite-database-integration/wp-includes',
+    dirname(__DIR__, 6) . '/lib/sqlite-database-integration/wp-includes',
+] as $candidate) {
+    if (file_exists($candidate . '/parser/class-wp-parser-token.php')) {
+        $sdi = $candidate;
+        break;
+    }
+}
+
+if ($sdi === null) {
+    throw new RuntimeException(
+        'sqlite-database-integration is missing. Run: git submodule update --init'
+    );
+}
 
 // Generic parser framework
 require_once $sdi . '/parser/class-wp-parser-token.php';

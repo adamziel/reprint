@@ -8,12 +8,20 @@
  */
 
 // Load HTML5 named character references (global variable, not autoloaded).
-// Required by WP_HTML_Decoder for parsing HTML entities like &quot;
-$_html5_ncr_file = dirname(__DIR__, 2) . '/vendor/wp-php-toolkit/html/html5-named-character-references.php';
-if (file_exists($_html5_ncr_file)) {
+// Required by WP_HTML_Decoder for parsing HTML entities like &quot;.
+$_html5_ncr_file = null;
+foreach ([4, 5, 2, 3, 6] as $_html5_ncr_levels) {
+    $_html5_ncr_candidate = dirname(__DIR__, $_html5_ncr_levels) .
+        '/vendor/wp-php-toolkit/html/html5-named-character-references.php';
+    if (file_exists($_html5_ncr_candidate)) {
+        $_html5_ncr_file = $_html5_ncr_candidate;
+        break;
+    }
+}
+if ($_html5_ncr_file !== null) {
     require_once $_html5_ncr_file;
 }
-unset($_html5_ncr_file);
+unset($_html5_ncr_candidate, $_html5_ncr_file, $_html5_ncr_levels);
 
 if (!function_exists('apply_filters')) {
     /**

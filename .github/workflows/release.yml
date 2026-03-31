@@ -25,6 +25,9 @@ jobs:
 
       - run: composer install --no-dev --no-interaction --prefer-dist
 
+      - name: Install plugin runtime dependencies
+        run: composer install --no-dev --no-interaction --prefer-dist --working-dir=wordpress-plugin
+
       - name: Build importer.phar
         run: ./bin/build-importer-phar.sh
 
