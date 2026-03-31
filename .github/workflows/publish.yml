@@ -16,17 +16,35 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Push package subtrees
+        env:
+          GH_CODESPLIT_EMAIL: ${{ secrets.GH_CODESPLIT_EMAIL }}
+          GH_ORG: ${{ secrets.GH_ORG }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          git subtree push --prefix=packages/streaming-exporter https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/wp-php-toolkit/streaming-exporter.git main
-          git subtree push --prefix=packages/streaming-importer https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/wp-php-toolkit/streaming-importer.git main
+          git config user.name "${GH_ORG} codesplit"
+          git config user.email "${GH_CODESPLIT_EMAIL}"
+          git config --global --unset-all http.https://github.com/.extraheader || true
+
+          git subtree push \
+            --prefix=packages/streaming-exporter \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GH_ORG}/streaming-exporter.git" \
+            main
+
+          git subtree push \
+            --prefix=packages/streaming-importer \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GH_ORG}/streaming-importer.git" \
+            main
 
       - name: Notify Packagist
+        env:
+          GH_ORG: ${{ secrets.GH_ORG }}
         run: |
           for pkg in streaming-exporter streaming-importer; do
             curl -fsS -X POST \
               "https://packagist.org/api/update-package?username=${{ secrets.PACKAGIST_USERNAME }}&apiToken=${{ secrets.PACKAGIST_TOKEN }}" \
               -H 'Content-Type: application/json' \
-              -d "{\"repository\":{\"url\":\"https://github.com/wp-php-toolkit/${pkg}\"}}"
+              -d "{\"repository\":{\"url\":\"https://github.com/${GH_ORG}/${pkg}\"}}"
           done
