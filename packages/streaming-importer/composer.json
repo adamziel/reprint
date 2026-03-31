@@ -2,7 +2,6 @@
     "name": "wp-php-toolkit/streaming-importer",
     "description": "Streaming site importer with CLI and PHAR distribution support",
     "type": "library",
-    "version": "dev-main",
     "license": "GPL-2.0-or-later",
     "require": {
         "php": ">=7.4",

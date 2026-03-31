@@ -18,56 +18,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Diagnose split repo auth
-        continue-on-error: true
-        env:
-          GH_ORG: ${{ secrets.GH_ORG }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          set -euxo pipefail
-          export GIT_TERMINAL_PROMPT=0
-          git config --local --unset-all http.https://github.com/.extraheader || true
-          git config --global --unset-all http.https://github.com/.extraheader || true
-
-          gh --version
-          gh api user --jq '{login: .login, id: .id, type: .type}'
-          GH_LOGIN="$(gh api user --jq .login)"
-
-          for pkg in streaming-exporter streaming-importer; do
-            echo "== API permissions for ${GH_ORG}/${pkg} =="
-            gh api "repos/${GH_ORG}/${pkg}" --jq '{full_name: .full_name, permissions: .permissions}'
-
-            echo "== ls-remote for ${GH_ORG}/${pkg} =="
-            git -c url."https://${GH_LOGIN}:${GH_TOKEN}@github.com/".insteadOf=https://github.com/ \
-              ls-remote "https://github.com/${GH_ORG}/${pkg}.git" HEAD
-
-            echo "== dry-run push for ${GH_ORG}/${pkg} =="
-            git -c url."https://${GH_LOGIN}:${GH_TOKEN}@github.com/".insteadOf=https://github.com/ \
-              push --dry-run "https://github.com/${GH_ORG}/${pkg}.git" HEAD:refs/heads/codesplit-auth-dryrun
-          done
-
       - name: Push package subtrees
         env:
           GH_CODESPLIT_EMAIL: ${{ secrets.GH_CODESPLIT_EMAIL }}
           GH_ORG: ${{ secrets.GH_ORG }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
+          set -euo pipefail
           GH_LOGIN="$(gh api user --jq .login)"
           git config user.name "github-actions[bot]"
           git config user.email "${GH_CODESPLIT_EMAIL}"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git config --global --unset-all http.https://github.com/.extraheader || true
           git config --global url."https://${GH_LOGIN}:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          export GIT_TERMINAL_PROMPT=0
 
-          git subtree push \
-            --prefix=packages/streaming-exporter \
-            "https://github.com/${GH_ORG}/streaming-exporter.git" \
-            main
+          for pkg in streaming-exporter streaming-importer; do
+            split_commit="$(git subtree split --prefix="packages/${pkg}" "${GITHUB_SHA}")"
+            remote_url="https://github.com/${GH_ORG}/${pkg}.git"
 
-          git subtree push \
-            --prefix=packages/streaming-importer \
-            "https://github.com/${GH_ORG}/streaming-importer.git" \
-            main
+            git push "${remote_url}" "${split_commit}:refs/heads/main"
+            git push "${remote_url}" "${split_commit}:refs/tags/${GITHUB_REF_NAME}"
+          done
 
       - name: Notify Packagist
         env:
