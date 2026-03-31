@@ -17,3 +17,36 @@ When a request arrives at `https://example.com/?site-export-api`, the plugin:
 5. Calls `exit` — WordPress never finishes booting
 
 This gives us a clean execution environment while using WordPress's front controller as the entry point.
+
+## Using as a library
+
+The export engine can be embedded in another PHP project without the WordPress plugin wrapper. Require `lib.php` instead of `index.php` — it defines constants and functions but does not handle any HTTP requests or check any URLs.
+
+```php
+// Your project must define ABSPATH before requiring lib.php.
+define('ABSPATH', '/path/to/wordpress/');
+
+require_once '/path/to/wordpress-plugin/lib.php';
+
+// Route however you like — lib.php doesn't check URLs.
+if ($myRouter->matches('/export')) {
+    // Use default HMAC authentication (reads secret from SITE_EXPORT_SECRET_FILE):
+    _site_export_handle_api_request();
+
+    // Or supply your own authentication:
+    _site_export_handle_api_request([
+        'authenticate' => function () {
+            if (!my_auth_check()) {
+                _site_export_error(403, 'Unauthorized');
+            }
+        },
+    ]);
+}
+```
+
+`lib.php` defines these constants (using WordPress's `plugin_dir_path`):
+
+- `SITE_EXPORT_VERSION` — plugin version string
+- `SITE_EXPORT_PLUGIN_DIR` — absolute path to the plugin directory
+- `SITE_EXPORT_SECRET_FILE` — path to the PHP file that returns the HMAC shared secret
+- `SITE_EXPORT_TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)

@@ -271,6 +271,10 @@ export async function ensureSite(name, options = {}) {
         join(PLUGIN_SRC, 'index.php'),
         join(siteDir, 'wp-content', 'plugins', 'site-export', 'index.php')
     );
+    safeCopyFile(
+        join(PLUGIN_SRC, 'lib.php'),
+        join(siteDir, 'wp-content', 'plugins', 'site-export', 'lib.php')
+    );
     for (const f of readdirSync(join(PLUGIN_SRC, 'generic')).filter(f => f.endsWith('.php'))) {
         safeCopyFile(
             join(PLUGIN_SRC, 'generic', f),
