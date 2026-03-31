@@ -1,0 +1,32 @@
+name: Publish Composer packages
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  split-packages:
+    name: Push subtrees to package repos
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push package subtrees
+        run: |
+          git subtree push --prefix=packages/streaming-exporter https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/wp-php-toolkit/streaming-exporter.git main
+          git subtree push --prefix=packages/streaming-importer https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/wp-php-toolkit/streaming-importer.git main
+
+      - name: Notify Packagist
+        run: |
+          for pkg in streaming-exporter streaming-importer; do
+            curl -fsS -X POST \
+              "https://packagist.org/api/update-package?username=${{ secrets.PACKAGIST_USERNAME }}&apiToken=${{ secrets.PACKAGIST_TOKEN }}" \
+              -H 'Content-Type: application/json' \
+              -d "{\"repository\":{\"url\":\"https://github.com/wp-php-toolkit/${pkg}\"}}"
+          done
