@@ -21,6 +21,7 @@
         </testsuite>
         <testsuite name="Export Utility Tests">
             <file>BuildPdoDsnTest.php</file>
+            <file>SiteExportSecretTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">
             <file>NaiveQueryStreamTest.php</file>

@@ -4,7 +4,8 @@
  *
  * This plugin provides a WordPress admin UI for configuring the export API.
  * The export API is triggered via `?site-export-api` during plugin load,
- * before WordPress finishes booting. It reads the secret from secret.php.
+ * before WordPress finishes booting. It reads the secret from a site option,
+ * with secret.php supported only as an override when present.
  *
  * Authentication uses HMAC signatures: the importing side generates a secret,
  * the user enters it here, and all requests must include a valid signature
@@ -22,10 +23,25 @@ class Site_Export_Plugin {
     }
 
     private function __construct() {
+        add_action('init', [$this, 'register_settings']);
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'handle_settings_save']);
         add_filter('plugin_action_links_' . plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'), [$this, 'add_settings_link']);
         add_action('admin_bar_menu', [$this, 'add_admin_bar_node'], 100);
+    }
+
+    /** Register the option so core's /wp/v2/settings endpoint can update it. */
+    public function register_settings() {
+        register_setting(
+            'general',
+            SITE_EXPORT_SECRET_OPTION,
+            [
+                'type' => 'string',
+                'sanitize_callback' => 'sanitize_text_field',
+                'default' => '',
+                'show_in_rest' => true,
+            ]
+        );
     }
 
     /**
@@ -83,16 +99,10 @@ class Site_Export_Plugin {
 
         $secret = isset($_POST['site_export_secret']) ? sanitize_text_field($_POST['site_export_secret']) : '';
 
-        // Write secret to PHP file
-        $result = $this->save_secret($secret);
+        $updated = _site_export_update_shared_secret($secret);
 
-        if (is_wp_error($result)) {
-            add_settings_error(
-                'site_export',
-                'save_failed',
-                'Failed to save secret: ' . $result->get_error_message(),
-                'error'
-            );
+        if (!$updated && _site_export_get_option_secret() !== $secret) {
+            add_settings_error('site_export', 'save_failed', 'Failed to save secret.', 'error');
         } else {
             add_settings_error(
                 'site_export',
@@ -104,48 +114,6 @@ class Site_Export_Plugin {
     }
 
     /**
-     * Save the secret to the PHP config file.
-     *
-     * @param string $secret The shared secret
-     * @return true|WP_Error
-     */
-    private function save_secret(string $secret) {
-        $content = "<?php\n";
-        $content .= "/**\n";
-        $content .= " * Site Export shared secret.\n";
-        $content .= " * Generated: " . gmdate('Y-m-d H:i:s') . " UTC\n";
-        $content .= " * \n";
-        $content .= " * DO NOT share this file or commit it to version control.\n";
-        $content .= " */\n";
-        $content .= "return " . var_export($secret, true) . ";\n";
-
-        $result = file_put_contents(SITE_EXPORT_SECRET_FILE, $content);
-
-        if ($result === false) {
-            return new WP_Error(
-                'write_failed',
-                'Could not write to ' . SITE_EXPORT_SECRET_FILE . '. Check file permissions.'
-            );
-        }
-
-        return true;
-    }
-
-    /**
-     * Load the current secret from config file.
-     *
-     * @return string
-     */
-    private function load_secret(): string {
-        if (!file_exists(SITE_EXPORT_SECRET_FILE)) {
-            return '';
-        }
-
-        $secret = require SITE_EXPORT_SECRET_FILE;
-        return is_string($secret) ? $secret : '';
-    }
-
-    /**
      * Render the admin page.
      */
     public function render_admin_page() {
@@ -153,9 +121,11 @@ class Site_Export_Plugin {
             return;
         }
 
-        $secret = $this->load_secret();
+        $stored_secret = _site_export_get_option_secret();
+        $effective_secret = _site_export_get_shared_secret() ?? '';
         $api_url = home_url('?site-export-api');
-        $is_configured = !empty($secret);
+        $is_configured = $effective_secret !== '';
+        $has_file_override = _site_export_has_secret_file();
 
         ?>
         <style>
@@ -285,6 +255,13 @@ class Site_Export_Plugin {
 
             <?php settings_errors('site_export'); ?>
 
+            <?php if ($has_file_override): ?>
+            <div class="site-export-status is-pending">
+                <span class="dashicons dashicons-lock"></span>
+                <span><strong><code>secret.php</code> override is active.</strong> This screen and the REST API update only the site option. Remove <code>secret.php</code> to use the stored option value.</span>
+            </div>
+            <?php endif; ?>
+
             <?php if ($is_configured): ?>
             <div class="site-export-status is-ready">
                 <span class="dashicons dashicons-yes-alt"></span>
@@ -310,7 +287,7 @@ class Site_Export_Plugin {
                         <input type="password"
                                id="site_export_secret"
                                name="site_export_secret"
-                               value="<?php echo esc_attr($secret); ?>"
+                               value="<?php echo esc_attr($stored_secret); ?>"
                                placeholder="Paste your token here"
                                autocomplete="off" />
                         <button type="button" class="site-export-toggle-btn" onclick="siteExportToggleSecret()" title="Show / hide token">

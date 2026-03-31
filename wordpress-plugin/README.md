@@ -34,7 +34,8 @@ require_once '/path/to/wordpress-plugin/lib.php';
 
 // Route however you like — lib.php doesn't check URLs.
 if ($myRouter->matches('/export')) {
-    // Use default HMAC authentication (reads secret from SITE_EXPORT_SECRET_FILE):
+    // Use default HMAC authentication (reads secret.php when present,
+    // otherwise falls back to the site option):
     _site_export_handle_api_request();
 
     // Or supply your own authentication:
@@ -52,5 +53,6 @@ if ($myRouter->matches('/export')) {
 
 - `SITE_EXPORT_VERSION` — plugin version string
 - `SITE_EXPORT_PLUGIN_DIR` — absolute path to the plugin directory
-- `SITE_EXPORT_SECRET_FILE` — path to the PHP file that returns the HMAC shared secret
+- `SITE_EXPORT_SECRET_FILE` — optional path to a PHP file that overrides the stored HMAC shared secret
+- `SITE_EXPORT_SECRET_OPTION` — WordPress site option name used for the stored HMAC shared secret
 - `SITE_EXPORT_TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)

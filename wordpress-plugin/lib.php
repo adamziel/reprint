@@ -10,9 +10,18 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('SITE_EXPORT_VERSION', '1.0.0');
-define('SITE_EXPORT_PLUGIN_DIR', plugin_dir_path(__FILE__));
-define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
+if (!defined('SITE_EXPORT_VERSION')) {
+    define('SITE_EXPORT_VERSION', '1.0.0');
+}
+if (!defined('SITE_EXPORT_PLUGIN_DIR')) {
+    define('SITE_EXPORT_PLUGIN_DIR', plugin_dir_path(__FILE__));
+}
+if (!defined('SITE_EXPORT_SECRET_FILE')) {
+    define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
+}
+if (!defined('SITE_EXPORT_SECRET_OPTION')) {
+    define('SITE_EXPORT_SECRET_OPTION', 'site_export_secret');
+}
 
 /**
  * Maximum age of a request timestamp in seconds.
@@ -81,6 +90,61 @@ function _site_export_get_header(string $name): ?string {
     }
 
     return null;
+}
+
+/** Returns whether the legacy secret.php override exists. */
+function _site_export_has_secret_file(): bool {
+    return file_exists(SITE_EXPORT_SECRET_FILE);
+}
+
+/**
+ * Reads the legacy secret.php override when present.
+ *
+ * @return string|null String secret when the file is valid, otherwise null.
+ */
+function _site_export_get_file_secret(): ?string {
+    if (!_site_export_has_secret_file()) {
+        return null;
+    }
+
+    $secret = require SITE_EXPORT_SECRET_FILE;
+    return is_string($secret) ? $secret : null;
+}
+
+/** Reads the option-backed shared secret. */
+function _site_export_get_option_secret(): string {
+    if (!function_exists('get_option')) {
+        return '';
+    }
+
+    $secret = get_option(SITE_EXPORT_SECRET_OPTION, '');
+    return is_string($secret) ? $secret : '';
+}
+
+/**
+ * Returns the effective shared secret.
+ *
+ * The legacy secret.php file takes precedence when present; otherwise the
+ * site option is used.
+ */
+function _site_export_get_shared_secret(): ?string {
+    if (_site_export_has_secret_file()) {
+        return _site_export_get_file_secret();
+    }
+
+    $secret = _site_export_get_option_secret();
+    return $secret === '' ? null : $secret;
+}
+
+/**
+ * Updates only the option-backed shared secret used by the settings UI and REST API.
+ */
+function _site_export_update_shared_secret(string $secret): bool {
+    if (!function_exists('update_option')) {
+        return false;
+    }
+
+    return (bool) update_option(SITE_EXPORT_SECRET_OPTION, $secret, false);
 }
 
 /**
@@ -169,18 +233,22 @@ function _site_export_verify_hmac(string $secret): ?string {
 /**
  * Default HMAC authentication handler.
  *
- * Reads the shared secret from SITE_EXPORT_SECRET_FILE and verifies
- * the request's HMAC signature. Calls _site_export_error() on failure.
+ * Reads the shared secret from secret.php when present, otherwise from the
+ * site option, and verifies the request's HMAC signature.
+ * Calls _site_export_error() on failure.
  */
 function _site_export_default_authenticate(): void {
-    $secret_file = SITE_EXPORT_SECRET_FILE;
-    if (!file_exists($secret_file)) {
-        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.');
+    if (_site_export_has_secret_file()) {
+        $secret = _site_export_get_file_secret();
+        if (empty($secret)) {
+            _site_export_error(503, 'Invalid secret.php configuration. Please remove it or replace it with a valid shared secret.');
+        }
+    } else {
+        $secret = _site_export_get_option_secret();
     }
 
-    $secret = require $secret_file;
     if (empty($secret) || !is_string($secret)) {
-        _site_export_error(503, 'Invalid secret configuration. Please reconfigure in WordPress admin.');
+        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.');
     }
 
     $auth_error = _site_export_verify_hmac($secret);
