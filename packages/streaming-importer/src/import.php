@@ -1278,6 +1278,18 @@ class ImportClient
         }
     }
 
+    /**
+     * Emit a preserve-local skip event to both TTY progress line and JSONL.
+     */
+    private function emit_skip_progress(string $path): void
+    {
+        $this->show_progress_line("[skip] " . $this->display_path($path));
+        $this->output_progress([
+            "type" => "skip",
+            "path" => $path,
+        ], true);
+    }
+
     private ?int $terminal_width_cache = null;
 
     private function get_terminal_width(): int
@@ -2346,6 +2358,12 @@ class ImportClient
                 if ($this->is_tty && !$this->verbose_mode) {
                     fwrite($this->progress_fd, "Downloading previously skipped files\n");
                 }
+                $this->output_progress([
+                    "type" => "lifecycle",
+                    "event" => "starting",
+                    "command" => "files-sync",
+                    "stage" => "fetch-skipped",
+                ], true);
                 $this->state["status"] = "in_progress";
                 $this->state["stage"] = "fetch-skipped";
                 $this->save_state($this->state);
@@ -2372,6 +2390,13 @@ class ImportClient
                     fwrite($this->progress_fd, "To re-sync, run with --abort first to clear state.\n");
                 }
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "already_complete",
+                "command" => "files-sync",
+                "files_indexed" => $index_size,
+                "has_skipped" => $has_skipped,
+            ], true);
             return;
         }
 
@@ -2414,6 +2439,13 @@ class ImportClient
                 fwrite($this->progress_fd, "  Stage: {$stage}\n");
                 fwrite($this->progress_fd, "  Already indexed: {$index_size} files\n");
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "resuming",
+                "command" => "files-sync",
+                "stage" => $stage,
+                "index_size" => $index_size,
+            ], true);
         } else {
             // Starting fresh — validate that target directory is empty.
             // A delta sync ($is_delta) naturally has a non-empty fs root
@@ -2447,6 +2479,13 @@ class ImportClient
                     fwrite($this->progress_fd, "  Index contains: {$index_size} files\n");
                     fwrite($this->progress_fd, "  Stage: index\n");
                 }
+                $this->output_progress([
+                    "type" => "lifecycle",
+                    "event" => "starting",
+                    "command" => "files-sync",
+                    "delta" => true,
+                    "index_size" => $index_size,
+                ], true);
             } else {
                 $this->audit_log(
                     "START files-sync ({$this->fs_root_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
@@ -2456,6 +2495,11 @@ class ImportClient
                 if ($this->is_tty && !$this->verbose_mode) {
                     fwrite($this->progress_fd, "Starting files-sync\n");
                 }
+                $this->output_progress([
+                    "type" => "lifecycle",
+                    "event" => "starting",
+                    "command" => "files-sync",
+                ], true);
             }
         }
 
@@ -2486,6 +2530,14 @@ class ImportClient
             fwrite($this->progress_fd, "{$label} complete: {$index_size} files indexed\n");
             fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "complete",
+            "command" => "files-sync",
+            "delta" => $is_delta,
+            "files_indexed" => $index_size,
+            "audit_log" => $this->audit_log,
+        ], true);
 
         $this->report_volatile_files();
     }
@@ -2686,6 +2738,11 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "Starting files-index\n");
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "starting",
+                "command" => "files-index",
+            ], true);
         } else {
             $cursor = $this->state["index"]["cursor"] ?? null;
             $this->audit_log(
@@ -2698,6 +2755,11 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "Resuming files-index\n");
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "resuming",
+                "command" => "files-index",
+            ], true);
         }
 
         $this->state["command"] = "files-index";
@@ -2765,6 +2827,14 @@ class ImportClient
             fwrite($this->progress_fd, "Remote index: {$this->remote_index_file}\n");
             fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "complete",
+            "command" => "files-index",
+            "entries_indexed" => $count,
+            "remote_index" => $this->remote_index_file,
+            "audit_log" => $this->audit_log,
+        ], true);
     }
 
     /**
@@ -2817,6 +2887,10 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "Following symlink target: {$dir}\n");
             }
+            $this->output_progress([
+                "type" => "symlink_follow",
+                "directory" => $dir,
+            ], true);
 
             // Reset the index cursor so download_remote_index starts fresh
             // for this directory, but appends to the existing index file.
@@ -2850,6 +2924,10 @@ class ImportClient
                         if ($this->is_tty && !$this->verbose_mode) {
                             fwrite($this->progress_fd, "  Skipped (server rejected): {$dir}\n");
                         }
+                        $this->output_progress([
+                            "type" => "symlink_follow_rejected",
+                            "directory" => $dir,
+                        ], true);
                         continue 2;
                     }
 
@@ -3160,6 +3238,12 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "Resuming db-sync (stage: {$stage})\n");
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "resuming",
+                "command" => "db-sync",
+                "stage" => $stage,
+            ], true);
         } else {
             // Starting fresh
             $this->state["command"] = "db-sync";
@@ -3175,6 +3259,11 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "Starting db-sync\n");
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "starting",
+                "command" => "db-sync",
+            ], true);
         }
 
         $this->state["command"] = "db-sync";
@@ -3236,6 +3325,17 @@ class ImportClient
             }
             fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
+        $db_sync_complete = [
+            "type" => "lifecycle",
+            "event" => "complete",
+            "command" => "db-sync",
+            "sql_output_mode" => $this->sql_output_mode,
+            "audit_log" => $this->audit_log,
+        ];
+        if ($this->sql_output_mode === "file") {
+            $db_sync_complete["sql_file"] = $sql_file;
+        }
+        $this->output_progress($db_sync_complete, true);
     }
 
     // =========================================================================
@@ -4570,6 +4670,14 @@ class ImportClient
                     }
                     echo "\n";
                 }
+                $domain_map = [];
+                foreach ($domains as $domain) {
+                    $domain_map[$domain] = $url_mapping[$domain] ?? null;
+                }
+                $this->output_progress([
+                    "type" => "domains_discovered",
+                    "domains" => $domain_map,
+                ], true);
             }
         }
 
@@ -4600,6 +4708,13 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 echo "Resuming db-apply (executed: {$statements_executed} statements)\n";
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "resuming",
+                "command" => "db-apply",
+                "statements_executed" => $statements_executed,
+                "bytes_read" => $bytes_read,
+            ], true);
         } else {
             $this->state["command"] = "db-apply";
             $this->state["status"] = "in_progress";
@@ -4615,6 +4730,11 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 echo "Starting db-apply\n";
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "starting",
+                "command" => "db-apply",
+            ], true);
         }
 
         // On resume, use the persisted URL mapping if none provided on CLI
@@ -4921,6 +5041,11 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "Starting db-index\n");
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "starting",
+                "command" => "db-index",
+            ], true);
         } else {
             $this->audit_log(
                 sprintf(
@@ -4932,15 +5057,15 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "Resuming db-index\n");
             }
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "resuming",
+                "command" => "db-index",
+            ], true);
         }
 
         $this->state["command"] = "db-index";
         $this->save_state($this->state);
-
-        $this->output_progress([
-            "status" => "starting",
-            "phase" => "db-index",
-        ]);
 
         $this->download_db_index();
 
@@ -4958,6 +5083,14 @@ class ImportClient
             fwrite($this->progress_fd, "Table stats: {$tables_file}\n");
             fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "complete",
+            "command" => "db-index",
+            "tables" => $tables,
+            "tables_file" => $tables_file,
+            "audit_log" => $this->audit_log,
+        ], true);
     }
 
     /**
@@ -5504,7 +5637,7 @@ class ImportClient
                 $skip_reason = $this->should_skip_for_preserve_local($remote["path"]);
                 if ($skip_reason) {
                     $this->audit_log($skip_reason, true);
-                    $this->show_progress_line("[skip] " . $this->display_path($remote["path"]));
+                    $this->emit_skip_progress($remote["path"]);
                 } else {
                     $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
                         ? $skipped_handle
@@ -7284,6 +7417,12 @@ class ImportClient
             $this->show_progress_line(
                 sprintf("[%d files] %s", $this->files_imported, $this->display_path($path)),
             );
+            $this->output_progress([
+                "type" => "file_progress",
+                "files_imported" => $this->files_imported,
+                "path" => $path,
+                "size" => $file_size,
+            ]);
         }
 
         // Skip body/close for files being preserved
@@ -7310,7 +7449,7 @@ class ImportClient
                 } catch (PreserveLocalSkipException $e) {
                     $context->skip_current_file = true;
                     $this->audit_log($e->getMessage(), true);
-                    $this->show_progress_line("[skip] " . $this->display_path($path));
+                    $this->emit_skip_progress($path);
                     return;
                 }
             }
@@ -7639,7 +7778,7 @@ class ImportClient
         if ($this->fs_root_nonempty_behavior === 'preserve-local') {
             if (is_dir($local_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
-                $this->show_progress_line("[skip] " . $this->display_path($path));
+                $this->emit_skip_progress($path);
                 if ($ctime > 0) {
                     $this->upsert_index_entry($path, $ctime, 0, "dir");
                 }
@@ -7647,7 +7786,7 @@ class ImportClient
             }
             if ($this->path_traverses_symlink($local_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$path}", true);
-                $this->show_progress_line("[skip] " . $this->display_path($path));
+                $this->emit_skip_progress($path);
                 if ($ctime > 0) {
                     $this->upsert_index_entry($path, $ctime, 0, "dir");
                 }
@@ -7673,7 +7812,7 @@ class ImportClient
             $this->ensure_directory_path($local_path);
         } catch (PreserveLocalSkipException $e) {
             $this->audit_log($e->getMessage(), true);
-            $this->show_progress_line("[skip] " . $this->display_path($path));
+            $this->emit_skip_progress($path);
             return;
         }
 
@@ -7725,12 +7864,12 @@ class ImportClient
         if ($this->fs_root_nonempty_behavior === 'preserve-local') {
             if (file_exists($local_path) || is_link($local_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
-                $this->show_progress_line("[skip] " . $this->display_path($path));
+                $this->emit_skip_progress($path);
                 return;
             }
             if ($this->path_traverses_symlink(dirname($local_path))) {
                 $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
-                $this->show_progress_line("[skip] " . $this->display_path($path));
+                $this->emit_skip_progress($path);
                 return;
             }
         }
@@ -7780,7 +7919,7 @@ class ImportClient
                 $this->ensure_directory_path($dir);
             } catch (PreserveLocalSkipException $e) {
                 $this->audit_log($e->getMessage(), true);
-                $this->show_progress_line("[skip] " . $this->display_path($path));
+                $this->emit_skip_progress($path);
                 return;
             } catch (RuntimeException $e) {
                 // Log error and skip this symlink
@@ -9384,6 +9523,12 @@ class ImportClient
             fwrite($this->progress_fd, "  Total files indexed: {$indexed}\n");
             fwrite($this->progress_fd, "  Files completed in this run: {$files_imported}\n");
         }
+        $this->output_progress([
+            "type" => "interrupt",
+            "command" => $current_command,
+            "files_indexed" => $indexed,
+            "files_completed" => $files_imported,
+        ], true);
 
         // Save current state (with timeout protection)
         try {
@@ -9391,6 +9536,9 @@ class ImportClient
             if ($this->is_tty && !$this->verbose_mode) {
                 fwrite($this->progress_fd, "✓ State saved successfully\n");
             }
+            $this->output_progress([
+                "type" => "state_saved",
+            ], true);
         } catch (Exception $e) {
             fwrite($this->progress_fd, "Warning: Failed to save state: " . $e->getMessage() . "\n");
         }
