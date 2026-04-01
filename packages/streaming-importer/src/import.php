@@ -1252,6 +1252,7 @@ class ImportClient
                 "type" => "volatile_files",
                 "files" => $files,
                 "count" => $count,
+                "message" => "{$count} file(s) changed during sync and need re-syncing (run files-sync again)",
             ],
             true,
         );
@@ -1287,6 +1288,7 @@ class ImportClient
         $this->output_progress([
             "type" => "skip",
             "path" => $path,
+            "message" => "[skip] " . $path,
         ], true);
     }
 
@@ -1545,7 +1547,7 @@ class ImportClient
             try {
                 $this->run_db_apply($options);
                 $final_status = $this->state["status"] ?? "complete";
-                $this->output_progress(["status" => $final_status]);
+                $this->output_progress(["status" => $final_status, "message" => "db-apply {$final_status}"]);
                 if ($final_status === "partial") {
                     $this->exit_code = 2;
                 }
@@ -1553,6 +1555,7 @@ class ImportClient
                 $this->output_progress([
                     "status" => "error",
                     "error" => $e->getMessage(),
+                    "message" => "Error: " . $e->getMessage(),
                 ]);
                 $this->write_status_file($e->getMessage());
                 throw $e;
@@ -1597,7 +1600,7 @@ class ImportClient
             }
 
             $final_status = $this->state["status"] ?? "complete";
-            $this->output_progress(["status" => $final_status]);
+            $this->output_progress(["status" => $final_status, "message" => "{$command} {$final_status}"]);
 
             // Exit code 2 signals "partial progress, call me again" so
             // runner scripts can loop on $? without reading the state file.
@@ -1608,6 +1611,7 @@ class ImportClient
             $this->output_progress([
                 "status" => "error",
                 "error" => $e->getMessage(),
+                "message" => "Error: " . $e->getMessage(),
             ]);
             $this->write_status_file($e->getMessage());
             throw $e;
@@ -1752,7 +1756,7 @@ class ImportClient
             fwrite($this->progress_fd, "State cleared for {$command}.\n");
         }
 
-        $this->output_progress(["status" => "aborted"]);
+        $this->output_progress(["status" => "aborted", "message" => "State cleared for {$command}."]);
     }
 
     /**
@@ -2363,6 +2367,7 @@ class ImportClient
                     "event" => "starting",
                     "command" => "files-sync",
                     "stage" => "fetch-skipped",
+                    "message" => "Downloading previously skipped files",
                 ], true);
                 $this->state["status"] = "in_progress";
                 $this->state["stage"] = "fetch-skipped";
@@ -2396,6 +2401,7 @@ class ImportClient
                 "command" => "files-sync",
                 "files_indexed" => $index_size,
                 "has_skipped" => $has_skipped,
+                "message" => "files-sync already complete: {$index_size} files indexed",
             ], true);
             return;
         }
@@ -2445,6 +2451,7 @@ class ImportClient
                 "command" => "files-sync",
                 "stage" => $stage,
                 "index_size" => $index_size,
+                "message" => "Resuming files-sync (stage: {$stage}, indexed: {$index_size} files)",
             ], true);
         } else {
             // Starting fresh — validate that target directory is empty.
@@ -2485,6 +2492,7 @@ class ImportClient
                     "command" => "files-sync",
                     "delta" => true,
                     "index_size" => $index_size,
+                    "message" => "Starting files-sync (delta, {$index_size} files indexed)",
                 ], true);
             } else {
                 $this->audit_log(
@@ -2499,6 +2507,7 @@ class ImportClient
                     "type" => "lifecycle",
                     "event" => "starting",
                     "command" => "files-sync",
+                    "message" => "Starting files-sync",
                 ], true);
             }
         }
@@ -2537,6 +2546,7 @@ class ImportClient
             "delta" => $is_delta,
             "files_indexed" => $index_size,
             "audit_log" => $this->audit_log,
+            "message" => "{$label} complete: {$index_size} files indexed",
         ], true);
 
         $this->report_volatile_files();
@@ -2742,6 +2752,7 @@ class ImportClient
                 "type" => "lifecycle",
                 "event" => "starting",
                 "command" => "files-index",
+                "message" => "Starting files-index",
             ], true);
         } else {
             $cursor = $this->state["index"]["cursor"] ?? null;
@@ -2759,6 +2770,7 @@ class ImportClient
                 "type" => "lifecycle",
                 "event" => "resuming",
                 "command" => "files-index",
+                "message" => "Resuming files-index",
             ], true);
         }
 
@@ -2834,6 +2846,7 @@ class ImportClient
             "entries_indexed" => $count,
             "remote_index" => $this->remote_index_file,
             "audit_log" => $this->audit_log,
+            "message" => "files-index complete: {$count} entries indexed",
         ], true);
     }
 
@@ -2890,6 +2903,7 @@ class ImportClient
             $this->output_progress([
                 "type" => "symlink_follow",
                 "directory" => $dir,
+                "message" => "Following symlink target: {$dir}",
             ], true);
 
             // Reset the index cursor so download_remote_index starts fresh
@@ -2927,6 +2941,7 @@ class ImportClient
                         $this->output_progress([
                             "type" => "symlink_follow_rejected",
                             "directory" => $dir,
+                            "message" => "Skipped (server rejected): {$dir}",
                         ], true);
                         continue 2;
                     }
@@ -3243,6 +3258,7 @@ class ImportClient
                 "event" => "resuming",
                 "command" => "db-sync",
                 "stage" => $stage,
+                "message" => "Resuming db-sync (stage: {$stage})",
             ], true);
         } else {
             // Starting fresh
@@ -3263,6 +3279,7 @@ class ImportClient
                 "type" => "lifecycle",
                 "event" => "starting",
                 "command" => "db-sync",
+                "message" => "Starting db-sync",
             ], true);
         }
 
@@ -3275,6 +3292,7 @@ class ImportClient
             $this->output_progress([
                 "status" => "starting",
                 "phase" => "db-index",
+                "message" => "Downloading table metadata",
             ]);
 
             $this->download_db_index();
@@ -3299,6 +3317,7 @@ class ImportClient
         $this->output_progress([
             "status" => "starting",
             "phase" => "sql",
+            "message" => "Downloading SQL dump",
         ]);
 
         $this->download_sql();
@@ -3331,6 +3350,7 @@ class ImportClient
             "command" => "db-sync",
             "sql_output_mode" => $this->sql_output_mode,
             "audit_log" => $this->audit_log,
+            "message" => "db-sync complete",
         ];
         if ($this->sql_output_mode === "file") {
             $db_sync_complete["sql_file"] = $sql_file;
@@ -3764,6 +3784,7 @@ class ImportClient
             "webhost" => $webhost,
             "webhost_source" => $manifest->source,
             "target_engine" => $target_engine,
+            "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
 
         fwrite(STDERR, "\n");
@@ -4677,6 +4698,7 @@ class ImportClient
                 $this->output_progress([
                     "type" => "domains_discovered",
                     "domains" => $domain_map,
+                    "message" => "Discovered " . count($domains) . " domain(s) in SQL dump",
                 ], true);
             }
         }
@@ -4714,6 +4736,7 @@ class ImportClient
                 "command" => "db-apply",
                 "statements_executed" => $statements_executed,
                 "bytes_read" => $bytes_read,
+                "message" => "Resuming db-apply (executed: {$statements_executed} statements)",
             ], true);
         } else {
             $this->state["command"] = "db-apply";
@@ -4734,6 +4757,7 @@ class ImportClient
                 "type" => "lifecycle",
                 "event" => "starting",
                 "command" => "db-apply",
+                "message" => "Starting db-apply",
             ], true);
         }
 
@@ -4814,6 +4838,7 @@ class ImportClient
             "status" => "starting",
             "phase" => "db-apply",
             "statements_total" => $statements_total,
+            "message" => "Applying SQL" . ($statements_total !== null ? " ({$statements_total} statements)" : ""),
         ]);
 
         try {
@@ -4889,6 +4914,12 @@ class ImportClient
                             ? round(100 * $total_bytes_read / $sql_file_size, 1)
                             : 0;
 
+                        $progress_message = sprintf(
+                            "db-apply: %s statements (%.1f%%)",
+                            $statements_total === null ? $statements_executed : "{$statements_executed} / {$statements_total}",
+                            $pct,
+                        );
+
                         $this->output_progress([
                             "phase" => "db-apply",
                             "statements_executed" => $statements_executed,
@@ -4896,15 +4927,10 @@ class ImportClient
                             "bytes_total" => $sql_file_size,
                             "pct" => $pct,
                             "statements_total" => $statements_total,
+                            "message" => $progress_message,
                         ]);
 
-                        $this->show_progress_line(
-                            sprintf(
-                                "db-apply: %s statements (%.1f%%)",
-                                $statements_total === null ? $statements_executed : "{$statements_executed} / {$statements_total}",
-                                $pct,
-                            ),
-                        );
+                        $this->show_progress_line($progress_message);
                     }
                 }
             }
@@ -4963,6 +4989,7 @@ class ImportClient
                     "phase" => "db-apply",
                     "statements_executed" => $statements_executed,
                     "statements_total" => $statements_total,
+                    "message" => "db-apply partial: {$statements_executed} statements executed",
                 ], true);
             } else {
                 // Mark complete
@@ -4984,6 +5011,7 @@ class ImportClient
                     "phase" => "db-apply",
                     "statements_executed" => $statements_executed,
                     "statements_total" => $statements_total,
+                    "message" => "db-apply complete ({$statements_executed} statements executed)",
                 ]);
 
                 if ($this->is_tty && !$this->verbose_mode) {
@@ -5045,6 +5073,7 @@ class ImportClient
                 "type" => "lifecycle",
                 "event" => "starting",
                 "command" => "db-index",
+                "message" => "Starting db-index",
             ], true);
         } else {
             $this->audit_log(
@@ -5061,6 +5090,7 @@ class ImportClient
                 "type" => "lifecycle",
                 "event" => "resuming",
                 "command" => "db-index",
+                "message" => "Resuming db-index",
             ], true);
         }
 
@@ -5090,6 +5120,7 @@ class ImportClient
             "tables" => $tables,
             "tables_file" => $tables_file,
             "audit_log" => $this->audit_log,
+            "message" => "db-index complete: {$tables} tables",
         ], true);
     }
 
@@ -7414,14 +7445,14 @@ class ImportClient
                 false,
             );
 
-            $this->show_progress_line(
-                sprintf("[%d files] %s", $this->files_imported, $this->display_path($path)),
-            );
+            $file_progress_message = sprintf("[%d files] %s", $this->files_imported, $this->display_path($path));
+            $this->show_progress_line($file_progress_message);
             $this->output_progress([
                 "type" => "file_progress",
                 "files_imported" => $this->files_imported,
                 "path" => $path,
                 "size" => $file_size,
+                "message" => $file_progress_message,
             ]);
         }
 
@@ -7889,6 +7920,7 @@ class ImportClient
                 "path" => $path,
                 "target" => $target,
                 "error" => $e->getMessage(),
+                "message" => "Symlink error: {$path} -> {$target}",
             ]);
             return;
         }
@@ -7907,6 +7939,7 @@ class ImportClient
                     "path" => $path,
                     "target" => $target,
                     "error" => "Failed to replace existing path",
+                    "message" => "Symlink error: {$path} -> {$target}",
                 ]);
                 return;
             }
@@ -7932,6 +7965,7 @@ class ImportClient
                     "path" => $path,
                     "target" => $target,
                     "error" => "Failed to create parent directory",
+                    "message" => "Symlink error: {$path} -> {$target}",
                 ]);
                 return;
             }
@@ -7950,6 +7984,7 @@ class ImportClient
                 "path" => $path,
                 "target" => $target,
                 "error" => "Failed to create symlink",
+                "message" => "Symlink error: {$path} -> {$target}",
             ]);
             return;
         }
@@ -7969,6 +8004,7 @@ class ImportClient
             "type" => "symlink",
             "path" => $path,
             "target" => $target,
+            "message" => "Symlink: {$path} -> {$target}",
         ]);
     }
 
@@ -8025,16 +8061,16 @@ class ImportClient
             }
         }
 
-        $this->show_progress_line(
-            "Remote error: {$error_type} " . ($path !== "" ? $path : ""),
-        );
+        $error_progress_message = "Remote error: {$error_type} " . ($path !== "" ? $path : "");
+        $this->show_progress_line($error_progress_message);
         $this->output_progress(
             [
                 "type" => "error",
                 "phase" => $phase,
                 "error_type" => $error_type,
                 "path" => $path,
-                "message" => $message,
+                "error_message" => $message,
+                "message" => $error_progress_message,
             ],
             true,
         );
@@ -9528,6 +9564,7 @@ class ImportClient
             "command" => $current_command,
             "files_indexed" => $indexed,
             "files_completed" => $files_imported,
+            "message" => "Interrupted - saving state...",
         ], true);
 
         // Save current state (with timeout protection)
@@ -9538,6 +9575,7 @@ class ImportClient
             }
             $this->output_progress([
                 "type" => "state_saved",
+                "message" => "State saved successfully",
             ], true);
         } catch (Exception $e) {
             fwrite($this->progress_fd, "Warning: Failed to save state: " . $e->getMessage() . "\n");
