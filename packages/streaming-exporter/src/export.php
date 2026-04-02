@@ -1651,10 +1651,25 @@ function endpoint_preflight(array $config): array
                             }
                         }
 
+                        // Use realpath() to resolve any symlinks in
+                        // ABSPATH (e.g. /wordpress -> /srv/wpcloud/core/6.9.4
+                        // on WP Cloud). This matches the convention used for
+                        // all other paths below and ensures the importer can
+                        // find the directory at the resolved location where
+                        // files are actually downloaded.
+                        $abspath_raw = defined("ABSPATH")
+                            ? rtrim(ABSPATH, "/")
+                            : null;
+                        $abspath_resolved = null;
+                        if ($abspath_raw !== null) {
+                            $abspath_real = realpath($abspath_raw);
+                            $abspath_resolved = $abspath_real !== false
+                                ? rtrim($abspath_real, "/")
+                                : $abspath_raw;
+                        }
+
                         $paths_urls = [
-                            "abspath" => defined("ABSPATH")
-                                ? rtrim(ABSPATH, "/")
-                                : null,
+                            "abspath" => $abspath_resolved,
                             "wp_admin_path" => $wp_admin_path,
                             "wp_includes_path" => $wp_includes_path,
                             "content_dir" => defined("WP_CONTENT_DIR")
