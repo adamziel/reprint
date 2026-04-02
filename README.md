@@ -1,4 +1,4 @@
-# WordPress Site Export - File Sync Architecture
+# Reprint — WordPress Site Migration
 
 ## Composer packages
 
