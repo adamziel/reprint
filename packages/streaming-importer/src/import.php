@@ -10204,7 +10204,7 @@ if (
     }
 
     /** @internal */
-    function _cli_cast(string $raw, ?string $cast): mixed
+    function _cli_cast(string $raw, ?string $cast)
     {
         switch ($cast) {
             case 'int':   return (int) $raw;
@@ -10215,7 +10215,7 @@ if (
     }
 
     /** @internal */
-    function _cli_store(array $def, mixed $value, ?string &$state_dir, ?string &$fs_root, array &$options): void
+    function _cli_store(array $def, $value, ?string &$state_dir, ?string &$fs_root, array &$options): void
     {
         $target = $def['target'];
         if ($target === 'state_dir') { $state_dir = $value; return; }
