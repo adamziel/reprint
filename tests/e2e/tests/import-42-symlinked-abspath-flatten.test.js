@@ -68,11 +68,18 @@ describe('Import: Flat Document Root with symlinked ABSPATH', () => {
                 // Create the symlink: siteDir/wordpress -> /tmp/e2e-symlinked-core
                 symlinkSync(CORE_DIR, join(siteDir, 'wordpress'));
 
-                // Rewrite index.php to bootstrap WP through the symlink, just
-                // like Atomic's document root index.php does.
+                // Rewrite index.php to pre-define ABSPATH through the symlink
+                // before loading wp-blog-header.php.  This mirrors Atomic's
+                // custom bootstrap: ABSPATH is set to the symlink path, not
+                // wp-load.php's __DIR__ (which PHP resolves to the real path).
+                //
+                // With ABSPATH already defined, wp-load.php skips its own
+                // definition and finds wp-config.php "one level up" from
+                // ABSPATH (dirname(siteDir/wordpress/) == siteDir).
                 writeFileSync(join(siteDir, 'index.php'), `<?php
 define('WP_USE_THEMES', true);
-require __DIR__ . '/wordpress/wp-blog-header.php';
+define('ABSPATH', __DIR__ . '/wordpress/');
+require ABSPATH . 'wp-blog-header.php';
 `);
 
                 // Rewrite wp-config.php so ABSPATH goes through the symlink.
