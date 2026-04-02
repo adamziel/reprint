@@ -9716,29 +9716,681 @@ if (
         exit(0);
     }
 
-    // Per-command help definitions. Each command has a short description
-    // shown in the main help, and a detailed help block shown when you
-    // run `php import.php <command> <url> <local-path> --help`.
-    $command_help = [
+    // ================================================================
+    // CLI option definitions — single source of truth.
+    //
+    // The argument parser and help renderer both read from this array.
+    // Adding a new option here automatically includes it in --help;
+    // removing it here removes it from both parsing and help.
+    //
+    // Fields:
+    //   name           --name without the dashes (required)
+    //   type           'value'         --name=VAL
+    //                  'flag'          --name (sets a boolean)
+    //                  'value-or-next' --name=VAL or --name VAL
+    //                  'pair'          --name A B (repeatable, takes 2 args)
+    //   target         Where to store the parsed value:
+    //                  'state_dir' | 'fs_root' → special local variables
+    //                  'key'                   → $options['key']
+    //                  'tuning_config.key'     → $options['tuning_config']['key']
+    //   help           Description for --help output (null = hidden)
+    //   help_section   'required' | 'global' → controls main --help grouping
+    //                  null → not shown in main --help
+    //   commands       Array of command names for per-command --help display
+    //   placeholder    Value placeholder in help, e.g. 'DIR' (value types)
+    //   short          Single-char alias, e.g. 'v' for -v (flag types)
+    //   aliases        Array of alternative --names (hidden from help)
+    //   cast           'int' | 'float' | 'size' (default: string)
+    //   flag_value     What to store for flag types (default: true)
+    //   valid_values   Array of allowed values (enforced at parse time)
+    //   pair_args      Arg labels for pair type help, e.g. 'FROM TO'
+    // ================================================================
+    $option_defs = [
+        // ── Required options ─────────────────────────────────────
+        [
+            'name' => 'state-dir',
+            'type' => 'value',
+            'target' => 'state_dir',
+            'placeholder' => 'DIR',
+            'help' => 'Directory for import state files and SQL dumps',
+            'help_section' => 'required',
+            'commands' => [],
+        ],
+        [
+            'name' => 'fs-root',
+            'type' => 'value',
+            'target' => 'fs_root',
+            'placeholder' => 'DIR',
+            'help' => 'Directory where downloaded site files are written',
+            'help_section' => 'required',
+            'commands' => ['apply-runtime'],
+            'aliases' => ['docroot'],
+        ],
+
+        // ── Global options ───────────────────────────────────────
+        [
+            'name' => 'secret',
+            'type' => 'value',
+            'target' => 'secret',
+            'placeholder' => 'TOKEN',
+            'help' => 'HMAC shared secret for export API authentication',
+            'help_section' => 'global',
+            'commands' => ['files-sync', 'files-index', 'db-sync', 'db-index', 'preflight', 'preflight-assert'],
+        ],
+        [
+            'name' => 'abort',
+            'type' => 'flag',
+            'target' => 'abort',
+            'help' => 'Abort current sync and exit (preserves downloaded files)',
+            'help_section' => 'global',
+            'commands' => ['files-sync', 'files-index', 'db-sync', 'db-index', 'db-apply'],
+        ],
+        [
+            'name' => 'verbose',
+            'type' => 'flag',
+            'target' => 'verbose',
+            'short' => 'v',
+            'help' => 'Show detailed request/response logs',
+            'help_section' => 'global',
+            'commands' => ['files-sync', 'files-index', 'db-sync', 'db-index', 'db-apply', 'flat-document-root', 'apply-runtime'],
+        ],
+        [
+            'name' => 'no-follow-symlinks',
+            'type' => 'flag',
+            'target' => 'follow_symlinks',
+            'flag_value' => false,
+            'help' => 'Do not follow symlinks pointing outside root directories',
+            'help_section' => 'global',
+            'commands' => ['files-sync'],
+        ],
+        [
+            'name' => 'follow-symlinks',
+            'type' => 'flag',
+            'target' => 'follow_symlinks',
+            'flag_value' => true,
+            'help' => null,
+            'commands' => [],
+        ],
+        [
+            'name' => 'on-fs-root-nonempty',
+            'type' => 'value',
+            'target' => 'fs_root_nonempty_behavior',
+            'placeholder' => 'MODE',
+            'help' => 'What to do when fs root is non-empty (error|preserve-local)',
+            'help_section' => 'global',
+            'commands' => ['files-sync'],
+            'aliases' => ['on-docroot-nonempty'],
+        ],
+        [
+            'name' => 'no-adaptive',
+            'type' => 'flag',
+            'target' => 'tuning_config.enabled',
+            'flag_value' => false,
+            'help' => 'Disable adaptive request tuning',
+            'help_section' => 'global',
+            'commands' => [],
+        ],
+        [
+            'name' => 'adaptive',
+            'type' => 'flag',
+            'target' => 'tuning_config.enabled',
+            'flag_value' => true,
+            'help' => null,
+            'commands' => [],
+        ],
+        [
+            'name' => 'step',
+            'type' => 'value',
+            'target' => 'pipeline_step',
+            'placeholder' => 'N',
+            'cast' => 'int',
+            'help' => 'Current pipeline step (1-indexed, for status file)',
+            'help_section' => 'global',
+            'commands' => [],
+        ],
+        [
+            'name' => 'steps',
+            'type' => 'value',
+            'target' => 'pipeline_steps',
+            'placeholder' => 'N',
+            'cast' => 'int',
+            'help' => 'Total pipeline steps (for status file)',
+            'help_section' => 'global',
+            'commands' => [],
+        ],
+
+        // ── files-sync options ───────────────────────────────────
+        [
+            'name' => 'filter',
+            'type' => 'value',
+            'target' => 'filter',
+            'placeholder' => 'MODE',
+            'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
+            'help' => 'Filter which files to download (none|essential-files|skipped-earlier)',
+            'commands' => ['files-sync'],
+        ],
+
+        // ── db-sync options ──────────────────────────────────────
+        [
+            'name' => 'max-allowed-packet',
+            'type' => 'value',
+            'target' => 'max_allowed_packet',
+            'placeholder' => 'SIZE',
+            'cast' => 'size',
+            'help' => 'Client max_allowed_packet (e.g. 16M, 64M)',
+            'commands' => ['db-sync'],
+        ],
+        [
+            'name' => 'sql-output',
+            'type' => 'value',
+            'target' => 'sql_output',
+            'placeholder' => 'MODE',
+            'help' => 'Output mode: file (default), stdout, mysql',
+            'commands' => ['db-sync'],
+        ],
+        [
+            'name' => 'mysql-host',
+            'type' => 'value',
+            'target' => 'mysql_host',
+            'placeholder' => 'HOST',
+            'help' => 'MySQL host (default: 127.0.0.1, for --sql-output=mysql)',
+            'commands' => ['db-sync'],
+        ],
+        [
+            'name' => 'mysql-port',
+            'type' => 'value',
+            'target' => 'mysql_port',
+            'placeholder' => 'PORT',
+            'help' => 'MySQL port (default: 3306, for --sql-output=mysql)',
+            'commands' => ['db-sync'],
+        ],
+        [
+            'name' => 'mysql-user',
+            'type' => 'value',
+            'target' => 'mysql_user',
+            'placeholder' => 'USER',
+            'help' => 'MySQL user (default: root, for --sql-output=mysql)',
+            'commands' => ['db-sync'],
+        ],
+        [
+            'name' => 'mysql-password',
+            'type' => 'value',
+            'target' => 'mysql_password',
+            'placeholder' => 'PASS',
+            'help' => 'MySQL password (or set MYSQL_PASSWORD env)',
+            'commands' => ['db-sync'],
+        ],
+        [
+            'name' => 'mysql-database',
+            'type' => 'value',
+            'target' => 'mysql_database',
+            'placeholder' => 'DB',
+            'help' => 'MySQL database (required for --sql-output=mysql)',
+            'commands' => ['db-sync'],
+        ],
+
+        // ── db-apply options ─────────────────────────────────────
+        [
+            'name' => 'target-engine',
+            'type' => 'value',
+            'target' => 'target_engine',
+            'placeholder' => 'ENGINE',
+            'help' => 'Target database engine: mysql (default) or sqlite',
+            'commands' => ['db-apply'],
+        ],
+        [
+            'name' => 'target-host',
+            'type' => 'value',
+            'target' => 'target_host',
+            'placeholder' => 'HOST',
+            'help' => 'Target MySQL host (default: 127.0.0.1)',
+            'commands' => ['db-apply'],
+        ],
+        [
+            'name' => 'target-port',
+            'type' => 'value',
+            'target' => 'target_port',
+            'placeholder' => 'PORT',
+            'cast' => 'int',
+            'help' => 'Target MySQL port (default: 3306)',
+            'commands' => ['db-apply'],
+        ],
+        [
+            'name' => 'target-user',
+            'type' => 'value',
+            'target' => 'target_user',
+            'placeholder' => 'USER',
+            'help' => 'Target MySQL user (required for mysql)',
+            'commands' => ['db-apply'],
+        ],
+        [
+            'name' => 'target-pass',
+            'type' => 'value',
+            'target' => 'target_pass',
+            'placeholder' => 'PASS',
+            'help' => 'Target MySQL password',
+            'commands' => ['db-apply'],
+        ],
+        [
+            'name' => 'target-db',
+            'type' => 'value',
+            'target' => 'target_db',
+            'placeholder' => 'NAME',
+            'help' => 'Target DB name (required for mysql, optional for sqlite)',
+            'commands' => ['db-apply'],
+        ],
+        [
+            'name' => 'target-sqlite-path',
+            'type' => 'value',
+            'target' => 'target_sqlite_path',
+            'placeholder' => 'PATH',
+            'help' => 'Target SQLite database file (default: <wp-content>/database/.ht.sqlite)',
+            'commands' => ['db-apply'],
+        ],
+        [
+            'name' => 'rewrite-url',
+            'type' => 'pair',
+            'target' => 'rewrite_url',
+            'pair_args' => 'FROM TO',
+            'help' => 'Rewrite FROM to TO (repeatable)',
+            'commands' => ['db-apply'],
+        ],
+        [
+            'name' => 'new-site-url',
+            'type' => 'value-or-next',
+            'target' => 'new_site_url',
+            'placeholder' => 'URL',
+            'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
+            'commands' => ['db-apply'],
+        ],
+
+        // ── flat-document-root options ───────────────────────────
+        [
+            'name' => 'flatten-to',
+            'type' => 'value',
+            'target' => 'flatten_to',
+            'placeholder' => 'PATH',
+            'help' => 'Target directory for the flattened layout (required)',
+            'commands' => ['flat-document-root'],
+        ],
+        [
+            'name' => 'force',
+            'type' => 'flag',
+            'target' => 'force',
+            'help' => 'Remove conflicting non-symlink files and replace with symlinks',
+            'commands' => ['flat-document-root'],
+        ],
+
+        // ── apply-runtime options ────────────────────────────────
+        [
+            'name' => 'runtime',
+            'type' => 'value',
+            'target' => 'runtime',
+            'placeholder' => 'RUNTIME',
+            'help' => 'Target server runtime: nginx-fpm, php-builtin, or playground-cli (required)',
+            'commands' => ['apply-runtime'],
+        ],
+        [
+            'name' => 'output-dir',
+            'type' => 'value',
+            'target' => 'output_dir',
+            'placeholder' => 'DIR',
+            'help' => 'Directory for generated runtime files (required)',
+            'commands' => ['apply-runtime'],
+        ],
+        [
+            'name' => 'flat-document-root',
+            'type' => 'value',
+            'target' => 'flat_document_root',
+            'placeholder' => 'DIR',
+            'help' => 'Flattened layout directory (used as-is)',
+            'commands' => ['apply-runtime'],
+            'aliases' => ['flattened-docroot'],
+        ],
+        [
+            'name' => 'host',
+            'type' => 'value',
+            'target' => 'host',
+            'placeholder' => 'HOST',
+            'help' => 'Listen address (default: from rewrite URL, or localhost)',
+            'commands' => ['apply-runtime'],
+        ],
+        [
+            'name' => 'port',
+            'type' => 'value',
+            'target' => 'port',
+            'placeholder' => 'PORT',
+            'cast' => 'int',
+            'help' => 'Listen port (default: from rewrite URL, or 8881)',
+            'commands' => ['apply-runtime'],
+        ],
+
+        // ── Tuning options (accepted but hidden from help) ───────
+        ['name' => 'duty', 'type' => 'value', 'target' => 'tuning_config.duty', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'duty-min', 'type' => 'value', 'target' => 'tuning_config.duty_min', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'duty-max', 'type' => 'value', 'target' => 'tuning_config.duty_max', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'throughput-alpha', 'type' => 'value', 'target' => 'tuning_config.throughput_ema_alpha', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'aimd-drop-ratio', 'type' => 'value', 'target' => 'tuning_config.aimd_drop_ratio', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'aimd-decrease-factor', 'type' => 'value', 'target' => 'tuning_config.aimd_decrease_factor', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'error-decrease-factor', 'type' => 'value', 'target' => 'tuning_config.error_decrease_factor', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'aimd-increase-file', 'type' => 'value', 'target' => 'tuning_config.aimd_increase_file_bytes', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'aimd-increase-index', 'type' => 'value', 'target' => 'tuning_config.aimd_increase_index_entries', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'aimd-increase-sql', 'type' => 'value', 'target' => 'tuning_config.aimd_increase_sql_fragments', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'tune-all', 'type' => 'flag', 'target' => 'tuning_config.tune_only_partial', 'flag_value' => false, 'help' => null, 'commands' => []],
+        ['name' => 'buffered-ratio', 'type' => 'value', 'target' => 'tuning_config.buffered_ratio_threshold', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'buffered-min-time', 'type' => 'value', 'target' => 'tuning_config.buffered_min_server_time', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'buffered-cooldown', 'type' => 'value', 'target' => 'tuning_config.buffered_cooldown', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'error-backoff', 'type' => 'value', 'target' => 'tuning_config.error_backoff_requests', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'slow-host-threshold', 'type' => 'value', 'target' => 'tuning_config.slow_host_threshold', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'slow-file-chunk-max', 'type' => 'value', 'target' => 'tuning_config.slow_host_file_chunk_max', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'slow-index-batch-max', 'type' => 'value', 'target' => 'tuning_config.slow_host_index_batch_max', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'slow-sql-fragments-max', 'type' => 'value', 'target' => 'tuning_config.slow_host_sql_fragments_max', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'sleep-jitter', 'type' => 'value', 'target' => 'tuning_config.sleep_jitter', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'max-exec', 'type' => 'value', 'target' => 'tuning_config.max_execution_time', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'memory-threshold', 'type' => 'value', 'target' => 'tuning_config.memory_threshold', 'cast' => 'float', 'help' => null, 'commands' => []],
+        ['name' => 'file-chunk-start', 'type' => 'value', 'target' => 'tuning_config.file_chunk_start', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'file-chunk-min', 'type' => 'value', 'target' => 'tuning_config.file_chunk_min', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'file-chunk-max', 'type' => 'value', 'target' => 'tuning_config.file_chunk_max', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'index-batch-start', 'type' => 'value', 'target' => 'tuning_config.index_batch_start', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'index-batch-min', 'type' => 'value', 'target' => 'tuning_config.index_batch_min', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'index-batch-max', 'type' => 'value', 'target' => 'tuning_config.index_batch_max', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'sql-fragments-start', 'type' => 'value', 'target' => 'tuning_config.sql_fragments_start', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'sql-fragments-min', 'type' => 'value', 'target' => 'tuning_config.sql_fragments_min', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'sql-fragments-max', 'type' => 'value', 'target' => 'tuning_config.sql_fragments_max', 'cast' => 'int', 'help' => null, 'commands' => []],
+        ['name' => 'db-unbuffered', 'type' => 'flag', 'target' => 'tuning_config.db_unbuffered', 'help' => null, 'commands' => []],
+        ['name' => 'db-query-time-limit', 'type' => 'value', 'target' => 'tuning_config.db_query_time_limit', 'cast' => 'int', 'help' => null, 'commands' => []],
+    ];
+
+    // ── CLI helper functions ─────────────────────────────────
+
+    /**
+     * Parse CLI options using the declarative option definitions.
+     *
+     * @return array{0: ?string, 1: ?string, 2: array} [$state_dir, $fs_root, $options]
+     */
+    function _cli_parse_options(array $argv, int $argc, int $start, array $option_defs): array
+    {
+        $state_dir = null;
+        $fs_root = null;
+        $options = [
+            "abort" => false,
+            "verbose" => false,
+            "secret" => null,
+            "tuning_config" => [],
+        ];
+
+        for ($i = $start; $i < $argc; $i++) {
+            $arg = $argv[$i];
+            $matched = false;
+
+            foreach ($option_defs as $def) {
+                $names = [$def['name']];
+                if (isset($def['aliases'])) {
+                    $names = array_merge($names, $def['aliases']);
+                }
+
+                foreach ($names as $cli_name) {
+                    switch ($def['type']) {
+                        case 'value':
+                            $prefix = "--{$cli_name}=";
+                            if (strpos($arg, $prefix) === 0) {
+                                $raw = substr($arg, strlen($prefix));
+                                $value = _cli_cast($raw, $def['cast'] ?? null);
+                                if (isset($def['valid_values']) && !in_array($value, $def['valid_values'], true)) {
+                                    fwrite(STDERR, "Invalid --{$def['name']} value: {$raw}. Valid values: " . implode(", ", $def['valid_values']) . "\n");
+                                    exit(1);
+                                }
+                                _cli_store($def, $value, $state_dir, $fs_root, $options);
+                                $matched = true;
+                                break 3;
+                            }
+                            break;
+
+                        case 'flag':
+                            if ($arg === "--{$cli_name}" || (isset($def['short']) && $arg === "-{$def['short']}")) {
+                                _cli_store($def, $def['flag_value'] ?? true, $state_dir, $fs_root, $options);
+                                $matched = true;
+                                break 3;
+                            }
+                            break;
+
+                        case 'value-or-next':
+                            $prefix = "--{$cli_name}=";
+                            if (strpos($arg, $prefix) === 0) {
+                                $raw = substr($arg, strlen($prefix));
+                                _cli_store($def, $raw, $state_dir, $fs_root, $options);
+                                $matched = true;
+                                break 3;
+                            }
+                            if ($arg === "--{$cli_name}") {
+                                if (!isset($argv[$i + 1])) {
+                                    fwrite(STDERR, "--{$def['name']} requires one argument: " . ($def['placeholder'] ?? 'VALUE') . "\n");
+                                    exit(1);
+                                }
+                                _cli_store($def, $argv[$i + 1], $state_dir, $fs_root, $options);
+                                $i += 1;
+                                $matched = true;
+                                break 3;
+                            }
+                            break;
+
+                        case 'pair':
+                            if ($arg === "--{$cli_name}") {
+                                if (!isset($argv[$i + 1]) || !isset($argv[$i + 2])) {
+                                    fwrite(STDERR, "--{$def['name']} requires two arguments: " . ($def['pair_args'] ?? 'ARG1 ARG2') . "\n");
+                                    exit(1);
+                                }
+                                $target = $def['target'];
+                                if (!isset($options[$target])) {
+                                    $options[$target] = [];
+                                }
+                                $options[$target][] = [$argv[$i + 1], $argv[$i + 2]];
+                                $i += 2;
+                                $matched = true;
+                                break 3;
+                            }
+                            break;
+                    }
+                }
+            }
+
+            if (!$matched) {
+                fwrite(STDERR, "Unknown option: {$arg}\n");
+                exit(1);
+            }
+        }
+
+        return [$state_dir, $fs_root, $options];
+    }
+
+    /** @internal */
+    function _cli_cast(string $raw, ?string $cast): mixed
+    {
+        switch ($cast) {
+            case 'int':   return (int) $raw;
+            case 'float': return (float) $raw;
+            case 'size':  return parse_size($raw);
+            default:      return $raw;
+        }
+    }
+
+    /** @internal */
+    function _cli_store(array $def, mixed $value, ?string &$state_dir, ?string &$fs_root, array &$options): void
+    {
+        $target = $def['target'];
+        if ($target === 'state_dir') { $state_dir = $value; return; }
+        if ($target === 'fs_root')   { $fs_root = $value;   return; }
+        if (strpos($target, 'tuning_config.') === 0) {
+            $options['tuning_config'][substr($target, strlen('tuning_config.'))] = $value;
+            return;
+        }
+        $options[$target] = $value;
+    }
+
+    /**
+     * Render the main --help output.
+     */
+    function _cli_render_main_help(array $option_defs, array $command_info): void
+    {
+        echo "Version " . get_importer_version() . "\n";
+        echo "\n";
+        echo "Usage: php import.php <command> <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
+        echo "\n";
+        echo "Commands:\n";
+        $max_len = max(array_map('strlen', array_keys($command_info)));
+        foreach ($command_info as $name => $info) {
+            echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
+        }
+        echo "\n";
+        echo "Run 'php import.php <command> --help' for command-specific help.\n";
+        echo "\n";
+
+        $required = array_filter($option_defs, fn($d) => ($d['help_section'] ?? null) === 'required');
+        if ($required) {
+            echo "Required options:\n";
+            _cli_render_option_list($required);
+            echo "\n";
+        }
+
+        echo "Global options:\n";
+        $global = array_filter($option_defs, fn($d) => ($d['help_section'] ?? null) === 'global');
+        // --version/-V is handled before option parsing, so inject it manually.
+        _cli_render_option_list($global, ['--version, -V' => 'Print version and exit']);
+        echo "\n";
+
+        echo "Exit codes:\n";
+        echo "  0  Command completed successfully\n";
+        echo "  2  Partial progress — run the same command again to continue\n";
+        echo "  1  Error\n";
+        echo "\n";
+        echo "State is stored in --state-dir/.import-state.json. Interrupted\n";
+        echo "commands automatically resume. Use --abort to abort the current\n";
+        echo "sync and exit — downloaded files are preserved.\n";
+    }
+
+    /**
+     * Render per-command --help output.
+     *
+     * The "Options:" section is auto-generated from $option_defs so that
+     * every declared option automatically appears in the right command's
+     * help.  The hand-written $command_info provides the prose description
+     * and any extra sections (examples, output-file lists, etc.).
+     */
+    function _cli_render_command_help(string $command, array $option_defs, array $command_info): void
+    {
+        if (!isset($command_info[$command])) {
+            fwrite(STDERR, "Unknown command: {$command}\n");
+            return;
+        }
+
+        $info = $command_info[$command];
+        echo "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
+        echo "\n";
+        echo $info["description"];
+
+        // Collect options tagged for this command.
+        $cmd_options = array_filter($option_defs, function ($d) use ($command) {
+            if (($d['help'] ?? null) === null) {
+                return false;
+            }
+            return isset($d['commands']) && in_array($command, $d['commands'], true);
+        });
+
+        // Show command-specific options first, then global ones.
+        if ($cmd_options) {
+            usort($cmd_options, function ($a, $b) {
+                $a_global = in_array($a['help_section'] ?? null, ['required', 'global'], true) ? 1 : 0;
+                $b_global = in_array($b['help_section'] ?? null, ['required', 'global'], true) ? 1 : 0;
+                return $a_global - $b_global;
+            });
+            echo "\n";
+            echo "Options:\n";
+            _cli_render_option_list($cmd_options);
+        }
+
+        if (!empty($info["extra"])) {
+            echo "\n";
+            echo $info["extra"];
+        }
+        echo "\n";
+    }
+
+    /**
+     * Render a list of options with aligned descriptions.
+     *
+     * @param array $defs   Option definition entries (only those with non-null help are rendered).
+     * @param array $extra  Additional entries as ['--usage-string' => 'description'].
+     */
+    function _cli_render_option_list(array $defs, array $extra = []): void
+    {
+        $lines = [];
+        foreach ($defs as $def) {
+            if (($def['help'] ?? null) === null) {
+                continue;
+            }
+            $lines[] = [_cli_option_usage($def), $def['help']];
+        }
+        foreach ($extra as $usage => $help) {
+            $lines[] = [$usage, $help];
+        }
+
+        // Compute alignment: at least 2 spaces after the longest option.
+        $max_usage = 0;
+        foreach ($lines as [$usage, $_]) {
+            $max_usage = max($max_usage, strlen($usage));
+        }
+        $col = max($max_usage + 2, 21);
+
+        foreach ($lines as [$usage, $help]) {
+            if (strlen($usage) >= $col) {
+                // Option too long for the column — wrap description to next line.
+                echo "  {$usage}\n";
+                echo str_repeat(' ', $col + 2) . "{$help}\n";
+            } else {
+                echo "  " . str_pad($usage, $col) . "{$help}\n";
+            }
+        }
+    }
+
+    /** @internal Build the display string for one option, e.g. "--name=DIR" or "--name, -v". */
+    function _cli_option_usage(array $def): string
+    {
+        $name = "--{$def['name']}";
+        if (isset($def['short'])) {
+            $name .= ", -{$def['short']}";
+        }
+        switch ($def['type']) {
+            case 'value':
+            case 'value-or-next':
+                return "{$name}=" . ($def['placeholder'] ?? 'VALUE');
+            case 'pair':
+                return "{$name} " . ($def['pair_args'] ?? 'ARG1 ARG2');
+            case 'flag':
+            default:
+                return $name;
+        }
+    }
+
+    // ── Per-command help definitions ─────────────────────────────
+    //
+    // "short"       — one-line summary shown in the main help listing.
+    // "description" — prose shown above the auto-generated Options section.
+    // "extra"       — text shown below the Options section (examples,
+    //                 output-file lists, mode explanations, etc.).
+    //
+    // The Options: section itself is generated from $option_defs so that
+    // every declared option for a command is guaranteed to appear.
+    $command_info = [
         "files-sync" => [
             "short" => "Sync files (auto-detects initial vs delta)",
-            "detail" =>
+            "description" =>
                 "Streams files from the remote server into the --fs-root directory.\n" .
                 "Auto-detects whether to run an initial or delta sync based on state:\n" .
                 "\n" .
                 "  - No prior sync: downloads the full directory tree (initial)\n" .
                 "  - Completed sync: re-indexes and downloads only changes (delta)\n" .
-                "  - Interrupted sync: resumes from the last saved cursor\n" .
-                "\n" .
-                "Options:\n" .
-                "  --abort              Abort current sync and exit (keeps files and index)\n" .
-                "  --filter=MODE        Filter which files to download (none|essential-files|skipped-earlier)\n" .
-                "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n" .
-                "  --on-fs-root-nonempty=MODE\n" .
-                "                       What to do when fs root is non-empty (error|preserve-local)\n" .
-                "  --secret=TOKEN       HMAC shared secret for export API authentication\n" .
-                "  --verbose, -v        Show detailed request/response logs\n" .
-                "\n" .
+                "  - Interrupted sync: resumes from the last saved cursor\n",
+            "extra" =>
                 "Filter modes:\n" .
                 "  none             Download all files (default)\n" .
                 "  essential-files   Skip uploads, download only code/config/themes/plugins.\n" .
@@ -9756,18 +10408,14 @@ if (
         ],
         "files-index" => [
             "short" => "Download the remote file index without fetching file contents",
-            "detail" =>
+            "description" =>
                 "Traverses the full remote directory tree and writes each entry\n" .
-                "to .import-index.jsonl. Does not download any file data.\n" .
-                "\n" .
-                "Options:\n" .
-                "  --abort        Clear state and output, then exit\n" .
-                "  --secret=TOKEN   HMAC shared secret for export API authentication\n" .
-                "  --verbose, -v    Show detailed request/response logs\n",
+                "to .import-index.jsonl. Does not download any file data.\n",
+            "extra" => null,
         ],
         "files-stats" => [
             "short" => "Show file count and total size of indexed and pending files",
-            "detail" =>
+            "description" =>
                 "Reads the remote file index and download list to report:\n" .
                 "\n" .
                 "  - Total indexed files and their combined size\n" .
@@ -9777,26 +10425,15 @@ if (
                 "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
                 "\n" .
                 "Requires a prior files-index or files-sync run.\n",
+            "extra" => null,
         ],
         "db-sync" => [
             "short" => "Download the database as a SQL dump",
-            "detail" =>
+            "description" =>
                 "Streams the full database dump into --state-dir/db.sql (default),\n" .
                 "to stdout for piping, or directly into a MySQL connection.\n" .
-                "Automatically resumes from the last cursor if interrupted.\n" .
-                "\n" .
-                "Options:\n" .
-                "  --abort                     Clear state and output, then exit\n" .
-                "  --secret=TOKEN              HMAC shared secret for export API authentication\n" .
-                "  --verbose, -v               Show detailed request/response logs\n" .
-                "  --max-allowed-packet=SIZE   Client max_allowed_packet (e.g. 16M, 64M)\n" .
-                "  --sql-output=MODE           Output mode: file (default), stdout, mysql\n" .
-                "  --mysql-host=HOST           MySQL host (default: 127.0.0.1, for --sql-output=mysql)\n" .
-                "  --mysql-port=PORT           MySQL port (default: 3306, for --sql-output=mysql)\n" .
-                "  --mysql-user=USER           MySQL user (default: root, for --sql-output=mysql)\n" .
-                "  --mysql-password=PASS       MySQL password (or set MYSQL_PASSWORD env)\n" .
-                "  --mysql-database=DB         MySQL database (required for --sql-output=mysql)\n" .
-                "\n" .
+                "Automatically resumes from the last cursor if interrupted.\n",
+            "extra" =>
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
                 "  stdout  Write raw SQL to stdout; progress goes to stderr\n" .
@@ -9804,21 +10441,16 @@ if (
         ],
         "db-index" => [
             "short" => "Index database tables and their statistics",
-            "detail" =>
+            "description" =>
                 "Streams table metadata (name, estimated rows, data size) into\n" .
-                "--state-dir/db-tables.jsonl. Useful for planning and diagnostics.\n" .
-                "\n" .
-                "Options:\n" .
-                "  --abort        Clear state and output, then exit\n" .
-                "  --secret=TOKEN   HMAC shared secret for export API authentication\n" .
-                "  --verbose, -v    Show detailed request/response logs\n" .
-                "\n" .
+                "--state-dir/db-tables.jsonl. Useful for planning and diagnostics.\n",
+            "extra" =>
                 "Output files:\n" .
                 "  db-tables.jsonl  One JSON object per table\n",
         ],
         "db-domains" => [
             "short" => "List domains discovered in the SQL dump",
-            "detail" =>
+            "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
                 "\n" .
                 "If .import-domains.json exists (written by db-sync), it is read\n" .
@@ -9829,27 +10461,16 @@ if (
                 "\n" .
                 "Example:\n" .
                 "  php import.php db-domains - --state-dir=/path/to/state\n",
+            "extra" => null,
         ],
         "db-apply" => [
             "short" => "Apply SQL dump to a target MySQL or SQLite database with URL rewriting",
-            "detail" =>
+            "description" =>
                 "Reads <local-path>/db.sql, optionally rewrites URLs, and executes\n" .
                 "all statements against a target MySQL or SQLite database. Resumable.\n" .
                 "\n" .
-                "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
-                "\n" .
-                "Options:\n" .
-                "  --target-engine=ENGINE     Target database engine: mysql (default) or sqlite\n" .
-                "  --target-host=HOST         Target MySQL host (default: 127.0.0.1)\n" .
-                "  --target-port=PORT         Target MySQL port (default: 3306)\n" .
-                "  --target-user=USER         Target MySQL user (required for mysql)\n" .
-                "  --target-pass=PASS         Target MySQL password\n" .
-                "  --target-db=NAME           Target DB name (required for mysql, optional for sqlite)\n" .
-                "  --target-sqlite-path=PATH  Target SQLite database file (default: <wp-content>/database/.ht.sqlite)\n" .
-                "  --rewrite-url FROM TO      Rewrite FROM to TO (repeatable)\n" .
-                "  --abort                    Clear state and exit\n" .
-                "  --verbose, -v              Show detailed logs\n" .
-                "\n" .
+                "The <remote-url> parameter is kept for CLI consistency but ignored.\n",
+            "extra" =>
                 "MySQL example:\n" .
                 "  php import.php db-apply - /path/to/import \\\n" .
                 "    --target-user=root --target-db=wp_new \\\n" .
@@ -9862,20 +10483,18 @@ if (
         ],
         "preflight" => [
             "short" => "Run preflight check and print the full result as JSON",
-            "detail" =>
+            "description" =>
                 "Contacts the export server and collects environment details:\n" .
                 "PHP/MySQL versions, memory limits, filesystem access, database\n" .
                 "connectivity, WordPress version, plugins, themes, and directory layout.\n" .
                 "\n" .
                 "Prints the full preflight response as pretty-printed JSON.\n" .
-                "Exits 0 if the server reported OK, 1 otherwise.\n" .
-                "\n" .
-                "Options:\n" .
-                "  --secret=TOKEN   HMAC shared secret for export API authentication\n",
+                "Exits 0 if the server reported OK, 1 otherwise.\n",
+            "extra" => null,
         ],
         "preflight-assert" => [
             "short" => "Check if migration is feasible (exits 0 or 1)",
-            "detail" =>
+            "description" =>
                 "Runs the same preflight check as the preflight command, then\n" .
                 "evaluates key assertions:\n" .
                 "\n" .
@@ -9884,14 +10503,12 @@ if (
                 "  - Filesystem directories are accessible\n" .
                 "  - Database connection works\n" .
                 "\n" .
-                "Prints a PASS/FAIL summary and exits 0 if all checks pass, 1 if not.\n" .
-                "\n" .
-                "Options:\n" .
-                "  --secret=TOKEN   HMAC shared secret for export API authentication\n",
+                "Prints a PASS/FAIL summary and exits 0 if all checks pass, 1 if not.\n",
+            "extra" => null,
         ],
         "flat-document-root" => [
             "short" => "Create a vanilla WordPress directory layout using symlinks",
-            "detail" =>
+            "description" =>
                 "Creates a directory at --flatten-to that mirrors the standard\n" .
                 "WordPress directory structure by analyzing preflight path data\n" .
                 "and symlinking each component from where it actually lives.\n" .
@@ -9906,17 +10523,12 @@ if (
                 "\n" .
                 "The command is idempotent: re-running refreshes all symlinks.\n" .
                 "If a path that should be a symlink is a regular file or directory,\n" .
-                "the command stops with an error unless --force is specified.\n" .
-                "\n" .
-                "Options:\n" .
-                "  --flatten-to=PATH  Target directory for the flattened layout (required)\n" .
-                "  --force            Remove conflicting non-symlink files and replace\n" .
-                "                     with symlinks (logged to audit log)\n" .
-                "  --verbose, -v      Show detailed operation logs\n",
+                "the command stops with an error unless --force is specified.\n",
+            "extra" => null,
         ],
         "apply-runtime" => [
             "short" => "Generate server configuration for the imported site",
-            "detail" =>
+            "description" =>
                 "Reads the source site's environment from preflight data and generates\n" .
                 "the configuration files needed to serve the imported site on your\n" .
                 "target server. This bridges the gap between 'files are on disk' and\n" .
@@ -9928,19 +10540,12 @@ if (
                 "\n" .
                 "Pass --fs-root for the raw download directory (the remote document_root\n" .
                 "path is appended automatically), or --flat-document-root for a directory\n" .
-                "created by flat-document-root (used as-is). These are mutually exclusive.\n" .
-                "\n" .
-                "Options:\n" .
-                "  --fs-root=DIR             Raw download directory (remote path appended)\n" .
-                "  --flat-document-root=DIR   Flattened layout directory (used as-is)\n" .
-                "  --runtime=RUNTIME         Target server runtime (required):\n" .
-                "                              nginx-fpm      — writes runtime.php + nginx.conf\n" .
-                "                              php-builtin    — writes runtime.php + start.sh\n" .
-                "                              playground-cli — writes runtime.php + blueprint.json\n" .
-                "  --output-dir=DIR          Directory for generated runtime files (required)\n" .
-                "  --host=HOST               Listen address (default: from rewrite URL, or localhost)\n" .
-                "  --port=PORT               Listen port (default: from rewrite URL, or 8881)\n" .
-                "  --verbose, -v             Show detailed operation logs\n" .
+                "created by flat-document-root (used as-is). These are mutually exclusive.\n",
+            "extra" =>
+                "Runtime modes:\n" .
+                "  nginx-fpm      — writes runtime.php + nginx.conf\n" .
+                "  php-builtin    — writes runtime.php + start.sh\n" .
+                "  playground-cli — writes runtime.php + blueprint.json\n" .
                 "\n" .
                 "Database configuration:\n" .
                 "  When db-apply has been run before apply-runtime, the target database\n" .
@@ -9981,42 +10586,7 @@ if (
 
     // Show main help when invoked with no arguments or just --help
     if ($argc < 2 || (isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]))) {
-        echo "Version " . get_importer_version() . "\n";
-        echo "\n";
-        echo "Usage: php import.php <command> <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
-        echo "\n";
-        echo "Commands:\n";
-        $max_len = max(array_map('strlen', array_keys($command_help)));
-        foreach ($command_help as $name => $info) {
-            echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
-        }
-        echo "\n";
-        echo "Run 'php import.php <command> --help' for command-specific help.\n";
-        echo "\n";
-        echo "Required options:\n";
-        echo "  --state-dir=DIR      Directory for import state files and SQL dumps\n";
-        echo "  --fs-root=DIR        Directory where downloaded site files are written\n";
-        echo "\n";
-        echo "Global options:\n";
-        echo "  --secret=TOKEN       HMAC shared secret for export API authentication\n";
-        echo "  --abort            Abort current sync and exit (preserves downloaded files)\n";
-        echo "  --no-follow-symlinks Do not follow symlinks pointing outside root directories\n";
-        echo "  --on-fs-root-nonempty=MODE\n";
-        echo "                       What to do when fs root is non-empty (error|preserve-local)\n";
-        echo "  --version, -V        Print version and exit\n";
-        echo "  --verbose, -v        Show detailed request/response logs\n";
-        echo "  --no-adaptive        Disable adaptive request tuning\n";
-        echo "  --step=N             Current pipeline step (1-indexed, for status file)\n";
-        echo "  --steps=N            Total pipeline steps (for status file)\n";
-        echo "\n";
-        echo "Exit codes:\n";
-        echo "  0  Command completed successfully\n";
-        echo "  2  Partial progress — run the same command again to continue\n";
-        echo "  1  Error\n";
-        echo "\n";
-        echo "State is stored in --state-dir/.import-state.json. Interrupted\n";
-        echo "commands automatically resume. Use --abort to abort the current\n";
-        echo "sync and exit — downloaded files are preserved.\n";
+        _cli_render_main_help($option_defs, $command_info);
         exit(1);
     }
 
@@ -10032,13 +10602,7 @@ if (
 
     // Per-command --help (can be requested before providing url/path)
     if (in_array("--help", array_slice($argv, 2)) || in_array("-h", array_slice($argv, 2))) {
-        if (isset($command_help[$command])) {
-            echo "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
-            echo "\n";
-            echo $command_help[$command]["detail"] . "\n";
-        } else {
-            fwrite(STDERR, "Unknown command: {$command}\n");
-        }
+        _cli_render_command_help($command, $option_defs, $command_info);
         exit(0);
     }
 
@@ -10061,292 +10625,10 @@ if (
         $option_start_index = 3;
     }
 
-    // Parse options (--state-dir and --fs-root are required named options)
-    $state_dir = null;
-    $fs_root = null;
-    $options = [
-        "command" => $command,
-        "abort" => false,
-        "verbose" => false,
-        "secret" => null,
-        "tuning_config" => [],
-    ];
-
-    for ($i = $option_start_index; $i < $argc; $i++) {
-        if (strpos($argv[$i], "--state-dir=") === 0) {
-            $state_dir = substr($argv[$i], strlen("--state-dir="));
-        } elseif (strpos($argv[$i], "--fs-root=") === 0) {
-            $fs_root = substr($argv[$i], strlen("--fs-root="));
-        } elseif (strpos($argv[$i], "--docroot=") === 0) {
-            // Backward-compatible alias for --fs-root
-            $fs_root = substr($argv[$i], strlen("--docroot="));
-        } elseif (strpos($argv[$i], "--secret=") === 0) {
-            $options["secret"] = substr($argv[$i], strlen("--secret="));
-        } elseif ($argv[$i] === "--abort") {
-            $options["abort"] = true;
-        } elseif ($argv[$i] === "--verbose" || $argv[$i] === "-v") {
-            $options["verbose"] = true;
-        } elseif ($argv[$i] === "--follow-symlinks") {
-            $options["follow_symlinks"] = true;
-        } elseif ($argv[$i] === "--no-follow-symlinks") {
-            $options["follow_symlinks"] = false;
-        } elseif (strpos($argv[$i], "--filter=") === 0) {
-            $filter_value = substr($argv[$i], strlen("--filter="));
-            $valid_filters = ["none", "essential-files", "skipped-earlier"];
-            if (!in_array($filter_value, $valid_filters, true)) {
-                fwrite(STDERR, "Invalid --filter value: {$filter_value}. Valid values: " . implode(", ", $valid_filters) . "\n");
-                exit(1);
-            }
-            $options["filter"] = $filter_value;
-        } elseif (strpos($argv[$i], "--on-fs-root-nonempty=") === 0) {
-            $options["fs_root_nonempty_behavior"] = substr(
-                $argv[$i],
-                strlen("--on-fs-root-nonempty="),
-            );
-        } elseif (strpos($argv[$i], "--on-docroot-nonempty=") === 0) {
-            // Backward-compatible alias for --on-fs-root-nonempty
-            $options["fs_root_nonempty_behavior"] = substr(
-                $argv[$i],
-                strlen("--on-docroot-nonempty="),
-            );
-        } elseif (strpos($argv[$i], "--duty=") === 0) {
-            $options["tuning_config"]["duty"] = (float) substr(
-                $argv[$i],
-                strlen("--duty="),
-            );
-        } elseif (strpos($argv[$i], "--duty-min=") === 0) {
-            $options["tuning_config"]["duty_min"] = (float) substr(
-                $argv[$i],
-                strlen("--duty-min="),
-            );
-        } elseif (strpos($argv[$i], "--duty-max=") === 0) {
-            $options["tuning_config"]["duty_max"] = (float) substr(
-                $argv[$i],
-                strlen("--duty-max="),
-            );
-        } elseif (strpos($argv[$i], "--throughput-alpha=") === 0) {
-            $options["tuning_config"]["throughput_ema_alpha"] = (float) substr(
-                $argv[$i],
-                strlen("--throughput-alpha="),
-            );
-        } elseif (strpos($argv[$i], "--aimd-drop-ratio=") === 0) {
-            $options["tuning_config"]["aimd_drop_ratio"] = (float) substr(
-                $argv[$i],
-                strlen("--aimd-drop-ratio="),
-            );
-        } elseif (strpos($argv[$i], "--aimd-decrease-factor=") === 0) {
-            $options["tuning_config"]["aimd_decrease_factor"] = (float) substr(
-                $argv[$i],
-                strlen("--aimd-decrease-factor="),
-            );
-        } elseif (strpos($argv[$i], "--error-decrease-factor=") === 0) {
-            $options["tuning_config"]["error_decrease_factor"] = (float) substr(
-                $argv[$i],
-                strlen("--error-decrease-factor="),
-            );
-        } elseif (strpos($argv[$i], "--aimd-increase-file=") === 0) {
-            $options["tuning_config"]["aimd_increase_file_bytes"] = (int) substr(
-                $argv[$i],
-                strlen("--aimd-increase-file="),
-            );
-        } elseif (strpos($argv[$i], "--aimd-increase-index=") === 0) {
-            $options["tuning_config"]["aimd_increase_index_entries"] = (int) substr(
-                $argv[$i],
-                strlen("--aimd-increase-index="),
-            );
-        } elseif (strpos($argv[$i], "--aimd-increase-sql=") === 0) {
-            $options["tuning_config"]["aimd_increase_sql_fragments"] = (int) substr(
-                $argv[$i],
-                strlen("--aimd-increase-sql="),
-            );
-        } elseif ($argv[$i] === "--tune-all") {
-            $options["tuning_config"]["tune_only_partial"] = false;
-        } elseif (strpos($argv[$i], "--buffered-ratio=") === 0) {
-            $options["tuning_config"]["buffered_ratio_threshold"] = (float) substr(
-                $argv[$i],
-                strlen("--buffered-ratio="),
-            );
-        } elseif (strpos($argv[$i], "--buffered-min-time=") === 0) {
-            $options["tuning_config"]["buffered_min_server_time"] = (float) substr(
-                $argv[$i],
-                strlen("--buffered-min-time="),
-            );
-        } elseif (strpos($argv[$i], "--buffered-cooldown=") === 0) {
-            $options["tuning_config"]["buffered_cooldown"] = (int) substr(
-                $argv[$i],
-                strlen("--buffered-cooldown="),
-            );
-        } elseif (strpos($argv[$i], "--error-backoff=") === 0) {
-            $options["tuning_config"]["error_backoff_requests"] = (int) substr(
-                $argv[$i],
-                strlen("--error-backoff="),
-            );
-        } elseif (strpos($argv[$i], "--slow-host-threshold=") === 0) {
-            $options["tuning_config"]["slow_host_threshold"] = (int) substr(
-                $argv[$i],
-                strlen("--slow-host-threshold="),
-            );
-        } elseif (strpos($argv[$i], "--slow-file-chunk-max=") === 0) {
-            $options["tuning_config"]["slow_host_file_chunk_max"] = (int) substr(
-                $argv[$i],
-                strlen("--slow-file-chunk-max="),
-            );
-        } elseif (strpos($argv[$i], "--slow-index-batch-max=") === 0) {
-            $options["tuning_config"]["slow_host_index_batch_max"] = (int) substr(
-                $argv[$i],
-                strlen("--slow-index-batch-max="),
-            );
-        } elseif (strpos($argv[$i], "--slow-sql-fragments-max=") === 0) {
-            $options["tuning_config"]["slow_host_sql_fragments_max"] = (int) substr(
-                $argv[$i],
-                strlen("--slow-sql-fragments-max="),
-            );
-        } elseif (strpos($argv[$i], "--sleep-jitter=") === 0) {
-            $options["tuning_config"]["sleep_jitter"] = (float) substr(
-                $argv[$i],
-                strlen("--sleep-jitter="),
-            );
-        } elseif (strpos($argv[$i], "--max-exec=") === 0) {
-            $options["tuning_config"]["max_execution_time"] = (int) substr(
-                $argv[$i],
-                strlen("--max-exec="),
-            );
-        } elseif (strpos($argv[$i], "--memory-threshold=") === 0) {
-            $options["tuning_config"]["memory_threshold"] = (float) substr(
-                $argv[$i],
-                strlen("--memory-threshold="),
-            );
-        } elseif ($argv[$i] === "--no-adaptive") {
-            $options["tuning_config"]["enabled"] = false;
-        } elseif ($argv[$i] === "--adaptive") {
-            $options["tuning_config"]["enabled"] = true;
-        } elseif (strpos($argv[$i], "--file-chunk-start=") === 0) {
-            $options["tuning_config"]["file_chunk_start"] = (int) substr(
-                $argv[$i],
-                strlen("--file-chunk-start="),
-            );
-        } elseif (strpos($argv[$i], "--file-chunk-min=") === 0) {
-            $options["tuning_config"]["file_chunk_min"] = (int) substr(
-                $argv[$i],
-                strlen("--file-chunk-min="),
-            );
-        } elseif (strpos($argv[$i], "--file-chunk-max=") === 0) {
-            $options["tuning_config"]["file_chunk_max"] = (int) substr(
-                $argv[$i],
-                strlen("--file-chunk-max="),
-            );
-        } elseif (strpos($argv[$i], "--index-batch-start=") === 0) {
-            $options["tuning_config"]["index_batch_start"] = (int) substr(
-                $argv[$i],
-                strlen("--index-batch-start="),
-            );
-        } elseif (strpos($argv[$i], "--index-batch-min=") === 0) {
-            $options["tuning_config"]["index_batch_min"] = (int) substr(
-                $argv[$i],
-                strlen("--index-batch-min="),
-            );
-        } elseif (strpos($argv[$i], "--index-batch-max=") === 0) {
-            $options["tuning_config"]["index_batch_max"] = (int) substr(
-                $argv[$i],
-                strlen("--index-batch-max="),
-            );
-        } elseif (strpos($argv[$i], "--sql-fragments-start=") === 0) {
-            $options["tuning_config"]["sql_fragments_start"] = (int) substr(
-                $argv[$i],
-                strlen("--sql-fragments-start="),
-            );
-        } elseif (strpos($argv[$i], "--sql-fragments-min=") === 0) {
-            $options["tuning_config"]["sql_fragments_min"] = (int) substr(
-                $argv[$i],
-                strlen("--sql-fragments-min="),
-            );
-        } elseif (strpos($argv[$i], "--sql-fragments-max=") === 0) {
-            $options["tuning_config"]["sql_fragments_max"] = (int) substr(
-                $argv[$i],
-                strlen("--sql-fragments-max="),
-            );
-        } elseif ($argv[$i] === "--db-unbuffered") {
-            $options["tuning_config"]["db_unbuffered"] = true;
-        } elseif (strpos($argv[$i], "--db-query-time-limit=") === 0) {
-            $options["tuning_config"]["db_query_time_limit"] = (int) substr(
-                $argv[$i],
-                strlen("--db-query-time-limit="),
-            );
-        } elseif (strpos($argv[$i], "--max-allowed-packet=") === 0) {
-            $options["max_allowed_packet"] = parse_size(
-                substr($argv[$i], strlen("--max-allowed-packet=")),
-            );
-        } elseif (strpos($argv[$i], "--step=") === 0) {
-            $options["pipeline_step"] = (int) substr($argv[$i], strlen("--step="));
-        } elseif (strpos($argv[$i], "--steps=") === 0) {
-            $options["pipeline_steps"] = (int) substr($argv[$i], strlen("--steps="));
-        } elseif (strpos($argv[$i], "--sql-output=") === 0) {
-            $options["sql_output"] = substr($argv[$i], strlen("--sql-output="));
-        } elseif (strpos($argv[$i], "--mysql-host=") === 0) {
-            $options["mysql_host"] = substr($argv[$i], strlen("--mysql-host="));
-        } elseif (strpos($argv[$i], "--mysql-port=") === 0) {
-            $options["mysql_port"] = substr($argv[$i], strlen("--mysql-port="));
-        } elseif (strpos($argv[$i], "--mysql-user=") === 0) {
-            $options["mysql_user"] = substr($argv[$i], strlen("--mysql-user="));
-        } elseif (strpos($argv[$i], "--mysql-password=") === 0) {
-            $options["mysql_password"] = substr($argv[$i], strlen("--mysql-password="));
-        } elseif (strpos($argv[$i], "--mysql-database=") === 0) {
-            $options["mysql_database"] = substr($argv[$i], strlen("--mysql-database="));
-        } elseif (strpos($argv[$i], "--target-host=") === 0) {
-            $options["target_host"] = substr($argv[$i], strlen("--target-host="));
-        } elseif (strpos($argv[$i], "--target-port=") === 0) {
-            $options["target_port"] = (int) substr($argv[$i], strlen("--target-port="));
-        } elseif (strpos($argv[$i], "--target-engine=") === 0) {
-            $options["target_engine"] = substr($argv[$i], strlen("--target-engine="));
-        } elseif (strpos($argv[$i], "--target-user=") === 0) {
-            $options["target_user"] = substr($argv[$i], strlen("--target-user="));
-        } elseif (strpos($argv[$i], "--target-pass=") === 0) {
-            $options["target_pass"] = substr($argv[$i], strlen("--target-pass="));
-        } elseif (strpos($argv[$i], "--target-db=") === 0) {
-            $options["target_db"] = substr($argv[$i], strlen("--target-db="));
-        } elseif (strpos($argv[$i], "--target-sqlite-path=") === 0) {
-            $options["target_sqlite_path"] = substr($argv[$i], strlen("--target-sqlite-path="));
-        } elseif ($argv[$i] === "--rewrite-url") {
-            if (!isset($argv[$i + 1]) || !isset($argv[$i + 2])) {
-                fwrite(STDERR, "--rewrite-url requires two arguments: FROM TO\n");
-                exit(1);
-            }
-            if (!isset($options["rewrite_url"])) {
-                $options["rewrite_url"] = [];
-            }
-            $options["rewrite_url"][] = [$argv[$i + 1], $argv[$i + 2]];
-            $i += 2;
-        } elseif (strpos($argv[$i], "--new-site-url=") === 0) {
-            $options["new_site_url"] = substr($argv[$i], strlen("--new-site-url="));
-        } elseif ($argv[$i] === "--new-site-url") {
-            if (!isset($argv[$i + 1])) {
-                fwrite(STDERR, "--new-site-url requires one argument: URL\n");
-                exit(1);
-            }
-            $options["new_site_url"] = $argv[$i + 1];
-            $i += 1;
-        } elseif (strpos($argv[$i], "--flatten-to=") === 0) {
-            $options["flatten_to"] = substr($argv[$i], strlen("--flatten-to="));
-        } elseif ($argv[$i] === "--force") {
-            $options["force"] = true;
-        } elseif (strpos($argv[$i], "--runtime=") === 0) {
-            $options["runtime"] = substr($argv[$i], strlen("--runtime="));
-        } elseif (strpos($argv[$i], "--output-dir=") === 0) {
-            $options["output_dir"] = substr($argv[$i], strlen("--output-dir="));
-        } elseif (strpos($argv[$i], "--flat-document-root=") === 0) {
-            $options["flat_document_root"] = substr($argv[$i], strlen("--flat-document-root="));
-        } elseif (strpos($argv[$i], "--flattened-docroot=") === 0) {
-            // Backward-compatible alias for --flat-document-root
-            $options["flat_document_root"] = substr($argv[$i], strlen("--flattened-docroot="));
-        } elseif (strpos($argv[$i], "--host=") === 0) {
-            $options["host"] = substr($argv[$i], strlen("--host="));
-        } elseif (strpos($argv[$i], "--port=") === 0) {
-            $options["port"] = (int) substr($argv[$i], strlen("--port="));
-        } else {
-            fwrite(STDERR, "Unknown option: {$argv[$i]}\n");
-            exit(1);
-        }
-    }
+    [$state_dir, $fs_root, $options] = _cli_parse_options(
+        $argv, $argc, $option_start_index, $option_defs
+    );
+    $options["command"] = $command;
 
     if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
