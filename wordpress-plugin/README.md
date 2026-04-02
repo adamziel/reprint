@@ -1,4 +1,4 @@
-# Site Export WordPress Plugin
+# Reprint — WordPress Plugin
 
 When working from this monorepo checkout, run `composer install` in
 `wordpress-plugin/` to populate the bundled `vendor/` directory used by the

@@ -7752,15 +7752,16 @@ class ImportClient
                 clearstatcache(true, $current);
             }
 
-            // Remove file if blocking directory creation
+            // Remove file if blocking directory creation.
+            // Even in preserve-local mode, a regular file that occupies a path
+            // the remote uses as a directory is a structural conflict — keeping
+            // the file would silently skip the entire subtree beneath it.
+            // Replace it with a directory so the import can proceed.
             if (is_file($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: file blocks directory creation: {$current}",
-                    );
-                }
                 $this->audit_log(
-                    "Removing file blocking directory: {$current}",
+                    ($this->fs_root_nonempty_behavior === 'preserve-local'
+                        ? "PRESERVE-LOCAL: replacing file with directory (structural conflict): {$current}"
+                        : "Removing file blocking directory: {$current}"),
                     true,
                 );
                 if (!unlink($current)) {
