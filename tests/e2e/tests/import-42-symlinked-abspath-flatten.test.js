@@ -53,10 +53,10 @@ describe('Import: Flat Document Root with symlinked ABSPATH', () => {
                 mkdirSync(CORE_DIR, { recursive: true });
 
                 // Move WP core files into the separate core directory.
-                // Keep wp-content in the site dir (not behind the symlink).
+                // Keep wp-content and index.php in the site dir.
                 for (const entry of ['wp-admin', 'wp-includes', 'wp-load.php',
                     'wp-settings.php', 'wp-blog-header.php', 'wp-cron.php',
-                    'wp-login.php', 'wp-signup.php', 'index.php', 'xmlrpc.php',
+                    'wp-login.php', 'wp-signup.php', 'xmlrpc.php',
                     'wp-activate.php', 'wp-comments-post.php', 'wp-links-opml.php',
                     'wp-mail.php', 'wp-trackback.php']) {
                     const src = join(siteDir, entry);
@@ -67,6 +67,13 @@ describe('Import: Flat Document Root with symlinked ABSPATH', () => {
 
                 // Create the symlink: siteDir/wordpress -> /tmp/e2e-symlinked-core
                 symlinkSync(CORE_DIR, join(siteDir, 'wordpress'));
+
+                // Rewrite index.php to bootstrap WP through the symlink, just
+                // like Atomic's document root index.php does.
+                writeFileSync(join(siteDir, 'index.php'), `<?php
+define('WP_USE_THEMES', true);
+require __DIR__ . '/wordpress/wp-blog-header.php';
+`);
 
                 // Rewrite wp-config.php so ABSPATH goes through the symlink.
                 // This is the key: __DIR__ is the site dir, so ABSPATH becomes
