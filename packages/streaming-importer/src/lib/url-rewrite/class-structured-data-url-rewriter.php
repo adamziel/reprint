@@ -215,32 +215,17 @@ class StructuredDataUrlRewriter
                     $parsed_url = $p->get_parsed_url();
                     foreach ( $url_mapping as $mapping ) {
                         if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $raw_url = $p->get_raw_url();
                             $new_raw_url = WPURL::replace_base_url(
                                 $parsed_url,
                                 array(
                                     'old_base_url' => $options['base_url'],
                                     'new_base_url' => $mapping['to_url'],
-                                    'raw_url'      => $raw_url,
+                                    'raw_url'      => $p->get_raw_url(),
                                     'is_relative'  => false,
                                 )
                             );
 
-                            // WPURL::replace_base_url() normalises an empty
-                            // path to "/" (per WHATWG), which adds a trailing
-                            // slash to origin-only URLs like
-                            // "https://example.com".  Preserve the original
-                            // URL's trailing-slash style so that siteurl/home
-                            // values don't get an unwanted "/" appended.
-                            $new_str = (string) $new_raw_url;
-                            if (
-                                strlen($new_str) > 1 &&
-                                $new_str[-1] === '/' &&
-                                $raw_url[-1] !== '/'
-                            ) {
-                                $new_str = substr($new_str, 0, -1);
-                            }
-                            $p->set_raw_url( $new_str );
+                            $p->set_raw_url( $new_raw_url );
                             break;
                         }
                     }
