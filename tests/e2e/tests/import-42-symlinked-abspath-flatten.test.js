@@ -21,8 +21,8 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
-    existsSync, readFileSync, readlinkSync,
-    mkdirSync, symlinkSync, lstatSync,
+    existsSync, readFileSync, writeFileSync,
+    mkdirSync, symlinkSync,
 } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -71,7 +71,12 @@ describe('Import: Flat Document Root with symlinked ABSPATH', () => {
                 // Rewrite wp-config.php so ABSPATH goes through the symlink.
                 // This is the key: __DIR__ is the site dir, so ABSPATH becomes
                 // {siteDir}/wordpress/ — an unresolved symlink path.
-                const wpConfig = `<?php
+                //
+                // WP_CONTENT_DIR must be set explicitly because WordPress defaults
+                // it to ABSPATH . 'wp-content', which would resolve through the
+                // symlink to CORE_DIR/wp-content (doesn't exist). The real
+                // wp-content stays in the site dir.
+                writeFileSync(join(siteDir, 'wp-config.php'), `<?php
 define('DB_HOST', '127.0.0.1');
 define('DB_NAME', 'e2e_symlinked_abspath');
 define('DB_USER', 'e2e_admin');
@@ -86,15 +91,13 @@ define('AUTH_SALT',        'e2e-test-salt-1');
 define('SECURE_AUTH_SALT', 'e2e-test-salt-2');
 define('LOGGED_IN_SALT',   'e2e-test-salt-3');
 define('NONCE_SALT',       'e2e-test-salt-4');
+define('WP_CONTENT_DIR', __DIR__ . '/wp-content');
 $table_prefix = 'wp_';
 if ( ! defined( 'ABSPATH' ) ) {
     define( 'ABSPATH', __DIR__ . '/wordpress/' );
 }
 require_once ABSPATH . 'wp-settings.php';
-`;
-                execSync(`cat > "${join(siteDir, 'wp-config.php')}" << 'WPEOF'
-${wpConfig}
-WPEOF`);
+`);
             },
             afterPermissions: async () => {
                 execSync(`sudo chown -R nginx:nginx ${CORE_DIR}`);
