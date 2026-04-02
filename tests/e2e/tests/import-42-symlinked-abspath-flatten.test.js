@@ -1,30 +1,30 @@
 /**
  * Test 42: flat-document-root when ABSPATH goes through a symlink
  *
- * Simulates a WordPress.com Atomic-like environment where:
- * - WP core files live in a separate directory (/tmp/e2e-symlinked-core/)
- * - The site has a symlink (wordpress/) pointing to that directory
- * - wp-config.php defines ABSPATH as __DIR__ . '/wordpress/' — through the symlink
+ * Simulates a WordPress.com Atomic-like environment where ABSPATH is
+ * accessed through a symlink. On Atomic, /wordpress is a symlink, so
+ * ABSPATH (e.g. /wordpress/core/6.9.4/) resolves to a different real path.
  *
- * Before the fix, the exporter reported the unresolved symlink path as abspath
- * (e.g. /srv/e2e-sites/symlinked-abspath/wordpress). The importer would download
- * files under the resolved real path (/tmp/e2e-symlinked-core/...) but then
- * flat-document-root would try to find the ABSPATH directory at the unresolved
- * symlink path in fs-root — which is a broken symlink locally — and fail with
- * "WordPress ABSPATH directory not found".
+ * Setup:
+ * - Standard WP install at siteDir
+ * - siteDir/wp-core is a symlink pointing to siteDir itself
+ * - index.php pre-defines ABSPATH as siteDir/wp-core/ (through the symlink)
+ * - realpath(ABSPATH) resolves to siteDir (the real path)
  *
- * The fix: the exporter now applies realpath() to ABSPATH, matching the convention
- * used for all other paths (content_dir, plugins_dir, etc.). This ensures flat-
- * document-root looks for the directory at the resolved location where the files
- * were actually downloaded.
+ * Before the fix, the exporter reported the unresolved symlink path as
+ * abspath. The importer would download files under the resolved real path
+ * but flat-document-root would look at the unresolved symlink path in
+ * fs-root and fail.
+ *
+ * The fix: the exporter now applies realpath() to ABSPATH, matching the
+ * convention used for all other paths (content_dir, plugins_dir, etc.).
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     existsSync, readFileSync, writeFileSync,
-    mkdirSync, symlinkSync,
+    symlinkSync,
 } from 'node:fs';
-import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -33,8 +33,6 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-const CORE_DIR = '/tmp/e2e-symlinked-core';
-
 describe('Import: Flat Document Root with symlinked ABSPATH', () => {
     const site = 'symlinked-abspath';
     let tempDir;
@@ -42,79 +40,23 @@ describe('Import: Flat Document Root with symlinked ABSPATH', () => {
     beforeAll(async () => {
         await ensureSite(site, {
             afterCreate: async (siteDir) => {
-                // Simulate Atomic-like layout:
-                //   /tmp/e2e-symlinked-core/  — real directory with WP core files
-                //   {siteDir}/wordpress/       — symlink to /tmp/e2e-symlinked-core/
-                //   {siteDir}/wp-config.php    — defines ABSPATH as __DIR__ . '/wordpress/'
-                //
-                // This means ABSPATH resolves through a symlink, just like Atomic's
-                // /wordpress symlink.
-                execSync(`sudo rm -rf ${CORE_DIR}`);
-                mkdirSync(CORE_DIR, { recursive: true });
-
-                // Move WP core files into the separate core directory.
-                // Keep wp-content and index.php in the site dir.
-                for (const entry of ['wp-admin', 'wp-includes', 'wp-load.php',
-                    'wp-settings.php', 'wp-blog-header.php', 'wp-cron.php',
-                    'wp-login.php', 'wp-signup.php', 'xmlrpc.php',
-                    'wp-activate.php', 'wp-comments-post.php', 'wp-links-opml.php',
-                    'wp-mail.php', 'wp-trackback.php']) {
-                    const src = join(siteDir, entry);
-                    if (existsSync(src)) {
-                        execSync(`mv "${src}" "${CORE_DIR}/${entry}"`);
-                    }
-                }
-
-                // Create the symlink: siteDir/wordpress -> /tmp/e2e-symlinked-core
-                symlinkSync(CORE_DIR, join(siteDir, 'wordpress'));
+                // Create a symlink that points back to the site directory itself.
+                // This means siteDir/wp-core/wp-load.php is the same file as
+                // siteDir/wp-load.php — just accessed through a symlink.
+                symlinkSync('.', join(siteDir, 'wp-core'));
 
                 // Rewrite index.php to pre-define ABSPATH through the symlink
-                // before loading wp-blog-header.php.  This mirrors Atomic's
-                // custom bootstrap: ABSPATH is set to the symlink path, not
-                // wp-load.php's __DIR__ (which PHP resolves to the real path).
+                // before wp-load.php can define it.  This mirrors Atomic's
+                // custom bootstrap where ABSPATH goes through a symlink.
                 //
-                // With ABSPATH already defined, wp-load.php skips its own
-                // definition and finds wp-config.php "one level up" from
-                // ABSPATH (dirname(siteDir/wordpress/) == siteDir).
+                // With ABSPATH pre-defined, wp-load.php skips its own
+                // definition and finds wp-config.php at ABSPATH/wp-config.php
+                // (which resolves through the symlink back to siteDir).
                 writeFileSync(join(siteDir, 'index.php'), `<?php
 define('WP_USE_THEMES', true);
-define('ABSPATH', __DIR__ . '/wordpress/');
+define('ABSPATH', __DIR__ . '/wp-core/');
 require ABSPATH . 'wp-blog-header.php';
 `);
-
-                // Rewrite wp-config.php so ABSPATH goes through the symlink.
-                // This is the key: __DIR__ is the site dir, so ABSPATH becomes
-                // {siteDir}/wordpress/ — an unresolved symlink path.
-                //
-                // WP_CONTENT_DIR must be set explicitly because WordPress defaults
-                // it to ABSPATH . 'wp-content', which would resolve through the
-                // symlink to CORE_DIR/wp-content (doesn't exist). The real
-                // wp-content stays in the site dir.
-                writeFileSync(join(siteDir, 'wp-config.php'), `<?php
-define('DB_HOST', '127.0.0.1');
-define('DB_NAME', 'e2e_symlinked_abspath');
-define('DB_USER', 'e2e_admin');
-define('DB_PASSWORD', 'e2e_password');
-define('DB_CHARSET', 'utf8mb4');
-define('DB_COLLATE', '');
-define('AUTH_KEY',         'e2e-test-key-1');
-define('SECURE_AUTH_KEY',  'e2e-test-key-2');
-define('LOGGED_IN_KEY',    'e2e-test-key-3');
-define('NONCE_KEY',        'e2e-test-key-4');
-define('AUTH_SALT',        'e2e-test-salt-1');
-define('SECURE_AUTH_SALT', 'e2e-test-salt-2');
-define('LOGGED_IN_SALT',   'e2e-test-salt-3');
-define('NONCE_SALT',       'e2e-test-salt-4');
-define('WP_CONTENT_DIR', __DIR__ . '/wp-content');
-$table_prefix = 'wp_';
-if ( ! defined( 'ABSPATH' ) ) {
-    define( 'ABSPATH', __DIR__ . '/wordpress/' );
-}
-require_once ABSPATH . 'wp-settings.php';
-`);
-            },
-            afterPermissions: async () => {
-                execSync(`sudo chown -R nginx:nginx ${CORE_DIR}`);
             },
         });
 
@@ -129,7 +71,7 @@ require_once ABSPATH . 'wp-settings.php';
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('preflight reports resolved (realpath) abspath, not the symlink path', () => {
+    it('preflight reports resolved abspath, not the symlink path', () => {
         const result = runImporter(importUrl(), tempDir, 'preflight', {
             secret: getSiteSecret(site),
         });
@@ -140,15 +82,15 @@ require_once ABSPATH . 'wp-settings.php';
         assert.ok(pathsUrls, 'Expected paths_urls in preflight data');
 
         // The critical assertion: abspath should be the resolved real path
-        // (/tmp/e2e-symlinked-core), NOT the symlink path (.../symlinked-abspath/wordpress).
+        // (the site directory), NOT the unresolved symlink path with /wp-core/.
         assert.ok(
-            pathsUrls.abspath?.includes('e2e-symlinked-core'),
-            `Expected abspath to be the resolved real path containing 'e2e-symlinked-core', ` +
+            !pathsUrls.abspath?.includes('/wp-core'),
+            `abspath should NOT contain the unresolved symlink path '/wp-core', ` +
             `got: ${pathsUrls.abspath}`,
         );
         assert.ok(
-            !pathsUrls.abspath?.includes('symlinked-abspath/wordpress'),
-            `abspath should NOT contain the unresolved symlink path 'symlinked-abspath/wordpress', ` +
+            pathsUrls.abspath?.includes('symlinked-abspath'),
+            `Expected abspath to contain the site directory name, ` +
             `got: ${pathsUrls.abspath}`,
         );
     });
