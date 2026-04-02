@@ -1154,6 +1154,21 @@ class ImportClient
     }
 
     /**
+     * Log the executed command and full argv to the audit log.
+     * Called from the CLI entry point before run() so the invocation
+     * is captured even if run() throws early.
+     */
+    public function audit_log_argv(string $command, array $argv): void
+    {
+        // Mask the remote URL (argv[2]) to avoid logging secrets embedded in query strings.
+        $masked = $argv;
+        if (isset($masked[2]) && $command !== 'apply-runtime') {
+            $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
+        }
+        $this->audit_log("COMMAND | {$command} | argv=" . implode(' ', $masked), false);
+    }
+
+    /**
      * Load the volatile files tracker from disk.
      *
      * @return array<string, int> Map of path => change count
@@ -9822,19 +9837,19 @@ if (
             'aliases' => ['on-docroot-nonempty'],
         ],
         [
-            'name' => 'no-adaptive',
-            'type' => 'flag',
-            'target' => 'tuning_config.enabled',
-            'flag_value' => false,
-            'help' => 'Disable adaptive request tuning',
-            'help_section' => 'global',
-            'commands' => [],
-        ],
-        [
             'name' => 'adaptive',
             'type' => 'flag',
             'target' => 'tuning_config.enabled',
             'flag_value' => true,
+            'help' => 'Enable adaptive request tuning (default: on)',
+            'help_section' => 'global',
+            'commands' => [],
+        ],
+        [
+            'name' => 'no-adaptive',
+            'type' => 'flag',
+            'target' => 'tuning_config.enabled',
+            'flag_value' => false,
             'help' => null,
             'commands' => [],
         ],
@@ -10656,6 +10671,7 @@ if (
 
     try {
         $client = new ImportClient($remote_url, $state_dir, $fs_root);
+        $client->audit_log_argv($command, $argv);
         $client->run($options ?? []);
         exit($client->exit_code);
     } catch (\Throwable $e) {
