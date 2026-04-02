@@ -204,13 +204,12 @@ describe('Import: URL Rewriting', () => {
             `Expected serialized PHP format, got: ${val.substring(0, 10)}`
         );
         // Verify s:N: byte lengths are correct for the target domain URL.
-        // The URL-aware rewriter normalizes bare domains by adding a trailing
-        // slash (https://target.example.com → https://target.example.com/),
-        // so the serialized length is one more than TARGET_DOMAIN.length.
-        const targetWithSlash = TARGET_DOMAIN + '/';
-        const targetLen = targetWithSlash.length;
+        // The rewriter preserves the original URL's trailing-slash style,
+        // so a bare origin like "https://target.example.com" stays without
+        // a trailing slash.
+        const targetLen = TARGET_DOMAIN.length;
         assert.ok(
-            val.includes(`s:${targetLen}:"${targetWithSlash}"`),
+            val.includes(`s:${targetLen}:"${TARGET_DOMAIN}"`),
             `Expected correct s:N: prefix for target URL (s:${targetLen}:), got: ${val}`
         );
     });
