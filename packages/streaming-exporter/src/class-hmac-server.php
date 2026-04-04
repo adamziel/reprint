@@ -91,7 +91,7 @@ final class Site_Export_HMAC_Server {
             $body = '';
         }
 
-        return $this->verify($this->collect_global_headers(), $body, $_FILES ?? [], $now);
+        return $this->verify($this->collect_global_headers(), $body, $_FILES, $now);
     }
 
     private function collect_global_headers(): array {
