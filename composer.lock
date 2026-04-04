@@ -319,11 +319,11 @@
         },
         {
             "name": "wp-php-toolkit/streaming-exporter",
-            "version": "dev-codex/extract-hmac-server",
+            "version": "dev-codex/extract-export-dispatcher",
             "dist": {
                 "type": "path",
                 "url": "packages/streaming-exporter",
-                "reference": "6d3897da519786d1705b1952f43816e8a83eb45f"
+                "reference": "2131bfb359f8e04244d912d5eeddb55c284ce52e"
             },
             "require": {
                 "ext-pdo": "*",
@@ -342,6 +342,7 @@
                     "src/class-file-tree-producer.php",
                     "src/class-hmac-client.php",
                     "src/class-hmac-server.php",
+                    "src/class-http-server.php",
                     "src/class-sqlite-driver-pdo.php"
                 ],
                 "files": [
