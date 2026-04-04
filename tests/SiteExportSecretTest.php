@@ -102,6 +102,12 @@ require_once __DIR__ . '/../wordpress-plugin/wordpress/site-export.php';
 
 final class SiteExportSecretTest extends TestCase
 {
+    /** @var array<string, mixed> */
+    private $original_server = [];
+
+    /** @var array<string, mixed> */
+    private $original_files = [];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -110,8 +116,13 @@ final class SiteExportSecretTest extends TestCase
             mkdir(SITE_EXPORT_PLUGIN_DIR, 0755, true);
         }
 
+        $this->original_server = $_SERVER;
+        $this->original_files = $_FILES;
+
         $GLOBALS['site_export_test_options'] = [];
         $GLOBALS['site_export_registered_settings'] = [];
+        $_SERVER = [];
+        $_FILES = [];
 
         if (file_exists(SITE_EXPORT_SECRET_FILE)) {
             unlink(SITE_EXPORT_SECRET_FILE);
@@ -127,6 +138,9 @@ final class SiteExportSecretTest extends TestCase
         if (is_dir(SITE_EXPORT_PLUGIN_DIR)) {
             rmdir(SITE_EXPORT_PLUGIN_DIR);
         }
+
+        $_SERVER = $this->original_server;
+        $_FILES = $this->original_files;
 
         parent::tearDown();
     }
@@ -163,5 +177,21 @@ final class SiteExportSecretTest extends TestCase
         $this->assertTrue($setting['args']['show_in_rest']);
         $this->assertSame('string', $setting['args']['type']);
         $this->assertSame('', $setting['args']['default']);
+    }
+
+    public function testPluginHmacVerifierDelegatesToPackageServer(): void
+    {
+        $secret = 'delegated-secret';
+        $nonce = '0123456789abcdef0123456789abcdef';
+        $client = new Site_Export_HMAC_Client($secret);
+        $timestamp = $client->get_timestamp();
+        $content_hash = hash('sha256', '');
+
+        $_SERVER['HTTP_X_AUTH_SIGNATURE'] = $client->compute_signature($nonce, $timestamp, $content_hash);
+        $_SERVER['HTTP_X_AUTH_NONCE'] = $nonce;
+        $_SERVER['HTTP_X_AUTH_TIMESTAMP'] = $timestamp;
+        $_SERVER['HTTP_X_AUTH_CONTENT_HASH'] = $content_hash;
+
+        $this->assertNull(_site_export_verify_hmac($secret));
     }
 }

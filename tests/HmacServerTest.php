@@ -1,0 +1,161 @@
+<?php
+
+declare(strict_types=1);
+
+use PHPUnit\Framework\TestCase;
+
+final class HmacServerTest extends TestCase
+{
+    private const SECRET = 'shared-secret';
+
+    public function testValidRequestVerifiesSuccessfully(): void
+    {
+        $body = '{"paths":["/wp-content/uploads/image.jpg"]}';
+        $timestamp = '1700000000.123456';
+        $nonce = '0123456789abcdef0123456789abcdef';
+        $content_hash = hash('sha256', $body);
+        $client = new Site_Export_HMAC_Client(self::SECRET);
+
+        $headers = [
+            'X-Auth-Signature' => $client->compute_signature($nonce, $timestamp, $content_hash),
+            'X-Auth-Nonce' => $nonce,
+            'X-Auth-Timestamp' => $timestamp,
+            'X-Auth-Content-Hash' => $content_hash,
+        ];
+
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertNull($server->verify($headers, $body, [], 1700000001.0));
+    }
+
+    public function testMissingHeaderIsRejected(): void
+    {
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'Missing X-Auth-Signature header',
+            $server->verify([], '', [], 1700000001.0)
+        );
+    }
+
+    public function testInvalidTimestampFormatIsRejected(): void
+    {
+        $headers = $this->buildHeadersForBody('', 'not-a-number');
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'Invalid timestamp format',
+            $server->verify($headers, '', [], 1700000001.0)
+        );
+    }
+
+    public function testExpiredTimestampIsRejected(): void
+    {
+        $headers = $this->buildHeadersForBody('', '1700000000.000000');
+        $server = new Site_Export_HMAC_Server(self::SECRET, 300);
+
+        $this->assertStringContainsString(
+            'Request timestamp expired',
+            (string) $server->verify($headers, '', [], 1700000401.0)
+        );
+    }
+
+    public function testShortNonceIsRejected(): void
+    {
+        $headers = $this->buildHeadersForBody('', '1700000000.000000', 'shortnonce');
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'Nonce must be at least 16 characters',
+            $server->verify($headers, '', [], 1700000001.0)
+        );
+    }
+
+    public function testInvalidSignatureIsRejected(): void
+    {
+        $headers = $this->buildHeadersForBody('');
+        $headers['X-Auth-Signature'] = str_repeat('0', 64);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'HMAC signature verification failed',
+            $server->verify($headers, '', [], 1700000001.0)
+        );
+    }
+
+    public function testContentHashMismatchIsRejected(): void
+    {
+        $headers = $this->buildHeadersForBody('signed-body');
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'Content hash mismatch: body was modified in transit',
+            $server->verify($headers, 'different-body', [], 1700000001.0)
+        );
+    }
+
+    public function testServerHeaderConventionIsSupported(): void
+    {
+        $body = 'payload';
+        $headers = $this->buildHeadersForBody($body);
+        $server_headers = [];
+
+        foreach ($headers as $name => $value) {
+            $server_headers['HTTP_' . strtoupper(str_replace('-', '_', $name))] = $value;
+        }
+
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertNull($server->verify($server_headers, $body, [], 1700000001.0));
+    }
+
+    public function testMultipartUploadsAreVerifiedFromUploadedFileContents(): void
+    {
+        $tmp_a = tempnam(sys_get_temp_dir(), 'hmac-a-');
+        $tmp_b = tempnam(sys_get_temp_dir(), 'hmac-b-');
+        file_put_contents($tmp_a, 'first-file');
+        file_put_contents($tmp_b, 'second-file');
+
+        try {
+            $content_hash = hash('sha256', 'first-filesecond-file');
+            $nonce = 'fedcba9876543210fedcba9876543210';
+            $timestamp = '1700000000.000000';
+            $client = new Site_Export_HMAC_Client(self::SECRET);
+
+            $headers = [
+                'X-Auth-Signature' => $client->compute_signature($nonce, $timestamp, $content_hash),
+                'X-Auth-Nonce' => $nonce,
+                'X-Auth-Timestamp' => $timestamp,
+                'X-Auth-Content-Hash' => $content_hash,
+            ];
+
+            $files = [
+                'b_file' => ['tmp_name' => $tmp_b],
+                'a_file' => ['tmp_name' => $tmp_a],
+            ];
+
+            $server = new Site_Export_HMAC_Server(self::SECRET);
+
+            $this->assertNull($server->verify($headers, 'ignored-body', $files, 1700000001.0));
+        } finally {
+            @unlink($tmp_a);
+            @unlink($tmp_b);
+        }
+    }
+
+    private function buildHeadersForBody(
+        string $body,
+        string $timestamp = '1700000000.000000',
+        string $nonce = '0123456789abcdef0123456789abcdef'
+    ): array {
+        $content_hash = hash('sha256', $body);
+        $client = new Site_Export_HMAC_Client(self::SECRET);
+
+        return [
+            'X-Auth-Signature' => $client->compute_signature($nonce, $timestamp, $content_hash),
+            'X-Auth-Nonce' => $nonce,
+            'X-Auth-Timestamp' => $timestamp,
+            'X-Auth-Content-Hash' => $content_hash,
+        ];
+    }
+}

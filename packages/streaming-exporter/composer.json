@@ -18,6 +18,7 @@
             "src/class-mysql-dump-producer.php",
             "src/class-file-tree-producer.php",
             "src/class-hmac-client.php",
+            "src/class-hmac-server.php",
             "src/class-sqlite-driver-pdo.php"
         ],
         "files": [
