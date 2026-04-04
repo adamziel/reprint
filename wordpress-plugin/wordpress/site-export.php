@@ -9,7 +9,7 @@
  *
  * Authentication uses HMAC signatures: the importing side generates a secret,
  * the user enters it here, and all requests must include a valid signature
- * computed from: shared_secret + nonce + timestamp.
+ * computed from the nonce, timestamp, and request content hash.
  */
 class Site_Export_Plugin {
 

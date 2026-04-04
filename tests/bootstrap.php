@@ -9,5 +9,18 @@ require_once __DIR__ . '/../packages/streaming-exporter/src/class-mysql-dump-pro
 // Load the FileTreeProducer class
 require_once __DIR__ . '/../packages/streaming-exporter/src/class-file-tree-producer.php';
 
+// Local path-package installs can be stale until composer reinstall.
+if (!function_exists('build_pdo_dsn')) {
+    require_once __DIR__ . '/../packages/streaming-exporter/src/utils.php';
+}
+
+if (!class_exists('Site_Export_HMAC_Client')) {
+    require_once __DIR__ . '/../packages/streaming-exporter/src/class-hmac-client.php';
+}
+
+if (!class_exists('Site_Export_HMAC_Server')) {
+    require_once __DIR__ . '/../packages/streaming-exporter/src/class-hmac-server.php';
+}
+
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';

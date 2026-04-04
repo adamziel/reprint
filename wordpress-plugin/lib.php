@@ -162,72 +162,16 @@ function _site_export_update_shared_secret(string $secret): bool {
  * matches AND that the HMAC is valid.
  */
 function _site_export_verify_hmac(string $secret): ?string {
-    $signature = _site_export_get_header('X-Auth-Signature');
-    $nonce = _site_export_get_header('X-Auth-Nonce');
-    $timestamp = _site_export_get_header('X-Auth-Timestamp');
-    $content_hash = _site_export_get_header('X-Auth-Content-Hash');
-
-    if (empty($signature)) {
-        return 'Missing X-Auth-Signature header';
-    }
-    if (empty($nonce)) {
-        return 'Missing X-Auth-Nonce header';
-    }
-    if (empty($timestamp)) {
-        return 'Missing X-Auth-Timestamp header';
-    }
-    if (empty($content_hash)) {
-        return 'Missing X-Auth-Content-Hash header';
+    if (!class_exists('Site_Export_HMAC_Server')) {
+        _site_export_load_exporter_runtime();
     }
 
-    if (!is_numeric($timestamp)) {
-        return 'Invalid timestamp format';
+    if (!class_exists('Site_Export_HMAC_Server')) {
+        return 'Site Export runtime is incomplete. Run composer install in wordpress-plugin or rebuild the release package.';
     }
 
-    $request_time = (float) $timestamp;
-    $current_time = microtime(true);
-    $time_diff = abs($current_time - $request_time);
-
-    if ($time_diff > SITE_EXPORT_TIMESTAMP_TOLERANCE) {
-        return sprintf(
-            'Request timestamp expired. Difference: %.2f seconds, max allowed: %d seconds',
-            $time_diff,
-            SITE_EXPORT_TIMESTAMP_TOLERANCE
-        );
-    }
-
-    if (strlen($nonce) < 16) {
-        return 'Nonce must be at least 16 characters';
-    }
-
-    $message = $nonce . $timestamp . $content_hash;
-    $expected = hash_hmac('sha256', $message, $secret);
-
-    if (!hash_equals($expected, $signature)) {
-        return 'HMAC signature verification failed';
-    }
-
-    // Now verify that the content hash matches what was actually received.
-    // For multipart/form-data, php://input is empty — PHP consumes it
-    // into $_FILES — so we hash the uploaded file contents instead.
-    if (!empty($_FILES)) {
-        $received_body = '';
-        ksort($_FILES);
-        foreach ($_FILES as $file_info) {
-            if (is_uploaded_file($file_info['tmp_name'])) {
-                $received_body .= file_get_contents($file_info['tmp_name']);
-            }
-        }
-    } else {
-        $received_body = file_get_contents('php://input') ?: '';
-    }
-
-    $received_hash = hash('sha256', $received_body);
-    if (!hash_equals($content_hash, $received_hash)) {
-        return 'Content hash mismatch: body was modified in transit';
-    }
-
-    return null; // Success
+    $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+    return $server->verify_globals();
 }
 
 /**

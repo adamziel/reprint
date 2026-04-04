@@ -319,11 +319,11 @@
         },
         {
             "name": "wp-php-toolkit/streaming-exporter",
-            "version": "dev-adamziel/new-site-url-sqlite",
+            "version": "dev-codex/extract-hmac-server",
             "dist": {
                 "type": "path",
                 "url": "packages/streaming-exporter",
-                "reference": "70accc62bc6fa13d2d8e0a6db39699918c1175d6"
+                "reference": "6d3897da519786d1705b1952f43816e8a83eb45f"
             },
             "require": {
                 "ext-pdo": "*",
@@ -341,6 +341,7 @@
                     "src/class-mysql-dump-producer.php",
                     "src/class-file-tree-producer.php",
                     "src/class-hmac-client.php",
+                    "src/class-hmac-server.php",
                     "src/class-sqlite-driver-pdo.php"
                 ],
                 "files": [
