@@ -186,7 +186,7 @@ final class ChunkWriterTest extends TestCase
         $root = $this->createTempDir();
         $writer = new ChunkWriter($root);
 
-        $this->expectException(RuntimeException::class);
+        $this->expectException(InvalidArgumentException::class);
 
         $writer->write_file_chunk(
             '/../../../etc/crontab',
@@ -204,7 +204,7 @@ final class ChunkWriterTest extends TestCase
         $root = $this->createTempDir();
         $writer = new ChunkWriter($root);
 
-        $this->expectException(RuntimeException::class);
+        $this->expectException(InvalidArgumentException::class);
 
         $writer->write_file_chunk(
             "/test.php\x00.jpg",

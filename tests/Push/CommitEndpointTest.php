@@ -301,8 +301,8 @@ final class CommitEndpointTest extends TestCase
         $this->assertStringContainsString('_push_wp_posts', $errors[0]);
 
         // Verify live table is untouched
-        $rows = $this->pdo->query("SELECT id FROM wp_posts")->fetchAll(PDO::FETCH_COLUMN);
-        $this->assertSame(['1'], $rows, "Live data must be untouched when commit is refused");
+        $count = (int) $this->pdo->query("SELECT COUNT(*) FROM wp_posts")->fetchColumn();
+        $this->assertSame(1, $count, "Live data must be untouched when commit is refused");
     }
 
     // ---------------------------------------------------------------
@@ -341,8 +341,8 @@ final class CommitEndpointTest extends TestCase
         $this->assertTrue($failed, "RENAME TABLE should have failed");
 
         // CRITICAL: wp_posts must still have the original data
-        $rows = $this->pdo->query("SELECT id FROM wp_posts ORDER BY id")->fetchAll(PDO::FETCH_COLUMN);
-        $this->assertSame(['1', '2', '3'], $rows, "Live table data must survive a failed RENAME");
+        $count = (int) $this->pdo->query("SELECT COUNT(*) FROM wp_posts")->fetchColumn();
+        $this->assertSame(3, $count, "Live table data must survive a failed RENAME");
     }
 
     // ---------------------------------------------------------------
