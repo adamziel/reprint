@@ -28,6 +28,9 @@
         <testsuite name="Query Stream Tests">
             <file>NaiveQueryStreamTest.php</file>
         </testsuite>
+        <testsuite name="Push Tests">
+            <directory>Push</directory>
+        </testsuite>
     </testsuites>
     <php>
         <env name="DB_HOST" value="127.0.0.1"/>

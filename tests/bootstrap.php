@@ -26,5 +26,21 @@ if (!class_exists('Site_Export_HTTP_Server')) {
     require_once __DIR__ . '/../packages/streaming-exporter/src/class-http-server.php';
 }
 
+// Load push-related classes
+if (!class_exists('MultipartBodyStream')) {
+    require_once __DIR__ . '/../packages/streaming-exporter/src/class-multipart-body-stream.php';
+}
+
+if (!class_exists('ChunkWriter')) {
+    require_once __DIR__ . '/../packages/streaming-exporter/src/class-chunk-writer.php';
+}
+
+// Load push functions (parse_multipart_body, rewrite_table_names, etc.).
+// We can't require export.php directly because it does require_once on
+// its local utils.php, which collides with the identical vendor copy
+// already loaded by Composer (same content, different paths → fatal).
+// The push-test-bootstrap defines these functions standalone.
+require_once __DIR__ . '/Push/push-test-bootstrap.php';
+
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';
