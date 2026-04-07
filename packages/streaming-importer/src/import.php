@@ -10149,6 +10149,7 @@ class ImportClient
 
             $producer_options = [
                 "chunk_size" => $chunk_size,
+                "paths" => ["."],
             ];
             if ($receiver_cursor !== null) {
                 $producer_options["cursor"] = $receiver_cursor;

@@ -3958,6 +3958,34 @@ function endpoint_commit(array $config): array
         $rename_pairs = [];
         $old_tables = [];
 
+        // Drop leftover _old_* tables from prior interrupted pushes.
+        // MySQL's RENAME TABLE fails if the target name already exists,
+        // so stale _old_ tables from a previous commit whose cleanup
+        // was interrupted would block all subsequent commits.
+        foreach ($pushed_tables as $table) {
+            $old_name = '_old_' . $table;
+            if (isset($current_tables[$old_name])) {
+                $pdo->exec("DROP TABLE IF EXISTS `{$old_name}`");
+                unset($current_tables[$old_name]);
+            }
+        }
+        // Also clean up _old_ versions of tables that exist on the remote
+        // but aren't in the push set (they'll be "dropped" via rename below).
+        foreach ($current_tables as $name => $_) {
+            if (
+                ($table_prefix === '' || str_starts_with($name, $table_prefix)) &&
+                !in_array($name, $pushed_tables) &&
+                !str_starts_with($name, PUSH_STAGING_TABLE_PREFIX) &&
+                !str_starts_with($name, '_old_')
+            ) {
+                $old_name = '_old_' . $name;
+                if (isset($current_tables[$old_name])) {
+                    $pdo->exec("DROP TABLE IF EXISTS `{$old_name}`");
+                    unset($current_tables[$old_name]);
+                }
+            }
+        }
+
         foreach ($pushed_tables as $table) {
             $staging_name = PUSH_STAGING_TABLE_PREFIX . $table;
             $old_name = '_old_' . $table;

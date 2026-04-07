@@ -80,6 +80,18 @@ class ChunkWriter
             $this->file_ctime = $ctime;
         }
 
+        // Resume recovery: if a file was partially written in a previous
+        // request, re-open it in append mode so continuation chunks (where
+        // is_first=false) can still be written.  Without this, the writer
+        // starts with file_handle=null and non-first chunks are silently dropped.
+        if (!$is_first && $this->file_handle === null && file_exists($local_path)) {
+            $this->file_handle = fopen($local_path, 'ab');
+            if ($this->file_handle) {
+                $this->file_path = $local_path;
+                $this->file_ctime = $ctime;
+            }
+        }
+
         // Write data
         if ($this->file_handle && $data !== '') {
             $bytes = fwrite($this->file_handle, $data);
