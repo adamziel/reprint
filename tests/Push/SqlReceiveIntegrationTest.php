@@ -476,12 +476,15 @@ final class SqlReceiveIntegrationTest extends TestCase
     }
 
     /**
-     * AUTO_INCREMENT counter after push: if source has a lower counter than
-     * production, new rows inserted after push will reuse IDs that existed
-     * in the old production data. This can cause FK confusion if any system
-     * cached the old IDs.
+     * AUTO_INCREMENT counter after push: the source's CREATE TABLE includes
+     * AUTO_INCREMENT=N from SHOW CREATE TABLE. After push + commit, the live
+     * table's next auto-increment value comes from the source, not production.
+     *
+     * The real danger: new rows inserted after push may get IDs that previously
+     * belonged to different content in production. Any system that cached old
+     * IDs (CDN, search index, external service) now points to wrong content.
      */
-    public function testAutoIncrementCounterResetAfterPush(): void
+    public function testAutoIncrementCounterAfterPush(): void
     {
         $src = $this->sourcePdo();
         $tgt = $this->targetPdo();
@@ -502,14 +505,7 @@ final class SqlReceiveIntegrationTest extends TestCase
             $tgt->exec("INSERT INTO wp_posts (title) VALUES ('Prod Post {$i}')");
         }
 
-        // Verify target's AUTO_INCREMENT is high
-        $pre_push_ai = (int) $tgt->query(
-            "SELECT AUTO_INCREMENT FROM INFORMATION_SCHEMA.TABLES
-             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wp_posts'"
-        )->fetchColumn();
-        $this->assertGreaterThan(10, $pre_push_ai);
-
-        // Export and push
+        // Export source — the SQL will contain AUTO_INCREMENT=3
         $producer = new \WordPress\DataLiberation\MySQLDumpProducer($src, ['create_table_query' => true]);
         $all_sql = '';
         while ($producer->next_sql_fragment()) {
@@ -526,23 +522,20 @@ final class SqlReceiveIntegrationTest extends TestCase
         // Commit
         $tgt->exec("RENAME TABLE `wp_posts` TO `_old_wp_posts`, `_push_wp_posts` TO `wp_posts`");
 
-        // AUTO_INCREMENT is now 3 (from source), not 11 (from production)
-        $post_push_ai = (int) $tgt->query(
-            "SELECT AUTO_INCREMENT FROM INFORMATION_SCHEMA.TABLES
-             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wp_posts'"
-        )->fetchColumn();
+        // After push, the table has exactly 2 rows (source data)
+        $count = (int) $tgt->query("SELECT COUNT(*) FROM wp_posts")->fetchColumn();
+        $this->assertSame(2, $count);
 
-        $this->assertLessThan($pre_push_ai, $post_push_ai,
-            "AUTO_INCREMENT counter is reset to source value, much lower than production"
-        );
-
-        // Insert a new post after push — it gets ID=3, which existed in old production
+        // Insert a new post — what ID does it get?
         $tgt->exec("INSERT INTO wp_posts (title) VALUES ('New Post After Push')");
         $new_id = (int) $tgt->query("SELECT LAST_INSERT_ID()")->fetchColumn();
 
+        // The new ID should be 3 (next after source's max ID of 2).
+        // This is an ID that previously belonged to "Prod Post 3" in production.
+        // Any external system referencing /posts/3 now gets different content.
         $this->assertSame(3, $new_id,
-            "New post gets ID=3, which was an existing production post ID — " .
-            "any system caching old ID=3 now points to wrong content"
+            "New post gets ID=3, reusing an ID from old production data — " .
+            "external caches and references now point to wrong content"
         );
     }
 
