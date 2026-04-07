@@ -1,0 +1,231 @@
+<?php
+
+/**
+ * HTTP dispatcher for the Site Export API.
+ */
+final class Site_Export_HTTP_Server {
+
+    /** @var array<string, callable> */
+    private $handlers;
+
+    /** @var callable */
+    private $budget_factory;
+
+    /** @var callable */
+    private $body_reader;
+
+    /** @var string */
+    private $cursor_header_name;
+
+    /** @var string|null */
+    private $default_directory;
+
+    public function __construct(array $options = []) {
+        $this->handlers = $options['handlers'] ?? $this->default_handlers();
+        $this->budget_factory = $options['budget_factory'] ?? [$this, 'default_budget_factory'];
+        $this->body_reader = $options['body_reader'] ?? static function (): string {
+            $body = file_get_contents('php://input');
+            return $body === false ? '' : $body;
+        };
+        $this->cursor_header_name = $options['cursor_header_name'] ?? 'HTTP_X_EXPORT_CURSOR';
+        $this->default_directory = $options['default_directory'] ?? null;
+    }
+
+    public function handle_request(array $request = []): void {
+        $server = $request['server'] ?? $_SERVER;
+        $body = array_key_exists('body', $request) ? (string) $request['body'] : call_user_func($this->body_reader);
+        $config = $request['config'] ?? $this->parse_http_config(
+            $request['get'] ?? $_GET,
+            $request['post'] ?? $_POST,
+            $server,
+            $body
+        );
+        $config = $this->normalize_config($config, $server);
+        $this->dispatch($config);
+    }
+
+    /**
+     * @param array<string, mixed> $get
+     * @param array<string, mixed> $post
+     * @param array<string, mixed> $server
+     * @return array<string, mixed>
+     */
+    public function parse_http_config(array $get = [], array $post = [], array $server = [], string $body = ''): array {
+        $config = [];
+        $params = array_merge($get, $post);
+
+        $content_type = $server['CONTENT_TYPE'] ?? '';
+        $content_type_main = strtolower(trim((string) strtok((string) $content_type, ';')));
+        if ($content_type_main === 'application/json' && $body !== '') {
+            $json_data = json_decode($body, true);
+            if (is_array($json_data)) {
+                $params = array_merge($json_data, $params);
+            }
+        }
+
+        foreach ($params as $key => $value) {
+            $key = str_replace('-', '_', (string) $key);
+
+            if (
+                in_array($key, [
+                    'max_execution_time',
+                    'min_ctime',
+                    'chunk_size',
+                    'fragments_per_batch',
+                    'batch_size',
+                    'db_query_time_limit',
+                    'tables_per_batch',
+                ], true)
+            ) {
+                $value = (int) $value;
+            } elseif (in_array($key, ['memory_threshold'], true)) {
+                $value = (float) $value;
+            } elseif (in_array($key, ['create_table_query', 'db_unbuffered', 'follow_symlinks'], true)) {
+                $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
+            } elseif ($key === 'paths' && is_string($value)) {
+                $decoded = json_decode($value, true);
+                if (is_array($decoded)) {
+                    $value = $decoded;
+                }
+            }
+
+            $config[$key] = $value;
+        }
+
+        return $config;
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $server
+     * @return array<string, mixed>
+     */
+    public function normalize_config(array $config, array $server = []): array {
+        if (
+            $this->default_directory !== null &&
+            !isset($config['directory'])
+        ) {
+            $config['directory'] = $this->default_directory;
+        }
+
+        if (!isset($config['cursor']) && isset($server[$this->cursor_header_name])) {
+            $config['cursor'] = $server[$this->cursor_header_name];
+        }
+
+        if (isset($config['cursor']) && $config['cursor'] !== '' && $config['cursor'] !== null) {
+            $config['cursor'] = $this->decode_cursor((string) $config['cursor']);
+        }
+
+        $endpoint = $config['endpoint'] ?? null;
+        if (!is_string($endpoint) || $endpoint === '') {
+            throw new InvalidArgumentException(
+                "endpoint parameter is required. Valid endpoints: " . $this->get_valid_endpoints_message()
+            );
+        }
+
+        return $config;
+    }
+
+    public function decode_cursor(string $cursor_b64): string {
+        $cursor_json = base64_decode($cursor_b64, true);
+        if ($cursor_json === false) {
+            throw new InvalidArgumentException(
+                'Cursor must be base64-encoded. Received invalid base64: ' . substr($cursor_b64, 0, 50)
+            );
+        }
+
+        $cursor_data = json_decode($cursor_json, true);
+        if ($cursor_data === null && json_last_error() !== JSON_ERROR_NONE) {
+            throw new InvalidArgumentException(
+                'Cursor must be valid JSON after base64 decoding. JSON error: ' . json_last_error_msg()
+            );
+        }
+
+        return $cursor_json;
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     * @return mixed
+     */
+    public function create_resource_budget(array $config) {
+        return call_user_func($this->budget_factory, $config);
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     * @param mixed $budget
+     */
+    public function dispatch(array $config, $budget = null): void {
+        $endpoint = $config['endpoint'] ?? null;
+        if (!is_string($endpoint) || $endpoint === '') {
+            throw new InvalidArgumentException(
+                "endpoint parameter is required. Valid endpoints: " . $this->get_valid_endpoints_message()
+            );
+        }
+
+        if (!isset($this->handlers[$endpoint])) {
+            throw new InvalidArgumentException(
+                "Invalid endpoint: '{$endpoint}'. Valid endpoints: " . $this->get_valid_endpoints_message()
+            );
+        }
+
+        $handler = $this->handlers[$endpoint];
+        if ($endpoint === 'preflight') {
+            call_user_func($handler, $config);
+            return;
+        }
+
+        if ($budget === null) {
+            $budget = $this->create_resource_budget($config);
+        }
+
+        call_user_func($handler, $config, $budget);
+    }
+
+    /**
+     * @return array<string, callable>
+     */
+    private function default_handlers(): array {
+        return [
+            'file_index' => 'endpoint_file_index',
+            'file_fetch' => 'endpoint_file_fetch',
+            'sql_chunk' => 'endpoint_sql_chunk',
+            'db_index' => 'endpoint_db_index',
+            'preflight' => 'endpoint_preflight',
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     * @return mixed
+     */
+    private function default_budget_factory(array $config) {
+        $max_execution_time = require_int_range(
+            'max_execution_time',
+            (int) ($config['max_execution_time'] ?? 5),
+            1,
+            60
+        );
+        $memory_threshold = require_float_range(
+            'memory_threshold',
+            (float) ($config['memory_threshold'] ?? 0.8),
+            0.1,
+            0.95
+        );
+
+        $memory_limit = ini_get('memory_limit');
+        $max_memory = $memory_limit === '-1' ? PHP_INT_MAX : parse_size((string) $memory_limit);
+
+        return new ResourceBudget(
+            microtime(true),
+            $max_execution_time,
+            $max_memory,
+            $memory_threshold
+        );
+    }
+
+    private function get_valid_endpoints_message(): string {
+        return "'" . implode("', '", array_keys($this->handlers)) . "'";
+    }
+}

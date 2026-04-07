@@ -376,6 +376,7 @@ function create_sqlite_pdo_adapter()
 }
 
 require_once __DIR__ . "/utils.php";
+require_once __DIR__ . "/class-http-server.php";
 
 /**
  * Emits an error chunk into a gzip multipart stream.
@@ -3377,49 +3378,11 @@ function position_after_entry(array $entries, string $after): int
  */
 function parse_http_config(): array
 {
-    $config = [];
-    $params = array_merge($_GET, $_POST);
-
-    $content_type = $_SERVER["CONTENT_TYPE"] ?? "";
-    $content_type_main = strtolower(trim((string) strtok($content_type, ";")));
-    if ($content_type_main === "application/json") {
-        $json_body = file_get_contents("php://input");
-        if ($json_body !== false && $json_body !== "") {
-            $json_data = json_decode($json_body, true);
-            if (is_array($json_data)) {
-                $params = array_merge($json_data, $params);
-            }
-        }
+    $body = file_get_contents('php://input');
+    if ($body === false) {
+        $body = '';
     }
 
-    foreach ($params as $key => $value) {
-        $key = str_replace("-", "_", $key);
-
-        if (
-            in_array($key, [
-                "max_execution_time",
-                "min_ctime",
-                "chunk_size",
-                "fragments_per_batch",
-                "batch_size",
-                "db_query_time_limit",
-                "tables_per_batch",
-            ])
-        ) {
-            $value = (int) $value;
-        } elseif (in_array($key, ["memory_threshold"])) {
-            $value = (float) $value;
-        } elseif (in_array($key, ["create_table_query", "db_unbuffered", "follow_symlinks"])) {
-            $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
-        } elseif ($key === "paths" && is_string($value)) {
-            $decoded = json_decode($value, true);
-            if (is_array($decoded)) {
-                $value = $decoded;
-            }
-        }
-
-        $config[$key] = $value;
-    }
-
-    return $config;
+    $server = new Site_Export_HTTP_Server();
+    return $server->parse_http_config($_GET, $_POST, $_SERVER, $body);
 }

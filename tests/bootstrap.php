@@ -22,5 +22,9 @@ if (!class_exists('Site_Export_HMAC_Server')) {
     require_once __DIR__ . '/../packages/streaming-exporter/src/class-hmac-server.php';
 }
 
+if (!class_exists('Site_Export_HTTP_Server')) {
+    require_once __DIR__ . '/../packages/streaming-exporter/src/class-http-server.php';
+}
+
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';

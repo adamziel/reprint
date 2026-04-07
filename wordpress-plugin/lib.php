@@ -276,11 +276,6 @@ function _site_export_handle_api_request(array $options = []): void {
     $authenticate = $options['authenticate'] ?? '_site_export_default_authenticate';
     $authenticate();
 
-    // -- Set up defaults for export.php --
-    if (!isset($_GET['directory']) && !isset($_POST['directory'])) {
-        $_GET['directory'] = ABSPATH;
-    }
-
     // export.php has its own SECRET_KEY guard — satisfy it since we already
     // verified the request via HMAC above.
     define('SECRET_KEY', 'hmac_authenticated');
@@ -298,96 +293,10 @@ function _site_export_handle_api_request(array $options = []): void {
 
     // -- Dispatch --
     try {
-        $config = parse_http_config();
-
-        if (!isset($config['cursor'])) {
-            $config['cursor'] = $_SERVER['HTTP_X_EXPORT_CURSOR'] ?? null;
-        }
-
-        if (isset($config['cursor']) && $config['cursor'] !== '' && $config['cursor'] !== null) {
-            $cursor_b64 = $config['cursor'];
-            $cursor_json = base64_decode($cursor_b64, true);
-
-            if ($cursor_json === false) {
-                throw new InvalidArgumentException(
-                    'Cursor must be base64-encoded. Received invalid base64: ' . substr($cursor_b64, 0, 50)
-                );
-            }
-
-            $cursor_data = json_decode($cursor_json, true);
-            if ($cursor_data === null && json_last_error() !== JSON_ERROR_NONE) {
-                throw new InvalidArgumentException(
-                    'Cursor must be valid JSON after base64 decoding. JSON error: ' . json_last_error_msg()
-                );
-            }
-
-            $config['cursor'] = $cursor_json;
-        }
-
-        $endpoint = $config['endpoint'] ?? null;
-        if (!$endpoint) {
-            throw new InvalidArgumentException(
-                "endpoint parameter is required. Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'db_index', 'preflight'"
-            );
-        }
-
-        $max_execution_time = (int) ($config['max_execution_time'] ?? 5);
-        $memory_threshold = (float) ($config['memory_threshold'] ?? 0.8);
-
-        $max_execution_time = require_int_range(
-            'max_execution_time',
-            $max_execution_time,
-            1,
-            60
-        );
-
-        $memory_threshold = require_float_range(
-            'memory_threshold',
-            $memory_threshold,
-            0.1,
-            0.95
-        );
-
-        $memory_limit = ini_get('memory_limit');
-        if ($memory_limit === '-1') {
-            $max_memory = PHP_INT_MAX;
-        } else {
-            $max_memory = parse_size($memory_limit);
-        }
-
-        $budget = new ResourceBudget(
-            microtime(true),
-            $max_execution_time,
-            $max_memory,
-            $memory_threshold,
-        );
-
-        switch ($endpoint) {
-            case 'file_index':
-                endpoint_file_index($config, $budget);
-                break;
-
-            case 'file_fetch':
-                endpoint_file_fetch($config, $budget);
-                break;
-
-            case 'sql_chunk':
-                endpoint_sql_chunk($config, $budget);
-                break;
-
-            case 'db_index':
-                endpoint_db_index($config, $budget);
-                break;
-
-            case 'preflight':
-                endpoint_preflight($config);
-                break;
-
-            default:
-                throw new InvalidArgumentException(
-                    "Invalid endpoint: '{$endpoint}'. Valid endpoints: 'file_index', 'file_fetch', 'sql_chunk', 'db_index', 'preflight'"
-                );
-        }
+        $server = new Site_Export_HTTP_Server([
+            'default_directory' => ABSPATH,
+        ]);
+        $server->handle_request();
     } catch (Exception $e) {
         if (!headers_sent()) {
             http_response_code(400);
