@@ -34,12 +34,33 @@ final class Site_Export_HTTP_Server {
     public function handle_request(array $request = []): void {
         $server = $request['server'] ?? $_SERVER;
         $body = array_key_exists('body', $request) ? (string) $request['body'] : call_user_func($this->body_reader);
-        $config = $request['config'] ?? $this->parse_http_config(
-            $request['get'] ?? $_GET,
-            $request['post'] ?? $_POST,
-            $server,
-            $body
-        );
+
+        // Detect multipart/mixed requests (push receiver). For these, the body
+        // is the multipart payload — config params come from the query string only.
+        // We stash the raw body and content-type in the config so receiver
+        // endpoints can parse the multipart chunks.
+        $content_type = $server['CONTENT_TYPE'] ?? $server['HTTP_CONTENT_TYPE'] ?? '';
+        $content_type_main = strtolower(trim((string) strtok((string) $content_type, ';')));
+        $is_multipart = ($content_type_main === 'multipart/mixed');
+
+        if ($is_multipart) {
+            $config = $request['config'] ?? $this->parse_http_config(
+                $request['get'] ?? $_GET,
+                $request['post'] ?? $_POST,
+                $server,
+                '' // Don't parse body as JSON for multipart requests
+            );
+            $config['_raw_body'] = $body;
+            $config['_content_type'] = $content_type;
+        } else {
+            $config = $request['config'] ?? $this->parse_http_config(
+                $request['get'] ?? $_GET,
+                $request['post'] ?? $_POST,
+                $server,
+                $body
+            );
+        }
+
         $config = $this->normalize_config($config, $server);
         $this->dispatch($config);
     }
@@ -171,7 +192,7 @@ final class Site_Export_HTTP_Server {
         }
 
         $handler = $this->handlers[$endpoint];
-        if ($endpoint === 'preflight') {
+        if ($endpoint === 'preflight' || $endpoint === 'commit') {
             call_user_func($handler, $config);
             return;
         }
@@ -193,6 +214,9 @@ final class Site_Export_HTTP_Server {
             'sql_chunk' => 'endpoint_sql_chunk',
             'db_index' => 'endpoint_db_index',
             'preflight' => 'endpoint_preflight',
+            'sql_receive' => 'endpoint_sql_receive',
+            'file_receive' => 'endpoint_file_receive',
+            'commit' => 'endpoint_commit',
         ];
     }
 

@@ -1363,7 +1363,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flat-document-root",
+                "Command is required. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flat-document-root, push-sql, push-files, push-commit",
             );
         }
 
@@ -1380,10 +1380,13 @@ class ImportClient
                 "preflight-assert",
                 "flat-document-root",
                 "apply-runtime",
+                "push-sql",
+                "push-files",
+                "push-commit",
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flat-document-root, apply-runtime",
+                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flat-document-root, apply-runtime, push-sql, push-files, push-commit",
             );
         }
 
@@ -1563,6 +1566,42 @@ class ImportClient
                 $this->run_db_apply($options);
                 $final_status = $this->state["status"] ?? "complete";
                 $this->output_progress(["status" => $final_status, "message" => "db-apply {$final_status}"]);
+                if ($final_status === "partial") {
+                    $this->exit_code = 2;
+                }
+            } catch (Exception $e) {
+                $this->output_progress([
+                    "status" => "error",
+                    "error" => $e->getMessage(),
+                    "message" => "Error: " . $e->getMessage(),
+                ]);
+                $this->write_status_file($e->getMessage());
+                throw $e;
+            }
+            return;
+        }
+
+        // Push commands run their own preflight and don't need prior pull state.
+        if (in_array($command, ["push-sql", "push-files", "push-commit"])) {
+            if ($abort) {
+                $this->handle_abort($command);
+                return;
+            }
+            try {
+                switch ($command) {
+                    case "push-sql":
+                        $this->run_push_sql($options);
+                        break;
+                    case "push-files":
+                        $this->run_push_files($options);
+                        break;
+                    case "push-commit":
+                        $this->run_push_commit($options);
+                        break;
+                }
+
+                $final_status = $this->state["status"] ?? "complete";
+                $this->output_progress(["status" => $final_status, "message" => "{$command} {$final_status}"]);
                 if ($final_status === "partial") {
                     $this->exit_code = 2;
                 }
@@ -9649,6 +9688,713 @@ class ImportClient
             @flush();
             $this->last_progress_output = $now;
         }
+    }
+
+    // =========================================================================
+    // Push commands: upload local site to remote WordPress
+    // =========================================================================
+
+    /**
+     * Run preflight against the remote and return the preflight data.
+     * Used by push commands to discover table_prefix, post_max_size, etc.
+     */
+    private function push_preflight(): array
+    {
+        if (!empty($this->state["preflight"]["data"])) {
+            return $this->state["preflight"]["data"];
+        }
+
+        $this->run_preflight();
+        $data = $this->state["preflight"]["data"] ?? null;
+        if (!is_array($data) || empty($data["ok"])) {
+            throw new RuntimeException(
+                "Preflight failed: " . ($data["error"] ?? "unknown error")
+            );
+        }
+        return $data;
+    }
+
+    /**
+     * POST a multipart body stream to a receiver endpoint and return the JSON response.
+     *
+     * Signs the body with HMAC (reading the stream, then rewinding for curl),
+     * sends via CURLOPT_UPLOAD / CURLOPT_INFILE, and returns the parsed JSON.
+     */
+    private function push_post_multipart(
+        string $url,
+        \MultipartBodyStream $stream
+    ): array {
+        $this->reset_curl_state();
+
+        $stream->finalize();
+
+        // Read body for HMAC signing, then rewind for curl
+        $body_for_signing = $stream->get_contents();
+
+        $headers = [
+            ...$this->get_base_headers("application/json"),
+            "Content-Type: " . $stream->get_content_type(),
+            "Content-Length: " . $stream->get_size(),
+            ...($this->get_hmac_headers($body_for_signing)),
+        ];
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_UPLOAD => true,
+            CURLOPT_INFILE => $stream->get_resource(),
+            CURLOPT_INFILESIZE => $stream->get_size(),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 120,
+            CURLOPT_FOLLOWLOCATION => false,
+        ]);
+
+        $this->audit_log("PUSH HTTP_REQUEST | POST | {$url} | size=" . $stream->get_size(), false);
+
+        $start = microtime(true);
+        $body = curl_exec($ch);
+        $elapsed = microtime(true) - $start;
+
+        try {
+            $this->check_curl_error($ch);
+        } catch (RuntimeException $e) {
+            @curl_close($ch);
+            throw new RuntimeException("Push request failed: " . $e->getMessage());
+        }
+
+        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        @curl_close($ch);
+
+        if ($http_code !== 200) {
+            throw new RuntimeException(
+                "Push request returned HTTP {$http_code}: " . substr($body, 0, 500)
+            );
+        }
+
+        $json = json_decode($body, true);
+        if (!is_array($json)) {
+            throw new RuntimeException(
+                "Push response is not valid JSON: " . substr($body, 0, 500)
+            );
+        }
+
+        $this->audit_log(
+            sprintf("PUSH RESPONSE | status=%s | elapsed=%.2fs", $json["status"] ?? "unknown", $elapsed),
+            false
+        );
+
+        return $json;
+    }
+
+    /**
+     * POST a JSON body to a receiver endpoint and return the JSON response.
+     */
+    private function push_post_json(string $url, array $data): array
+    {
+        $this->reset_curl_state();
+
+        $json_body = json_encode($data);
+        if ($json_body === false) {
+            throw new RuntimeException("Failed to encode push request body");
+        }
+
+        $headers = [
+            ...$this->get_base_headers("application/json"),
+            "Content-Type: application/json",
+            "Content-Length: " . strlen($json_body),
+            ...($this->get_hmac_headers($json_body)),
+        ];
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $json_body,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 120,
+            CURLOPT_FOLLOWLOCATION => false,
+        ]);
+
+        $this->audit_log("PUSH HTTP_REQUEST | POST JSON | {$url}", false);
+
+        $start = microtime(true);
+        $body = curl_exec($ch);
+        $elapsed = microtime(true) - $start;
+
+        try {
+            $this->check_curl_error($ch);
+        } catch (RuntimeException $e) {
+            @curl_close($ch);
+            throw new RuntimeException("Push JSON request failed: " . $e->getMessage());
+        }
+
+        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        @curl_close($ch);
+
+        if ($http_code !== 200) {
+            throw new RuntimeException(
+                "Push request returned HTTP {$http_code}: " . substr($body, 0, 500)
+            );
+        }
+
+        $json = json_decode($body, true);
+        if (!is_array($json)) {
+            throw new RuntimeException(
+                "Push response is not valid JSON: " . substr($body, 0, 500)
+            );
+        }
+
+        $this->audit_log(
+            sprintf("PUSH JSON RESPONSE | status=%s | elapsed=%.2fs", $json["status"] ?? "unknown", $elapsed),
+            false
+        );
+
+        return $json;
+    }
+
+    /**
+     * Command: push-sql
+     *
+     * Reads the local database via MySQLDumpProducer, streams SQL to the
+     * remote's sql_receive endpoint in multipart/mixed chunks sized to fit
+     * within the remote's post_max_size. The receiver rewrites table names
+     * to a staging prefix and executes the SQL. Progress is tracked by the
+     * receiver's cursor — the client resumes from there on retry.
+     */
+    private function run_push_sql(array $options): void
+    {
+        $preflight = $this->push_preflight();
+
+        $remote_table_prefix = $preflight["database"]["wp"]["table_prefix"] ?? "wp_";
+        $post_max_bytes = (int) ($preflight["limits"]["post_max_bytes"] ?? 8 * 1024 * 1024);
+        // Leave headroom for multipart framing and headers
+        $body_budget = (int) ($post_max_bytes * 0.8);
+        if ($body_budget < 64 * 1024) {
+            $body_budget = 64 * 1024;
+        }
+
+        // State management
+        $state_command = $this->state["command"] ?? null;
+        $current_status = $state_command === "push-sql"
+            ? ($this->state["status"] ?? null)
+            : null;
+
+        if ($current_status === "complete") {
+            throw new RuntimeException(
+                "push-sql already completed. Use --abort to start over."
+            );
+        }
+
+        $receiver_cursor = null;
+        if ($state_command === "push-sql" && $current_status === "in_progress") {
+            $receiver_cursor = $this->state["push_cursor"] ?? null;
+            $this->audit_log("RESUME push-sql | cursor=" .
+                ($receiver_cursor ? substr($receiver_cursor, 0, 40) . "..." : "none"));
+        } else {
+            $this->state["command"] = "push-sql";
+            $this->state["status"] = "in_progress";
+            $this->state["push_cursor"] = null;
+            $this->save_state($this->state);
+            $this->audit_log("START push-sql");
+        }
+
+        // Connect to local database
+        if (empty($this->mysql_database)) {
+            throw new InvalidArgumentException(
+                "--mysql-database is required for push-sql"
+            );
+        }
+        $local_dsn = build_pdo_dsn(
+            $this->mysql_host ?? '127.0.0.1',
+            $this->mysql_database
+        );
+        $local_pdo = new PDO(
+            $local_dsn,
+            $this->mysql_user ?? 'root',
+            $this->mysql_password ?? '',
+            [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
+        );
+
+        // Discover local tables for the receiver's staging map
+        $local_tables = [];
+        $stmt = $local_pdo->query(
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+        );
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $local_tables[] = $row['TABLE_NAME'];
+        }
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            fwrite($this->progress_fd, "Pushing SQL to remote ({$this->remote_url})...\n");
+        }
+
+        $total_sql_bytes = 0;
+        $total_statements = 0;
+        $iterations = 0;
+
+        // Push loop: create producer from receiver's last cursor, stream until
+        // body budget, POST to sql_receive, save receiver's cursor, repeat.
+        while (true) {
+            if ($this->shutdown_requested) {
+                $this->state["status"] = "partial";
+                $this->save_state($this->state);
+                return;
+            }
+
+            $producer_options = ["create_table_query" => true];
+            if ($receiver_cursor !== null) {
+                $producer_options["cursor"] = $receiver_cursor;
+            }
+
+            $producer = new \WordPress\DataLiberation\MySQLDumpProducer(
+                $local_pdo,
+                $producer_options,
+            );
+
+            // Check if producer is already finished (all tables dumped)
+            if ($producer->is_finished()) {
+                break;
+            }
+
+            // Build multipart body up to body_budget
+            $stream = new \MultipartBodyStream();
+            $body_size = 0;
+            $chunks_in_batch = 0;
+
+            while ($body_size < $body_budget) {
+                $sql_fragments = [];
+                $i = 0;
+                while ($producer->next_sql_fragment()) {
+                    $sql_fragments[] = $producer->get_sql_fragment();
+                    $i++;
+                    if ($i >= 500) {
+                        break;
+                    }
+                }
+
+                $sql = implode("", $sql_fragments);
+                if ($sql === "") {
+                    break;
+                }
+
+                $trimmed = rtrim($sql);
+                $query_complete = $trimmed !== "" && $trimmed[-1] === ";";
+                $cursor = $producer->get_reentrancy_cursor();
+
+                $stream->write_sql_chunk($sql, $cursor, $query_complete);
+
+                $body_size += strlen($sql);
+                $chunks_in_batch++;
+                $total_sql_bytes += strlen($sql);
+
+                if ($producer->is_finished()) {
+                    break;
+                }
+            }
+
+            if ($chunks_in_batch === 0) {
+                // Nothing left to send
+                break;
+            }
+
+            $is_finished = $producer->is_finished();
+            $stream->write_completion_chunk(
+                $is_finished ? "complete" : "partial",
+                ["sql_bytes" => $body_size]
+            );
+
+            // POST to receiver
+            $url = $this->build_url("sql_receive", null, [
+                "table_prefix" => $remote_table_prefix,
+                "incoming_tables" => json_encode($local_tables),
+            ]);
+
+            $response = $this->push_post_multipart($url, $stream);
+
+            $receiver_cursor = $response["cursor"] ?? null;
+            $total_statements += (int) ($response["statements_executed"] ?? 0);
+
+            // Save progress
+            $this->state["push_cursor"] = $receiver_cursor;
+            $this->state["push_sql_bytes"] = $total_sql_bytes;
+            $this->state["push_sql_statements"] = $total_statements;
+            $this->save_state($this->state);
+
+            $iterations++;
+            $this->output_progress([
+                "type" => "push_sql_progress",
+                "iterations" => $iterations,
+                "sql_bytes" => $total_sql_bytes,
+                "statements" => $total_statements,
+                "message" => sprintf(
+                    "push-sql: %d iterations, %s SQL bytes",
+                    $iterations,
+                    number_format($total_sql_bytes)
+                ),
+            ]);
+
+            if ($this->is_tty && !$this->verbose_mode) {
+                $this->show_progress_line(sprintf(
+                    "push-sql: %s bytes, %d statements",
+                    number_format($total_sql_bytes),
+                    $total_statements
+                ));
+            }
+
+            if (($response["status"] ?? "") === "complete" || $is_finished) {
+                break;
+            }
+        }
+
+        $this->state["status"] = "complete";
+        $this->save_state($this->state);
+
+        $this->audit_log(sprintf(
+            "push-sql complete: %d iterations, %s SQL bytes, %d statements",
+            $iterations,
+            number_format($total_sql_bytes),
+            $total_statements
+        ));
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            fwrite($this->progress_fd, sprintf(
+                "\npush-sql complete: %s SQL bytes staged on remote\n",
+                number_format($total_sql_bytes)
+            ));
+        }
+    }
+
+    /**
+     * Command: push-files
+     *
+     * Reads the local filesystem via FileTreeProducer, streams file chunks
+     * to the remote's file_receive endpoint. Files are written to a staging
+     * directory on the remote. Nothing goes live until push-commit.
+     */
+    private function run_push_files(array $options): void
+    {
+        $preflight = $this->push_preflight();
+
+        $post_max_bytes = (int) ($preflight["limits"]["post_max_bytes"] ?? 8 * 1024 * 1024);
+        $body_budget = (int) ($post_max_bytes * 0.8);
+        if ($body_budget < 64 * 1024) {
+            $body_budget = 64 * 1024;
+        }
+
+        // Determine the remote's directory for the receiver to resolve paths
+        $remote_directories = [];
+        $wp_roots = $preflight["wp_detect"]["roots"] ?? [];
+        foreach ($wp_roots as $root) {
+            $path = $root["path"] ?? null;
+            if (is_string($path) && $path !== "") {
+                $remote_directories[] = $path;
+            }
+        }
+        if (empty($remote_directories)) {
+            throw new RuntimeException(
+                "Cannot determine remote directory from preflight. " .
+                "Ensure the remote WordPress is detected."
+            );
+        }
+        $remote_directory = $remote_directories[0];
+
+        // State management
+        $state_command = $this->state["command"] ?? null;
+        $current_status = $state_command === "push-files"
+            ? ($this->state["status"] ?? null)
+            : null;
+
+        if ($current_status === "complete") {
+            throw new RuntimeException(
+                "push-files already completed. Use --abort to start over."
+            );
+        }
+
+        // Generate or restore staging ID — persistent across resume cycles
+        $staging_id = $this->state["push_staging_id"] ?? null;
+        if ($staging_id === null) {
+            $staging_id = bin2hex(random_bytes(8));
+        }
+
+        $receiver_cursor = null;
+        if ($state_command === "push-files" && $current_status === "in_progress") {
+            $receiver_cursor = $this->state["push_cursor"] ?? null;
+            $this->audit_log("RESUME push-files | staging_id={$staging_id} | cursor=" .
+                ($receiver_cursor ? substr($receiver_cursor, 0, 40) . "..." : "none"));
+        } else {
+            $this->state["command"] = "push-files";
+            $this->state["status"] = "in_progress";
+            $this->state["push_cursor"] = null;
+            $this->state["push_staging_id"] = $staging_id;
+            $this->save_state($this->state);
+            $this->audit_log("START push-files | staging_id={$staging_id}");
+        }
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            fwrite($this->progress_fd, "Pushing files to remote ({$this->remote_url})...\n");
+        }
+
+        $chunk_size = 2 * 1024 * 1024; // 2MB chunks
+        $total_bytes = 0;
+        $total_files = 0;
+        $iterations = 0;
+
+        // Push loop
+        while (true) {
+            if ($this->shutdown_requested) {
+                $this->state["status"] = "partial";
+                $this->save_state($this->state);
+                return;
+            }
+
+            $producer_options = [
+                "chunk_size" => $chunk_size,
+            ];
+            if ($receiver_cursor !== null) {
+                $producer_options["cursor"] = $receiver_cursor;
+            }
+
+            $producer = new \WordPress\DataLiberation\FileTreeProducer(
+                [$this->fs_root],
+                $producer_options,
+            );
+
+            // Build multipart body
+            $stream = new \MultipartBodyStream();
+            $body_size = 0;
+            $chunks_in_batch = 0;
+
+            while ($body_size < $body_budget) {
+                if (!$producer->next_chunk()) {
+                    break;
+                }
+
+                $chunk = $producer->get_current_chunk();
+                if ($chunk === null) {
+                    // Progress-only chunk (scanning/sorting phase)
+                    continue;
+                }
+
+                $cursor = $producer->get_reentrancy_cursor();
+                $chunk_type = $chunk["type"] ?? "file";
+
+                if ($chunk_type === "directory") {
+                    $stream->write_directory_chunk(
+                        $chunk["path"],
+                        $cursor,
+                        $chunk["ctime"] ?? null
+                    );
+                    $chunks_in_batch++;
+                } elseif ($chunk_type === "symlink") {
+                    $stream->write_symlink_chunk(
+                        $chunk["path"],
+                        $chunk["target"],
+                        $chunk["ctime"] ?? 0,
+                        $cursor
+                    );
+                    $chunks_in_batch++;
+                } elseif ($chunk_type === "file" || !isset($chunk["type"])) {
+                    $stream->write_file_chunk($chunk, $cursor);
+                    $body_size += strlen($chunk["data"]);
+                    $chunks_in_batch++;
+                    $total_bytes += strlen($chunk["data"]);
+                    if (!empty($chunk["is_last_chunk"])) {
+                        $total_files++;
+                    }
+                }
+                // Skip index, missing, error chunk types — they're for pull mode
+            }
+
+            if ($chunks_in_batch === 0) {
+                break;
+            }
+
+            $progress = $producer->get_progress();
+            $is_finished = ($progress["phase"] ?? "") === "finished";
+
+            $stream->write_completion_chunk(
+                $is_finished ? "complete" : "partial",
+                [
+                    "bytes_processed" => $body_size,
+                    "files_completed" => $total_files,
+                ]
+            );
+
+            // POST to receiver
+            $url = $this->build_url("file_receive", null, [
+                "staging_id" => $staging_id,
+                "directory" => $remote_directory,
+            ]);
+
+            $response = $this->push_post_multipart($url, $stream);
+
+            $receiver_cursor = $response["cursor"] ?? null;
+
+            // Save progress
+            $this->state["push_cursor"] = $receiver_cursor;
+            $this->state["push_files_bytes"] = $total_bytes;
+            $this->state["push_files_count"] = $total_files;
+            $this->save_state($this->state);
+
+            $iterations++;
+            $this->output_progress([
+                "type" => "push_files_progress",
+                "iterations" => $iterations,
+                "bytes" => $total_bytes,
+                "files" => $total_files,
+                "message" => sprintf(
+                    "push-files: %d iterations, %s bytes, %d files",
+                    $iterations,
+                    number_format($total_bytes),
+                    $total_files
+                ),
+            ]);
+
+            if ($this->is_tty && !$this->verbose_mode) {
+                $this->show_progress_line(sprintf(
+                    "push-files: %s bytes, %d files",
+                    number_format($total_bytes),
+                    $total_files
+                ));
+            }
+
+            if (($response["status"] ?? "") === "complete" || $is_finished) {
+                break;
+            }
+        }
+
+        $this->state["status"] = "complete";
+        $this->save_state($this->state);
+
+        $this->audit_log(sprintf(
+            "push-files complete: %d iterations, %s bytes, %d files",
+            $iterations,
+            number_format($total_bytes),
+            $total_files
+        ));
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            fwrite($this->progress_fd, sprintf(
+                "\npush-files complete: %s bytes, %d files staged on remote\n",
+                number_format($total_bytes),
+                $total_files
+            ));
+        }
+    }
+
+    /**
+     * Command: push-commit
+     *
+     * Tells the remote to atomically swap staged files and database tables
+     * into place. This is the point of no return: validates staging, swaps
+     * files (symlink or rename), swaps DB (atomic RENAME TABLE), and cleans
+     * up old artifacts. On partial failure, rolls back.
+     */
+    private function run_push_commit(array $options): void
+    {
+        $preflight = $this->push_preflight();
+
+        $remote_table_prefix = $preflight["database"]["wp"]["table_prefix"] ?? "wp_";
+
+        // Determine what was pushed. The staging_id comes from push-files state.
+        // If only push-sql was run (no files), generate a temporary one so the
+        // commit endpoint can still validate — the staging directory won't exist
+        // and the file swap step will be skipped.
+        $staging_id = $this->state["push_staging_id"] ?? bin2hex(random_bytes(8));
+
+        // Determine the remote directory
+        $remote_directories = [];
+        $wp_roots = $preflight["wp_detect"]["roots"] ?? [];
+        foreach ($wp_roots as $root) {
+            $path = $root["path"] ?? null;
+            if (is_string($path) && $path !== "") {
+                $remote_directories[] = $path;
+            }
+        }
+        $remote_directory = $remote_directories[0] ?? null;
+
+        // Get list of tables that were pushed (from local database)
+        $pushed_tables = [];
+        if (!empty($this->mysql_database)) {
+            $local_dsn = build_pdo_dsn(
+                $this->mysql_host ?? '127.0.0.1',
+                $this->mysql_database
+            );
+            $local_pdo = new PDO(
+                $local_dsn,
+                $this->mysql_user ?? 'root',
+                $this->mysql_password ?? '',
+                [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
+            );
+            $stmt = $local_pdo->query(
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+            );
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                $pushed_tables[] = $row['TABLE_NAME'];
+            }
+        }
+
+        $this->audit_log(sprintf(
+            "push-commit | staging_id=%s | tables=%d | directory=%s",
+            $staging_id ?? "none",
+            count($pushed_tables),
+            $remote_directory ?? "none"
+        ));
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            fwrite($this->progress_fd, "Committing push (atomic cutover)...\n");
+        }
+
+        $params = [
+            "table_prefix" => $remote_table_prefix,
+            "pushed_tables" => json_encode($pushed_tables),
+        ];
+        if ($staging_id !== null) {
+            $params["staging_id"] = $staging_id;
+        }
+        if ($remote_directory !== null) {
+            $params["directory"] = $remote_directory;
+        }
+
+        $url = $this->build_url("commit", null, $params);
+        $response = $this->push_post_json($url, $params);
+
+        $status = $response["status"] ?? "error";
+        if ($status !== "ok") {
+            $errors = $response["errors"] ?? [$response["error"] ?? "Unknown error"];
+            throw new RuntimeException(
+                "push-commit failed: " . implode("; ", $errors)
+            );
+        }
+
+        $tables_swapped = (int) ($response["tables_swapped"] ?? 0);
+        $file_strategy = $response["file_strategy"] ?? "none";
+
+        $this->state["command"] = "push-commit";
+        $this->state["status"] = "complete";
+        $this->save_state($this->state);
+
+        $this->audit_log(sprintf(
+            "push-commit complete: %d tables swapped, file_strategy=%s",
+            $tables_swapped,
+            $file_strategy
+        ));
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            fwrite($this->progress_fd, sprintf(
+                "push-commit complete: %d tables swapped, files: %s\n",
+                $tables_swapped,
+                $file_strategy
+            ));
+        }
+
+        $this->output_progress([
+            "type" => "push_commit_complete",
+            "tables_swapped" => $tables_swapped,
+            "file_strategy" => $file_strategy,
+            "status" => "complete",
+            "message" => "push-commit complete",
+        ], true);
     }
 }
 
