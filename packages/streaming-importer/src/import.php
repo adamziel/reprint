@@ -10154,7 +10154,7 @@ class ImportClient
                 $producer_options["cursor"] = $receiver_cursor;
             }
 
-            $producer = new \WordPress\DataLiberation\FileTreeProducer(
+            $producer = new \FileTreeProducer(
                 [$this->fs_root],
                 $producer_options,
             );
@@ -10336,7 +10336,7 @@ class ImportClient
 
         $this->audit_log(sprintf(
             "push-commit | staging_id=%s | tables=%d | directory=%s",
-            $staging_id ?? "none",
+            $staging_id,
             count($pushed_tables),
             $remote_directory ?? "none"
         ));

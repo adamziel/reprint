@@ -3849,11 +3849,11 @@ function endpoint_commit(array $config): array
 
     // Check staging tables exist
     $staging_table_names = [];
+    $existing_tables = [];
     if (!empty($pushed_tables)) {
         $stmt = $pdo->query(
             "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()"
         );
-        $existing_tables = [];
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
             $existing_tables[$row['TABLE_NAME']] = true;
         }
