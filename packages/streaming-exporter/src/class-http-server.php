@@ -103,8 +103,7 @@ final class Site_Export_HTTP_Server {
     public function normalize_config(array $config, array $server = []): array {
         if (
             $this->default_directory !== null &&
-            !isset($config['directory']) &&
-            !isset($config['list_dir'])
+            !isset($config['directory'])
         ) {
             $config['directory'] = $this->default_directory;
         }

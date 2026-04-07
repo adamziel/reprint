@@ -44,6 +44,21 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame('{"offset":10}', $config['cursor']);
     }
 
+    public function testNormalizeConfigAppliesDefaultDirectoryEvenWhenListDirPresent(): void
+    {
+        $server = new Site_Export_HTTP_Server([
+            'default_directory' => '/srv/site',
+        ]);
+
+        $config = $server->normalize_config(
+            ['endpoint' => 'file_index', 'list_dir' => '/srv/site/wp-content'],
+            []
+        );
+
+        $this->assertSame('/srv/site', $config['directory']);
+        $this->assertSame('/srv/site/wp-content', $config['list_dir']);
+    }
+
     public function testNormalizeConfigRejectsInvalidCursor(): void
     {
         $server = new Site_Export_HTTP_Server();
