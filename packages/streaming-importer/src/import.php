@@ -928,6 +928,16 @@ class ImportClient
      *  avoid re-reading the index file on every progress record. */
     private $cached_index_count = null;
 
+    /** @var int|null Total entries in the current download list.  Set once
+     *  at the start of download_files_from_list() by counting lines. */
+    private $download_list_total = null;
+
+    /** @var int|null Entries already processed (before the current offset)
+     *  in the download list.  Computed at list start and incremented after
+     *  each batch completes.  This is the cumulative, restart-safe counter
+     *  that consumers should display as "files done". */
+    private $download_list_done = null;
+
     /**
      * @var array Persistent import state loaded from / saved to $state_file.
      * Keys: command, status, cursor, stage, preflight, version, follow_symlinks,
@@ -5743,6 +5753,31 @@ class ImportClient
      * @param string $state_key   Key in $this->state that holds fetch progress
      *                            (e.g. "fetch" or "fetch_skipped").
      */
+    /**
+     * Count non-empty lines in a JSONL file, optionally up to a byte limit.
+     */
+    private function count_jsonl_lines(string $file, int $up_to_byte = -1): int
+    {
+        if (!is_file($file)) {
+            return 0;
+        }
+        $handle = fopen($file, "r");
+        if (!$handle) {
+            return 0;
+        }
+        $count = 0;
+        while (($line = fgets($handle)) !== false) {
+            if ($up_to_byte >= 0 && ftell($handle) > $up_to_byte) {
+                break;
+            }
+            if (trim($line) !== "") {
+                $count++;
+            }
+        }
+        fclose($handle);
+        return $count;
+    }
+
     private function download_files_from_list(
         string $list_file,
         string $state_key
@@ -5753,6 +5788,17 @@ class ImportClient
 
         if (filesize($list_file) === 0) {
             return true;
+        }
+
+        // Compute download list counters once at the start of each list.
+        // These survive across batches within one invocation and are
+        // recomputed on restart from the state file's byte offset.
+        if ($this->download_list_total === null) {
+            $offset = (int) ($this->state[$state_key]["offset"] ?? 0);
+            $this->download_list_total = $this->count_jsonl_lines($list_file);
+            $this->download_list_done = $offset > 0
+                ? $this->count_jsonl_lines($list_file, $offset)
+                : 0;
         }
         $fetch_state = $this->state[$state_key] ?? $this->default_state()[$state_key];
         $batch_file = $fetch_state["batch_file"] ?? null;
@@ -5794,6 +5840,22 @@ class ImportClient
         if (file_exists($batch_file)) {
             @unlink($batch_file);
             $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
+        }
+
+        // Advance the done counter by the number of entries in this batch.
+        if ($this->download_list_done !== null) {
+            $handle = fopen($list_file, "r");
+            if ($handle) {
+                fseek($handle, $batch_offset);
+                $batch_entries = 0;
+                while (ftell($handle) < $next_offset && ($line = fgets($handle)) !== false) {
+                    if (trim($line) !== "") {
+                        $batch_entries++;
+                    }
+                }
+                fclose($handle);
+                $this->download_list_done += $batch_entries;
+            }
         }
 
         $this->state[$state_key] = [
@@ -7469,14 +7531,25 @@ class ImportClient
 
             $file_progress_message = sprintf("[%d files] %s", $this->files_imported, $this->display_path($path));
             $this->show_progress_line($file_progress_message);
-            $this->output_progress([
+            $progress_record = [
                 "type" => "file_progress",
                 "files_imported" => $this->files_imported,
-                "files_indexed" => $this->cached_index_count,
                 "path" => $path,
                 "size" => $file_size,
                 "message" => $file_progress_message,
-            ]);
+            ];
+            // Emit globally-stable download list counters so consumers can
+            // display an accurate X/Y that never resets or over-counts.
+            // files_done = entries fully processed across all invocations
+            //   (batch boundary value + files written in the current batch).
+            // files_total = total entries in the download list (fixed once
+            //   the diff phase is done).
+            if ($this->download_list_total !== null) {
+                $progress_record["files_total"] = $this->download_list_total;
+                $progress_record["files_done"] =
+                    ($this->download_list_done ?? 0) + $this->files_imported;
+            }
+            $this->output_progress($progress_record);
         }
 
         // Skip body/close for files being preserved
@@ -8908,10 +8981,12 @@ class ImportClient
                         $heartbeat = [
                             "heartbeat" => true,
                             "bytes_received" => $bytes_received,
+                            "files_imported" => $this->files_imported,
                         ];
-                        if ($this->cached_index_count !== null) {
-                            $heartbeat["files_imported"] = $this->files_imported;
-                            $heartbeat["files_indexed"] = $this->cached_index_count;
+                        if ($this->download_list_total !== null) {
+                            $heartbeat["files_total"] = $this->download_list_total;
+                            $heartbeat["files_done"] =
+                                ($this->download_list_done ?? 0) + $this->files_imported;
                         }
                         fwrite($this->progress_fd, json_encode($heartbeat) . "\n");
                     }
