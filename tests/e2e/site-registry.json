@@ -101,8 +101,11 @@
     "symlinked-abspath": {
       "port": 8111
     },
-    "symlink-cycle": {
+    "sql-crash": {
       "port": 8113
+    },
+    "symlink-cycle": {
+      "port": 8114
     }
   }
 }
