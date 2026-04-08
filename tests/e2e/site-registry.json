@@ -5,36 +5,104 @@
   "dbHost": "127.0.0.1",
   "wpVersion": "6.7",
   "sites": {
-    "basic":             { "port": 8081 },
-    "symlinks-outside":  { "port": 8082 },
-    "custom-wp-content": { "port": 8083 },
-    "chmod-denied":      { "port": 8084 },
-    "mysql-restricted":  { "port": 8085 },
-    "circular-symlinks": { "port": 8086 },
-    "file-changes":      { "port": 8087 },
-    "dir-deleted":       { "port": 8088 },
-    "volatile-file":     { "port": 8089 },
-    "emoji-paths":       { "port": 8090 },
-    "large-directory":   { "port": 8091 },
-    "hmac-errors":       { "port": 8092 },
-    "sha1-verify":       { "port": 8093 },
-    "http-errors":       { "port": 8094 },
-    "request-cutoff":    { "port": 8095 },
-    "gzip-corrupt":      { "port": 8096 },
-    "redirect-301":      { "port": 8097, "nginx": "redirect", "redirectTo": 8081 },
-    "buffered":          { "port": 8098, "nginx": "buffered" },
-    "error-chunks":      { "port": 8099 },
-    "import-failures":   { "port": 8100 },
-    "follow-symlinks":   { "port": 8101 },
-    "sqlite":            { "port": 8102 },
-    "large-single-file": { "port": 8103 },
-    "file-deletions":    { "port": 8104 },
-    "file-type-swaps":   { "port": 8105 },
-    "file-type-cache":   { "port": 8106 },
-    "preserve-local":    { "port": 8107 },
-    "url-rewriting":     { "port": 8108 },
-    "wpcloud-flatten":   { "port": 8109 },
-    "defer-uploads":     { "port": 8110 },
-    "symlinked-abspath": { "port": 8111 }
+    "basic": {
+      "port": 8081
+    },
+    "symlinks-outside": {
+      "port": 8082
+    },
+    "custom-wp-content": {
+      "port": 8083
+    },
+    "chmod-denied": {
+      "port": 8084
+    },
+    "mysql-restricted": {
+      "port": 8085
+    },
+    "circular-symlinks": {
+      "port": 8086
+    },
+    "file-changes": {
+      "port": 8087
+    },
+    "dir-deleted": {
+      "port": 8088
+    },
+    "volatile-file": {
+      "port": 8089
+    },
+    "emoji-paths": {
+      "port": 8090
+    },
+    "large-directory": {
+      "port": 8091
+    },
+    "hmac-errors": {
+      "port": 8092
+    },
+    "sha1-verify": {
+      "port": 8093
+    },
+    "http-errors": {
+      "port": 8094
+    },
+    "request-cutoff": {
+      "port": 8095
+    },
+    "gzip-corrupt": {
+      "port": 8096
+    },
+    "redirect-301": {
+      "port": 8097,
+      "nginx": "redirect",
+      "redirectTo": 8081
+    },
+    "buffered": {
+      "port": 8098,
+      "nginx": "buffered"
+    },
+    "error-chunks": {
+      "port": 8099
+    },
+    "import-failures": {
+      "port": 8100
+    },
+    "follow-symlinks": {
+      "port": 8101
+    },
+    "sqlite": {
+      "port": 8102
+    },
+    "large-single-file": {
+      "port": 8103
+    },
+    "file-deletions": {
+      "port": 8104
+    },
+    "file-type-swaps": {
+      "port": 8105
+    },
+    "file-type-cache": {
+      "port": 8106
+    },
+    "preserve-local": {
+      "port": 8107
+    },
+    "url-rewriting": {
+      "port": 8108
+    },
+    "wpcloud-flatten": {
+      "port": 8109
+    },
+    "defer-uploads": {
+      "port": 8110
+    },
+    "symlinked-abspath": {
+      "port": 8111
+    },
+    "symlink-cycle": {
+      "port": 8112
+    }
   }
 }
