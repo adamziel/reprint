@@ -7529,26 +7529,18 @@ class ImportClient
                 false,
             );
 
-            $file_progress_message = sprintf("[%d files] %s", $this->files_imported, $this->display_path($path));
+            $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
+            $file_progress_message = sprintf("[%d files] %s", $files_done, $this->display_path($path));
             $this->show_progress_line($file_progress_message);
             $progress_record = [
                 "type" => "file_progress",
-                "files_imported" => $this->files_imported,
-                "files_indexed" => $this->cached_index_count,
+                "files_done" => $files_done,
                 "path" => $path,
                 "size" => $file_size,
                 "message" => $file_progress_message,
             ];
-            // Emit globally-stable download list counters so consumers can
-            // display an accurate X/Y that never resets or over-counts.
-            // files_done = entries fully processed across all invocations
-            //   (batch boundary value + files written in the current batch).
-            // files_total = total entries in the download list (fixed once
-            //   the diff phase is done).
             if ($this->download_list_total !== null) {
                 $progress_record["files_total"] = $this->download_list_total;
-                $progress_record["files_done"] =
-                    ($this->download_list_done ?? 0) + $this->files_imported;
             }
             $this->output_progress($progress_record);
         }
@@ -8982,12 +8974,11 @@ class ImportClient
                         $heartbeat = [
                             "heartbeat" => true,
                             "bytes_received" => $bytes_received,
-                            "files_imported" => $this->files_imported,
+                            "files_done" =>
+                                ($this->download_list_done ?? 0) + $this->files_imported,
                         ];
                         if ($this->download_list_total !== null) {
                             $heartbeat["files_total"] = $this->download_list_total;
-                            $heartbeat["files_done"] =
-                                ($this->download_list_done ?? 0) + $this->files_imported;
                         }
                         fwrite($this->progress_fd, json_encode($heartbeat) . "\n");
                     }
