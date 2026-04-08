@@ -5643,6 +5643,21 @@ class ImportClient
         $this->begin_index_updates();
         $processed = 0;
 
+        // Resolve the document root for duplicate-path filtering.
+        // The remote index may contain the same file through multiple
+        // symlink paths (e.g. /srv/htdocs/wordpress/X and /wordpress/X).
+        // Skip paths that re-enter the doc root or fall outside it.
+        $doc_root = null;
+        $doc_root_raw = $this->state["preflight"]["data"]["runtime"]["document_root"] ?? null;
+        if (is_string($doc_root_raw) && str_starts_with($doc_root_raw, "base64:")) {
+            $doc_root = base64_decode(substr($doc_root_raw, 7));
+        } elseif (is_string($doc_root_raw) && $doc_root_raw !== "") {
+            $doc_root = $doc_root_raw;
+        }
+        $doc_root_prefix = $doc_root !== null ? rtrim($doc_root, "/") . "/" : null;
+        $doc_root_relative = $doc_root !== null ? ltrim($doc_root, "/") . "/" : null;
+        $skipped_as_duplicate = 0;
+
         while (($line = fgets($remote_handle)) !== false) {
             if ($this->shutdown_requested) {
                 break;
@@ -5656,6 +5671,32 @@ class ImportClient
             $remote = $this->parse_index_line($line);
             if (!$remote) {
                 continue;
+            }
+
+            // Duplicate-path filtering: two stateless rules using the
+            // document root.  No memory tracking needed.
+            //
+            // Rule 1: recursive re-entry.  A path under the doc root
+            // that, after stripping the doc root prefix, still starts
+            // with the doc root path.  Example with doc root /srv/htdocs:
+            //   /srv/htdocs/srv/htdocs/wp-config.php
+            //   Strip prefix → srv/htdocs/wp-config.php
+            //   Starts with "srv/htdocs/" → duplicate, skip.
+            //
+            // Rule 2: outside doc root.  Paths not under the doc root
+            // are symlink targets already reachable through the doc root
+            // tree (e.g. /wordpress/X is also /srv/htdocs/wordpress/X).
+            if ($doc_root_prefix !== null) {
+                if (str_starts_with($remote["path"], $doc_root_prefix)) {
+                    $rest = substr($remote["path"], strlen($doc_root_prefix));
+                    if ($doc_root_relative !== null && str_starts_with($rest, $doc_root_relative)) {
+                        $skipped_as_duplicate++;
+                        continue;
+                    }
+                } elseif ($remote["path"] !== $doc_root) {
+                    $skipped_as_duplicate++;
+                    continue;
+                }
             }
 
             while (
