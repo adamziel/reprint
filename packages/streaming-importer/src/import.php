@@ -924,6 +924,10 @@ class ImportClient
     /** @var int Running count of files imported in the current invocation. */
     private $files_imported = 0;
 
+    /** @var int|null Cached index size, set once before the fetch phase to
+     *  avoid re-reading the index file on every progress record. */
+    private $cached_index_count = null;
+
     /**
      * @var array Persistent import state loaded from / saved to $state_file.
      * Keys: command, status, cursor, stage, preflight, version, follow_symlinks,
@@ -2444,6 +2448,7 @@ class ImportClient
         if ($has_progress) {
             $this->files_imported = 0;
             $index_size = $this->index_count();
+            $this->cached_index_count = $index_size;
 
             $stage = $this->state["stage"] ?? "index";
             $this->audit_log(
@@ -2491,6 +2496,7 @@ class ImportClient
             if ($is_delta) {
                 $this->files_imported = 0;
                 $index_size = $this->index_count();
+                $this->cached_index_count = $index_size;
                 $this->audit_log(
                     "START files-sync (delta) | index_files={$index_size}",
                     true,
@@ -2543,6 +2549,7 @@ class ImportClient
 
         $this->clear_progress_line();
         $index_size = $this->index_count();
+        $this->cached_index_count = $index_size;
         $label = $is_delta ? "files-sync (delta)" : "files-sync";
 
         $this->audit_log(
@@ -7465,6 +7472,7 @@ class ImportClient
             $this->output_progress([
                 "type" => "file_progress",
                 "files_imported" => $this->files_imported,
+                "files_indexed" => $this->cached_index_count,
                 "path" => $path,
                 "size" => $file_size,
                 "message" => $file_progress_message,
@@ -8897,10 +8905,15 @@ class ImportClient
                 // Output heartbeat every second (only in verbose/non-TTY mode)
                 if ($now - $last_heartbeat >= 1.0) {
                     if ($this->verbose_mode || !$this->is_tty) {
-                        fwrite($this->progress_fd, json_encode([
+                        $heartbeat = [
                             "heartbeat" => true,
                             "bytes_received" => $bytes_received,
-                        ]) . "\n");
+                        ];
+                        if ($this->cached_index_count !== null) {
+                            $heartbeat["files_imported"] = $this->files_imported;
+                            $heartbeat["files_indexed"] = $this->cached_index_count;
+                        }
+                        fwrite($this->progress_fd, json_encode($heartbeat) . "\n");
                     }
                     $last_heartbeat = $now;
                 }
