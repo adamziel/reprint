@@ -5643,6 +5643,14 @@ class ImportClient
         $this->begin_index_updates();
         $processed = 0;
 
+        // Track directory prefixes whose content is already reachable via
+        // another path.  When a symlink's target is inside the document root
+        // (or inside an already-covered prefix), everything under the symlink
+        // is a duplicate and can be skipped.  Sorted longest-first so the
+        // prefix check can short-circuit.
+        $covered_prefixes = [];
+        $skipped_as_duplicate = 0;
+
         while (($line = fgets($remote_handle)) !== false) {
             if ($this->shutdown_requested) {
                 break;
@@ -5655,6 +5663,65 @@ class ImportClient
             $remote_offset = ftell($remote_handle);
             $remote = $this->parse_index_line($line);
             if (!$remote) {
+                continue;
+            }
+
+            // When a symlink points to a directory that is already indexed
+            // through another path, mark the symlink's path as a covered
+            // prefix so all files under it are skipped as duplicates.
+            if ($remote["type"] === "link" && isset($remote["target"])) {
+                $target = $remote["target"];
+                $symlink_path = $remote["path"];
+
+                // A symlink is redundant when its target is already reachable:
+                // either the target is under the document root (which is always
+                // indexed) or under another covered prefix.
+                $target_already_covered = false;
+                foreach ($covered_prefixes as $prefix) {
+                    if (str_starts_with($symlink_path . "/", $prefix . "/")) {
+                        // This symlink is already inside a covered subtree.
+                        $target_already_covered = true;
+                        break;
+                    }
+                    if (str_starts_with($target . "/", $prefix . "/") || $target === $prefix) {
+                        $target_already_covered = true;
+                        break;
+                    }
+                }
+
+                if (!$target_already_covered) {
+                    // Check if the target is under the document root (the primary
+                    // tree being indexed).  The document root is the first path
+                    // component from the index entries (typically /srv/htdocs).
+                    $doc_root_raw = $this->state["preflight"]["data"]["runtime"]["document_root"] ?? null;
+                    if (is_string($doc_root_raw) && str_starts_with($doc_root_raw, "base64:")) {
+                        $doc_root_raw = base64_decode(substr($doc_root_raw, 7));
+                    }
+                    if ($doc_root_raw && str_starts_with($target . "/", $doc_root_raw . "/")) {
+                        $target_already_covered = true;
+                    }
+                }
+
+                if ($target_already_covered) {
+                    $covered_prefixes[] = $symlink_path;
+                    $this->audit_log(
+                        "DEDUP | Skipping symlink subtree {$symlink_path} -> {$target} (target already covered)",
+                        false,
+                    );
+                }
+            }
+
+            // Skip files under covered prefixes — they're duplicates
+            // reachable through the original (non-symlink) path.
+            $is_duplicate = false;
+            foreach ($covered_prefixes as $prefix) {
+                if (str_starts_with($remote["path"] . "/", $prefix . "/") || $remote["path"] === $prefix) {
+                    $is_duplicate = true;
+                    break;
+                }
+            }
+            if ($is_duplicate) {
+                $skipped_as_duplicate++;
                 continue;
             }
 
@@ -5728,6 +5795,17 @@ class ImportClient
         fclose($download_handle);
         if ($skipped_handle !== null) {
             fclose($skipped_handle);
+        }
+
+        if ($skipped_as_duplicate > 0) {
+            $this->audit_log(
+                sprintf(
+                    "DEDUP | Skipped %d duplicate entries from %d covered symlink prefixes",
+                    $skipped_as_duplicate,
+                    count($covered_prefixes),
+                ),
+                true,
+            );
         }
 
         $this->state["diff"] = [
@@ -6162,12 +6240,19 @@ class ImportClient
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
         assert_valid_path($path, "index path");
-        return [
+        $entry = [
             "path" => $path,
             "ctime" => (int) ($data["ctime"] ?? 0),
             "size" => (int) ($data["size"] ?? 0),
             "type" => (string) ($data["type"] ?? "file"),
         ];
+        if ($entry["type"] === "link" && isset($data["target"])) {
+            $target = base64_decode($data["target"], true);
+            if ($target !== false && $target !== "") {
+                $entry["target"] = $target;
+            }
+        }
+        return $entry;
     }
 
     /**
