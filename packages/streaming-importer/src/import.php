@@ -5643,12 +5643,30 @@ class ImportClient
         $this->begin_index_updates();
         $processed = 0;
 
-        // Track directory prefixes whose content is already reachable via
-        // another path.  When a symlink's target is inside the document root
-        // (or inside an already-covered prefix), everything under the symlink
-        // is a duplicate and can be skipped.  Sorted longest-first so the
-        // prefix check can short-circuit.
-        $covered_prefixes = [];
+        // Deduplicate paths that appear multiple times in the remote index
+        // due to symlink expansion.  Stateless — only uses the document root
+        // path from the preflight response, no in-memory accumulation.
+        //
+        // Two rules, both derived from the document root (e.g. /srv/htdocs):
+        //
+        //   1. Recursive re-entry: /srv/htdocs/srv/htdocs/file.php
+        //      Strip the doc root prefix once — if the remainder still
+        //      starts with the doc root path, the entry re-enters the
+        //      document root through a symlink.  Skip it.
+        //
+        //   2. Outside doc root: /wordpress/plugins/foo.php
+        //      Also reachable as /srv/htdocs/wordpress/plugins/foo.php.
+        //      Any path not under the doc root is a symlink target whose
+        //      content is already indexed under the doc root.  Skip it.
+        $doc_root = null;
+        $doc_root_raw = $this->state["preflight"]["data"]["runtime"]["document_root"] ?? null;
+        if (is_string($doc_root_raw) && str_starts_with($doc_root_raw, "base64:")) {
+            $doc_root = base64_decode(substr($doc_root_raw, 7));
+        } elseif (is_string($doc_root_raw) && $doc_root_raw !== "") {
+            $doc_root = $doc_root_raw;
+        }
+        $doc_root_prefix = $doc_root !== null ? $doc_root . "/" : null;
+        $doc_root_relative = $doc_root !== null ? ltrim($doc_root, "/") . "/" : null;
         $skipped_as_duplicate = 0;
 
         while (($line = fgets($remote_handle)) !== false) {
@@ -5666,64 +5684,20 @@ class ImportClient
                 continue;
             }
 
-            // When a symlink points to a directory that is already indexed
-            // through another path, mark the symlink's path as a covered
-            // prefix so all files under it are skipped as duplicates.
-            if ($remote["type"] === "link" && isset($remote["target"])) {
-                $target = $remote["target"];
-                $symlink_path = $remote["path"];
-
-                // A symlink is redundant when its target is already reachable:
-                // either the target is under the document root (which is always
-                // indexed) or under another covered prefix.
-                $target_already_covered = false;
-                foreach ($covered_prefixes as $prefix) {
-                    if (str_starts_with($symlink_path . "/", $prefix . "/")) {
-                        // This symlink is already inside a covered subtree.
-                        $target_already_covered = true;
-                        break;
-                    }
-                    if (str_starts_with($target . "/", $prefix . "/") || $target === $prefix) {
-                        $target_already_covered = true;
-                        break;
-                    }
-                }
-
-                if (!$target_already_covered) {
-                    // Check if the target is under the document root (the primary
-                    // tree being indexed).  The document root is the first path
-                    // component from the index entries (typically /srv/htdocs).
-                    $doc_root_raw = $this->state["preflight"]["data"]["runtime"]["document_root"] ?? null;
-                    if (is_string($doc_root_raw) && str_starts_with($doc_root_raw, "base64:")) {
-                        $doc_root_raw = base64_decode(substr($doc_root_raw, 7));
-                    }
-                    if ($doc_root_raw && str_starts_with($target . "/", $doc_root_raw . "/")) {
-                        $target_already_covered = true;
-                    }
-                }
-
-                if ($target_already_covered) {
-                    $covered_prefixes[] = $symlink_path;
-                    $this->audit_log(
-                        "DEDUP | Skipping symlink subtree {$symlink_path} -> {$target} (target already covered)",
-                        false,
-                    );
+            // Rule 1: recursive doc root re-entry.
+            if ($doc_root_prefix !== null && $doc_root_relative !== null
+                && str_starts_with($remote["path"], $doc_root_prefix)) {
+                $rest = substr($remote["path"], strlen($doc_root_prefix));
+                if (str_starts_with($rest, $doc_root_relative)) {
+                    $skipped_as_duplicate++;
+                    continue;
                 }
             }
 
-            // Skip files under covered prefixes — they're duplicates
-            // reachable through the original (non-symlink) path.
-            // The symlink entry itself ($remote["path"] === $prefix) must
-            // NOT be skipped — it needs to reach the download list so the
-            // symlink is recreated locally.  Only children are duplicates.
-            $is_duplicate = false;
-            foreach ($covered_prefixes as $prefix) {
-                if (str_starts_with($remote["path"] . "/", $prefix . "/")) {
-                    $is_duplicate = true;
-                    break;
-                }
-            }
-            if ($is_duplicate) {
+            // Rule 2: path outside the document root.
+            if ($doc_root_prefix !== null
+                && !str_starts_with($remote["path"] . "/", $doc_root_prefix)
+                && $remote["path"] !== $doc_root) {
                 $skipped_as_duplicate++;
                 continue;
             }
@@ -5803,9 +5777,9 @@ class ImportClient
         if ($skipped_as_duplicate > 0) {
             $this->audit_log(
                 sprintf(
-                    "DEDUP | Skipped %d duplicate entries from %d covered symlink prefixes",
+                    "DEDUP | Skipped %d duplicate entries (doc_root=%s)",
                     $skipped_as_duplicate,
-                    count($covered_prefixes),
+                    $doc_root ?? "(unknown)",
                 ),
                 true,
             );

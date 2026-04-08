@@ -367,4 +367,188 @@ class DownloadListProgressTest extends TestCase
         $this->assertSame(100, $total);
         $this->assertLessThanOrEqual($total, $filesDone);
     }
+    // ---------------------------------------------------------------
+    // Symlink deduplication tests
+    // ---------------------------------------------------------------
+
+    /**
+     * Build a remote index JSONL file with the given entries.
+     * Each entry: ['path' => string, 'type' => 'file'|'link'|'dir', 'target' => string|null]
+     */
+    private function writeRemoteIndex(array $entries): string
+    {
+        $file = $this->stateDir . '/.import-remote-index.jsonl';
+        $handle = fopen($file, 'w');
+        $ctime = 1000;
+        foreach ($entries as $entry) {
+            $data = [
+                'path' => base64_encode($entry['path']),
+                'ctime' => $ctime++,
+                'size' => 100,
+                'type' => $entry['type'] ?? 'file',
+            ];
+            if (isset($entry['target'])) {
+                $data['target'] = base64_encode($entry['target']);
+            }
+            fwrite($handle, json_encode($data, JSON_UNESCAPED_SLASHES) . "\n");
+        }
+        fclose($handle);
+        return $file;
+    }
+
+    /**
+     * Run the diff phase and return the paths in the download list.
+     */
+    private function runDiffAndGetDownloadList(string $docRoot = '/srv/htdocs'): array
+    {
+        $this->writeState([
+            'command' => 'files-sync',
+            'status' => 'in_progress',
+            'stage' => 'diff',
+            'preflight' => [
+                'data' => [
+                    'ok' => true,
+                    'runtime' => [
+                        'document_root' => 'base64:' . base64_encode($docRoot),
+                    ],
+                ],
+                'http_code' => 200,
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
+        $diffMethod->invoke($client);
+
+        return $this->readDownloadList();
+    }
+
+    private function readDownloadList(): array
+    {
+        $file = $this->stateDir . '/.import-download-list.jsonl';
+        if (!file_exists($file)) {
+            return [];
+        }
+        $paths = [];
+        foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            $data = json_decode($line, true);
+            if (isset($data['path'])) {
+                $paths[] = base64_decode($data['path']);
+            }
+        }
+        return $paths;
+    }
+
+    /**
+     * Recursive symlink: /srv/htdocs/srv/htdocs/file.php is a re-entry
+     * into the document root and must be skipped.
+     */
+    public function testRecursiveDocRootReentryIsSkipped()
+    {
+        $this->writeRemoteIndex([
+            ['path' => '/srv/htdocs/file.php'],
+            ['path' => '/srv/htdocs/srv', 'type' => 'dir'],
+            ['path' => '/srv/htdocs/srv/htdocs', 'type' => 'dir'],
+            ['path' => '/srv/htdocs/srv/htdocs/file.php'],
+            ['path' => '/srv/htdocs/srv/htdocs/wp-config.php'],
+            ['path' => '/srv/htdocs/wp-config.php'],
+        ]);
+
+        $paths = $this->runDiffAndGetDownloadList();
+
+        $this->assertContains('/srv/htdocs/file.php', $paths);
+        $this->assertContains('/srv/htdocs/wp-config.php', $paths);
+        // These are recursive re-entries — same files via /srv/htdocs/srv/htdocs/
+        $this->assertNotContains('/srv/htdocs/srv/htdocs/file.php', $paths);
+        $this->assertNotContains('/srv/htdocs/srv/htdocs/wp-config.php', $paths);
+    }
+
+    /**
+     * Paths outside the document root that are also reachable inside it
+     * should be skipped.  /wordpress/plugins/foo.php is already reachable
+     * as /srv/htdocs/wordpress/plugins/foo.php.
+     */
+    public function testPathsOutsideDocRootSkippedWhenReachableInside()
+    {
+        $this->writeRemoteIndex([
+            ['path' => '/srv/htdocs/wordpress', 'type' => 'dir'],
+            ['path' => '/srv/htdocs/wordpress/plugins/foo.php'],
+            ['path' => '/wordpress', 'type' => 'dir'],
+            ['path' => '/wordpress/plugins/foo.php'],
+        ]);
+
+        $paths = $this->runDiffAndGetDownloadList();
+
+        // The doc-root version is canonical
+        $this->assertContains('/srv/htdocs/wordpress/plugins/foo.php', $paths);
+        // The outside-doc-root version is a duplicate
+        $this->assertNotContains('/wordpress/plugins/foo.php', $paths);
+    }
+
+    /**
+     * Symlink alias directories inside the doc root are NOT deduped
+     * (the dedup is stateless — it only uses the doc root path).
+     * This is acceptable: the alias files are a small fraction of the
+     * total and keeping them is cheaper than in-memory state tracking.
+     */
+    public function testSymlinkAliasInsideDocRootIsKept()
+    {
+        $this->writeRemoteIndex([
+            ['path' => '/srv/htdocs/wordpress/plugins/jetpack/15.7/file.php'],
+            ['path' => '/srv/htdocs/wordpress/plugins/jetpack/latest', 'type' => 'link', 'target' => '/srv/htdocs/wordpress/plugins/jetpack/15.7'],
+            ['path' => '/srv/htdocs/wordpress/plugins/jetpack/latest/file.php'],
+        ]);
+
+        $paths = $this->runDiffAndGetDownloadList();
+
+        // Both kept — alias dedup would require in-memory state
+        $this->assertContains('/srv/htdocs/wordpress/plugins/jetpack/15.7/file.php', $paths);
+        $this->assertContains('/srv/htdocs/wordpress/plugins/jetpack/latest/file.php', $paths);
+    }
+
+    /**
+     * Combined: all three dedup patterns together, matching the real
+     * WP.com Atomic site structure.
+     */
+    public function testCombinedWpComAtomicDedup()
+    {
+        $this->writeRemoteIndex([
+            // Canonical files under document root
+            ['path' => '/srv/htdocs/wp-config.php'],
+            ['path' => '/srv/htdocs/wordpress', 'type' => 'dir'],
+            ['path' => '/srv/htdocs/wordpress/plugins/jetpack/15.7/init.php'],
+            ['path' => '/srv/htdocs/wordpress/plugins/jetpack/latest', 'type' => 'link', 'target' => '/srv/htdocs/wordpress/plugins/jetpack/15.7'],
+            ['path' => '/srv/htdocs/wordpress/plugins/jetpack/latest/init.php'],
+            ['path' => '/srv/htdocs/wp-content/mu-plugins/loader.php'],
+            // Recursive re-entry via /srv/htdocs/srv/htdocs/
+            ['path' => '/srv/htdocs/srv', 'type' => 'dir'],
+            ['path' => '/srv/htdocs/srv/htdocs', 'type' => 'dir'],
+            ['path' => '/srv/htdocs/srv/htdocs/wp-config.php'],
+            ['path' => '/srv/htdocs/srv/htdocs/wp-content/mu-plugins/loader.php'],
+            // Outside doc root — duplicates /srv/htdocs/wordpress/
+            ['path' => '/wordpress', 'type' => 'dir'],
+            ['path' => '/wordpress/plugins/jetpack/15.7/init.php'],
+            ['path' => '/wordpress/plugins/jetpack/latest', 'type' => 'link', 'target' => '/wordpress/plugins/jetpack/15.7'],
+            ['path' => '/wordpress/plugins/jetpack/latest/init.php'],
+        ]);
+
+        $paths = $this->runDiffAndGetDownloadList();
+
+        // Canonical files kept
+        $this->assertContains('/srv/htdocs/wp-config.php', $paths);
+        $this->assertContains('/srv/htdocs/wordpress/plugins/jetpack/15.7/init.php', $paths);
+        $this->assertContains('/srv/htdocs/wp-content/mu-plugins/loader.php', $paths);
+
+        // Symlink alias inside doc root is kept (stateless dedup doesn't track these)
+        $this->assertContains('/srv/htdocs/wordpress/plugins/jetpack/latest/init.php', $paths);
+
+        // Recursive re-entries skipped
+        $this->assertNotContains('/srv/htdocs/srv/htdocs/wp-config.php', $paths);
+        $this->assertNotContains('/srv/htdocs/srv/htdocs/wp-content/mu-plugins/loader.php', $paths);
+
+        // Outside-doc-root duplicates skipped
+        $this->assertNotContains('/wordpress/plugins/jetpack/15.7/init.php', $paths);
+        $this->assertNotContains('/wordpress/plugins/jetpack/latest/init.php', $paths);
+    }
+
 }
