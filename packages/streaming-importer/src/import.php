@@ -5713,9 +5713,12 @@ class ImportClient
 
             // Skip files under covered prefixes — they're duplicates
             // reachable through the original (non-symlink) path.
+            // The symlink entry itself ($remote["path"] === $prefix) must
+            // NOT be skipped — it needs to reach the download list so the
+            // symlink is recreated locally.  Only children are duplicates.
             $is_duplicate = false;
             foreach ($covered_prefixes as $prefix) {
-                if (str_starts_with($remote["path"] . "/", $prefix . "/") || $remote["path"] === $prefix) {
+                if (str_starts_with($remote["path"] . "/", $prefix . "/")) {
                     $is_duplicate = true;
                     break;
                 }
