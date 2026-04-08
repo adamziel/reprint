@@ -924,12 +924,8 @@ class ImportClient
     /** @var int Running count of files imported in the current invocation. */
     private $files_imported = 0;
 
-    /** @var int|null Cached index size, set once before the fetch phase to
-     *  avoid re-reading the index file on every progress record. */
-    private $cached_index_count = null;
-
     /** @var int|null Total entries in the current download list.  Set once
-     *  at the start of download_files_from_list() by counting lines. */
+     *  at the start of download_files_from_list() by counting newlines. */
     private $download_list_total = null;
 
     /** @var int|null Entries already processed (before the current offset)
@@ -2458,7 +2454,7 @@ class ImportClient
         if ($has_progress) {
             $this->files_imported = 0;
             $index_size = $this->index_count();
-            $this->cached_index_count = $index_size;
+
 
             $stage = $this->state["stage"] ?? "index";
             $this->audit_log(
@@ -2506,7 +2502,7 @@ class ImportClient
             if ($is_delta) {
                 $this->files_imported = 0;
                 $index_size = $this->index_count();
-                $this->cached_index_count = $index_size;
+    
                 $this->audit_log(
                     "START files-sync (delta) | index_files={$index_size}",
                     true,
@@ -2559,7 +2555,6 @@ class ImportClient
 
         $this->clear_progress_line();
         $index_size = $this->index_count();
-        $this->cached_index_count = $index_size;
         $label = $is_delta ? "files-sync (delta)" : "files-sync";
 
         $this->audit_log(
@@ -5754,9 +5749,14 @@ class ImportClient
      *                            (e.g. "fetch" or "fetch_skipped").
      */
     /**
-     * Count non-empty lines in a JSONL file, optionally up to a byte limit.
+     * Count newlines in a file using buffered reads.  Much faster than
+     * fgets() on large JSONL files because it never allocates per-line
+     * strings — just scans raw bytes in 64 KB chunks.
+     *
+     * @param string $file       Path to the file.
+     * @param int    $up_to_byte Stop after this byte offset (-1 = entire file).
      */
-    private function count_jsonl_lines(string $file, int $up_to_byte = -1): int
+    private function count_newlines(string $file, int $up_to_byte = -1): int
     {
         if (!is_file($file)) {
             return 0;
@@ -5766,13 +5766,15 @@ class ImportClient
             return 0;
         }
         $count = 0;
-        while (($line = fgets($handle)) !== false) {
-            if ($up_to_byte >= 0 && ftell($handle) > $up_to_byte) {
+        $chunk_size = 65536;
+        $remaining = $up_to_byte >= 0 ? $up_to_byte : PHP_INT_MAX;
+        while ($remaining > 0 && !feof($handle)) {
+            $data = fread($handle, min($chunk_size, $remaining));
+            if ($data === false || $data === '') {
                 break;
             }
-            if (trim($line) !== "") {
-                $count++;
-            }
+            $count += substr_count($data, "\n");
+            $remaining -= strlen($data);
         }
         fclose($handle);
         return $count;
@@ -5795,9 +5797,9 @@ class ImportClient
         // recomputed on restart from the state file's byte offset.
         if ($this->download_list_total === null) {
             $offset = (int) ($this->state[$state_key]["offset"] ?? 0);
-            $this->download_list_total = $this->count_jsonl_lines($list_file);
+            $this->download_list_total = $this->count_newlines($list_file);
             $this->download_list_done = $offset > 0
-                ? $this->count_jsonl_lines($list_file, $offset)
+                ? $this->count_newlines($list_file, $offset)
                 : 0;
         }
         $fetch_state = $this->state[$state_key] ?? $this->default_state()[$state_key];
@@ -5805,6 +5807,8 @@ class ImportClient
         $batch_offset = (int) ($fetch_state["offset"] ?? 0);
         $next_offset = (int) ($fetch_state["next_offset"] ?? 0);
         $cursor = $fetch_state["cursor"] ?? null;
+
+        $batch_entries = (int) ($fetch_state["batch_entries"] ?? 0);
 
         if ($batch_file === null || !file_exists($batch_file)) {
             $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
@@ -5814,11 +5818,13 @@ class ImportClient
             $batch_file = $batch["file"];
             $batch_offset = $batch["offset"];
             $next_offset = $batch["next_offset"];
+            $batch_entries = $batch["entries"];
             $cursor = null;
             $this->state[$state_key] = [
                 "offset" => $batch_offset,
                 "next_offset" => $next_offset,
                 "batch_file" => $batch_file,
+                "batch_entries" => $batch_entries,
                 "cursor" => null,
             ];
             $this->save_state($this->state);
@@ -5842,20 +5848,9 @@ class ImportClient
             $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
         }
 
-        // Advance the done counter by the number of entries in this batch.
+        // Advance the done counter by the known batch size.
         if ($this->download_list_done !== null) {
-            $handle = fopen($list_file, "r");
-            if ($handle) {
-                fseek($handle, $batch_offset);
-                $batch_entries = 0;
-                while (ftell($handle) < $next_offset && ($line = fgets($handle)) !== false) {
-                    if (trim($line) !== "") {
-                        $batch_entries++;
-                    }
-                }
-                fclose($handle);
-                $this->download_list_done += $batch_entries;
-            }
+            $this->download_list_done += $batch_entries;
         }
 
         $this->state[$state_key] = [
@@ -5882,8 +5877,9 @@ class ImportClient
      *
      * @param string $list_file Path to the JSONL download list.
      * @param int    $offset    Byte offset into the download list file.
-     * @return array{file: string, offset: int, next_offset: int}|null
-     *         The temp file path and byte offsets, or null if no paths remain.
+     * @return array{file: string, offset: int, next_offset: int, entries: int}|null
+     *         The temp file path, byte offsets, and entry count, or null if
+     *         no paths remain.
      */
     private function prepare_fetch_batch(string $list_file, int $offset): ?array
     {
@@ -5924,6 +5920,7 @@ class ImportClient
         //   - A bare JSON string:   "/path/to/file"
         //   - A JSON object:        {"path": "<base64-encoded path>"}
         $bytes = 0;
+        $entries = 0;
         $first = true;
         fwrite($out, "[");
         $bytes = 1;
@@ -5974,6 +5971,7 @@ class ImportClient
                     throw new RuntimeException("Failed to write fetch batch file (disk full?)");
                 }
                 $bytes += strlen($chunk);
+                $entries++;
                 $first = false;
                 break;
             }
@@ -5982,6 +5980,7 @@ class ImportClient
                 throw new RuntimeException("Failed to write fetch batch file (disk full?)");
             }
             $bytes += strlen($chunk);
+            $entries++;
             $first = false;
         }
         fwrite($out, "]");
@@ -6001,6 +6000,7 @@ class ImportClient
             "file" => $tmp,
             "offset" => $offset,
             "next_offset" => $next_offset,
+            "entries" => $entries,
         ];
     }
 
