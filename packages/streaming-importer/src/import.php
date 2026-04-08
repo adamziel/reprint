@@ -6671,6 +6671,7 @@ class ImportClient
         );
 
         $curl_timed_out = false;
+        $caught_exception = null;
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
@@ -6879,6 +6880,42 @@ class ImportClient
                     $sql_buffer = "";
                     $curl_timed_out = true;
                     break;
+                } catch (RuntimeException $e) {
+                    // The server may crash mid-response (max_execution_time,
+                    // OOM, fatal error). This surfaces as either:
+                    //  - "missing completion chunk" (response ended without it)
+                    //  - "cURL error:" (partial transfer / recv error)
+                    //  - "missing multipart boundary" (proxy error page)
+                    // Treat these like a timeout: save state so the next
+                    // invocation resumes from the cursor. The .sql-buffer
+                    // file already has all partial SQL persisted to disk, so
+                    // the next run will reload it and continue accumulating.
+                    $msg = $e->getMessage();
+                    $is_retryable =
+                        strpos($msg, "missing completion chunk") !== false ||
+                        strpos($msg, "cURL error:") !== false ||
+                        strpos($msg, "missing multipart boundary") !== false;
+                    if ($is_retryable) {
+                        $this->audit_log(
+                            "INCOMPLETE RESPONSE | " . $msg .
+                            " | buffered_sql=" . strlen($sql_buffer) . " bytes" .
+                            " — will save state for retry",
+                            true,
+                        );
+                        $this->assert_can_retry_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
+                        if ($sql_handle) {
+                            fflush($sql_handle);
+                        }
+                        $this->state["cursor"] = $cursor;
+                        $this->state["sql_bytes"] = $sql_bytes_written;
+                        $this->state["sql_statements_counted"] = $sql_statements_counted;
+                        $this->state["status"] = "partial";
+                        $this->save_state($this->state);
+                        $sql_buffer = "";
+                        $curl_timed_out = true;
+                        break;
+                    }
+                    throw $e;
                 }
                 $this->state["consecutive_timeouts"] = 0;
                 $wall_time = microtime(true) - $request_start;
@@ -6939,6 +6976,9 @@ class ImportClient
                     );
                 }
             }
+        } catch (\Throwable $e) {
+            $caught_exception = $e;
+            throw $e;
         } finally {
             if ($sql_handle) {
                 fclose($sql_handle);
@@ -6958,10 +6998,23 @@ class ImportClient
                     unlink($buffer_file);
                 }
                 if ($pending !== "") {
-                    throw new RuntimeException(
-                        "Buffered SQL was never executed (" . strlen($pending) .
-                        " bytes) — incomplete export?"
-                    );
+                    if ($caught_exception !== null) {
+                        // An exception is already in flight (e.g. curl error,
+                        // MySQL error). Don't mask it by throwing about the
+                        // buffer — the buffer data is safely persisted in
+                        // .sql-buffer and will be recovered on the next run.
+                        $this->audit_log(
+                            "BUFFER NOT FLUSHED | " . strlen($pending) .
+                            " bytes in SQL buffer during exception unwind" .
+                            " (original error: " . $caught_exception->getMessage() . ")",
+                            true,
+                        );
+                    } else {
+                        throw new RuntimeException(
+                            "Buffered SQL was never executed (" . strlen($pending) .
+                            " bytes) — incomplete export?"
+                        );
+                    }
                 }
             }
         }
