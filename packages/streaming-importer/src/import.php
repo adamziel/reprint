@@ -8974,10 +8974,14 @@ class ImportClient
                         $heartbeat = [
                             "heartbeat" => true,
                             "bytes_received" => $bytes_received,
-                            "files_done" =>
-                                ($this->download_list_done ?? 0) + $this->files_imported,
                         ];
+                        // Only emit file counters when the download list has
+                        // been counted (fetch phase).  During indexing the
+                        // list doesn't exist yet and emitting files_done:0
+                        // without files_total confuses consumers.
                         if ($this->download_list_total !== null) {
+                            $heartbeat["files_done"] =
+                                ($this->download_list_done ?? 0) + $this->files_imported;
                             $heartbeat["files_total"] = $this->download_list_total;
                         }
                         fwrite($this->progress_fd, json_encode($heartbeat) . "\n");
