@@ -6885,7 +6885,7 @@ class ImportClient
                     // The server may crash mid-response (max_execution_time,
                     // OOM, fatal error). This surfaces as either:
                     //  - "missing completion chunk" (response ended without it)
-                    //  - "cURL error:" (partial transfer / recv error)
+                    //  - cURL error 18/52/56 (partial transfer / recv error)
                     //  - "missing multipart boundary" (proxy error page)
                     // Treat these as a retryable partial response: save state
                     // so the next invocation resumes from the cursor. Unlike
@@ -6894,9 +6894,20 @@ class ImportClient
                     // is preserved — the next run reloads it and continues
                     // accumulating from where the server left off.
                     $msg = $e->getMessage();
+                    // Only retry connection-level curl errors that indicate
+                    // the server crashed or the connection was interrupted.
+                    // Do NOT retry content-encoding errors (e.g. gzip
+                    // corruption, CURLE_BAD_CONTENT_ENCODING=61) — those
+                    // will fail identically on every retry.
+                    //   18 = CURLE_PARTIAL_FILE (transfer closed mid-stream)
+                    //   52 = CURLE_GOT_NOTHING (empty response)
+                    //   56 = CURLE_RECV_ERROR (connection reset / recv failure)
+                    $is_retryable_curl = preg_match(
+                        '/cURL error \((\d+)\):/', $msg, $curl_match
+                    ) && in_array((int) $curl_match[1], [18, 52, 56]);
                     $is_retryable =
                         strpos($msg, "missing completion chunk") !== false ||
-                        strpos($msg, "cURL error:") !== false ||
+                        $is_retryable_curl ||
                         strpos($msg, "missing multipart boundary") !== false;
                     if ($is_retryable) {
                         $this->audit_log(
@@ -8675,7 +8686,7 @@ class ImportClient
         if ($this->last_curl_timeout) {
             throw new CurlTimeoutException("cURL error: {$error}");
         }
-        throw new RuntimeException("cURL error: {$error}");
+        throw new RuntimeException("cURL error ($errno): {$error}");
     }
 
     /**
