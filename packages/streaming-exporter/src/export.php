@@ -2898,7 +2898,7 @@ function endpoint_file_index(
         );
         $gz->sync();
         $stop = false;
-        // Cycle detection uses the traversal stack — see below.
+
         while (!$stop) {
             if (empty($stack)) {
                 $status = "complete";
@@ -2986,23 +2986,7 @@ function endpoint_file_index(
             $stack[$frame_index]["dir"] = $current_real;
             $current_dir = $current_real;
 
-            // Cycle detection: skip this directory if its realpath is already
-            // an ancestor in the current traversal stack.  This catches
-            // symlink loops (e.g. /srv/htdocs/srv -> /srv -> contains
-            // htdocs/ again) without blocking legitimate symlinks that
-            // point to a directory visited in a sibling branch.
-            $is_cycle = false;
-            for ($i = 0; $i < $frame_index; $i++) {
-                $ancestor_real = realpath($stack[$i]["dir"]);
-                if ($ancestor_real !== false && $ancestor_real === $current_real) {
-                    $is_cycle = true;
-                    break;
-                }
-            }
-            if ($is_cycle) {
-                array_pop($stack);
-                continue;
-            }
+
 
             clearstatcache(true, $current_real);
             $entries = @scandir($current_real, SCANDIR_SORT_ASCENDING);
@@ -3143,6 +3127,29 @@ function endpoint_file_index(
                 }
 
                 if ($type === "dir") {
+                    // Stateless dedup: check the resolved realpath against the
+                    // configured roots.  Skip if it equals a root (overlapping
+                    // root — will be indexed when that root is traversed) or is
+                    // a parent of a root (would re-enter a root and cause a
+                    // cycle).  O(k) where k = number of roots (typically 2-5).
+                    $dir_real = realpath($path);
+                    if ($dir_real !== false) {
+                        $skip_dir = false;
+                        foreach ($directories as $root) {
+                            if ($dir_real === $root) {
+                                $skip_dir = true;
+                                break;
+                            }
+                            if ($dir_real === "/" || str_starts_with($root . "/", $dir_real . "/")) {
+                                $skip_dir = true;
+                                break;
+                            }
+                        }
+                        if ($skip_dir) {
+                            // Don't push — emit the entry but skip traversal
+                            continue;
+                        }
+                    }
                     $stack[] = [
                         "dir" => $path,
                         "after" => null,
