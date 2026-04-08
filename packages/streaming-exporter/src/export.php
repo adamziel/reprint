@@ -2898,6 +2898,9 @@ function endpoint_file_index(
         );
         $gz->sync();
         $stop = false;
+        // Track resolved real paths of directories we've entered to detect
+        // symlink cycles (e.g. /srv/htdocs/srv -> /srv -> contains htdocs/).
+        $visited_realpaths = [];
         while (!$stop) {
             if (empty($stack)) {
                 $status = "complete";
@@ -2984,6 +2987,16 @@ function endpoint_file_index(
             // This keeps root dirs and symlink-followed dirs consistent.
             $stack[$frame_index]["dir"] = $current_real;
             $current_dir = $current_real;
+
+            // Cycle detection: skip directories whose realpath we've already
+            // traversed.  This catches symlink loops like /srv/htdocs/srv ->
+            // /srv (which contains htdocs/ again).
+            if (isset($visited_realpaths[$current_real])) {
+                array_pop($stack);
+                continue;
+            }
+            $visited_realpaths[$current_real] = true;
+
             clearstatcache(true, $current_real);
             $entries = @scandir($current_real, SCANDIR_SORT_ASCENDING);
             if ($entries === false) {
