@@ -6671,6 +6671,8 @@ class ImportClient
         );
 
         $curl_timed_out = false;
+        $caught_exception = null;
+        $buffer_not_flushed = "";
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
@@ -6879,6 +6881,54 @@ class ImportClient
                     $sql_buffer = "";
                     $curl_timed_out = true;
                     break;
+                } catch (RuntimeException $e) {
+                    // The server may crash mid-response (max_execution_time,
+                    // OOM, fatal error). This surfaces as either:
+                    //  - "missing completion chunk" (response ended without it)
+                    //  - cURL error 18/52/56 (partial transfer / recv error)
+                    //  - "missing multipart boundary" (proxy error page)
+                    // Treat these as a retryable partial response: save state
+                    // so the next invocation resumes from the cursor. Unlike
+                    // a timeout (where the buffer is discarded and re-fetched),
+                    // we keep $sql_buffer intact here so the .sql-buffer file
+                    // is preserved — the next run reloads it and continues
+                    // accumulating from where the server left off.
+                    $msg = $e->getMessage();
+                    // Only retry connection-level curl errors that indicate
+                    // the server crashed or the connection was interrupted.
+                    // Do NOT retry content-encoding errors (e.g. gzip
+                    // corruption, CURLE_BAD_CONTENT_ENCODING=61) — those
+                    // will fail identically on every retry.
+                    //   18 = CURLE_PARTIAL_FILE (transfer closed mid-stream)
+                    //   52 = CURLE_GOT_NOTHING (empty response)
+                    //   56 = CURLE_RECV_ERROR (connection reset / recv failure)
+                    $is_retryable_curl = preg_match(
+                        '/cURL error \((\d+)\):/', $msg, $curl_match
+                    ) && in_array((int) $curl_match[1], [18, 52, 56]);
+                    $is_retryable =
+                        strpos($msg, "missing completion chunk") !== false ||
+                        $is_retryable_curl ||
+                        strpos($msg, "missing multipart boundary") !== false;
+                    if ($is_retryable) {
+                        $this->audit_log(
+                            "INCOMPLETE RESPONSE | " . $msg .
+                            " | buffered_sql=" . strlen($sql_buffer) . " bytes" .
+                            " — will save state for retry",
+                            true,
+                        );
+                        $this->assert_can_retry_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
+                        if ($sql_handle) {
+                            fflush($sql_handle);
+                        }
+                        $this->state["cursor"] = $cursor;
+                        $this->state["sql_bytes"] = $sql_bytes_written;
+                        $this->state["sql_statements_counted"] = $sql_statements_counted;
+                        $this->state["status"] = "partial";
+                        $this->save_state($this->state);
+                        $curl_timed_out = true;
+                        break;
+                    }
+                    throw $e;
                 }
                 $this->state["consecutive_timeouts"] = 0;
                 $wall_time = microtime(true) - $request_start;
@@ -6939,6 +6989,9 @@ class ImportClient
                     );
                 }
             }
+        } catch (\Throwable $e) {
+            $caught_exception = $e;
+            throw $e;
         } finally {
             if ($sql_handle) {
                 fclose($sql_handle);
@@ -6958,12 +7011,38 @@ class ImportClient
                     unlink($buffer_file);
                 }
                 if ($pending !== "") {
-                    throw new RuntimeException(
-                        "Buffered SQL was never executed (" . strlen($pending) .
-                        " bytes) — incomplete export?"
-                    );
+                    if ($caught_exception !== null) {
+                        // An exception is already in flight (e.g. curl error,
+                        // MySQL error). Don't mask it by throwing about the
+                        // buffer — the buffer data is safely persisted in
+                        // .sql-buffer and will be recovered on the next run.
+                        $this->audit_log(
+                            "BUFFER NOT FLUSHED | " . strlen($pending) .
+                            " bytes in SQL buffer during exception unwind" .
+                            " (original error: " . $caught_exception->getMessage() . ")",
+                            true,
+                        );
+                    } elseif ($curl_timed_out) {
+                        // Crash recovery — the buffer file is preserved on
+                        // disk so the next invocation reloads it and continues
+                        // accumulating from where the server left off.
+                        $this->audit_log(
+                            "BUFFER PRESERVED | " . strlen($pending) .
+                            " bytes in SQL buffer saved for crash recovery",
+                            true,
+                        );
+                    } else {
+                        $buffer_not_flushed = $pending;
+                    }
                 }
             }
+        }
+
+        if ($buffer_not_flushed !== "") {
+            throw new RuntimeException(
+                "Buffered SQL was never executed (" . strlen($buffer_not_flushed) .
+                " bytes) — incomplete export?"
+            );
         }
 
         if ($curl_timed_out) {
@@ -8607,7 +8686,7 @@ class ImportClient
         if ($this->last_curl_timeout) {
             throw new CurlTimeoutException("cURL error: {$error}");
         }
-        throw new RuntimeException("cURL error: {$error}");
+        throw new RuntimeException("cURL error ($errno): {$error}");
     }
 
     /**

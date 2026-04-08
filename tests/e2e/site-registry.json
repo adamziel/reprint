@@ -35,6 +35,7 @@
     "url-rewriting":     { "port": 8108 },
     "wpcloud-flatten":   { "port": 8109 },
     "defer-uploads":     { "port": 8110 },
-    "symlinked-abspath": { "port": 8111 }
+    "symlinked-abspath": { "port": 8111 },
+    "sql-crash":         { "port": 8113 }
   }
 }
