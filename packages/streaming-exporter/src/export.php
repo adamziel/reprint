@@ -2898,7 +2898,11 @@ function endpoint_file_index(
         );
         $gz->sync();
         $stop = false;
-        // Cycle detection uses the traversal stack — see below.
+        // Track real paths of directories we've fully entered.  If a new
+        // directory's realpath is already in the set — or is a child of one —
+        // it's a duplicate tree (reached through a different symlink path)
+        // and can be skipped.
+        $visited_realpaths = [];
         while (!$stop) {
             if (empty($stack)) {
                 $status = "complete";
@@ -2986,23 +2990,23 @@ function endpoint_file_index(
             $stack[$frame_index]["dir"] = $current_real;
             $current_dir = $current_real;
 
-            // Cycle detection: skip this directory if its realpath is already
-            // an ancestor in the current traversal stack.  This catches
-            // symlink loops (e.g. /srv/htdocs/srv -> /srv -> contains
-            // htdocs/ again) without blocking legitimate symlinks that
-            // point to a directory visited in a sibling branch.
-            $is_cycle = false;
-            for ($i = 0; $i < $frame_index; $i++) {
-                $ancestor_real = realpath($stack[$i]["dir"]);
-                if ($ancestor_real !== false && $ancestor_real === $current_real) {
-                    $is_cycle = true;
+            // Duplicate-tree detection: skip this directory if its realpath
+            // (or a parent of it) was already traversed.  This catches:
+            //   - Symlink cycles (/srv/htdocs/srv -> /srv -> htdocs again)
+            //   - Overlapping roots (/wordpress resolved to /srv/htdocs/wordpress)
+            //   - Version aliases (plugins/jetpack/latest -> plugins/jetpack/15.7)
+            $is_duplicate = false;
+            foreach ($visited_realpaths as $visited) {
+                if ($current_real === $visited || str_starts_with($current_real . "/", $visited . "/")) {
+                    $is_duplicate = true;
                     break;
                 }
             }
-            if ($is_cycle) {
+            if ($is_duplicate) {
                 array_pop($stack);
                 continue;
             }
+            $visited_realpaths[] = $current_real;
 
             clearstatcache(true, $current_real);
             $entries = @scandir($current_real, SCANDIR_SORT_ASCENDING);
