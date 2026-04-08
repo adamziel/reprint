@@ -7534,6 +7534,7 @@ class ImportClient
             $progress_record = [
                 "type" => "file_progress",
                 "files_imported" => $this->files_imported,
+                "files_indexed" => $this->cached_index_count,
                 "path" => $path,
                 "size" => $file_size,
                 "message" => $file_progress_message,
