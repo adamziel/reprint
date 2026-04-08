@@ -6672,6 +6672,7 @@ class ImportClient
 
         $curl_timed_out = false;
         $caught_exception = null;
+        $buffer_not_flushed = "";
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
@@ -6886,10 +6887,12 @@ class ImportClient
                     //  - "missing completion chunk" (response ended without it)
                     //  - "cURL error:" (partial transfer / recv error)
                     //  - "missing multipart boundary" (proxy error page)
-                    // Treat these like a timeout: save state so the next
-                    // invocation resumes from the cursor. The .sql-buffer
-                    // file already has all partial SQL persisted to disk, so
-                    // the next run will reload it and continue accumulating.
+                    // Treat these as a retryable partial response: save state
+                    // so the next invocation resumes from the cursor. Unlike
+                    // a timeout (where the buffer is discarded and re-fetched),
+                    // we keep $sql_buffer intact here so the .sql-buffer file
+                    // is preserved — the next run reloads it and continues
+                    // accumulating from where the server left off.
                     $msg = $e->getMessage();
                     $is_retryable =
                         strpos($msg, "missing completion chunk") !== false ||
@@ -6911,7 +6914,6 @@ class ImportClient
                         $this->state["sql_statements_counted"] = $sql_statements_counted;
                         $this->state["status"] = "partial";
                         $this->save_state($this->state);
-                        $sql_buffer = "";
                         $curl_timed_out = true;
                         break;
                     }
@@ -7009,14 +7011,27 @@ class ImportClient
                             " (original error: " . $caught_exception->getMessage() . ")",
                             true,
                         );
-                    } else {
-                        throw new RuntimeException(
-                            "Buffered SQL was never executed (" . strlen($pending) .
-                            " bytes) — incomplete export?"
+                    } elseif ($curl_timed_out) {
+                        // Crash recovery — the buffer file is preserved on
+                        // disk so the next invocation reloads it and continues
+                        // accumulating from where the server left off.
+                        $this->audit_log(
+                            "BUFFER PRESERVED | " . strlen($pending) .
+                            " bytes in SQL buffer saved for crash recovery",
+                            true,
                         );
+                    } else {
+                        $buffer_not_flushed = $pending;
                     }
                 }
             }
+        }
+
+        if ($buffer_not_flushed !== "") {
+            throw new RuntimeException(
+                "Buffered SQL was never executed (" . strlen($buffer_not_flushed) .
+                " bytes) — incomplete export?"
+            );
         }
 
         if ($curl_timed_out) {

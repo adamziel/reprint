@@ -42,6 +42,12 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
         '--mysql-host=127.0.0.1',
         '--mysql-user=e2e_admin',
         '--mysql-password=e2e_password',
+        // Force small batches so the standard WP install produces 3+
+        // SQL batches. The default (1000 fragments/batch) fits everything
+        // in one batch, so the crash hook on batch 3 would never fire.
+        '--sql-fragments-start=5',
+        '--sql-fragments-max=5',
+        '--sql-fragments-min=5',
     ];
 
     describe('PHP crash mid-SQL-stream recovers via resume', () => {
@@ -127,6 +133,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
             const audit = readAuditLog(tempDir);
             assert.ok(
                 audit.includes('INCOMPLETE RESPONSE') ||
+                audit.includes('BUFFER PRESERVED') ||
                 audit.includes('BUFFER NOT FLUSHED') ||
                 audit.includes('missing completion chunk'),
                 'Expected audit log to record the incomplete response'
