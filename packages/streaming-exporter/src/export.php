@@ -1199,6 +1199,29 @@ function resolve_directories(array $config): array
 }
 
 /**
+ * Returns true when traversing $candidate would only duplicate or re-enter
+ * one of the already-scheduled roots.
+ *
+ * Examples:
+ * - candidate == root: duplicate root
+ * - candidate is a parent of root: would expose outside-tree paths and then
+ *   re-enter the scheduled root again
+ */
+function should_skip_index_root(string $candidate, array $roots): bool
+{
+    foreach ($roots as $root) {
+        if ($candidate === $root) {
+            return true;
+        }
+        if ($candidate === "/" || str_starts_with($root . "/", $candidate . "/")) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * Returns lightweight preflight checks: filesystem accessibility, DB connectivity,
  * and environment details useful for diagnostics.
  */
@@ -2824,6 +2847,9 @@ function endpoint_file_index(
         if (!empty($extra_roots)) {
             sort($extra_roots, SORT_STRING);
             foreach ($extra_roots as $root) {
+                if (should_skip_index_root($root, $ordered)) {
+                    continue;
+                }
                 $ordered[] = $root;
             }
         }
@@ -3127,28 +3153,14 @@ function endpoint_file_index(
                 }
 
                 if ($type === "dir") {
-                    // Stateless dedup: check the resolved realpath against the
-                    // configured roots.  Skip if it equals a root (overlapping
-                    // root — will be indexed when that root is traversed) or is
-                    // a parent of a root (would re-enter a root and cause a
-                    // cycle).  O(k) where k = number of roots (typically 2-5).
+                    // Skip traversing directories whose realpath is already
+                    // covered by the configured roots (duplicate root), or is a
+                    // parent of one of them (would expose outside-tree files and
+                    // re-enter a scheduled root). O(k) where k = number of roots.
                     $dir_real = realpath($path);
-                    if ($dir_real !== false) {
-                        $skip_dir = false;
-                        foreach ($directories as $root) {
-                            if ($dir_real === $root) {
-                                $skip_dir = true;
-                                break;
-                            }
-                            if ($dir_real === "/" || str_starts_with($root . "/", $dir_real . "/")) {
-                                $skip_dir = true;
-                                break;
-                            }
-                        }
-                        if ($skip_dir) {
-                            // Don't push — emit the entry but skip traversal
-                            continue;
-                        }
+                    if ($dir_real !== false && should_skip_index_root($dir_real, $directories)) {
+                        // Don't push — emit the entry but skip traversal
+                        continue;
                     }
                     $stack[] = [
                         "dir" => $path,
