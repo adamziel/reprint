@@ -1199,6 +1199,155 @@ function resolve_directories(array $config): array
 }
 
 /**
+ * Returns true when $path is exactly $prefix or nested underneath it.
+ */
+function path_has_prefix(string $path, string $prefix): bool
+{
+    return $path === $prefix || str_starts_with($path, $prefix . "/");
+}
+
+/**
+ * Detect wp.com Atomic-style document roots so file_index can suppress the
+ * duplicate /srv and /wordpress trees that are already reachable from
+ * /srv/htdocs.
+ *
+ * Supports the real host layout (/srv/htdocs) and temporary test prefixes
+ * (.../srv/htdocs). Also accepts /htdocs for environments where /srv has
+ * already been resolved away.
+ *
+ * @return array{document_root: string, host_prefix: string, document_root_relative: string}|null
+ */
+function get_atomic_document_root_context(array $config): ?array
+{
+    $document_root = $config["document_root"] ?? ($_SERVER["DOCUMENT_ROOT"] ?? null);
+    if (!is_string($document_root) || $document_root === "") {
+        return null;
+    }
+
+    clearstatcache(true, $document_root);
+    $document_root_real = @realpath($document_root);
+    if ($document_root_real !== false) {
+        $document_root = $document_root_real;
+    }
+
+    $document_root = rtrim($document_root, "/");
+    if ($document_root === "") {
+        return null;
+    }
+
+    if (basename($document_root) !== "htdocs") {
+        return null;
+    }
+
+    $parent = dirname($document_root);
+    if ($parent !== "/" && basename($parent) !== "srv") {
+        return null;
+    }
+
+    $host_prefix = "";
+    if ($parent !== "/") {
+        $host_prefix = dirname($parent);
+        if ($host_prefix === "/" || $host_prefix === ".") {
+            $host_prefix = "";
+        }
+    }
+
+    $document_root_relative = $host_prefix === ""
+        ? $document_root
+        : substr($document_root, strlen($host_prefix));
+    if (
+        !is_string($document_root_relative) ||
+        $document_root_relative === "" ||
+        $document_root_relative[0] !== "/"
+    ) {
+        return null;
+    }
+
+    return [
+        "document_root" => $document_root,
+        "host_prefix" => $host_prefix,
+        "document_root_relative" => $document_root_relative,
+    ];
+}
+
+/**
+ * Returns true when an outside path is already reachable inside the Atomic
+ * document root via the same host-relative suffix.
+ */
+function path_has_atomic_document_root_alias(string $path, array $context): bool
+{
+    $host_prefix = $context["host_prefix"];
+    if ($host_prefix !== "" && !path_has_prefix($path, $host_prefix)) {
+        return false;
+    }
+
+    $relative = $host_prefix === ""
+        ? $path
+        : substr($path, strlen($host_prefix));
+    if (!is_string($relative) || $relative === "" || $relative[0] !== "/") {
+        return false;
+    }
+
+    $alias = $context["document_root"] . $relative;
+    clearstatcache(true, $alias);
+
+    return @lstat($alias) !== false || @file_exists($alias);
+}
+
+/**
+ * Returns true when $path is a duplicate path produced by the wp.com Atomic
+ * /srv/htdocs layout:
+ *
+ * 1. /srv/htdocs/srv/htdocs/... recursively re-enters the document root.
+ * 2. Outside roots like /srv and /wordpress are already reachable under
+ *    /srv/htdocs/srv and /srv/htdocs/wordpress.
+ */
+function should_skip_atomic_duplicate_index_path(string $path, ?array $context): bool
+{
+    if ($context === null) {
+        return false;
+    }
+
+    $document_root = $context["document_root"];
+    if (path_has_prefix($path, $document_root)) {
+        $remainder = substr($path, strlen($document_root));
+        return is_string($remainder) &&
+            $remainder !== "" &&
+            path_has_prefix($remainder, $context["document_root_relative"]);
+    }
+
+    return path_has_atomic_document_root_alias($path, $context);
+}
+
+/**
+ * Remove Atomic duplicate targets while preserving the symlink entry itself.
+ *
+ * @return array<string, mixed>|null
+ */
+function filter_index_item_for_atomic_duplicates(array $item, ?array $context): ?array
+{
+    $path = $item["path"] ?? null;
+    if (!is_string($path) || $path === "") {
+        return $item;
+    }
+
+    if (should_skip_atomic_duplicate_index_path($path, $context)) {
+        return null;
+    }
+
+    $target = $item["target"] ?? null;
+    if (
+        is_string($target) &&
+        $target !== "" &&
+        should_skip_atomic_duplicate_index_path($target, $context)
+    ) {
+        unset($item["target"]);
+    }
+
+    return $item;
+}
+
+/**
  * Returns true when traversing $candidate would only duplicate or re-enter
  * one of the already-scheduled roots.
  *
@@ -1207,8 +1356,16 @@ function resolve_directories(array $config): array
  * - candidate is a parent of root: would expose outside-tree paths and then
  *   re-enter the scheduled root again
  */
-function should_skip_index_root(string $candidate, array $roots): bool
+function should_skip_index_root(
+    string $candidate,
+    array $roots,
+    ?array $atomic_document_root_context = null
+): bool
 {
+    if (should_skip_atomic_duplicate_index_path($candidate, $atomic_document_root_context)) {
+        return true;
+    }
+
     foreach ($roots as $root) {
         if ($candidate === $root) {
             return true;
@@ -2759,6 +2916,9 @@ function endpoint_file_index(
     $stack = [];
     $ordered = [];
     $follow_symlinks = !empty($config["follow_symlinks"]);
+    $atomic_document_root_context = $follow_symlinks
+        ? get_atomic_document_root_context($config)
+        : null;
     $cursor_provided = isset($config["cursor"]);
 
     // Find the starting point – either by parsing the cursor, or by
@@ -2836,21 +2996,30 @@ function endpoint_file_index(
             );
         }
 
-        $ordered = [$list_dir_real];
-        $extra_roots = [];
-        foreach ($directories as $root) {
-            if ($root === $list_dir_real) {
-                continue;
-            }
-            $extra_roots[] = $root;
+        $skip_list_dir = should_skip_index_root(
+            $list_dir_real,
+            [],
+            $atomic_document_root_context,
+        );
+        if (!$skip_list_dir) {
+            $ordered[] = $list_dir_real;
         }
-        if (!empty($extra_roots)) {
-            sort($extra_roots, SORT_STRING);
-            foreach ($extra_roots as $root) {
-                if (should_skip_index_root($root, $ordered)) {
+        if (!$skip_list_dir) {
+            $extra_roots = [];
+            foreach ($directories as $root) {
+                if ($root === $list_dir_real) {
                     continue;
                 }
-                $ordered[] = $root;
+                $extra_roots[] = $root;
+            }
+            if (!empty($extra_roots)) {
+                sort($extra_roots, SORT_STRING);
+                foreach ($extra_roots as $root) {
+                    if (should_skip_index_root($root, $ordered, $atomic_document_root_context)) {
+                        continue;
+                    }
+                    $ordered[] = $root;
+                }
             }
         }
 
@@ -2892,7 +3061,13 @@ function endpoint_file_index(
         foreach ($ordered as $dir) {
             $path_symlinks = find_parents_symlinks($dir);
             foreach ($path_symlinks as $entry) {
-                $batch_items[] = $entry;
+                $filtered_entry = filter_index_item_for_atomic_duplicates(
+                    $entry,
+                    $atomic_document_root_context,
+                );
+                if ($filtered_entry !== null) {
+                    $batch_items[] = $filtered_entry;
+                }
             }
         }
     }
@@ -3093,8 +3268,25 @@ function endpoint_file_index(
                     $type = "link";
                     $resolved = resolve_symlink_target($path);
                     $link_target = $resolved['target'];
+                    if (
+                        $link_target !== null &&
+                        should_skip_atomic_duplicate_index_path(
+                            $link_target,
+                            $atomic_document_root_context,
+                        )
+                    ) {
+                        $link_target = null;
+                    }
                     if ($follow_symlinks && !empty($resolved['intermediates'])) {
-                        $batch_items = array_merge($batch_items, $resolved['intermediates']);
+                        foreach ($resolved['intermediates'] as $intermediate) {
+                            $filtered_entry = filter_index_item_for_atomic_duplicates(
+                                $intermediate,
+                                $atomic_document_root_context,
+                            );
+                            if ($filtered_entry !== null) {
+                                $batch_items[] = $filtered_entry;
+                            }
+                        }
                     }
                 } elseif ($mode === STAT_TYPE_DIR) {
                     $type = "dir";
@@ -3114,7 +3306,14 @@ function endpoint_file_index(
                 if ($link_target !== null) {
                     $item["target"] = $link_target;
                 }
-                $batch_items[] = $item;
+                $filtered_item = filter_index_item_for_atomic_duplicates(
+                    $item,
+                    $atomic_document_root_context,
+                );
+                if ($filtered_item === null) {
+                    continue;
+                }
+                $batch_items[] = $filtered_item;
 
                 if (count($batch_items) >= $batch_size) {
                     // E2E test hook: before index batch is emitted
@@ -3158,7 +3357,14 @@ function endpoint_file_index(
                     // parent of one of them (would expose outside-tree files and
                     // re-enter a scheduled root). O(k) where k = number of roots.
                     $dir_real = realpath($path);
-                    if ($dir_real !== false && should_skip_index_root($dir_real, $directories)) {
+                    if (
+                        $dir_real !== false &&
+                        should_skip_index_root(
+                            $dir_real,
+                            $directories,
+                            $atomic_document_root_context,
+                        )
+                    ) {
                         // Don't push — emit the entry but skip traversal
                         continue;
                     }
