@@ -22,6 +22,7 @@
         <testsuite name="Export Utility Tests">
             <file>BuildPdoDsnTest.php</file>
             <file>ExportHttpServerTest.php</file>
+            <file>FileIndexDedupTest.php</file>
             <file>HmacServerTest.php</file>
             <file>SiteExportSecretTest.php</file>
         </testsuite>
