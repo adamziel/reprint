@@ -137,13 +137,17 @@ class FilesSyncStateTest extends TestCase
 
         $stateProperty = $reflection->getProperty('state');
         $loadState = $reflection->getMethod('load_state');
-        $stateProperty->setValue($client, $loadState->invoke($client));
+        $state = $loadState->invoke($client);
+        $stateProperty->setValue($client, $state);
 
         $ttyProperty = $reflection->getProperty('is_tty');
         $ttyProperty->setValue($client, false);
 
         $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
         $behaviorProp->setValue($client, 'preserve-local');
+
+        $followSymlinksProp = $reflection->getProperty('follow_symlinks');
+        $followSymlinksProp->setValue($client, $state["follow_symlinks"] ?? true);
 
         return [$client, $reflection];
     }
@@ -314,6 +318,76 @@ class FilesSyncStateTest extends TestCase
             '/wp-content/object-cache.php',
             $downloads,
             "A pre-existing local file not in the index must be skipped by preserve-local",
+        );
+    }
+
+    public function testDiffSkipsPathsOutsideDocumentRootAsDuplicates()
+    {
+        $remoteIndex = $this->stateDir . '/.import-remote-index.jsonl';
+        file_put_contents(
+            $remoteIndex,
+            $this->indexLine('/srv/htdocs/wordpress/wp-admin/index.php', 1000, 200) .
+                $this->indexLine('/wordpress/wp-admin/index.php', 1000, 200),
+        );
+
+        $this->writeState([
+            "command" => "files-sync",
+            "status" => "in_progress",
+            "stage" => "diff",
+            "follow_symlinks" => true,
+            "preflight" => [
+                "data" => [
+                    "ok" => true,
+                    "runtime" => [
+                        "document_root" => "base64:" . base64_encode('/srv/htdocs'),
+                    ],
+                ],
+                "http_code" => 200,
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $reflection->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
+
+        $this->assertSame(
+            ['/srv/htdocs/wordpress/wp-admin/index.php'],
+            $this->readDownloadList(),
+            "Paths outside document_root should be skipped because they are already reachable inside it",
+        );
+    }
+
+    public function testDiffSkipsRecursiveDocumentRootReentryAsDuplicate()
+    {
+        $remoteIndex = $this->stateDir . '/.import-remote-index.jsonl';
+        file_put_contents(
+            $remoteIndex,
+            $this->indexLine('/srv/htdocs/wp-config.php', 1000, 50) .
+                $this->indexLine('/srv/htdocs/srv/htdocs/wp-config.php', 1000, 50),
+        );
+
+        $this->writeState([
+            "command" => "files-sync",
+            "status" => "in_progress",
+            "stage" => "diff",
+            "follow_symlinks" => true,
+            "preflight" => [
+                "data" => [
+                    "ok" => true,
+                    "runtime" => [
+                        "document_root" => '/srv/htdocs',
+                    ],
+                ],
+                "http_code" => 200,
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $reflection->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
+
+        $this->assertSame(
+            ['/srv/htdocs/wp-config.php'],
+            $this->readDownloadList(),
+            "Paths that re-enter document_root recursively should be skipped as duplicates",
         );
     }
 

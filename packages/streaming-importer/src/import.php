@@ -5642,6 +5642,7 @@ class ImportClient
         }
         $this->begin_index_updates();
         $processed = 0;
+        $skipped_duplicate_entries = 0;
 
         while (($line = fgets($remote_handle)) !== false) {
             if ($this->shutdown_requested) {
@@ -5655,6 +5656,10 @@ class ImportClient
             $remote_offset = ftell($remote_handle);
             $remote = $this->parse_index_line($line);
             if (!$remote) {
+                continue;
+            }
+            if ($this->should_skip_remote_index_entry_as_duplicate($remote["path"])) {
+                $skipped_duplicate_entries++;
                 continue;
             }
 
@@ -5729,6 +5734,15 @@ class ImportClient
         if ($skipped_handle !== null) {
             fclose($skipped_handle);
         }
+        if ($skipped_duplicate_entries > 0) {
+            $this->audit_log(
+                sprintf(
+                    "DEDUP | Skipped %d duplicate remote index entries based on document_root",
+                    $skipped_duplicate_entries,
+                ),
+                true,
+            );
+        }
 
         $this->state["diff"] = [
             "remote_offset" => $remote_offset,
@@ -5739,6 +5753,69 @@ class ImportClient
         $this->finalize_index_updates();
 
         return !$this->shutdown_requested;
+    }
+
+    /**
+     * Older exporters may emit duplicate entries when follow-symlinks expands
+     * overlapping trees outside the document root, or when a symlink re-enters
+     * the document root recursively (for example /srv/htdocs/srv/htdocs/*).
+     *
+     * The fallback is intentionally stateless so it survives resumable diff
+     * runs. It only relies on the remote document_root reported by preflight:
+     *
+     * 1. If a path is outside document_root, it is assumed to be reachable via
+     *    a symlink target already covered inside document_root.
+     * 2. If a path is inside document_root and the remainder still begins with
+     *    document_root, it re-entered the tree recursively and is a duplicate.
+     */
+    private function should_skip_remote_index_entry_as_duplicate(string $path): bool
+    {
+        if (!$this->follow_symlinks) {
+            return false;
+        }
+
+        $document_root = $this->get_dedup_document_root();
+        if ($document_root === null) {
+            return false;
+        }
+
+        if (!$this->path_has_prefix($path, $document_root)) {
+            return true;
+        }
+
+        $remainder = substr($path, strlen($document_root));
+        if ($remainder === false || $remainder === '') {
+            return false;
+        }
+
+        return $this->path_has_prefix($remainder, $document_root);
+    }
+
+    private function get_dedup_document_root(): ?string
+    {
+        $document_root = $this->state["preflight"]["data"]["runtime"]["document_root"] ?? null;
+        if (!is_string($document_root) || $document_root === '') {
+            return null;
+        }
+        if (str_starts_with($document_root, "base64:")) {
+            $decoded = base64_decode(substr($document_root, 7), true);
+            if ($decoded === false || $decoded === '') {
+                return null;
+            }
+            $document_root = $decoded;
+        }
+
+        $document_root = rtrim($document_root, "/");
+        if ($document_root === '' || $document_root[0] !== '/') {
+            return null;
+        }
+
+        return $document_root;
+    }
+
+    private function path_has_prefix(string $path, string $prefix): bool
+    {
+        return $path === $prefix || str_starts_with($path, $prefix . "/");
     }
 
     /**
