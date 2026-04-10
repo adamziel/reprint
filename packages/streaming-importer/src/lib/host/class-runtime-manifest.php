@@ -66,6 +66,34 @@ class RuntimeManifest
     public bool $has_db_constants = false;
 
     /**
+     * Paths relative to the fs-root that should be removed after
+     * flattening because they depend on production infrastructure not
+     * available locally.  Examples: Memcached-backed object-cache
+     * drop-ins, hosting-specific mu-plugins.
+     *
+     * Each entry is a relative path like 'wp-content/object-cache.php'
+     * or 'wp-content/mu-plugins/wpcomsh'.  Directories are removed
+     * recursively.  The audit log records every removal.
+     *
+     * @var string[]
+     */
+    public array $paths_to_remove = [];
+
+    /**
+     * Directories outside the WordPress root that must be mounted into
+     * the virtual filesystem at their original absolute paths.  Each
+     * entry maps an absolute remote path (e.g. '/scripts') to the
+     * corresponding host-side directory under fs-root/raw.
+     *
+     * Populated from auto_prepend_file / auto_append_file INI values
+     * during host analysis.  The target runtime applier decides how to
+     * surface these (e.g. --mount-before-install in Playground CLI).
+     *
+     * @var string[]  Absolute remote directory paths (e.g. ['/scripts'])
+     */
+    public array $extra_directories = [];
+
+    /**
      * SQLite database configuration.  When non-null, the target uses
      * SQLite instead of MySQL.  The runtime layer copies the plugin
      * into the output directory and generates a lazy-loading $wpdb
