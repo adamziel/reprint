@@ -160,8 +160,11 @@ function _site_export_update_shared_secret(string $secret): bool {
  * The client sends X-Auth-Content-Hash = SHA256(body).  The server
  * independently hashes what it received and checks both that the hash
  * matches AND that the HMAC is valid.
+ *
+ * @param string      $secret Shared secret.
+ * @param string|null $body   Pre-read request body. If null, reads php://input.
  */
-function _site_export_verify_hmac(string $secret): ?string {
+function _site_export_verify_hmac(string $secret, ?string $body = null): ?string {
     if (!class_exists('Site_Export_HMAC_Server')) {
         _site_export_load_exporter_runtime();
     }
@@ -171,6 +174,26 @@ function _site_export_verify_hmac(string $secret): ?string {
     }
 
     $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+
+    if ($body !== null) {
+        // Use the pre-read body to avoid double-reading php://input.
+        // Collect headers from superglobals the same way verify_globals() does.
+        $headers = [];
+        if (function_exists('getallheaders')) {
+            $all = getallheaders();
+            if (is_array($all)) {
+                $headers = $all;
+            }
+        }
+        foreach ($_SERVER as $key => $value) {
+            if (strpos($key, 'HTTP_') !== 0 || !is_string($value)) {
+                continue;
+            }
+            $headers[$key] = $value;
+        }
+        return $server->verify($headers, $body, $_FILES);
+    }
+
     return $server->verify_globals();
 }
 
@@ -180,8 +203,10 @@ function _site_export_verify_hmac(string $secret): ?string {
  * Reads the shared secret from secret.php when present, otherwise from the
  * site option, and verifies the request's HMAC signature.
  * Calls _site_export_error() on failure.
+ *
+ * @param string|null $body Pre-read request body. If null, reads php://input.
  */
-function _site_export_default_authenticate(): void {
+function _site_export_default_authenticate(?string $body = null): void {
     if (_site_export_has_secret_file()) {
         $secret = _site_export_get_file_secret();
         if (empty($secret)) {
@@ -195,7 +220,7 @@ function _site_export_default_authenticate(): void {
         _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.');
     }
 
-    $auth_error = _site_export_verify_hmac($secret);
+    $auth_error = _site_export_verify_hmac($secret, $body);
     if ($auth_error !== null) {
         _site_export_error(403, $auth_error);
     }
@@ -272,9 +297,22 @@ function _site_export_handle_api_request(array $options = []): void {
         exit(1);
     });
 
+    // Read the request body once. php://input is not rewindable, so both
+    // HMAC verification and the HTTP server dispatch must share this copy.
+    $request_body = file_get_contents('php://input');
+    if ($request_body === false) {
+        $request_body = '';
+    }
+
     // -- Authenticate --
-    $authenticate = $options['authenticate'] ?? '_site_export_default_authenticate';
-    $authenticate();
+    // Pass the pre-read body to the authenticate callable when using the
+    // default handler, so it doesn't try to re-read php://input.
+    $authenticate = $options['authenticate'] ?? null;
+    if ($authenticate !== null) {
+        $authenticate();
+    } else {
+        _site_export_default_authenticate($request_body);
+    }
 
     // export.php has its own SECRET_KEY guard — satisfy it since we already
     // verified the request via HMAC above.
@@ -292,11 +330,12 @@ function _site_export_handle_api_request(array $options = []): void {
     require_once $export_runtime;
 
     // -- Dispatch --
+    // Pass the pre-read body so the HTTP server doesn't re-read php://input.
     try {
         $server = new Site_Export_HTTP_Server([
             'default_directory' => ABSPATH,
         ]);
-        $server->handle_request();
+        $server->handle_request(['body' => $request_body]);
     } catch (Exception $e) {
         if (!headers_sent()) {
             http_response_code(400);

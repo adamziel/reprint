@@ -3412,6 +3412,711 @@ function position_after_entry(array $entries, string $after): int
     return $low;
 }
 
+// =========================================================================
+// Push receiver endpoints
+// =========================================================================
+
+require_once __DIR__ . '/class-multipart-body-stream.php';
+require_once __DIR__ . '/class-chunk-writer.php';
+
+/**
+ * The staging prefix prepended to table names during push-sql.
+ *
+ * During push, the receiver creates staging copies of every table with this
+ * prefix prepended to the original name. On commit, RENAME TABLE atomically
+ * swaps the staging tables into place.
+ *
+ * Example: wp_posts → _push_wp_posts
+ */
+define('PUSH_STAGING_TABLE_PREFIX', '_push_');
+
+/**
+ * Parse a multipart/mixed body into an array of chunks.
+ *
+ * Each chunk is an associative array with:
+ *   - 'headers': array of lowercase header-name => value
+ *   - 'body':    string body content
+ *
+ * This is a synchronous parser for use on the receiver side where we have
+ * the full body in memory (it was already read for HMAC verification).
+ *
+ * @param string $body     Raw multipart body.
+ * @param string $boundary Multipart boundary string (without leading --).
+ * @return array List of parsed chunks.
+ */
+function parse_multipart_body(string $body, string $boundary): array
+{
+    $delimiter = '--' . $boundary;
+    $closing = $delimiter . '--';
+    $chunks = [];
+
+    // Split on boundary markers
+    $parts = explode($delimiter, $body);
+
+    // First element is the preamble (before first boundary), skip it.
+    // Last element may contain the closing marker "--", skip that too.
+    array_shift($parts);
+
+    foreach ($parts as $part) {
+        // Check for closing boundary
+        if (str_starts_with(ltrim($part, "\r\n"), '--')) {
+            break;
+        }
+
+        // Split headers from body at the first blank line
+        $header_end = strpos($part, "\r\n\r\n");
+        if ($header_end === false) {
+            $header_end = strpos($part, "\n\n");
+            if ($header_end === false) {
+                continue;
+            }
+            $header_block = substr($part, 0, $header_end);
+            $body_content = substr($part, $header_end + 2);
+        } else {
+            $header_block = substr($part, 0, $header_end);
+            $body_content = substr($part, $header_end + 4);
+        }
+
+        // Parse headers
+        $headers = [];
+        foreach (explode("\n", $header_block) as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $colon = strpos($line, ':');
+            if ($colon !== false) {
+                $name = strtolower(trim(substr($line, 0, $colon)));
+                $value = ltrim(substr($line, $colon + 1));
+                $headers[$name] = $value;
+            }
+        }
+
+        // Trim trailing \r\n from body (multipart framing artifact)
+        $body_content = rtrim($body_content, "\r\n");
+
+        // Respect Content-Length if present
+        if (isset($headers['content-length'])) {
+            $len = (int) $headers['content-length'];
+            $body_content = substr($body_content, 0, $len);
+        }
+
+        $chunks[] = [
+            'headers' => $headers,
+            'body' => $body_content,
+        ];
+    }
+
+    return $chunks;
+}
+
+/**
+ * Rewrite table names in a SQL statement from the original prefix to a staging prefix.
+ *
+ * Targets well-defined positions in MySQL DDL/DML:
+ *   DROP TABLE IF EXISTS `original` → DROP TABLE IF EXISTS `staging`
+ *   CREATE TABLE `original`         → CREATE TABLE `staging`
+ *   INSERT INTO `original`          → INSERT INTO `staging`
+ *   REFERENCES `original`           → REFERENCES `staging` (FK constraints)
+ *
+ * @param string $sql       The SQL statement to rewrite.
+ * @param array  $table_map Map of original_name => staging_name.
+ * @return string The rewritten SQL.
+ */
+function rewrite_table_names(string $sql, array $table_map): string
+{
+    foreach ($table_map as $original => $staging) {
+        // Patterns that appear in MySQL dumps at known positions.
+        // We match the backtick-quoted name to avoid partial matches.
+        $patterns = [
+            "DROP TABLE IF EXISTS `{$original}`"  => "DROP TABLE IF EXISTS `{$staging}`",
+            "CREATE TABLE `{$original}`"          => "CREATE TABLE `{$staging}`",
+            "INSERT INTO `{$original}`"           => "INSERT INTO `{$staging}`",
+            "REFERENCES `{$original}`"            => "REFERENCES `{$staging}`",
+        ];
+        foreach ($patterns as $from => $to) {
+            $sql = str_replace($from, $to, $sql);
+        }
+    }
+    return $sql;
+}
+
+/**
+ * Build the table name map for push staging.
+ *
+ * Maps every table that starts with the given prefix to its staging name.
+ * Also accepts a list of "incoming" table names from the push client so
+ * tables that exist only on the source side get mapped too.
+ *
+ * @param PDO    $pdo              Database connection.
+ * @param string $table_prefix     WordPress table prefix (e.g. "wp_").
+ * @param array  $incoming_tables  Additional table names from the push client.
+ * @return array Map of original_name => staging_name.
+ */
+function build_staging_table_map(
+    PDO $pdo,
+    string $table_prefix,
+    array $incoming_tables = []
+): array {
+    $map = [];
+
+    // Get all existing tables with this prefix
+    $stmt = $pdo->query(
+        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+    );
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $name = $row['TABLE_NAME'];
+        if ($table_prefix === '' || str_starts_with($name, $table_prefix)) {
+            $map[$name] = PUSH_STAGING_TABLE_PREFIX . $name;
+        }
+    }
+
+    // Add incoming tables that don't exist on the remote yet
+    foreach ($incoming_tables as $name) {
+        if (!isset($map[$name]) && ($table_prefix === '' || str_starts_with($name, $table_prefix))) {
+            $map[$name] = PUSH_STAGING_TABLE_PREFIX . $name;
+        }
+    }
+
+    return $map;
+}
+
+/**
+ * Receive and execute SQL from a push client.
+ *
+ * The client streams SQL via multipart/mixed. This endpoint rewrites table
+ * names to use a staging prefix and executes the SQL. The receiver is the
+ * authority on progress — it returns the cursor of the last chunk it
+ * successfully processed.
+ *
+ * Config params (via query string):
+ *   - table_prefix: WordPress table prefix on the source site
+ *   - incoming_tables: JSON array of table names being pushed (optional)
+ *
+ * @param array          $config Endpoint configuration.
+ * @param ResourceBudget $budget Time/memory budget.
+ * @return array Response with cursor and stats.
+ */
+function endpoint_sql_receive(
+    array $config,
+    ResourceBudget $budget
+): array {
+    $raw_body = $config['_raw_body'] ?? '';
+    $content_type = $config['_content_type'] ?? '';
+
+    // Extract boundary from content type
+    if (!preg_match('/boundary="?([^";]+)"?/', $content_type, $m)) {
+        throw new InvalidArgumentException('Missing boundary in Content-Type header');
+    }
+    $boundary = $m[1];
+
+    $table_prefix = $config['table_prefix'] ?? ($GLOBALS['table_prefix'] ?? 'wp_');
+    $incoming_tables_json = $config['incoming_tables'] ?? '[]';
+    $incoming_tables = is_string($incoming_tables_json)
+        ? (json_decode($incoming_tables_json, true) ?? [])
+        : (is_array($incoming_tables_json) ? $incoming_tables_json : []);
+
+    $creds = resolve_db_credentials();
+    $pdo = create_db_connection($creds);
+
+    // Build the staging table map: original_name → staging_name
+    $table_map = build_staging_table_map($pdo, $table_prefix, $incoming_tables);
+
+    // Parse the multipart body
+    $chunks = parse_multipart_body($raw_body, $boundary);
+
+    $last_cursor = null;
+    $statements_executed = 0;
+    $sql_bytes = 0;
+    $status = 'partial';
+
+    foreach ($chunks as $chunk) {
+        if (!$budget->has_remaining()) {
+            break;
+        }
+
+        $headers = $chunk['headers'];
+        $chunk_type = $headers['x-chunk-type'] ?? '';
+
+        if ($chunk_type === 'sql') {
+            $sql = $chunk['body'];
+            $sql_bytes += strlen($sql);
+
+            // Rewrite table names to staging prefix
+            $sql = rewrite_table_names($sql, $table_map);
+
+            // Execute the SQL. MySQLDumpProducer emits complete statements
+            // terminated by semicolons, but a single chunk may contain
+            // multiple statements (CREATE TABLE + INSERT batches).
+            if (trim($sql) !== '') {
+                $pdo->exec($sql);
+                $statements_executed++;
+            }
+
+            $cursor_b64 = $headers['x-cursor'] ?? '';
+            if ($cursor_b64 !== '') {
+                $last_cursor = base64_decode($cursor_b64, true) ?: null;
+            }
+        } elseif ($chunk_type === 'completion') {
+            $remote_status = $headers['x-status'] ?? 'partial';
+            if ($remote_status === 'complete') {
+                $status = 'complete';
+            }
+        }
+    }
+
+    // If we processed all chunks and saw completion, mark complete
+    if ($status !== 'complete') {
+        $status = 'partial';
+    }
+
+    header('Content-Type: application/json');
+    $response = [
+        'status' => $status,
+        'cursor' => $last_cursor,
+        'statements_executed' => $statements_executed,
+        'sql_bytes' => $sql_bytes,
+    ];
+    echo json_encode($response);
+
+    return [
+        'status' => $status,
+        'stats' => $response,
+    ];
+}
+
+/**
+ * Receive files from a push client and write them to a staging directory.
+ *
+ * The staging directory is created alongside the fs root:
+ *   {fs_root}/../.push-staging-{id}/
+ *
+ * The staging ID is persistent across requests (stored in config/state)
+ * so resumed pushes write to the same staging directory.
+ *
+ * Config params (via query string):
+ *   - staging_id: Persistent staging session ID
+ *   - directory:  The remote's fs_root (for path resolution)
+ *
+ * @param array          $config Endpoint configuration.
+ * @param ResourceBudget $budget Time/memory budget.
+ * @return array Response with cursor and stats.
+ */
+function endpoint_file_receive(
+    array $config,
+    ResourceBudget $budget
+): array {
+    $raw_body = $config['_raw_body'] ?? '';
+    $content_type = $config['_content_type'] ?? '';
+
+    if (!preg_match('/boundary="?([^";]+)"?/', $content_type, $m)) {
+        throw new InvalidArgumentException('Missing boundary in Content-Type header');
+    }
+    $boundary = $m[1];
+
+    $staging_id = $config['staging_id'] ?? null;
+    if (!$staging_id || !preg_match('/^[a-zA-Z0-9_-]+$/', $staging_id)) {
+        throw new InvalidArgumentException(
+            'staging_id is required and must be alphanumeric/dash/underscore'
+        );
+    }
+
+    // Resolve the fs_root from config
+    $directories = resolve_directories($config);
+    $fs_root = rtrim($directories[0], '/');
+
+    // Create staging directory alongside the fs_root
+    $staging_dir = dirname($fs_root) . '/.push-staging-' . $staging_id;
+    if (!is_dir($staging_dir)) {
+        if (!mkdir($staging_dir, 0755, true) && !is_dir($staging_dir)) {
+            throw new RuntimeException("Failed to create staging directory: {$staging_dir}");
+        }
+    }
+
+    $writer = new ChunkWriter($staging_dir, function (string $msg) {
+        error_log("push-file-receive: {$msg}");
+    });
+
+    $chunks = parse_multipart_body($raw_body, $boundary);
+
+    $last_cursor = null;
+    $files_written = 0;
+    $bytes_written = 0;
+    $dirs_created = 0;
+    $status = 'partial';
+
+    foreach ($chunks as $chunk) {
+        if (!$budget->has_remaining()) {
+            break;
+        }
+
+        $headers = $chunk['headers'];
+        $chunk_type = $headers['x-chunk-type'] ?? '';
+
+        if ($chunk_type === 'file') {
+            $path = base64_decode($headers['x-file-path'] ?? '', true);
+            if ($path === false || $path === '') {
+                continue;
+            }
+
+            $is_first = ($headers['x-first-chunk'] ?? '0') === '1';
+            $is_last = ($headers['x-last-chunk'] ?? '0') === '1';
+            $ctime = (int) ($headers['x-file-ctime'] ?? 0);
+
+            $writer->write_file_chunk(
+                $path,
+                $chunk['body'],
+                $is_first,
+                $is_last,
+                $ctime
+            );
+
+            $bytes_written += strlen($chunk['body']);
+            if ($is_last) {
+                $files_written++;
+            }
+
+            $cursor_b64 = $headers['x-cursor'] ?? '';
+            if ($cursor_b64 !== '') {
+                $last_cursor = base64_decode($cursor_b64, true) ?: null;
+            }
+        } elseif ($chunk_type === 'directory') {
+            $path = base64_decode($headers['x-directory-path'] ?? '', true);
+            if ($path === false || $path === '') {
+                continue;
+            }
+            $ctime = (int) ($headers['x-directory-ctime'] ?? 0);
+            $writer->write_directory($path, $ctime);
+            $dirs_created++;
+
+            $cursor_b64 = $headers['x-cursor'] ?? '';
+            if ($cursor_b64 !== '') {
+                $last_cursor = base64_decode($cursor_b64, true) ?: null;
+            }
+        } elseif ($chunk_type === 'symlink') {
+            $path = base64_decode($headers['x-symlink-path'] ?? '', true);
+            $target = base64_decode($headers['x-symlink-target'] ?? '', true);
+            if ($path === false || $path === '' || $target === false) {
+                continue;
+            }
+            $ctime = (int) ($headers['x-symlink-ctime'] ?? 0);
+            $writer->write_symlink($path, $target, $ctime);
+
+            $cursor_b64 = $headers['x-cursor'] ?? '';
+            if ($cursor_b64 !== '') {
+                $last_cursor = base64_decode($cursor_b64, true) ?: null;
+            }
+        } elseif ($chunk_type === 'completion') {
+            $remote_status = $headers['x-status'] ?? 'partial';
+            if ($remote_status === 'complete') {
+                $status = 'complete';
+            }
+        }
+    }
+
+    // Flush any open file
+    $writer->close_current_file();
+
+    if ($status !== 'complete') {
+        $status = 'partial';
+    }
+
+    header('Content-Type: application/json');
+    $response = [
+        'status' => $status,
+        'cursor' => $last_cursor,
+        'staging_dir' => $staging_dir,
+        'files_written' => $files_written,
+        'bytes_written' => $bytes_written,
+        'dirs_created' => $dirs_created,
+    ];
+    echo json_encode($response);
+
+    return [
+        'status' => $status,
+        'stats' => $response,
+    ];
+}
+
+/**
+ * Commit a push: atomically swap staged files and database tables into place.
+ *
+ * This is the point of no return. The endpoint:
+ *   1. Validates that staging tables and staging directory are ready
+ *   2. Copies live wp-config.php into staging directory (preserves remote credentials)
+ *   3. Swaps files (symlink swap or rename swap)
+ *   4. Swaps database tables (atomic RENAME TABLE)
+ *   5. On DB failure: rolls back files
+ *   6. Cleans up old artifacts
+ *
+ * Config params (via query string):
+ *   - staging_id:    The staging session ID
+ *   - directory:     The remote's fs_root
+ *   - table_prefix:  WordPress table prefix
+ *   - pushed_tables: JSON array of table names that were pushed
+ *
+ * @param array $config Endpoint configuration.
+ * @return array Response with swap results.
+ */
+function endpoint_commit(array $config): array
+{
+    $staging_id = $config['staging_id'] ?? null;
+    if (!$staging_id || !preg_match('/^[a-zA-Z0-9_-]+$/', $staging_id)) {
+        throw new InvalidArgumentException('staging_id is required');
+    }
+
+    $table_prefix = $config['table_prefix'] ?? ($GLOBALS['table_prefix'] ?? 'wp_');
+    $pushed_tables_json = $config['pushed_tables'] ?? '[]';
+    $pushed_tables = is_string($pushed_tables_json)
+        ? (json_decode($pushed_tables_json, true) ?? [])
+        : (is_array($pushed_tables_json) ? $pushed_tables_json : []);
+
+    $directories = resolve_directories($config);
+    $fs_root = rtrim($directories[0], '/');
+    $staging_dir = dirname($fs_root) . '/.push-staging-' . $staging_id;
+
+    $creds = resolve_db_credentials();
+    $pdo = create_db_connection($creds);
+
+    $tables_swapped = 0;
+    $file_strategy = 'none';
+    $errors = [];
+
+    // ---------------------------------------------------------------
+    // 1. Validate staging state
+    // ---------------------------------------------------------------
+
+    // Check staging tables exist
+    $staging_table_names = [];
+    $existing_tables = [];
+    if (!empty($pushed_tables)) {
+        $stmt = $pdo->query(
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+        );
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $existing_tables[$row['TABLE_NAME']] = true;
+        }
+
+        foreach ($pushed_tables as $table) {
+            $staging_name = PUSH_STAGING_TABLE_PREFIX . $table;
+            if (!isset($existing_tables[$staging_name])) {
+                $errors[] = "Missing staging table: {$staging_name}";
+            } else {
+                $staging_table_names[] = $staging_name;
+            }
+        }
+    }
+
+    // Check staging directory exists (only if staging_id was used for files)
+    $has_staging_dir = is_dir($staging_dir);
+
+    if (!empty($errors)) {
+        header('Content-Type: application/json');
+        http_response_code(400);
+        $response = [
+            'status' => 'error',
+            'errors' => $errors,
+        ];
+        echo json_encode($response);
+        return ['status' => 'error', 'stats' => $response];
+    }
+
+    // ---------------------------------------------------------------
+    // 2. Swap files (if staging directory exists)
+    // ---------------------------------------------------------------
+
+    $files_swapped = false;
+    $old_fs_dir = null;
+
+    if ($has_staging_dir) {
+        // Copy live wp-config.php into staging directory before swap,
+        // so the new document root keeps the remote site's DB credentials.
+        $wp_config_src = $fs_root . '/wp-config.php';
+        $wp_config_dst = $staging_dir . '/wp-config.php';
+        if (file_exists($wp_config_src)) {
+            copy($wp_config_src, $wp_config_dst);
+        }
+
+        // Detect swap strategy
+        if (is_link($fs_root)) {
+            // Symlink swap: atomic via rename of a new symlink
+            $file_strategy = 'symlink';
+            $real_target = readlink($fs_root);
+            $new_link = $fs_root . '_new_' . $staging_id;
+            $old_target = $real_target;
+
+            // Create new symlink pointing to staging
+            if (!symlink($staging_dir, $new_link)) {
+                throw new RuntimeException("Failed to create new symlink: {$new_link}");
+            }
+
+            // Atomic rename: new symlink replaces the live one
+            if (!rename($new_link, $fs_root)) {
+                @unlink($new_link);
+                throw new RuntimeException("Failed to atomically swap symlink: {$fs_root}");
+            }
+
+            $old_fs_dir = $old_target;
+            $files_swapped = true;
+        } else {
+            // Rename swap: two renames, tiny gap
+            $file_strategy = 'rename';
+            $old_fs_dir = $fs_root . '_old_' . $staging_id;
+
+            if (!rename($fs_root, $old_fs_dir)) {
+                throw new RuntimeException(
+                    "Failed to rename live directory to old: {$fs_root} → {$old_fs_dir}"
+                );
+            }
+
+            if (!rename($staging_dir, $fs_root)) {
+                // Roll back: put the old directory back
+                rename($old_fs_dir, $fs_root);
+                throw new RuntimeException(
+                    "Failed to rename staging to live: {$staging_dir} → {$fs_root}. Rolled back."
+                );
+            }
+
+            $files_swapped = true;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 3. Swap database tables (atomic RENAME TABLE)
+    // ---------------------------------------------------------------
+
+    if (!empty($pushed_tables)) {
+        // Build the RENAME TABLE statement.
+        // For each pushed table:
+        //   - If it exists on the remote: swap live → _old, staging → live
+        //   - If it's new (only in push): staging → live (no _old needed)
+        // Reuse $existing_tables from validation step above (already contains
+        // all tables in the current database).
+        $current_tables = $existing_tables;
+
+        $rename_pairs = [];
+        $old_tables = [];
+
+        // Drop leftover _old_* tables from prior interrupted pushes.
+        // MySQL's RENAME TABLE fails if the target name already exists,
+        // so stale _old_ tables from a previous commit whose cleanup
+        // was interrupted would block all subsequent commits.
+        foreach ($pushed_tables as $table) {
+            $old_name = '_old_' . $table;
+            if (isset($current_tables[$old_name])) {
+                $pdo->exec("DROP TABLE IF EXISTS `{$old_name}`");
+                unset($current_tables[$old_name]);
+            }
+        }
+        // Also clean up _old_ versions of tables that exist on the remote
+        // but aren't in the push set (they'll be "dropped" via rename below).
+        foreach ($current_tables as $name => $_) {
+            if (
+                ($table_prefix === '' || str_starts_with($name, $table_prefix)) &&
+                !in_array($name, $pushed_tables) &&
+                !str_starts_with($name, PUSH_STAGING_TABLE_PREFIX) &&
+                !str_starts_with($name, '_old_')
+            ) {
+                $old_name = '_old_' . $name;
+                if (isset($current_tables[$old_name])) {
+                    $pdo->exec("DROP TABLE IF EXISTS `{$old_name}`");
+                    unset($current_tables[$old_name]);
+                }
+            }
+        }
+
+        foreach ($pushed_tables as $table) {
+            $staging_name = PUSH_STAGING_TABLE_PREFIX . $table;
+            $old_name = '_old_' . $table;
+
+            if (isset($current_tables[$table])) {
+                // Existing table: swap live → old, staging → live
+                $rename_pairs[] = "`{$table}` TO `{$old_name}`";
+                $rename_pairs[] = "`{$staging_name}` TO `{$table}`";
+                $old_tables[] = $old_name;
+            } else {
+                // New table: just rename staging → live
+                $rename_pairs[] = "`{$staging_name}` TO `{$table}`";
+            }
+        }
+
+        // Handle tables that exist on remote but not in push (dropped tables).
+        // Move them to _old_ so they're removed from the live prefix.
+        foreach ($current_tables as $name => $_) {
+            if (
+                ($table_prefix === '' || str_starts_with($name, $table_prefix)) &&
+                !in_array($name, $pushed_tables) &&
+                !str_starts_with($name, PUSH_STAGING_TABLE_PREFIX) &&
+                !str_starts_with($name, '_old_')
+            ) {
+                $old_name = '_old_' . $name;
+                $rename_pairs[] = "`{$name}` TO `{$old_name}`";
+                $old_tables[] = $old_name;
+            }
+        }
+
+        if (!empty($rename_pairs)) {
+            $rename_sql = 'RENAME TABLE ' . implode(', ', $rename_pairs);
+
+            try {
+                $pdo->exec($rename_sql);
+                $tables_swapped = count($pushed_tables);
+            } catch (\Throwable $e) {
+                // DB swap failed — roll back files if they were swapped
+                if ($files_swapped) {
+                    if ($file_strategy === 'symlink' && $old_fs_dir !== null) {
+                        // Recreate symlink to old target
+                        $new_link = $fs_root . '_rollback_' . $staging_id;
+                        @symlink($old_fs_dir, $new_link);
+                        @rename($new_link, $fs_root);
+                    } elseif ($file_strategy === 'rename' && $old_fs_dir !== null) {
+                        @rename($fs_root, $staging_dir);
+                        @rename($old_fs_dir, $fs_root);
+                    }
+                }
+
+                throw new RuntimeException(
+                    "Database swap failed: " . $e->getMessage() .
+                    ". Files have been rolled back. SQL: " . $rename_sql
+                );
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // 4. Cleanup: drop _old_* tables (best-effort)
+        // ---------------------------------------------------------------
+        foreach ($old_tables as $old_table) {
+            try {
+                $pdo->exec("DROP TABLE IF EXISTS `{$old_table}`");
+            } catch (\Throwable $e) {
+                error_log("push-commit: failed to drop old table {$old_table}: " . $e->getMessage());
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 5. Cleanup: remove old file directory (best-effort)
+    // ---------------------------------------------------------------
+    if ($old_fs_dir !== null && is_dir($old_fs_dir) && $file_strategy === 'rename') {
+        // Defer to background or just log — recursive delete can be slow
+        error_log("push-commit: old directory available for cleanup: {$old_fs_dir}");
+    }
+
+    header('Content-Type: application/json');
+    $response = [
+        'status' => 'ok',
+        'tables_swapped' => $tables_swapped,
+        'file_strategy' => $file_strategy,
+        'files_swapped' => $files_swapped,
+    ];
+    echo json_encode($response);
+
+    return [
+        'status' => 'ok',
+        'stats' => $response,
+    ];
+}
+
 /**
  * Builds the config array from HTTP GET/POST parameters and optional JSON body.
  */
