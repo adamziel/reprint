@@ -3824,6 +3824,10 @@ class ImportClient
             $this->audit_log("APPLY-RUNTIME | {$line}");
         }
 
+        // Persist which paths were removed so callers can inspect state.
+        $this->state["apply"]["paths_removed"] = $manifest->paths_to_remove;
+        $this->save_state($this->state);
+
         // Output the summary and manifest as structured JSON for callers,
         // and print the human-readable summary to stderr.
         $this->output_progress([
@@ -9297,6 +9301,7 @@ class ImportClient
                 "target_user" => null,
                 "target_pass" => null,
                 "target_sqlite_path" => null,
+                "paths_removed" => [],
             ],
             // SQL output mode (file, stdout, mysql) — persisted for resume
             "sql_output" => null,

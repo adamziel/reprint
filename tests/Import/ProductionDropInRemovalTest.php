@@ -300,6 +300,28 @@ class ProductionDropInRemovalTest extends TestCase
         );
     }
 
+    public function testApplyRuntimePersistsPathsRemovedToState(): void
+    {
+        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
+        $this->createProductionDropIns();
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        // Re-read the state file to verify paths_removed was persisted.
+        $state = json_decode(
+            file_get_contents($this->stateDir . '/.import-state.json'),
+            true,
+        );
+
+        $this->assertArrayHasKey('paths_removed', $state['apply']);
+        $this->assertContains('wp-content/object-cache.php', $state['apply']['paths_removed']);
+        $this->assertContains('wp-content/mu-plugins/wpcomsh', $state['apply']['paths_removed']);
+        $this->assertContains('wp-content/mu-plugins/wpcomsh-dev', $state['apply']['paths_removed']);
+        $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $state['apply']['paths_removed']);
+    }
+
     public function testNonWpcloudHostDoesNotRemoveAnything(): void
     {
         // Override webhost to 'other' — the DefaultHostAnalyzer should
