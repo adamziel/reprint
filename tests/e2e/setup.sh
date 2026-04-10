@@ -7,8 +7,8 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/composer.json" ]; then
     composer install --no-dev --no-interaction --prefer-dist --working-dir="$PROJECT_ROOT"
 fi
-if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/wordpress-plugin/composer.json" ]; then
-    composer install --no-dev --no-interaction --prefer-dist --working-dir="$PROJECT_ROOT/wordpress-plugin"
+if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/reprint-exporter-wp/composer.json" ]; then
+    composer install --no-dev --no-interaction --prefer-dist --working-dir="$PROJECT_ROOT/reprint-exporter-wp"
 fi
 
 cd "$(dirname "$0")"

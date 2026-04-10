@@ -8,7 +8,7 @@
 require_once __DIR__ . "/../vendor/autoload.php";
 
 // Load required classes
-require_once __DIR__ . "/../../packages/streaming-exporter/src/class-mysql-dump-producer.php";
+require_once __DIR__ . "/../../packages/reprint-exporter/src/class-mysql-dump-producer.php";
 
 // Display test environment info
 echo "\n";

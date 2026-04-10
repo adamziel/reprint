@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/streaming-importer/src/import.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
 /**
  * Verify that files_done and files_total progress counters are correct
