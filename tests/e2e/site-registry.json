@@ -106,6 +106,9 @@
     },
     "symlink-cycle": {
       "port": 8114
+    },
+    "atomic-split-roots": {
+      "port": 8115
     }
   }
 }
