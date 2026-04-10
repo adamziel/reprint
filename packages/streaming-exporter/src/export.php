@@ -2847,7 +2847,15 @@ function endpoint_file_index(
         if (!empty($extra_roots)) {
             sort($extra_roots, SORT_STRING);
             foreach ($extra_roots as $root) {
-                if (should_skip_index_root($root, $ordered)) {
+                // Skip exact duplicates of already-ordered roots.
+                // Do NOT skip parent roots — on hosts like wp.com Atomic
+                // the document root (/srv/htdocs) is a parent of the
+                // primary root (/srv/htdocs/__wp__) but contains a separate
+                // wp-content with the site's actual plugins and themes.
+                // The during-traversal dedup in the main loop already
+                // prevents re-entering child roots (i.e. when traversing
+                // /srv/htdocs we won't descend back into __wp__/).
+                if (in_array($root, $ordered, true)) {
                     continue;
                 }
                 $ordered[] = $root;
