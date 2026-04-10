@@ -92,6 +92,13 @@ class WpcloudHostAnalyzer implements HostAnalyzer
         // infrastructure: object-cache.php talks to a Memcached server
         // that doesn't exist locally, wpcomsh* mu-plugins depend on
         // multisite functions and wp.com API endpoints.
+        //
+        // TODO: Consider removing all drop-ins unconditionally, not just
+        // WP Cloud ones. Drop-ins (object-cache.php, advanced-cache.php,
+        // db.php, etc.) typically integrate platform-specific software
+        // (Memcached, Redis, custom DB layers) that won't be available
+        // in a local environment. This is host-specific today, but the
+        // problem is universal.
         $manifest->paths_to_remove = [
             'wp-content/object-cache.php',
             'wp-content/mu-plugins/wpcomsh',
