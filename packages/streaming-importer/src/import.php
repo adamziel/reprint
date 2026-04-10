@@ -989,6 +989,9 @@ class ImportClient
      */
     private $filter = "none";
 
+    /** @var string|null Extra remote directory to include in the export (--extra-directory). */
+    private $extra_directory = null;
+
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
@@ -1357,6 +1360,7 @@ class ImportClient
     {
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
+        $this->extra_directory = $options["extra_directory"] ?? null;
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
             if (!in_array($this->fs_root_nonempty_behavior, ['error', 'preserve-local'])) {
@@ -3798,9 +3802,31 @@ class ImportClient
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
+        // Remove production drop-ins and mu-plugins that would crash
+        // the local site.  The host analyzer declares these — they
+        // depend on infrastructure (Memcached servers, multisite APIs)
+        // not available outside the original hosting environment.
+        foreach ($manifest->paths_to_remove as $rel_path) {
+            $full_path = $abs_fs_root . '/' . ltrim($rel_path, '/');
+            if (!file_exists($full_path) && !is_link($full_path)) {
+                continue;
+            }
+            if (is_dir($full_path) && !is_link($full_path)) {
+                self::rmdir_recursive($full_path);
+            } else {
+                unlink($full_path);
+            }
+            $summary[] = "Removed production drop-in: {$rel_path}";
+            $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (production-only)");
+        }
+
         foreach ($summary as $line) {
             $this->audit_log("APPLY-RUNTIME | {$line}");
         }
+
+        // Persist which paths were removed so callers can inspect state.
+        $this->state["apply"]["remote_paths_removed_from_local_site"] = $manifest->paths_to_remove;
+        $this->save_state($this->state);
 
         // Output the summary and manifest as structured JSON for callers,
         // and print the human-readable summary to stderr.
@@ -3811,6 +3837,8 @@ class ImportClient
             "webhost" => $webhost,
             "webhost_source" => $manifest->source,
             "target_engine" => $target_engine,
+            "paths_removed" => $manifest->paths_to_remove,
+            "extra_directories" => $manifest->extra_directories,
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
 
@@ -8338,6 +8366,24 @@ class ImportClient
             "content_dir" => rtrim($preflight["database"]["wp"]["paths_urls"]["content_dir"] ?? "", "/"),
         ];
 
+        if ($this->extra_directory !== null && $this->extra_directory !== "") {
+            $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
+        }
+
+        // auto_prepend_file / auto_append_file may point to directories
+        // outside the WordPress roots (e.g. /scripts/env.php on Atomic).
+        // Include those directories so the remote exporter traverses them.
+        $ini_all = $preflight["runtime"]["ini_get_all"] ?? [];
+        foreach (["auto_prepend_file", "auto_append_file"] as $ini_key) {
+            $ini_path = $ini_all[$ini_key] ?? "";
+            if (is_string($ini_path) && $ini_path !== "" && $ini_path[0] === "/") {
+                $ini_dir = rtrim(dirname($ini_path), "/");
+                if ($ini_dir !== "" && $ini_dir !== "/") {
+                    $extra_paths[$ini_key] = $ini_dir;
+                }
+            }
+        }
+
         foreach ($extra_paths as $label => $path) {
             if ($path === "") {
                 continue;
@@ -9262,6 +9308,7 @@ class ImportClient
                 "target_user" => null,
                 "target_pass" => null,
                 "target_sqlite_path" => null,
+                "remote_paths_removed_from_local_site" => [],
             ],
             // SQL output mode (file, stdout, mysql) — persisted for resume
             "sql_output" => null,
@@ -10053,6 +10100,14 @@ if (
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
             'help' => 'Filter which files to download (none|essential-files|skipped-earlier)',
             'commands' => ['files-sync'],
+        ],
+        [
+            'name' => 'extra-directory',
+            'type' => 'value',
+            'target' => 'extra_directory',
+            'placeholder' => 'DIR',
+            'help' => 'Additional remote directory to include in the export',
+            'commands' => ['files-sync', 'files-index'],
         ],
 
         // ── db-sync options ──────────────────────────────────────

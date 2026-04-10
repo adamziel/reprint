@@ -88,7 +88,56 @@ class WpcloudHostAnalyzer implements HostAnalyzer
             'description' => 'Generate missing WordPress thumbnail sizes from originals using GD',
         ];
 
+        // Production drop-ins and mu-plugins that depend on WP Cloud
+        // infrastructure: object-cache.php talks to a Memcached server
+        // that doesn't exist locally, wpcomsh* mu-plugins depend on
+        // multisite functions and wp.com API endpoints.
+        //
+        // TODO: Consider removing all drop-ins unconditionally, not just
+        // WP Cloud ones. Drop-ins (object-cache.php, advanced-cache.php,
+        // db.php, etc.) typically integrate platform-specific software
+        // (Memcached, Redis, custom DB layers) that won't be available
+        // in a local environment. This is host-specific today, but the
+        // problem is universal.
+        $manifest->paths_to_remove = [
+            'wp-content/object-cache.php',
+            'wp-content/mu-plugins/wpcomsh',
+            'wp-content/mu-plugins/wpcomsh-dev',
+            'wp-content/mu-plugins/wpcomsh-loader.php',
+        ];
+
+        // auto_prepend_file on Atomic points to /scripts/env.php — a
+        // directory outside the WordPress roots.  Record it so that
+        // files-sync downloads it and the runtime applier can mount it.
+        $manifest->extra_directories = $this->detect_extra_directories($preflight_data);
+
         return $manifest;
+    }
+
+    /**
+     * Detect directories outside the WordPress roots that need to be
+     * downloaded and mounted.  Currently reads auto_prepend_file and
+     * auto_append_file from PHP INI.
+     *
+     * @return string[]  Absolute remote directory paths (e.g. ['/scripts'])
+     */
+    private function detect_extra_directories(array $preflight_data): array
+    {
+        $ini_all = $preflight_data['runtime']['ini_get_all'] ?? [];
+        $dirs = [];
+
+        foreach (['auto_prepend_file', 'auto_append_file'] as $key) {
+            $path = $ini_all[$key] ?? '';
+            if (!is_string($path) || $path === '' || $path[0] !== '/') {
+                continue;
+            }
+            $dir = rtrim(dirname($path), '/');
+            if ($dir !== '' && $dir !== '/') {
+                $dirs[] = $dir;
+            }
+        }
+
+        return array_values(array_unique($dirs));
     }
 
     private function build_constants(array $preflight_data): array
