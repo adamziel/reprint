@@ -3825,7 +3825,7 @@ class ImportClient
         }
 
         // Persist which paths were removed so callers can inspect state.
-        $this->state["apply"]["paths_removed"] = $manifest->paths_to_remove;
+        $this->state["apply"]["remote_paths_removed_from_local_site"] = $manifest->paths_to_remove;
         $this->save_state($this->state);
 
         // Output the summary and manifest as structured JSON for callers,
@@ -9301,7 +9301,7 @@ class ImportClient
                 "target_user" => null,
                 "target_pass" => null,
                 "target_sqlite_path" => null,
-                "paths_removed" => [],
+                "remote_paths_removed_from_local_site" => [],
             ],
             // SQL output mode (file, stdout, mysql) — persisted for resume
             "sql_output" => null,

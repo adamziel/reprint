@@ -315,11 +315,11 @@ class ProductionDropInRemovalTest extends TestCase
             true,
         );
 
-        $this->assertArrayHasKey('paths_removed', $state['apply']);
-        $this->assertContains('wp-content/object-cache.php', $state['apply']['paths_removed']);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh', $state['apply']['paths_removed']);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh-dev', $state['apply']['paths_removed']);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $state['apply']['paths_removed']);
+        $this->assertArrayHasKey('remote_paths_removed_from_local_site', $state['apply']);
+        $this->assertContains('wp-content/object-cache.php', $state['apply']['remote_paths_removed_from_local_site']);
+        $this->assertContains('wp-content/mu-plugins/wpcomsh', $state['apply']['remote_paths_removed_from_local_site']);
+        $this->assertContains('wp-content/mu-plugins/wpcomsh-dev', $state['apply']['remote_paths_removed_from_local_site']);
+        $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $state['apply']['remote_paths_removed_from_local_site']);
     }
 
     public function testNonWpcloudHostDoesNotRemoveAnything(): void
