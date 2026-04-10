@@ -5192,8 +5192,9 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
+        // Always send directory[] – see comment in download_remote_index().
         $export_dirs = $this->get_export_directories();
-        if (count($export_dirs) > 1) {
+        if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
         }
         $url = $this->build_url("file_fetch", $cursor, $params);
@@ -5408,8 +5409,14 @@ class ImportClient
         if ($this->follow_symlinks) {
             $params["follow_symlinks"] = "1";
         }
+        // Always send directory[] to the server when we have export dirs.
+        // Without this parameter, the server falls back to ABSPATH as the
+        // scan root. On managed hosts like wp.com Atomic, ABSPATH points to
+        // a shared WordPress core directory (e.g. /wordpress/core/6.9.4/)
+        // rather than the site's document root, so the scan would miss
+        // wp-content entirely (no plugins, themes, or uploads).
         $export_dirs = $this->get_export_directories();
-        if (count($export_dirs) > 1) {
+        if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
         }
         $url = $this->build_url("file_index", $cursor, $params);
