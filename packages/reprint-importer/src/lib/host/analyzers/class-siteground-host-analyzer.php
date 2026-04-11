@@ -43,6 +43,21 @@ class SitegroundHostAnalyzer implements HostAnalyzer
         $manifest = new RuntimeManifest('siteground');
         $manifest->php_ini = extract_php_ini($preflight_data);
         $manifest->constants = extract_constants($preflight_data);
+
+        // SiteGround ships two hosting-specific plugins that depend on
+        // SiteGround server infrastructure (their custom caching layer,
+        // server-level security rules).  They won't work on a local
+        // environment and produce warnings in wp-admin, so strip them
+        // from disk and deactivate them in the database.
+        $manifest->paths_to_remove = [
+            'wp-content/plugins/sg-cachepress',
+            'wp-content/plugins/sg-security',
+        ];
+        $manifest->plugins_to_deactivate = [
+            'sg-cachepress',
+            'sg-security',
+        ];
+
         return $manifest;
     }
 }

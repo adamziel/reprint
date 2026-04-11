@@ -3838,8 +3838,25 @@ class ImportClient
             $this->audit_log("APPLY-RUNTIME | {$line}");
         }
 
+        // Deactivate host-specific plugins in the target database so
+        // WordPress doesn't show "plugin file does not exist" warnings.
+        // This runs after path removal so the files are already gone.
+        $deactivated_plugins = [];
+        if (!empty($manifest->plugins_to_deactivate) && $target_engine !== null) {
+            $deactivated_plugins = $this->deactivate_plugins_in_target_db(
+                $apply_state,
+                $manifest->plugins_to_deactivate,
+                $preflight_data,
+            );
+            foreach ($deactivated_plugins as $plugin_basename) {
+                $summary[] = "Deactivated plugin: {$plugin_basename}";
+                $this->audit_log("APPLY-RUNTIME | deactivated {$plugin_basename} (host-specific)");
+            }
+        }
+
         // Persist which paths were removed so callers can inspect state.
         $this->state["apply"]["remote_paths_removed_from_local_site"] = $manifest->paths_to_remove;
+        $this->state["apply"]["plugins_deactivated"] = $deactivated_plugins;
         $this->save_state($this->state);
 
         // Output the summary and manifest as structured JSON for callers,
@@ -3852,6 +3869,7 @@ class ImportClient
             "webhost_source" => $manifest->source,
             "target_engine" => $target_engine,
             "paths_removed" => $manifest->paths_to_remove,
+            "plugins_deactivated" => $deactivated_plugins,
             "extra_directories" => $manifest->extra_directories,
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
@@ -3866,6 +3884,124 @@ class ImportClient
         foreach ($summary as $line) {
             fwrite(STDERR, "{$line}\n");
         }
+    }
+
+    /**
+     * Remove host-specific plugins from the active_plugins option in
+     * the target database.  Each entry in $plugin_dirs is a plugin
+     * directory name (e.g. "sg-security"); any active plugin whose
+     * basename starts with that directory + "/" is removed.
+     *
+     * @param array    $apply_state  The apply state with target DB credentials.
+     * @param string[] $plugin_dirs  Plugin directory names to deactivate.
+     * @param array    $preflight_data  Preflight data (for table prefix).
+     * @return string[]  Basenames actually removed (e.g. ["sg-security/sg-security.php"]).
+     */
+    private function deactivate_plugins_in_target_db(array $apply_state, array $plugin_dirs, array $preflight_data): array
+    {
+        $target_engine = $apply_state["target_engine"] ?? null;
+        if ($target_engine === null) {
+            return [];
+        }
+
+        $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
+        $options_table = $table_prefix . 'options';
+
+        try {
+            $pdo = $this->connect_to_target_db($apply_state);
+        } catch (RuntimeException $e) {
+            $this->audit_log("APPLY-RUNTIME | plugin deactivation skipped: " . $e->getMessage());
+            return [];
+        }
+
+        try {
+            $stmt = $pdo->prepare(
+                "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
+            );
+            $stmt->execute();
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$row || !isset($row['option_value'])) {
+                return [];
+            }
+
+            $active_plugins = @unserialize($row['option_value']);
+            if (!is_array($active_plugins)) {
+                return [];
+            }
+
+            $removed = [];
+            $filtered = [];
+            foreach ($active_plugins as $basename) {
+                $should_remove = false;
+                foreach ($plugin_dirs as $dir) {
+                    if (strpos($basename, $dir . '/') === 0) {
+                        $should_remove = true;
+                        break;
+                    }
+                }
+                if ($should_remove) {
+                    $removed[] = $basename;
+                } else {
+                    $filtered[] = $basename;
+                }
+            }
+
+            if (empty($removed)) {
+                return [];
+            }
+
+            // Re-index so the serialized array uses sequential integer keys,
+            // matching how WordPress stores active_plugins.
+            $filtered = array_values($filtered);
+
+            $stmt = $pdo->prepare(
+                "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
+            );
+            $stmt->execute([serialize($filtered)]);
+
+            return $removed;
+        } finally {
+            $pdo = null;
+        }
+    }
+
+    /**
+     * Create a PDO connection to the target database using credentials
+     * persisted by db-apply.
+     */
+    private function connect_to_target_db(array $apply_state): PDO
+    {
+        $engine = $apply_state["target_engine"] ?? null;
+
+        if ($engine === "sqlite") {
+            $path = $apply_state["target_sqlite_path"] ?? null;
+            $db = $apply_state["target_db"] ?? "sqlite_database";
+            if (!$path) {
+                throw new RuntimeException("No SQLite path in apply state");
+            }
+            return $this->create_sqlite_target_pdo($path, $db);
+        }
+
+        if ($engine === "mysql") {
+            $host = $apply_state["target_host"] ?? "127.0.0.1";
+            $port = (int) ($apply_state["target_port"] ?? 3306);
+            $user = $apply_state["target_user"] ?? null;
+            $pass = $apply_state["target_pass"] ?? "";
+            $db = $apply_state["target_db"] ?? null;
+
+            if (!$user || !$db) {
+                throw new RuntimeException("Incomplete MySQL credentials in apply state");
+            }
+
+            $dsn = "mysql:host={$host};port={$port};dbname={$db};charset=utf8mb4";
+            return new PDO($dsn, $user, $pass, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::MYSQL_ATTR_LOCAL_INFILE => false,
+            ]);
+        }
+
+        throw new RuntimeException("Unknown target engine: {$engine}");
     }
 
     /**

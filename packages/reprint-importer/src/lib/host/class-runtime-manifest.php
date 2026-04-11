@@ -94,6 +94,18 @@ class RuntimeManifest
     public array $extra_directories = [];
 
     /**
+     * Plugin directory names to deactivate in the WordPress database
+     * after import.  Each entry is a plugin directory name (e.g.
+     * 'sg-security') — any active plugin whose basename starts with
+     * that directory + '/' will be removed from the active_plugins
+     * option.  The corresponding plugin files should also appear in
+     * paths_to_remove so they are deleted from disk.
+     *
+     * @var string[]
+     */
+    public array $plugins_to_deactivate = [];
+
+    /**
      * SQLite database configuration.  When non-null, the target uses
      * SQLite instead of MySQL.  The runtime layer copies the plugin
      * into the output directory and generates a lazy-loading $wpdb

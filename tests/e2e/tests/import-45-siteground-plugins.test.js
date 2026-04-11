@@ -1,0 +1,274 @@
+/**
+ * Test 45: SiteGround host-specific plugin stripping
+ *
+ * Simulates a SiteGround hosting environment where sg-cachepress and
+ * sg-security are installed and active.  Verifies that after the full
+ * import pipeline (preflight -> files-sync -> db-sync -> db-apply ->
+ * apply-runtime), both plugins are:
+ *   1. Removed from the local filesystem
+ *   2. Deactivated in the target database (active_plugins option)
+ *   3. Unrelated plugins are preserved
+ */
+import { describe, it, beforeAll, afterAll } from 'vitest';
+import assert from 'node:assert/strict';
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
+import {
+    runImporter, createTempDir, cleanupTempDir,
+    getSiteUrl, getSiteSecret, getSiteDir,
+    fsRootDir, createMysqlConnection, getDbName,
+} from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
+
+const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
+const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+
+describe('Import: SiteGround plugin stripping', () => {
+    const site = 'siteground-plugins';
+    let tempDir;
+    let runtimeDir;
+
+    beforeAll(async () => {
+        await ensureSite(site, {
+            db: 'standard',
+            files: 'sample',
+            afterCreate: async (siteDir, dbName) => {
+                // Create fake sg-cachepress plugin with a valid plugin header
+                // so WordPress recognizes it as a plugin.
+                const pluginsDir = join(siteDir, 'wp-content', 'plugins');
+
+                mkdirSync(join(pluginsDir, 'sg-cachepress'), { recursive: true });
+                writeFileSync(join(pluginsDir, 'sg-cachepress', 'sg-cachepress.php'),
+`<?php
+/**
+ * Plugin Name: SG CachePress (fake)
+ * Description: Fake SiteGround caching plugin for E2E testing
+ * Version: 1.0.0
+ */
+`);
+
+                mkdirSync(join(pluginsDir, 'sg-security'), { recursive: true });
+                writeFileSync(join(pluginsDir, 'sg-security', 'sg-security.php'),
+`<?php
+/**
+ * Plugin Name: SG Security (fake)
+ * Description: Fake SiteGround security plugin for E2E testing
+ * Version: 1.0.0
+ */
+`);
+
+                // Activate both plugins via the database so they appear
+                // in active_plugins when the DB is exported.
+                const { createConnection } = await import('mysql2/promise');
+                const conn = await createConnection({
+                    host: '127.0.0.1',
+                    user: 'e2e_admin',
+                    password: 'e2e_password',
+                    database: dbName,
+                });
+                const [rows] = await conn.query(
+                    "SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'"
+                );
+                let plugins = [];
+                if (rows.length > 0 && rows[0].option_value) {
+                    // Parse PHP serialized array using a simple regex approach.
+                    // We know the format is a:N:{...} with s:LEN:"value"; entries.
+                    const raw = rows[0].option_value;
+                    const matches = [...raw.matchAll(/s:\d+:"([^"]+)"/g)];
+                    plugins = matches.map(m => m[1]);
+                }
+                plugins.push('sg-cachepress/sg-cachepress.php');
+                plugins.push('sg-security/sg-security.php');
+
+                // Serialize as PHP array: a:N:{i:0;s:LEN:"value";...}
+                const entries = plugins.map((p, i) => `i:${i};s:${p.length}:"${p}";`).join('');
+                const serialized = `a:${plugins.length}:{${entries}}`;
+
+                await conn.query(
+                    "UPDATE wp_options SET option_value = ? WHERE option_name = 'active_plugins'",
+                    [serialized]
+                );
+                await conn.end();
+            },
+        });
+
+        tempDir = createTempDir('e2e-siteground-plugins');
+        runtimeDir = join(tempDir, 'runtime');
+    }, 120000);
+
+    afterAll(() => {
+        cleanupTempDir(tempDir);
+    });
+
+    function importUrl() {
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
+    }
+
+    it('preflight detects the site as siteground', () => {
+        const result = runImporter(importUrl(), tempDir, 'preflight', {
+            secret: getSiteSecret(site),
+        });
+        assert.equal(result.exitCode, 0, `preflight failed:\n${result.stderr}`);
+
+        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        assert.equal(state.webhost, 'siteground',
+            `Expected webhost 'siteground', got '${state.webhost}'`);
+    });
+
+    it('files-sync downloads the site', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            secret: getSiteSecret(site),
+        });
+        assert.equal(result.exitCode, 0, `files-sync failed:\n${result.stderr}`);
+    });
+
+    it('db-sync downloads the SQL dump', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-sync', {
+            secret: getSiteSecret(site),
+        });
+        assert.equal(result.exitCode, 0, `db-sync failed:\n${result.stderr}`);
+        assert.ok(existsSync(join(tempDir, 'db.sql')), 'db.sql should exist');
+    });
+
+    it('db-apply imports into a separate database', () => {
+        const sourceDomain = new URL(getSiteUrl(site)).origin;
+        const result = runImporter(importUrl(), tempDir, 'db-apply', {
+            secret: getSiteSecret(site),
+            extraArgs: [
+                '--target-engine=mysql',
+                `--target-db=${getDbName(site)}_import`,
+                '--target-user=e2e_admin',
+                '--target-pass=e2e_password',
+                '--target-host=127.0.0.1',
+                '--rewrite-url', sourceDomain, `http://127.0.0.1:9999`,
+            ],
+        });
+        assert.equal(result.exitCode, 0, `db-apply failed:\n${result.stderr}`);
+    });
+
+    describe('after apply-runtime', () => {
+        beforeAll(() => {
+            const siteDir = getSiteDir(site);
+            const flatDir = join(tempDir, 'flattened');
+            // Flatten first so apply-runtime has a standard layout to work with.
+            const flatResult = runImporter(importUrl(), tempDir, 'flat-document-root', {
+                secret: getSiteSecret(site),
+                extraArgs: [`--flatten-to=${flatDir}`],
+            });
+            assert.equal(flatResult.exitCode, 0,
+                `flat-document-root failed:\n${flatResult.stderr}`);
+
+            execFileSync('php', [
+                IMPORTER_PATH,
+                'apply-runtime',
+                `--state-dir=${tempDir}`,
+                `--flat-document-root=${flatDir}`,
+                `--runtime=php-builtin`,
+                `--output-dir=${runtimeDir}`,
+                `--port=9999`,
+            ], {
+                encoding: 'utf-8',
+                timeout: 30000,
+            });
+        });
+
+        it('sg-cachepress plugin directory is removed from disk', () => {
+            const flatDir = join(tempDir, 'flattened');
+            assert.ok(
+                !existsSync(join(flatDir, 'wp-content', 'plugins', 'sg-cachepress')),
+                'sg-cachepress directory should not exist after apply-runtime',
+            );
+        });
+
+        it('sg-security plugin directory is removed from disk', () => {
+            const flatDir = join(tempDir, 'flattened');
+            assert.ok(
+                !existsSync(join(flatDir, 'wp-content', 'plugins', 'sg-security')),
+                'sg-security directory should not exist after apply-runtime',
+            );
+        });
+
+        it('unrelated plugins are preserved on disk', () => {
+            const flatDir = join(tempDir, 'flattened');
+            // The site-export plugin should still exist.
+            assert.ok(
+                existsSync(join(flatDir, 'wp-content', 'plugins', 'site-export')),
+                'site-export plugin should still exist after apply-runtime',
+            );
+        });
+
+        it('sg plugins are deactivated in the target database', async () => {
+            const importDb = `${getDbName(site)}_import`;
+            const conn = await createMysqlConnection(importDb);
+            try {
+                const [rows] = await conn.query(
+                    "SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'"
+                );
+                assert.ok(rows.length > 0, 'active_plugins option should exist');
+
+                const raw = rows[0].option_value;
+                assert.ok(
+                    !raw.includes('sg-cachepress'),
+                    `active_plugins should not contain sg-cachepress, got: ${raw}`,
+                );
+                assert.ok(
+                    !raw.includes('sg-security'),
+                    `active_plugins should not contain sg-security, got: ${raw}`,
+                );
+            } finally {
+                await conn.end();
+            }
+        });
+
+        it('non-SG plugins remain active in the target database', async () => {
+            const importDb = `${getDbName(site)}_import`;
+            const conn = await createMysqlConnection(importDb);
+            try {
+                const [rows] = await conn.query(
+                    "SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'"
+                );
+                const raw = rows[0].option_value;
+                assert.ok(
+                    raw.includes('site-export'),
+                    `active_plugins should still contain site-export, got: ${raw}`,
+                );
+            } finally {
+                await conn.end();
+            }
+        });
+
+        it('state records deactivated plugins', () => {
+            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            const deactivated = state.apply?.plugins_deactivated ?? [];
+            assert.ok(
+                deactivated.some(p => p.includes('sg-cachepress')),
+                `Expected sg-cachepress in plugins_deactivated, got: ${JSON.stringify(deactivated)}`,
+            );
+            assert.ok(
+                deactivated.some(p => p.includes('sg-security')),
+                `Expected sg-security in plugins_deactivated, got: ${JSON.stringify(deactivated)}`,
+            );
+        });
+
+        it('audit log records the removals and deactivations', () => {
+            const auditLog = readFileSync(join(tempDir, '.import-audit.log'), 'utf-8');
+            assert.ok(
+                auditLog.includes('removed wp-content/plugins/sg-cachepress (production-only)'),
+                'audit log should record sg-cachepress removal',
+            );
+            assert.ok(
+                auditLog.includes('removed wp-content/plugins/sg-security (production-only)'),
+                'audit log should record sg-security removal',
+            );
+            assert.ok(
+                auditLog.includes('deactivated') && auditLog.includes('sg-cachepress'),
+                'audit log should record sg-cachepress deactivation',
+            );
+            assert.ok(
+                auditLog.includes('deactivated') && auditLog.includes('sg-security'),
+                'audit log should record sg-security deactivation',
+            );
+        });
+    });
+});

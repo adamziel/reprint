@@ -354,4 +354,142 @@ class ProductionDropInRemovalTest extends TestCase
 
         $this->assertFileExists($wpContent . '/object-cache.php');
     }
+
+    // ---- SiteGround-specific tests ----
+
+    private function writeSitegroundState(array $overrides = []): void
+    {
+        $this->writeState(array_replace_recursive([
+            'command' => 'files-sync',
+            'status' => 'complete',
+            'webhost' => 'siteground',
+            'preflight' => [
+                'data' => [
+                    'runtime' => [
+                        'document_root' => '',
+                        'env_names' => [],
+                        'ini_get_all' => [],
+                    ],
+                    'filesystem' => ['directories' => []],
+                    'wp_detect' => ['roots' => []],
+                    'wp_content' => [
+                        'roots' => [
+                            [
+                                'plugins' => [
+                                    ['name' => 'sg-cachepress', 'type' => 'dir'],
+                                    ['name' => 'sg-security', 'type' => 'dir'],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ], $overrides));
+    }
+
+    private function createSitegroundPlugins(): void
+    {
+        $plugins = $this->fsRoot . '/wp-content/plugins';
+        mkdir($plugins . '/sg-cachepress', 0755, true);
+        file_put_contents(
+            $plugins . '/sg-cachepress/sg-cachepress.php',
+            "<?php // SG CachePress\n",
+        );
+        mkdir($plugins . '/sg-security', 0755, true);
+        file_put_contents(
+            $plugins . '/sg-security/sg-security.php',
+            "<?php // SG Security\n",
+        );
+    }
+
+    public function testSitegroundRemovesSgCachepressDirectory(): void
+    {
+        $this->writeSitegroundState();
+        $this->createSitegroundPlugins();
+
+        $sgCacheDir = $this->fsRoot . '/wp-content/plugins/sg-cachepress';
+        $this->assertDirectoryExists($sgCacheDir);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        $this->assertDirectoryDoesNotExist($sgCacheDir);
+    }
+
+    public function testSitegroundRemovesSgSecurityDirectory(): void
+    {
+        $this->writeSitegroundState();
+        $this->createSitegroundPlugins();
+
+        $sgSecurityDir = $this->fsRoot . '/wp-content/plugins/sg-security';
+        $this->assertDirectoryExists($sgSecurityDir);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        $this->assertDirectoryDoesNotExist($sgSecurityDir);
+    }
+
+    public function testSitegroundPreservesUnrelatedPlugins(): void
+    {
+        $this->writeSitegroundState();
+        $this->createSitegroundPlugins();
+
+        $plugins = $this->fsRoot . '/wp-content/plugins';
+        mkdir($plugins . '/woocommerce', 0755, true);
+        file_put_contents($plugins . '/woocommerce/woocommerce.php', "<?php // WooCommerce\n");
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        $this->assertDirectoryExists($plugins . '/woocommerce');
+    }
+
+    public function testSitegroundLogsRemovalsToAuditLog(): void
+    {
+        $this->writeSitegroundState();
+        $this->createSitegroundPlugins();
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        $auditLog = file_get_contents($this->stateDir . '/.import-audit.log');
+
+        $this->assertStringContainsString(
+            'removed wp-content/plugins/sg-cachepress (production-only)',
+            $auditLog,
+        );
+        $this->assertStringContainsString(
+            'removed wp-content/plugins/sg-security (production-only)',
+            $auditLog,
+        );
+    }
+
+    public function testSitegroundPersistsPathsRemovedToState(): void
+    {
+        $this->writeSitegroundState();
+        $this->createSitegroundPlugins();
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        $state = json_decode(
+            file_get_contents($this->stateDir . '/.import-state.json'),
+            true,
+        );
+
+        $this->assertContains(
+            'wp-content/plugins/sg-cachepress',
+            $state['apply']['remote_paths_removed_from_local_site'],
+        );
+        $this->assertContains(
+            'wp-content/plugins/sg-security',
+            $state['apply']['remote_paths_removed_from_local_site'],
+        );
+    }
 }
