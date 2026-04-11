@@ -155,55 +155,30 @@ describe('Import: SiteGround plugin stripping', () => {
             assert.equal(result.exitCode, 0, `db-apply failed:\n${result.stderr}`);
         });
 
-        it('sg plugins are removed from active_plugins', async () => {
+        it('sg plugins are removed from active_plugins', () => {
             const importDb = `${getDbName(site)}_import`;
 
-            // Debug: print the audit log to help diagnose CI failures.
-            const auditPath = join(tempDir, '.import-audit.log');
-            if (existsSync(auditPath)) {
-                const auditContent = readFileSync(auditPath, 'utf-8');
-                const deactivateLines = auditContent.split('\n').filter(
-                    l => l.includes('deactivat') || l.includes('DB-APPLY') || l.includes('webhost'),
-                );
-                console.log('DEBUG audit log (deactivation-related):', deactivateLines.join('\n'));
-            }
+            // Query using PHP to use the same MySQL driver as the importer.
+            const raw = execFileSync('php', ['-r', `
+                \$pdo = new PDO('mysql:host=127.0.0.1;dbname=${importDb};charset=utf8mb4', 'e2e_admin', 'e2e_password');
+                \$stmt = \$pdo->query("SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'");
+                echo \$stmt->fetchColumn();
+            `], { encoding: 'utf-8', timeout: 10000 }).trim();
 
-            const conn = await createMysqlConnection(importDb);
-            try {
-                const [rows] = await conn.query(
-                    "SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'"
-                );
-                assert.ok(rows.length > 0, 'active_plugins option should exist');
-
-                const raw = rows[0].option_value;
-                assert.ok(
-                    !raw.includes('sg-cachepress'),
-                    `active_plugins should not contain sg-cachepress, got: ${raw}`,
-                );
-                assert.ok(
-                    !raw.includes('sg-security'),
-                    `active_plugins should not contain sg-security, got: ${raw}`,
-                );
-            } finally {
-                await conn.end();
-            }
-        });
-
-        it('non-SG plugins remain active', async () => {
-            const importDb = `${getDbName(site)}_import`;
-            const conn = await createMysqlConnection(importDb);
-            try {
-                const [rows] = await conn.query(
-                    "SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'"
-                );
-                const raw = rows[0].option_value;
-                assert.ok(
-                    raw.includes('site-export'),
-                    `active_plugins should still contain site-export, got: ${raw}`,
-                );
-            } finally {
-                await conn.end();
-            }
+            assert.ok(raw.length > 0, 'active_plugins option should exist');
+            assert.ok(
+                !raw.includes('sg-cachepress'),
+                `active_plugins should not contain sg-cachepress, got: ${raw}`,
+            );
+            assert.ok(
+                !raw.includes('sg-security'),
+                `active_plugins should not contain sg-security, got: ${raw}`,
+            );
+            // Confirm non-SG plugins survived.
+            assert.ok(
+                raw.includes('site-export'),
+                `active_plugins should still contain site-export, got: ${raw}`,
+            );
         });
 
         it('audit log records the deactivations', () => {
