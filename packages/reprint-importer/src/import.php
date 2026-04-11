@@ -10641,7 +10641,7 @@ if (
     $command_info = [
         "files-sync" => [
             "display" => "files-pull",
-            "short" => "Pull files from the remote site, runs files-index if needed",
+            "short" => "Pull all files (initial) or only changes (delta)",
             "description" =>
                 "Downloads files from the remote site into --fs-root.\n" .
                 "\n" .
