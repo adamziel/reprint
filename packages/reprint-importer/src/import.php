@@ -1377,7 +1377,7 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flat-document-root",
+                "Command is required. Valid commands: files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
             );
         }
 
@@ -1397,7 +1397,7 @@ class ImportClient
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-sync, files-index, files-stats, db-sync, db-index, db-domains, db-apply, preflight, preflight-assert, flat-document-root, apply-runtime",
+                "Invalid command: {$command}. Valid commands: files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
             );
         }
 
@@ -10472,17 +10472,34 @@ if (
      */
     function _cli_render_main_help(array $option_defs, array $command_info): void
     {
+        if (function_exists("posix_isatty") && posix_isatty(STDOUT)) {
+            // Colored ASCII art banner — each letter clearly separated.
+            $re = "\033[35m";              // magenta (Re)
+            $pr = "\033[38;5;63m";         // WP Blueberry ~#3858E9 (Print)
+            $r  = "\033[0m";
+            echo "{$re} ___         {$pr}___         _          _   {$r}\n";
+            echo "{$re}| _ \\  ___  {$pr}| _ \\  _ _  (_)  _ _   | |_ {$r}\n";
+            echo "{$re}|   / / -_) {$pr}|  _/ | '_| | | | ' \\  |  _|{$r}\n";
+            echo "{$re}|_|_\\ \\___| {$pr}|_|   |_|   |_| |_||_|  \\__|{$r}\n";
+            echo "\n";
+        }
+        echo "Mirror any WordPress site over HTTP.\n";
         echo "Version " . get_importer_version() . "\n";
         echo "\n";
-        echo "Usage: php import.php <command> <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
+        echo "Usage: reprint <command> <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
         echo "\n";
         echo "Commands:\n";
-        $max_len = max(array_map('strlen', array_keys($command_info)));
+        $display_names = [];
         foreach ($command_info as $name => $info) {
-            echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
+            $display_names[] = $info["display"] ?? $name;
+        }
+        $max_len = max(array_map('strlen', $display_names));
+        foreach ($command_info as $name => $info) {
+            $display = $info["display"] ?? $name;
+            echo "  " . str_pad($display, $max_len + 2) . $info["short"] . "\n";
         }
         echo "\n";
-        echo "Run 'php import.php <command> --help' for command-specific help.\n";
+        echo "Run 'reprint <command> --help' for command-specific help.\n";
         echo "\n";
 
         $required = array_filter($option_defs, fn($d) => ($d['help_section'] ?? null) === 'required');
@@ -10524,7 +10541,8 @@ if (
         }
 
         $info = $command_info[$command];
-        echo "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
+        $display = $info["display"] ?? $command;
+        echo "Usage: reprint {$display} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
         echo "\n";
         echo $info["description"];
 
@@ -10622,20 +10640,22 @@ if (
     // every declared option for a command is guaranteed to appear.
     $command_info = [
         "files-sync" => [
-            "short" => "Sync files (auto-detects initial vs delta)",
+            "display" => "files-pull",
+            "short" => "Pull files from the remote site (index + download)",
             "description" =>
-                "Streams files from the remote server into the --fs-root directory.\n" .
-                "Auto-detects whether to run an initial or delta sync based on state:\n" .
+                "Indexes the remote directory tree and downloads files into --fs-root.\n" .
+                "Runs three stages: index → diff → fetch.\n" .
+                "Auto-detects whether this is a fresh pull or a follow-up:\n" .
                 "\n" .
-                "  - No prior sync: downloads the full directory tree (initial)\n" .
-                "  - Completed sync: re-indexes and downloads only changes (delta)\n" .
-                "  - Interrupted sync: resumes from the last saved cursor\n",
+                "  - First run: indexes and downloads the full directory tree\n" .
+                "  - After a completed pull: re-indexes and downloads only changes (delta)\n" .
+                "  - After an interruption: resumes from the last saved cursor\n",
             "extra" =>
                 "Filter modes:\n" .
-                "  none             Download all files (default)\n" .
-                "  essential-files   Skip uploads, download only code/config/themes/plugins.\n" .
+                "  none             Pull all files (default)\n" .
+                "  essential-files   Skip uploads, pull only code/config/themes/plugins.\n" .
                 "                    The skipped file list is saved for later retrieval.\n" .
-                "  skipped-earlier   Download only files skipped by a prior essential-files run.\n" .
+                "  skipped-earlier   Pull only files skipped by a prior essential-files run.\n" .
                 "\n" .
                 "Output files:\n" .
                 "  (fs-root)/                              Downloaded files\n" .
@@ -10647,32 +10667,36 @@ if (
                 "  .import-audit.log                       Audit log\n",
         ],
         "files-index" => [
-            "short" => "Download the remote file index without fetching file contents",
+            "short" => "Pull the remote file index (metadata only, no file contents)",
             "description" =>
-                "Traverses the full remote directory tree and writes each entry\n" .
-                "to .import-index.jsonl. Does not download any file data.\n",
+                "Streams the full remote directory tree over HTTP and writes each\n" .
+                "entry (path, size, ctime, type) to .import-remote-index.jsonl.\n" .
+                "When symlink-following is enabled, recursively discovers and indexes\n" .
+                "additional directories outside the primary roots.\n" .
+                "\n" .
+                "Does not download any file contents.\n",
             "extra" => null,
         ],
         "files-stats" => [
-            "short" => "Show file count and total size of indexed and pending files",
+            "short" => "Show file counts and sizes from the local index",
             "description" =>
-                "Reads the remote file index and download list to report:\n" .
+                "Reads local index files to report (no network calls):\n" .
                 "\n" .
                 "  - Total indexed files and their combined size\n" .
                 "  - Files not yet downloaded and their combined size\n" .
                 "\n" .
                 "Output is JSON with 'indexed' and 'pending' sections.\n" .
-                "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
-                "\n" .
-                "Requires a prior files-index or files-sync run.\n",
+                "Requires a prior files-index or files-pull run.\n",
             "extra" => null,
         ],
         "db-sync" => [
-            "short" => "Download the database as a SQL dump",
+            "display" => "db-pull",
+            "short" => "Pull the database as a SQL dump (index + download)",
             "description" =>
-                "Streams the full database dump into --state-dir/db.sql (default),\n" .
-                "to stdout for piping, or directly into a MySQL connection.\n" .
-                "Automatically resumes from the last cursor if interrupted.\n",
+                "Indexes remote tables, then streams the full SQL dump into\n" .
+                "--state-dir/db.sql (default), to stdout, or directly into a\n" .
+                "MySQL connection. Resumes from the last cursor if interrupted.\n" .
+                "Discovered domains are cached for later use by db-apply.\n",
             "extra" =>
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
@@ -10680,65 +10704,65 @@ if (
                 "  mysql   Stream directly into a MySQL connection\n",
         ],
         "db-index" => [
-            "short" => "Index database tables and their statistics",
+            "short" => "Pull table metadata from the remote database",
             "description" =>
-                "Streams table metadata (name, estimated rows, data size) into\n" .
-                "--state-dir/db-tables.jsonl. Useful for planning and diagnostics.\n",
+                "Fetches table metadata (name, estimated rows, data size) from\n" .
+                "the remote server and writes it to --state-dir/db-tables.jsonl.\n" .
+                "Useful for planning before a full db-pull.\n",
             "extra" =>
                 "Output files:\n" .
                 "  db-tables.jsonl  One JSON object per table\n",
         ],
         "db-domains" => [
-            "short" => "List domains discovered in the SQL dump",
+            "short" => "Extract domains from the pulled SQL dump",
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
                 "\n" .
-                "If .import-domains.json exists (written by db-sync), it is read\n" .
-                "directly. Otherwise, db.sql is scanned for domains and the result\n" .
-                "is saved for future calls.\n" .
-                "\n" .
-                "The <remote-url> parameter is kept for CLI consistency but ignored.\n" .
+                "If .import-domains.json exists (cached by db-pull), it is read\n" .
+                "directly. Otherwise, db.sql is scanned and the result is cached\n" .
+                "for future calls. No network calls.\n" .
                 "\n" .
                 "Example:\n" .
-                "  php import.php db-domains - --state-dir=/path/to/state\n",
+                "  reprint db-domains - --state-dir=/path/to/state\n",
             "extra" => null,
         ],
         "db-apply" => [
-            "short" => "Apply SQL dump to a target MySQL or SQLite database with URL rewriting",
+            "short" => "Import the SQL dump into a local MySQL or SQLite database",
             "description" =>
-                "Reads <local-path>/db.sql, optionally rewrites URLs, and executes\n" .
-                "all statements against a target MySQL or SQLite database. Resumable.\n" .
-                "\n" .
-                "The <remote-url> parameter is kept for CLI consistency but ignored.\n",
+                "Reads db.sql from --state-dir, optionally rewrites URLs, and executes\n" .
+                "all statements against a target database. Resumable. Saves target\n" .
+                "database credentials to state for use by apply-runtime.\n",
             "extra" =>
                 "MySQL example:\n" .
-                "  php import.php db-apply - /path/to/import \\\n" .
+                "  reprint db-apply - --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-user=root --target-db=wp_new \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n" .
                 "\n" .
                 "SQLite example:\n" .
-                "  php import.php db-apply - /path/to/import \\\n" .
+                "  reprint db-apply - --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite --target-sqlite-path=/path/to/db.sqlite \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
         "preflight" => [
-            "short" => "Run preflight check and print the full result as JSON",
+            "short" => "Probe the remote site and cache its environment",
             "description" =>
-                "Contacts the export server and collects environment details:\n" .
+                "Contacts the remote site and collects environment details:\n" .
                 "PHP/MySQL versions, memory limits, filesystem access, database\n" .
-                "connectivity, WordPress version, plugins, themes, and directory layout.\n" .
+                "connectivity, WordPress version, plugins, themes, directory layout,\n" .
+                "and runtime scripts (auto_prepend_file, auto_append_file).\n" .
                 "\n" .
-                "Prints the full preflight response as pretty-printed JSON.\n" .
-                "Exits 0 if the server reported OK, 1 otherwise.\n",
+                "Results are saved to state for use by later commands.\n" .
+                "Prints the full response as pretty-printed JSON.\n" .
+                "Exits 0 if the site reported OK, 1 otherwise.\n",
             "extra" => null,
         ],
         "preflight-assert" => [
-            "short" => "Check if migration is feasible (exits 0 or 1)",
+            "short" => "Verify the remote site can be mirrored (exits 0 or 1)",
             "description" =>
-                "Runs the same preflight check as the preflight command, then\n" .
-                "evaluates key assertions:\n" .
+                "Runs the same check as the preflight command, then evaluates\n" .
+                "key assertions:\n" .
                 "\n" .
-                "  - Server responded with HTTP 200\n" .
+                "  - Remote site responded with HTTP 200\n" .
                 "  - Preflight OK flag is set\n" .
                 "  - Filesystem directories are accessible\n" .
                 "  - Database connection works\n" .
@@ -10747,40 +10771,38 @@ if (
             "extra" => null,
         ],
         "flat-document-root" => [
-            "short" => "Create a vanilla WordPress directory layout using symlinks",
+            "display" => "flat-docroot",
+            "short" => "Reassemble pulled files into a standard WordPress layout",
             "description" =>
-                "Creates a directory at --flatten-to that mirrors the standard\n" .
-                "WordPress directory structure by analyzing preflight path data\n" .
-                "and symlinking each component from where it actually lives.\n" .
+                "Creates a directory at --flatten-to with symlinks that map the\n" .
+                "pulled files back into a vanilla WordPress directory structure.\n" .
                 "\n" .
-                "Uses preflight paths_urls (ABSPATH, WP_CONTENT_DIR, WP_PLUGIN_DIR,\n" .
-                "WPMU_PLUGIN_DIR, uploads basedir) to locate each WordPress component\n" .
-                "within the import fs root, even when they reside in different parent\n" .
+                "Uses preflight paths (ABSPATH, WP_CONTENT_DIR, WP_PLUGIN_DIR,\n" .
+                "WPMU_PLUGIN_DIR, uploads basedir) to locate each component\n" .
+                "within --fs-root, even when they reside in different parent\n" .
                 "directories on the source server (e.g. WP Cloud with ABSPATH at\n" .
                 "/srv/htdocs and WP_CONTENT_DIR at /tmp/__wp__/wp-content).\n" .
                 "\n" .
-                "Requires a prior preflight run to detect the WordPress directory layout.\n" .
-                "\n" .
-                "The command is idempotent: re-running refreshes all symlinks.\n" .
+                "No files are copied — only symlinks are created. Idempotent.\n" .
                 "If a path that should be a symlink is a regular file or directory,\n" .
                 "the command stops with an error unless --force is specified.\n",
             "extra" => null,
         ],
         "apply-runtime" => [
-            "short" => "Generate server configuration for the imported site",
+            "short" => "Generate server config and prepare the site to run locally",
             "description" =>
-                "Reads the source site's environment from preflight data and generates\n" .
-                "the configuration files needed to serve the imported site on your\n" .
-                "target server. This bridges the gap between 'files are on disk' and\n" .
-                "'the site actually works' — setting PHP constants, INI directives,\n" .
-                "and error handlers (like on-the-fly thumbnail generation).\n" .
+                "Generates server configuration (runtime.php, nginx.conf or start.sh)\n" .
+                "from preflight data and removes production-only drop-ins and mu-plugins\n" .
+                "that would crash outside the original host.\n" .
+                "\n" .
+                "If db-apply was run first, embeds the target database credentials\n" .
+                "into runtime.php automatically.\n" .
                 "\n" .
                 "Does not require a remote URL — reads only from local state.\n" .
-                "Requires a prior preflight run to detect the source host.\n" .
                 "\n" .
                 "Pass --fs-root for the raw download directory (the remote document_root\n" .
                 "path is appended automatically), or --flat-document-root for a directory\n" .
-                "created by flat-document-root (used as-is). These are mutually exclusive.\n",
+                "created by flat-docroot (used as-is). These are mutually exclusive.\n",
             "extra" =>
                 "Runtime modes:\n" .
                 "  nginx-fpm      — writes runtime.php + nginx.conf\n" .
@@ -10813,11 +10835,11 @@ if (
                 "\n" .
                 "Examples:\n" .
                 "  # From raw download directory:\n" .
-                "  php import.php apply-runtime --state-dir=./state \\\n" .
+                "  reprint apply-runtime --state-dir=./state \\\n" .
                 "    --fs-root=./files --output-dir=./runtime --runtime=php-builtin\n" .
                 "\n" .
                 "  # From flattened layout:\n" .
-                "  php import.php apply-runtime --state-dir=./state \\\n" .
+                "  reprint apply-runtime --state-dir=./state \\\n" .
                 "    --flat-document-root=./flat --output-dir=./runtime --runtime=php-builtin\n" .
                 "\n" .
                 "  bash ./runtime/start.sh\n",
@@ -10832,8 +10854,12 @@ if (
 
     $command = $argv[1];
 
-    // Backward-compatible command aliases (not advertised in help)
+    // Command aliases — maps user-facing names and legacy names to
+    // the internal command names used by run() and state files.
     $command_aliases = [
+        "files-pull" => "files-sync",
+        "db-pull" => "db-sync",
+        "flat-docroot" => "flat-document-root",
         "flatten-docroot" => "flat-document-root",
     ];
     if (isset($command_aliases[$command])) {
@@ -10859,7 +10885,7 @@ if (
         $remote_url = $argv[2] ?? null;
         if (!$remote_url) {
             fwrite(STDERR, "Error: <remote-url> is required\n");
-            fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+            fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
             exit(1);
         }
         $option_start_index = 3;
@@ -10872,7 +10898,7 @@ if (
 
     if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
-        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
 
@@ -10885,7 +10911,7 @@ if (
     }
     if (!$fs_root && !$flat_document_root) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
-        fwrite(STDERR, "Usage: php import.php {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
     if (!$fs_root) {
