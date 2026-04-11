@@ -318,11 +318,11 @@
             "time": "2026-04-02T14:37:51+00:00"
         },
         {
-            "name": "wp-php-toolkit/streaming-exporter",
+            "name": "wp-php-toolkit/reprint-exporter",
             "version": "dev-codex/extract-export-dispatcher",
             "dist": {
                 "type": "path",
-                "url": "../packages/streaming-exporter",
+                "url": "../packages/reprint-exporter",
                 "reference": "2131bfb359f8e04244d912d5eeddb55c284ce52e"
             },
             "require": {
@@ -414,7 +414,7 @@
     "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
-        "wp-php-toolkit/streaming-exporter": 20
+        "wp-php-toolkit/reprint-exporter": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,

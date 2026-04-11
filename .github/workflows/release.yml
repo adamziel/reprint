@@ -26,18 +26,18 @@ jobs:
       - run: composer install --no-dev --no-interaction --prefer-dist
 
       - name: Install plugin runtime dependencies
-        run: composer install --no-dev --no-interaction --prefer-dist --working-dir=wordpress-plugin
+        run: composer install --no-dev --no-interaction --prefer-dist --working-dir=reprint-exporter-wp
 
-      - name: Build importer.phar
-        run: ./bin/build-importer-phar.sh
+      - name: Build reprint.phar
+        run: ./bin/build-reprint-phar.sh
 
-      - name: Package wordpress-plugin.zip
-        run: cd wordpress-plugin && zip -r ../wordpress-plugin.zip . -x '*/secret.php'
+      - name: Package reprint-exporter-wp.zip
+        run: cd reprint-exporter-wp && zip -r ../reprint-exporter-wp.zip . -x '*/secret.php'
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            importer.phar
-            wordpress-plugin.zip
+            reprint.phar
+            reprint-exporter-wp.zip
           generate_release_notes: true

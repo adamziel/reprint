@@ -1,10 +1,10 @@
 {
-    "main": "packages/streaming-importer/src/import.php",
-    "output": "importer.phar",
+    "main": "packages/reprint-importer/src/import.php",
+    "output": "reprint.phar",
     "check-requirements": false,
 
     "directories": [
-        "packages/streaming-importer"
+        "packages/reprint-importer"
     ],
 
     "finder": [
@@ -39,7 +39,7 @@
     ],
 
     "files": [
-        "packages/streaming-importer/src/VERSION",
+        "packages/reprint-importer/src/VERSION",
         "lib/sqlite-database-integration/constants.php",
         "lib/sqlite-database-integration/php-polyfills.php",
         "lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php",

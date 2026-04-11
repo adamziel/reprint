@@ -106,7 +106,7 @@ $config = json_decode(file_get_contents(%s), true, 512, JSON_THROW_ON_ERROR);
 $budget = new ResourceBudget(microtime(true), 10, 128 * 1024 * 1024, 0.9);
 endpoint_file_index($config, $budget);
 PHP,
-                var_export(dirname(__DIR__) . '/packages/streaming-exporter/src/export.php', true),
+                var_export(dirname(__DIR__) . '/packages/reprint-exporter/src/export.php', true),
                 var_export($configPath, true),
             ),
         );

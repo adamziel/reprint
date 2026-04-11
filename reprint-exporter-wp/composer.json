@@ -8,7 +8,7 @@
     "repositories": [
         {
             "type": "path",
-            "url": "../packages/streaming-exporter",
+            "url": "../packages/reprint-exporter",
             "options": {
                 "symlink": false
             }
@@ -16,6 +16,6 @@
     ],
     "require": {
         "php": ">=7.4",
-        "wp-php-toolkit/streaming-exporter": "*@dev"
+        "wp-php-toolkit/reprint-exporter": "*@dev"
     }
 }

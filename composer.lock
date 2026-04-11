@@ -318,11 +318,11 @@
             "time": "2026-04-02T14:37:51+00:00"
         },
         {
-            "name": "wp-php-toolkit/streaming-exporter",
+            "name": "wp-php-toolkit/reprint-exporter",
             "version": "dev-codex/extract-export-dispatcher",
             "dist": {
                 "type": "path",
-                "url": "packages/streaming-exporter",
+                "url": "packages/reprint-exporter",
                 "reference": "2131bfb359f8e04244d912d5eeddb55c284ce52e"
             },
             "require": {
@@ -359,11 +359,11 @@
             }
         },
         {
-            "name": "wp-php-toolkit/streaming-importer",
+            "name": "wp-php-toolkit/reprint-importer",
             "version": "dev-adamziel/new-site-url-sqlite",
             "dist": {
                 "type": "path",
-                "url": "packages/streaming-importer",
+                "url": "packages/reprint-importer",
                 "reference": "b6ab722bb7744ab5cb8112171b72a6aab5669390"
             },
             "require": {
@@ -372,10 +372,10 @@
                 "php": ">=7.4",
                 "wp-php-toolkit/data-liberation": "^0.5.1",
                 "wp-php-toolkit/html": "^0.5.1",
-                "wp-php-toolkit/streaming-exporter": "*@dev"
+                "wp-php-toolkit/reprint-exporter": "*@dev"
             },
             "bin": [
-                "bin/streaming-importer"
+                "bin/reprint-importer"
             ],
             "type": "library",
             "license": [
@@ -2403,8 +2403,8 @@
     "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
-        "wp-php-toolkit/streaming-exporter": 20,
-        "wp-php-toolkit/streaming-importer": 20
+        "wp-php-toolkit/reprint-exporter": 20,
+        "wp-php-toolkit/reprint-importer": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,

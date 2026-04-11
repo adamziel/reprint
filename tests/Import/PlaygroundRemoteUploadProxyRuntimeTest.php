@@ -4,8 +4,8 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/streaming-importer/src/lib/host/class-runtime-manifest.php';
-require_once __DIR__ . '/../../packages/streaming-importer/src/lib/target-runtime/load.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/class-runtime-manifest.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/target-runtime/load.php';
 
 class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 {
@@ -91,20 +91,20 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $startSh = file_get_contents($this->outputDir . '/start.sh');
 
         $this->assertStringContainsString(
-            "/tmp/streaming-site-migration/.import-state.json",
+            "/tmp/reprint/.import-state.json",
             $runtime,
         );
         $this->assertStringContainsString(
-            "/tmp/streaming-site-migration/.import-download-list-skipped.jsonl",
+            "/tmp/reprint/.import-download-list-skipped.jsonl",
             $runtime,
         );
         $this->assertStringNotContainsString($this->stateFile, $runtime);
         $this->assertStringContainsString(
-            "--mount='" . $this->stateFile . ":/tmp/streaming-site-migration/.import-state.json'",
+            "--mount='" . $this->stateFile . ":/tmp/reprint/.import-state.json'",
             $startSh,
         );
         $this->assertStringContainsString(
-            "--mount='" . $this->skippedFile . ":/tmp/streaming-site-migration/.import-download-list-skipped.jsonl'",
+            "--mount='" . $this->skippedFile . ":/tmp/reprint/.import-download-list-skipped.jsonl'",
             $startSh,
         );
     }

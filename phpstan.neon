@@ -7,22 +7,22 @@ parameters:
     phpVersion: 70400
     level: 5
     paths:
-        - packages/streaming-exporter
-        - packages/streaming-importer
-        - wordpress-plugin
+        - packages/reprint-exporter
+        - packages/reprint-importer
+        - reprint-exporter-wp
     excludePaths:
         analyseAndScan:
-            - packages/streaming-exporter/src/secrets.php
-            - packages/streaming-exporter/src/class-sqlite-driver-pdo.php
-            - wordpress-plugin/wordpress/
-            - wordpress-plugin/index.php
-            - wordpress-plugin/vendor/
+            - packages/reprint-exporter/src/secrets.php
+            - packages/reprint-exporter/src/class-sqlite-driver-pdo.php
+            - reprint-exporter-wp/wordpress/
+            - reprint-exporter-wp/index.php
+            - reprint-exporter-wp/vendor/
         analyse:
-            - packages/streaming-importer/src/lib/mysql-query-stream/
-            - wordpress-plugin/vendor/
+            - packages/reprint-importer/src/lib/mysql-query-stream/
+            - reprint-exporter-wp/vendor/
     treatPhpDocTypesAsCertain: false
     scanDirectories:
-        - packages/streaming-exporter/src
+        - packages/reprint-exporter/src
         - lib/sqlite-database-integration/wp-includes/parser
         - lib/sqlite-database-integration/wp-includes/mysql
         - lib/sqlite-database-integration/wp-includes/sqlite

@@ -97,8 +97,8 @@ if (!function_exists('wp_safe_redirect')) {
     function wp_safe_redirect(...$args): void {}
 }
 
-require_once __DIR__ . '/../wordpress-plugin/lib.php';
-require_once __DIR__ . '/../wordpress-plugin/wordpress/site-export.php';
+require_once __DIR__ . '/../reprint-exporter-wp/lib.php';
+require_once __DIR__ . '/../reprint-exporter-wp/wordpress/site-export.php';
 
 final class SiteExportSecretTest extends TestCase
 {

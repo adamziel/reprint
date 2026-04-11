@@ -6,7 +6,7 @@ sql-exports
 *.meta
 adamadam.blog-export
 adamadam-blog-export
-wordpress-plugin/generic/secrets.php
+reprint-exporter-wp/generic/secrets.php
 secrets.sh
 tester.sh
 exports.sh
@@ -17,4 +17,4 @@ exports-old
 siteground-export-*
 node_modules
 *.phar
-packages/streaming-importer/src/VERSION
+packages/reprint-importer/src/VERSION

@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-phar:
-    name: Build importer.phar
+    name: Build reprint.phar
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,12 +21,12 @@ jobs:
 
       - run: composer install --no-dev --no-interaction --prefer-dist
 
-      - run: ./bin/build-importer-phar.sh
+      - run: ./bin/build-reprint-phar.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: importer-phar
-          path: importer.phar
+          path: reprint.phar
 
   e2e:
     name: E2E (PHP ${{ matrix.php }})
@@ -63,7 +63,7 @@ jobs:
 
       - name: Provision basic site and smoke-test API
         env:
-          IMPORTER_PATH: ${{ github.workspace }}/importer.phar
+          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
         working-directory: tests/e2e
         run: |
           # Download WP-CLI (normally done by Vitest globalSetup, but we need it here)
@@ -92,7 +92,7 @@ jobs:
 
       - name: Run E2E tests
         env:
-          IMPORTER_PATH: ${{ github.workspace }}/importer.phar
+          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
         working-directory: tests/e2e
         run: npx vitest run
 

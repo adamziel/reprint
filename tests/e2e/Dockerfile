@@ -43,7 +43,7 @@ WORKDIR /app
 
 # Install PHP dependencies (vendor/ is gitignored)
 RUN composer install --no-dev --no-interaction --prefer-dist
-RUN composer install --no-dev --no-interaction --prefer-dist --working-dir=wordpress-plugin
+RUN composer install --no-dev --no-interaction --prefer-dist --working-dir=reprint-exporter-wp
 
 # Install npm deps for E2E
 RUN cd tests/e2e && npm install --silent

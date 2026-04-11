@@ -4,14 +4,14 @@
 
 The exporter and importer are published as separate Composer packages:
 
-- [`wp-php-toolkit/streaming-exporter`](https://packagist.org/packages/wp-php-toolkit/streaming-exporter) — Streaming export engine (SQL dumps, file trees, cursor-based resumption).
-- [`wp-php-toolkit/streaming-importer`](https://packagist.org/packages/wp-php-toolkit/streaming-importer) — Streaming site importer with CLI and PHAR support.
+- [`wp-php-toolkit/reprint-exporter`](https://packagist.org/packages/wp-php-toolkit/reprint-exporter) — Streaming export engine (SQL dumps, file trees, cursor-based resumption).
+- [`wp-php-toolkit/reprint-importer`](https://packagist.org/packages/wp-php-toolkit/reprint-importer) — Streaming site importer with CLI and PHAR support.
 
 Install whichever you need:
 
 ```bash
-composer require wp-php-toolkit/streaming-exporter
-composer require wp-php-toolkit/streaming-importer
+composer require wp-php-toolkit/reprint-exporter
+composer require wp-php-toolkit/reprint-importer
 ```
 
 Or add them to your `composer.json`:
@@ -19,8 +19,8 @@ Or add them to your `composer.json`:
 ```json
 {
     "require": {
-        "wp-php-toolkit/streaming-exporter": "dev-main",
-        "wp-php-toolkit/streaming-importer": "dev-main"
+        "wp-php-toolkit/reprint-exporter": "dev-main",
+        "wp-php-toolkit/reprint-importer": "dev-main"
     }
 }
 ```
@@ -29,9 +29,9 @@ Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org
 
 ## Repository layout
 
-- `packages/streaming-exporter` — Source for the `wp-php-toolkit/streaming-exporter` Composer package.
-- `packages/streaming-importer` — Source for the `wp-php-toolkit/streaming-importer` Composer package.
-- `wordpress-plugin` — WordPress plugin distribution that bundles `streaming-exporter`.
+- `packages/reprint-exporter` — Source for the `wp-php-toolkit/reprint-exporter` Composer package.
+- `packages/reprint-importer` — Source for the `wp-php-toolkit/reprint-importer` Composer package.
+- `reprint-exporter-wp` — WordPress plugin distribution that bundles `reprint-exporter`.
 - `importer/import.php` — thin compatibility wrapper for the importer package entrypoint.
 
 ### Technical requirements
@@ -59,12 +59,12 @@ On the **migration target** side:
 
 Download the latest release artifacts from [GitHub Releases](../../releases):
 
-* **`importer.phar`** — a self-contained PHP archive that runs on the **migration target** (the hosting account you are migrating to). No cloning or `composer install` needed.
-* **`wordpress-plugin.zip`** — install this on the **migration source** (the remote WordPress site you want to migrate).
+* **`reprint.phar`** — a self-contained PHP archive that runs on the **migration target** (the hosting account you are migrating to). No cloning or `composer install` needed.
+* **`reprint-exporter-wp.zip`** — install this on the **migration source** (the remote WordPress site you want to migrate).
 
 Both must share the same secret string. The plugin has a UI screen where the user can paste the secret, and then
 the importer must be fed the same secret string (more details below). Alternatively, the plugin
-can be pre-packaged with a `./wordpress-plugin/secret.php` file where a pre-determined secret is shipped:
+can be pre-packaged with a `./reprint-exporter-wp/secret.php` file where a pre-determined secret is shipped:
 
 ```php
 <?php
@@ -94,7 +94,7 @@ SECRET="your-shared-secret"
 First, we'll make sure the server is reachable and the environment is in a good shape:
 
 ```bash
-php importer.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
@@ -105,7 +105,7 @@ To run very basic diagnostics that confirms the remote server replied and it has
 sound-looking filesystem and a database connection, run:
 
 ```bash
-php importer.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 For hosting platform-specific checks, such as database version compatibility or
@@ -118,7 +118,7 @@ This first builds a full index of the remote directory tree, then streams every 
 It can be interrupted and resumed at any time — just re-run the same command:
 
 ```bash
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -144,7 +144,7 @@ and you want to bring the site online before downloading all the uploads:
 
 ```bash
 # Step 1: download only essential files (code, config, themes, plugins)
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --filter=essential-files
 ```
 
@@ -154,7 +154,7 @@ files are done, the sync marks itself **complete**. The skipped file list stays 
 
 ```bash
 # Step 2: download the uploads
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --filter=skipped-earlier
 ```
 
@@ -172,7 +172,7 @@ The uploads directory is detected from preflight data (`uploads.basedir`), falli
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
 
 ```bash
-php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 You can also pipe the SQL directly to stdout or stream it into a MySQL server
@@ -180,11 +180,11 @@ without writing a file to disk. Use `--sql-output` to choose the mode:
 
 ```bash
 # Pipe to stdout — useful for feeding into mysql CLI or another tool
-php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=stdout | mysql -u root my_database
 
 # Stream directly into MySQL — no intermediate file, no pipe
-php importer.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=root --mysql-password=secret
 ```
 
@@ -216,7 +216,7 @@ First, we must abort the previous files-sync. Otherwise, it would just
 tell us it's completed and refuse to proceed:
 
 ```bash
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --abort
+php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --abort
 ```
 
 From here, we can run the `files-sync` command again. It will index
@@ -224,7 +224,7 @@ the remote filesystem once again, compute which files have changed
 since the initial sync, and apply that delta in the local directory:
 
 ```bash
-php importer.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -242,7 +242,7 @@ the SQL dump into a target database while rewriting all URLs in one pass.
 MySQL target:
 
 ```bash
-php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
 ```
@@ -250,7 +250,7 @@ php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" 
 SQLite target:
 
 ```bash
-php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --target-engine=sqlite --target-sqlite-path="$STATE_DIR/wordpress.sqlite" \
     --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
@@ -266,7 +266,7 @@ are recalculated, JSON is re-encoded, and block comment attributes are updated.
 You can map multiple domains by repeating the flag:
 
 ```bash
-php importer.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com \
     --rewrite-url https://cdn.old-site.com https://cdn.new-site.com
@@ -286,7 +286,7 @@ hosting provider, and generates the configuration files your target server needs
 For PHP's built-in development server:
 
 ```bash
-php importer.phar apply-runtime --state-dir="$STATE_DIR" \
+php reprint.phar apply-runtime --state-dir="$STATE_DIR" \
     --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=php-builtin
 bash "$RUNTIME_DIR/start.sh"
 ```
@@ -294,7 +294,7 @@ bash "$RUNTIME_DIR/start.sh"
 For nginx + PHP-FPM:
 
 ```bash
-php importer.phar apply-runtime --state-dir="$STATE_DIR" \
+php reprint.phar apply-runtime --state-dir="$STATE_DIR" \
     --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=nginx-fpm
 # Include $RUNTIME_DIR/nginx.conf in your nginx configuration, then reload
 ```
@@ -505,7 +505,7 @@ This is useful for debugging but noisy for production use.
 The importer accepts the following commands:
 
 ```
-php importer.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
+php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 ```
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.

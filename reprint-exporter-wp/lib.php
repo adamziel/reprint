@@ -40,8 +40,8 @@ function _site_export_error(int $code, string $message): void {
 /**
  * Resolve and load the exporter package runtime.
  *
- * Supports both plugin release bundles (with wordpress-plugin/vendor/) and
- * the monorepo checkout (root vendor/ + vendor/wp-php-toolkit/streaming-exporter).
+ * Supports both plugin release bundles (with reprint-exporter-wp/vendor/) and
+ * the monorepo checkout (root vendor/ + vendor/wp-php-toolkit/reprint-exporter).
  *
  * @return string|null Absolute path to export.php, or null when the runtime is missing.
  */
@@ -50,11 +50,11 @@ function _site_export_load_exporter_runtime(): ?string {
     $candidates = [
         [
             'autoload' => SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php',
-            'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/streaming-exporter/src/export.php',
+            'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-exporter/src/export.php',
         ],
         [
             'autoload' => $repo_root . '/vendor/autoload.php',
-            'export' => $repo_root . '/vendor/wp-php-toolkit/streaming-exporter/src/export.php',
+            'export' => $repo_root . '/vendor/wp-php-toolkit/reprint-exporter/src/export.php',
         ],
     ];
 
@@ -167,7 +167,7 @@ function _site_export_verify_hmac(string $secret): ?string {
     }
 
     if (!class_exists('Site_Export_HMAC_Server')) {
-        return 'Site Export runtime is incomplete. Run composer install in wordpress-plugin or rebuild the release package.';
+        return 'Site Export runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.';
     }
 
     $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
@@ -285,7 +285,7 @@ function _site_export_handle_api_request(array $options = []): void {
     if ($export_runtime === null) {
         _site_export_error(
             500,
-            'Site Export runtime is incomplete. Run composer install in wordpress-plugin or rebuild the release package.'
+            'Site Export runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.'
         );
     }
 

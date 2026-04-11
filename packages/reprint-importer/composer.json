@@ -1,5 +1,5 @@
 {
-    "name": "wp-php-toolkit/streaming-importer",
+    "name": "wp-php-toolkit/reprint-importer",
     "description": "Streaming site importer with CLI and PHAR distribution support",
     "type": "library",
     "license": "GPL-2.0-or-later",
@@ -9,9 +9,9 @@
         "ext-pdo_mysql": "*",
         "wp-php-toolkit/data-liberation": "^0.5.1",
         "wp-php-toolkit/html": "^0.5.1",
-        "wp-php-toolkit/streaming-exporter": "*@dev"
+        "wp-php-toolkit/reprint-exporter": "*@dev"
     },
     "bin": [
-        "bin/streaming-importer"
+        "bin/reprint-importer"
     ]
 }

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Builds importer.phar — a self-contained, lean archive of the import client
+# Builds reprint.phar — a self-contained, lean archive of the import client
 # with all its runtime dependencies baked in.
 #
 # Uses Box (box-project/box) for GZ compression and PHP comment stripping
 # (line-number-preserving, so stack traces stay accurate).
 #
 # Usage:
-#   ./bin/build-importer-phar.sh            # outputs importer.phar in project root
+#   ./bin/build-reprint-phar.sh            # outputs reprint.phar in project root
 #
 set -euo pipefail
 
@@ -57,15 +57,15 @@ else
     LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
     VERSION="${LATEST_TAG:-v0.0.0}-trunk"
 fi
-echo "$VERSION" > packages/streaming-importer/src/VERSION
+echo "$VERSION" > packages/reprint-importer/src/VERSION
 echo "Version: $VERSION"
 
 # ── Build ─────────────────────────────────────────────────────────
 
-rm -f importer.phar
+rm -f reprint.phar
 
 php -d phar.readonly=0 "$BOX_PHAR" compile
 
-SIZE=$(du -h importer.phar | cut -f1)
+SIZE=$(du -h reprint.phar | cut -f1)
 echo ""
-echo "Output: importer.phar ($SIZE)"
+echo "Output: reprint.phar ($SIZE)"
