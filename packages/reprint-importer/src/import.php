@@ -3929,20 +3929,21 @@ class ImportClient
  * strips the listed plugins from active_plugins so they don't trigger
  * "plugin file does not exist" errors, then deletes itself.
  */
-\$_reprint_prefixes = {$prefixes_exported};
+require_once ABSPATH . 'wp-admin/includes/plugin.php';
 
+\$_reprint_prefixes = {$prefixes_exported};
 \$_reprint_active = get_option( 'active_plugins', array() );
-\$_reprint_filtered = array_values( array_filter( \$_reprint_active, function ( \$p ) use ( \$_reprint_prefixes ) {
+\$_reprint_to_deactivate = array();
+foreach ( \$_reprint_active as \$plugin ) {
     foreach ( \$_reprint_prefixes as \$prefix ) {
-        if ( strpos( \$p, \$prefix ) === 0 ) {
-            return false;
+        if ( strpos( \$plugin, \$prefix ) === 0 ) {
+            \$_reprint_to_deactivate[] = \$plugin;
+            break;
         }
     }
-    return true;
-} ) );
-
-if ( count( \$_reprint_filtered ) !== count( \$_reprint_active ) ) {
-    update_option( 'active_plugins', \$_reprint_filtered );
+}
+if ( ! empty( \$_reprint_to_deactivate ) ) {
+    deactivate_plugins( \$_reprint_to_deactivate );
 }
 
 // Self-destruct — the file is already loaded, so unlinking is safe.
