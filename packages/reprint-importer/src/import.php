@@ -10641,15 +10641,16 @@ if (
     $command_info = [
         "files-sync" => [
             "display" => "files-pull",
-            "short" => "Pull files from the remote site (index + download)",
+            "short" => "Pull files from the remote site, runs files-index if needed",
             "description" =>
-                "Indexes the remote directory tree and downloads files into --fs-root.\n" .
-                "Runs three stages: index → diff → fetch.\n" .
-                "Auto-detects whether this is a fresh pull or a follow-up:\n" .
+                "Downloads files from the remote site into --fs-root.\n" .
                 "\n" .
-                "  - First run: indexes and downloads the full directory tree\n" .
-                "  - After a completed pull: re-indexes and downloads only changes (delta)\n" .
-                "  - After an interruption: resumes from the last saved cursor\n",
+                "On the first run, indexes the full remote directory tree and then\n" .
+                "downloads every file. On subsequent runs, re-indexes the remote tree,\n" .
+                "diffs against the local index, and downloads only what changed.\n" .
+                "Interrupted pulls resume from the last saved cursor.\n" .
+                "\n" .
+                "Runs files-index internally when no index exists yet.\n",
             "extra" =>
                 "Filter modes:\n" .
                 "  none             Pull all files (default)\n" .
