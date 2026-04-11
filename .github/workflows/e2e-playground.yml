@@ -66,10 +66,22 @@ jobs:
         run: |
           echo "=== Playground CLI version ==="
           npx @wp-playground/cli --version || echo "no --version flag"
+
+          echo "=== Playground CLI php --help ==="
+          npx @wp-playground/cli php --help 2>&1 || true
+
           echo "=== Test PHP execution ==="
           npx @wp-playground/cli php -- -r "echo 'Hello from Playground PHP ' . PHP_VERSION . PHP_EOL;"
-          echo "=== Test PHAR support ==="
-          npx @wp-playground/cli php -- reprint.phar --help || echo "EXIT: $?"
+
+          echo "=== Test with mount ==="
+          npx @wp-playground/cli php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- -r "echo file_exists('${GITHUB_WORKSPACE}/reprint.phar') ? 'PHAR found' : 'PHAR NOT found';" || echo "EXIT: $?"
+
+          echo "=== Test PHAR with mount ==="
+          npx @wp-playground/cli php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- "${GITHUB_WORKSPACE}/reprint.phar" --help || echo "EXIT: $?"
+
+          echo "=== Test with /tmp mount ==="
+          echo '<?php echo "Hello from mounted PHP " . PHP_VERSION . PHP_EOL;' > /tmp/test-playground.php
+          npx @wp-playground/cli php --mount="/tmp:/tmp" -- /tmp/test-playground.php || echo "EXIT: $?"
 
       - name: Provision basic site and smoke-test API
         env:
