@@ -7,9 +7,9 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Test files-sync state transitions and preserve-local diff behavior.
+ * Test files-pull state transitions and preserve-local diff behavior.
  *
- * A completed files-sync should refuse to re-run without --abort.
+ * A completed files-pull should refuse to re-run without --abort.
  * After --abort, the next run should start fresh (not "already complete").
  * In preserve-local mode, previously-synced files that changed remotely
  * must still be re-downloaded (not skipped).
@@ -153,7 +153,7 @@ class FilesSyncStateTest extends TestCase
     // ---------------------------------------------------------------
 
     /**
-     * A completed files-sync should refuse to re-run.
+     * A completed files-pull should refuse to re-run.
      */
     public function testCompletedFilesSyncRefusesToRerun()
     {

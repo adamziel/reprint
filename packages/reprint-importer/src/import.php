@@ -3603,7 +3603,7 @@ class ImportClient
      * The effective fs root is --fs-root + the remote site's document_root
      * prefix (from preflight). For example, if the remote document_root is
      * /srv/htdocs and --fs-root is ./files, the effective fs root is
-     * ./files/srv/htdocs. If the site was flattened with flat-document-root,
+     * ./files/srv/htdocs. If the site was flattened with flat-docroot,
      * pass the flattened directory as --fs-root directly and the prefix
      * is not applied.
      */
@@ -3666,7 +3666,7 @@ class ImportClient
                 throw new RuntimeException(
                     "Effective fs root does not exist: {$effective_fs_root}\n" .
                     "The remote document_root was: {$remote_doc_root}\n" .
-                    "If you used flat-document-root, pass the flattened directory " .
+                    "If you used flat-docroot, pass the flattened directory " .
                     "with --flat-document-root instead of --fs-root."
                 );
             }
@@ -3945,7 +3945,7 @@ class ImportClient
     }
 
     /**
-     * Command: flat-document-root
+     * Command: flat-docroot
      *
      * Creates a directory at the specified --flatten-to path that mirrors
      * a vanilla WordPress installation layout by symlinking entries from
@@ -3967,7 +3967,7 @@ class ImportClient
         $flatten_to = $options["flatten_to"] ?? null;
         if (empty($flatten_to)) {
             throw new InvalidArgumentException(
-                "flat-document-root requires --flatten-to=PATH",
+                "flat-docroot requires --flatten-to=PATH",
             );
         }
 

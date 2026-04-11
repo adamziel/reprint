@@ -118,7 +118,7 @@ This first builds a full index of the remote directory tree, then streams every 
 It can be interrupted and resumed at any time — just re-run the same command:
 
 ```bash
-php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -131,7 +131,7 @@ Which is to say, you'll need to wrap it in a loop that runs until failure or ful
 
 **Non-empty local fs-root**
 
-By default, `files-sync` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
+By default, `files-pull` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
 the `--on-fs-root-nonempty` flag controls this behavior. It takes the following values:
 
 - `--on-fs-root-nonempty=error` (default): throw an error and abort.
@@ -144,7 +144,7 @@ and you want to bring the site online before downloading all the uploads:
 
 ```bash
 # Step 1: download only essential files (code, config, themes, plugins)
-php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --filter=essential-files
 ```
 
@@ -154,7 +154,7 @@ files are done, the sync marks itself **complete**. The skipped file list stays 
 
 ```bash
 # Step 2: download the uploads
-php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --filter=skipped-earlier
 ```
 
@@ -172,7 +172,7 @@ The uploads directory is detected from preflight data (`uploads.basedir`), falli
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
 
 ```bash
-php reprint.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 You can also pipe the SQL directly to stdout or stream it into a MySQL server
@@ -180,11 +180,11 @@ without writing a file to disk. Use `--sql-output` to choose the mode:
 
 ```bash
 # Pipe to stdout — useful for feeding into mysql CLI or another tool
-php reprint.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=stdout | mysql -u root my_database
 
 # Stream directly into MySQL — no intermediate file, no pipe
-php reprint.phar db-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=root --mysql-password=secret
 ```
 
@@ -218,19 +218,19 @@ The command returns one of three exit codes:
 
 While the database was being dumped, some files may have changed.
 
-First, we must abort the previous files-sync. Otherwise, it would just
+First, we must abort the previous files-pull. Otherwise, it would just
 tell us it's completed and refuse to proceed:
 
 ```bash
-php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --abort
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --abort
 ```
 
-From here, we can run the `files-sync` command again. It will index
+From here, we can run the `files-pull` command again. It will index
 the remote filesystem once again, compute which files have changed
 since the initial sync, and apply that delta in the local directory:
 
 ```bash
-php reprint.phar files-sync "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -307,7 +307,7 @@ php reprint.phar apply-runtime --state-dir="$STATE_DIR" \
 
 The command accepts either `--fs-root` (the raw download directory — the remote
 `document_root` path is appended automatically) or `--flat-document-root` (a
-directory created by `flat-document-root`, used as-is). These are mutually exclusive.
+directory created by `flat-docroot`, used as-is). These are mutually exclusive.
 
 Host and port default to the URL rewrite target from `db-apply` (so the server
 listens on the same address the database was rewritten to). Override with
@@ -383,7 +383,7 @@ The file contains a flat JSON object:
 {
   "step": 2,
   "steps": 4,
-  "command": "files-sync",
+  "command": "files-pull",
   "status": "in_progress",
   "phase": "index",
   "error": null,
@@ -395,7 +395,7 @@ The file contains a flat JSON object:
 |-----------|-------------------|-------------|
 | `step`    | `int \| null`     | Current pipeline step (1-indexed). `null` when `--step` is not passed. |
 | `steps`   | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
-| `command` | `string \| null`  | Current command name (`preflight`, `files-sync`, `db-sync`, etc.). |
+| `command` | `string \| null`  | Current command name (`preflight`, `files-pull`, `db-pull`, etc.). |
 | `status`  | `string`          | One of `in_progress`, `partial`, `complete`, `error`, `aborted`. |
 | `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`, `fetch-skipped`), or `null`. Derived from the internal state's `stage` field. |
 | `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
@@ -426,7 +426,7 @@ If the JSON is invalid on load, the importer renames it to
 
 ```jsonc
 {
-  "command": "files-sync",         // active command
+  "command": "files-pull",         // active command
   "status": "in_progress",        // "in_progress" | "complete" | null
   "cursor": "...",                 // server-side cursor (opaque string)
   "stage": "streaming",           // current phase within the command
@@ -485,7 +485,7 @@ tell you where the pipeline is. The `stage` field gives finer granularity
 
 #### `.import-volatile-files.json` — files that changed during sync
 
-During `files-sync`, a file on the source may be modified while the importer is
+During `files-pull`, a file on the source may be modified while the importer is
 streaming it. When that happens, the server returns a different content hash than
 expected and the importer records the file in `.import-volatile-files.json`
 instead of failing.
@@ -500,7 +500,7 @@ was detected as changed:
 }
 ```
 
-At the end of `files-sync`, the importer prints a summary of volatile files so
+At the end of `files-pull`, the importer prints a summary of volatile files so
 the caller can decide what to do — re-run the sync, ignore them, or ask the user.
 Files that are subsequently downloaded successfully are automatically removed
 from the tracker. The file is deleted entirely once all entries are cleared.
@@ -531,17 +531,16 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
-* `files-sync` — Sync files. Auto-detects initial vs delta based on state: downloads the full tree on first run, only changes on subsequent runs.
-* `files-index` — Optional. It's a standalone command to index the full remote file index without fetching file contents. `files-sync` does it implicitly
-                  so this is mostly useful for testing and diagnostics.
-* `db-sync` — Downloads the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
+* `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
+* `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
+* `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
-* `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-sync`), otherwise scans `db.sql`.
+* `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
-* `flat-document-root` — Creates a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
+* `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-sync`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-sync` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
 
 # Architecture
 

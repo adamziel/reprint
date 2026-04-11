@@ -222,7 +222,7 @@ export function fsRootDir(outputDir) {
  * Run the importer CLI.
  * @param {string} url - Export URL
  * @param {string} outputDir - Local output directory (state files live here; fs-root is outputDir/fs-root)
- * @param {string} command - Import command (files-sync, db-sync, etc.)
+ * @param {string} command - Import command (files-pull, db-pull, etc.)
  * @param {Object} options - Additional options
  * @returns {Object} { stdout, stderr, exitCode }
  */
