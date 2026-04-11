@@ -132,7 +132,14 @@ describe('Import: SiteGround plugin stripping', () => {
     });
 
     describe('db-apply deactivates SG plugins', () => {
-        beforeAll(() => {
+        beforeAll(async () => {
+            // Create the target database before db-apply connects to it.
+            const importDb = `${getDbName(site)}_import`;
+            const conn = await createMysqlConnection();
+            await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
+            await conn.query(`CREATE DATABASE \`${importDb}\``);
+            await conn.end();
+
             const sourceDomain = new URL(getSiteUrl(site)).origin;
             const result = runImporter(importUrl(), tempDir, 'db-apply', {
                 secret: getSiteSecret(site),
