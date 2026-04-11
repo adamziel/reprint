@@ -5148,14 +5148,18 @@ class ImportClient
             return [];
         }
 
-        $active_plugins = @unserialize($row['option_value']);
-        if (!is_array($active_plugins)) {
+        // Use PhpSerializationProcessor to iterate string values safely —
+        // no unserialize(), no risk of arbitrary object instantiation.
+        $serialized = $row['option_value'];
+        $processor = new \PhpSerializationProcessor($serialized);
+        if ($processor->is_malformed()) {
             return [];
         }
 
         $removed = [];
-        $filtered = [];
-        foreach ($active_plugins as $basename) {
+        $kept = [];
+        while ($processor->next_value()) {
+            $basename = $processor->get_value();
             $dominated = false;
             foreach ($plugin_dirs as $dir) {
                 if (strpos($basename, $dir . '/') === 0) {
@@ -5166,7 +5170,7 @@ class ImportClient
             if ($dominated) {
                 $removed[] = $basename;
             } else {
-                $filtered[] = $basename;
+                $kept[] = $basename;
             }
         }
 
@@ -5175,8 +5179,14 @@ class ImportClient
             return [];
         }
 
-        $filtered = array_values($filtered);
-        $new_value = serialize($filtered);
+        // Rebuild the serialized array with sequential integer keys.
+        // active_plugins is always a flat array of strings, so we can
+        // produce valid serialization without calling serialize().
+        $parts = [];
+        foreach ($kept as $i => $v) {
+            $parts[] = 'i:' . $i . ';s:' . strlen($v) . ':"' . $v . '";';
+        }
+        $new_value = 'a:' . count($kept) . ':{' . implode('', $parts) . '}';
         $stmt = $pdo->prepare(
             "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
         );
