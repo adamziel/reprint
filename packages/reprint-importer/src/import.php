@@ -5132,6 +5132,12 @@ class ImportClient
             }
         }
 
+        $this->audit_log(
+            "DB-APPLY | deactivate_host_plugins: webhost={$webhost}, " .
+            "paths_to_remove=" . implode(',', $manifest->paths_to_remove) . ", " .
+            "plugin_dirs=" . implode(',', $plugin_dirs),
+        );
+
         if (empty($plugin_dirs)) {
             return [];
         }
@@ -5171,14 +5177,21 @@ class ImportClient
         }
 
         if (empty($removed)) {
+            $this->audit_log("DB-APPLY | no host-specific plugins found in active_plugins");
             return [];
         }
 
         $filtered = array_values($filtered);
+        $new_value = serialize($filtered);
         $stmt = $pdo->prepare(
             "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
         );
-        $stmt->execute([serialize($filtered)]);
+        $stmt->execute([$new_value]);
+        $affected = $stmt->rowCount();
+        $this->audit_log(
+            "DB-APPLY | updated active_plugins ({$affected} row(s) affected, " .
+            count($removed) . " plugin(s) removed)",
+        );
 
         return $removed;
     }
