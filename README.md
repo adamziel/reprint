@@ -196,6 +196,12 @@ The three modes:
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
 | `mysql` | Connects via `mysqli::multi_query()` and executes statements as they arrive | none |
 
+All three modes recover from server crashes mid-stream (PHP fatal errors,
+OOM kills, `max_execution_time` expiry). When the server dies before sending
+a completion chunk, the importer detects the transport failure, saves its
+cursor, and exits with code 2 for automatic retry. Accumulated SQL is
+persisted in a `.sql-buffer` file so the next run reloads it and continues.
+
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
 environment variable). The host string also supports `host:port` and
@@ -325,9 +331,12 @@ manifest and write server-specific files. Adding a new source host or target
 server is independent — you implement one interface without touching the other.
 
 Currently supported source hosts: WP Cloud (with on-the-fly thumbnail
-generation for missing image sizes), SiteGround, and a generic default.
-Currently supported target runtimes: nginx + PHP-FPM and PHP's built-in
-development server.
+generation for missing image sizes, automatic stripping of production-only
+drop-ins like Memcached object-cache and wpcomsh mu-plugins, and
+auto-detection of extra directories from `auto_prepend_file`/`auto_append_file`
+INI values), SiteGround, and a generic default.
+Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
+development server, and WordPress Playground CLI.
 
 #### Shoehorning the site onto your platform
 
@@ -391,6 +400,18 @@ The file contains a flat JSON object:
 | `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`, `fetch-skipped`), or `null`. Derived from the internal state's `stage` field. |
 | `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
 | `ts`      | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
+
+During the file fetch phase, progress and heartbeat records also include
+structured file counters:
+
+| Field         | Type           | Description |
+|---------------|----------------|-------------|
+| `files_done`  | `int`          | Files already processed (cumulative across restarts). Derived from the download list byte offset plus the current batch's `files_imported`. |
+| `files_total` | `int`          | Total non-empty entries in the download list. Fixed once the diff phase completes. |
+
+Both fields are emitted together only when the download list exists — they
+are absent during the index and diff phases. `files_done` grows monotonically
+up to `files_total` and survives exit-code-2 restarts.
 
 #### `.import-state.json` — the migration state store
 
@@ -636,6 +657,20 @@ the `--fs-root`.
 
 To disable this behavior, pass `--no-follow-symlinks`. Symlinks pointing
 outside the directory root will then be skipped instead of followed.
+
+#### Server-side cycle detection
+
+Hosting environments like WP.com Atomic can have symlink structures that create
+infinite traversal loops — for example, `/srv/htdocs/srv` symlinked back to `/srv`,
+or overlapping roots where `/wordpress/` and `/srv/htdocs/wordpress/` resolve to
+the same physical directory.
+
+The exporter handles this at the source. During directory traversal, every
+directory's `realpath()` is checked against the configured roots using
+`should_skip_index_root()`. If the directory is a duplicate or parent of an
+already-scheduled root, traversal skips it. This catches cycles, overlapping roots,
+and version aliases in a single check, preventing the index from exploding with
+duplicate entries.
 
 ## Database synchronization
 
