@@ -978,7 +978,7 @@ class ImportClient
     private $fs_root_nonempty_behavior = 'error';
 
     /**
-     * Controls which files are downloaded during files-sync.
+     * Controls which files are downloaded during files-pull.
      *
      *   "none"             — download everything (default)
      *   "essential-files"  — skip uploads, download only code/config/themes/plugins
@@ -1262,7 +1262,7 @@ class ImportClient
         );
 
         if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "{$count} file(s) changed during sync and need re-syncing (run files-sync again):\n");
+            fwrite($this->progress_fd, "{$count} file(s) changed during sync and need re-syncing (run files-pull again):\n");
         }
 
         foreach ($files as $path => $changes) {
@@ -1280,7 +1280,7 @@ class ImportClient
                 "type" => "volatile_files",
                 "files" => $files,
                 "count" => $count,
-                "message" => "{$count} file(s) changed during sync and need re-syncing (run files-sync again)",
+                "message" => "{$count} file(s) changed during sync and need re-syncing (run files-pull again)",
             ],
             true,
         );
@@ -1352,7 +1352,7 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: files-sync, files-index, db-sync, db-index, preflight, preflight-assert
+     *   - command: Required. One of: files-pull, files-index, db-pull, db-index, preflight, preflight-assert
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      */
@@ -1660,10 +1660,10 @@ class ImportClient
             case "files-pull":
                 // Clear sync progress (cursor, stage, status) and transient
                 // files, but keep the local index and downloaded files intact.
-                // This way the next `files-sync` sees a completed local index
+                // This way the next `files-pull` sees a completed local index
                 // and runs a delta sync rather than re-downloading everything.
                 $this->audit_log(
-                    "RESTART | Clearing files-sync progress (keeping local index and files)",
+                    "RESTART | Clearing files-pull progress (keeping local index and files)",
                     true,
                 );
                 $this->reset_state();
@@ -1723,7 +1723,7 @@ class ImportClient
 
             case "db-pull":
                 $this->audit_log(
-                    "RESTART | Clearing db-sync state",
+                    "RESTART | Clearing db-pull state",
                     true,
                 );
                 $this->reset_state();
@@ -1734,7 +1734,7 @@ class ImportClient
                     if (file_exists($sql_file)) {
                         unlink($sql_file);
                         $this->audit_log(
-                            "FILE DELETE | {$sql_file} | abort db-sync",
+                            "FILE DELETE | {$sql_file} | abort db-pull",
                         );
                     }
                 }
@@ -1742,14 +1742,14 @@ class ImportClient
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
-                        "FILE DELETE | {$tables_file} | abort db-sync",
+                        "FILE DELETE | {$tables_file} | abort db-pull",
                     );
                 }
                 $domains_file = $this->state_dir . "/.import-domains.json";
                 if (file_exists($domains_file)) {
                     unlink($domains_file);
                     $this->audit_log(
-                        "FILE DELETE | {$domains_file} | abort db-sync",
+                        "FILE DELETE | {$domains_file} | abort db-pull",
                     );
                 }
                 break;
@@ -2345,12 +2345,12 @@ class ImportClient
     }
 
     /**
-     * Command: files-sync
+     * Command: files-pull
      *
      * Unified file synchronization that auto-detects initial vs delta mode:
-     * - No prior completed files-sync → initial mode (index all, fetch all)
-     * - Prior completed files-sync → delta mode (re-index, diff, fetch changes)
-     * - In-progress files-sync → resume from saved state
+     * - No prior completed files-pull → initial mode (index all, fetch all)
+     * - Prior completed files-pull → delta mode (re-index, diff, fetch changes)
+     * - In-progress files-pull → resume from saved state
      *
      * Both modes share the same pipeline: index → diff → fetch.
      */
@@ -2381,11 +2381,11 @@ class ImportClient
                 if (!$has_skipped) {
                     throw new RuntimeException(
                         "--filter=skipped-earlier was requested but there is no skipped file list. " .
-                            "Run files-sync with --filter=essential-files first.",
+                            "Run files-pull with --filter=essential-files first.",
                     );
                 }
                 $this->audit_log(
-                    "FETCH SKIPPED | files-sync was complete — downloading previously skipped files",
+                    "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
                     true,
                 );
                 if ($this->is_tty && !$this->verbose_mode) {
@@ -2412,12 +2412,12 @@ class ImportClient
                 ? " (some files were skipped — re-run with --filter=skipped-earlier to download them)"
                 : "";
             $this->audit_log(
-                sprintf("files-sync already complete: %d files indexed%s", $index_size, $skipped_note),
+                sprintf("files-pull already complete: %d files indexed%s", $index_size, $skipped_note),
                 true,
             );
 
             if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "files-sync already complete: {$index_size} files indexed\n");
+                fwrite($this->progress_fd, "files-pull already complete: {$index_size} files indexed\n");
                 if ($has_skipped) {
                     fwrite($this->progress_fd, "Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
                 } else {
@@ -2430,7 +2430,7 @@ class ImportClient
                 "command" => "files-pull",
                 "files_indexed" => $index_size,
                 "has_skipped" => $has_skipped,
-                "message" => "files-sync already complete: {$index_size} files indexed",
+                "message" => "files-pull already complete: {$index_size} files indexed",
             ], true);
             return;
         }
@@ -2441,7 +2441,7 @@ class ImportClient
         if ($this->filter === "skipped-earlier") {
             throw new RuntimeException(
                 "--filter=skipped-earlier was requested but there is no completed sync with skipped files. " .
-                    "Run files-sync with --filter=essential-files first.",
+                    "Run files-pull with --filter=essential-files first.",
             );
         }
 
@@ -2463,7 +2463,7 @@ class ImportClient
             $stage = $this->state["stage"] ?? "index";
             $this->audit_log(
                 sprintf(
-                    "RESUME files-sync | stage=%s | indexed_files=%d",
+                    "RESUME files-pull | stage=%s | indexed_files=%d",
                     $stage,
                     $index_size,
                 ),
@@ -2471,7 +2471,7 @@ class ImportClient
             );
 
             if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "Resuming files-sync\n");
+                fwrite($this->progress_fd, "Resuming files-pull\n");
                 fwrite($this->progress_fd, "  Stage: {$stage}\n");
                 fwrite($this->progress_fd, "  Already indexed: {$index_size} files\n");
             }
@@ -2481,7 +2481,7 @@ class ImportClient
                 "command" => "files-pull",
                 "stage" => $stage,
                 "index_size" => $index_size,
-                "message" => "Resuming files-sync (stage: {$stage}, indexed: {$index_size} files)",
+                "message" => "Resuming files-pull (stage: {$stage}, indexed: {$index_size} files)",
             ], true);
         } else {
             // Starting fresh — validate that target directory is empty.
@@ -2508,12 +2508,12 @@ class ImportClient
                 $index_size = $this->index_count();
     
                 $this->audit_log(
-                    "START files-sync (delta) | index_files={$index_size}",
+                    "START files-pull (delta) | index_files={$index_size}",
                     true,
                 );
 
                 if ($this->is_tty && !$this->verbose_mode) {
-                    fwrite($this->progress_fd, "Starting files-sync (delta)\n");
+                    fwrite($this->progress_fd, "Starting files-pull (delta)\n");
                     fwrite($this->progress_fd, "  Index contains: {$index_size} files\n");
                     fwrite($this->progress_fd, "  Stage: index\n");
                 }
@@ -2523,22 +2523,22 @@ class ImportClient
                     "command" => "files-pull",
                     "delta" => true,
                     "index_size" => $index_size,
-                    "message" => "Starting files-sync (delta, {$index_size} files indexed)",
+                    "message" => "Starting files-pull (delta, {$index_size} files indexed)",
                 ], true);
             } else {
                 $this->audit_log(
-                    "START files-sync ({$this->fs_root_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
+                    "START files-pull ({$this->fs_root_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
                     true,
                 );
 
                 if ($this->is_tty && !$this->verbose_mode) {
-                    fwrite($this->progress_fd, "Starting files-sync\n");
+                    fwrite($this->progress_fd, "Starting files-pull\n");
                 }
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
                     "command" => "files-pull",
-                    "message" => "Starting files-sync",
+                    "message" => "Starting files-pull",
                 ], true);
             }
         }
@@ -2559,7 +2559,7 @@ class ImportClient
 
         $this->clear_progress_line();
         $index_size = $this->index_count();
-        $label = $is_delta ? "files-sync (delta)" : "files-pull";
+        $label = $is_delta ? "files-pull (delta)" : "files-pull";
 
         $this->audit_log(
             sprintf("%s complete: %d files indexed", $label, $index_size),
@@ -3227,7 +3227,7 @@ class ImportClient
     }
 
     /**
-     * Command: db-sync
+     * Command: db-pull
      *
      * Rules:
      * - Stream next portion of SQL from last saved cursor
@@ -3254,16 +3254,16 @@ class ImportClient
                 $sql_exists = file_exists($sql_file);
                 if ($sql_exists) {
                     throw new RuntimeException(
-                        "db-sync already completed and db.sql exists. Use --abort flag to start over.",
+                        "db-pull already completed and db.sql exists. Use --abort flag to start over.",
                     );
                 } else {
                     throw new RuntimeException(
-                        "db-sync marked complete but db.sql is missing. Use --abort flag to re-sync.",
+                        "db-pull marked complete but db.sql is missing. Use --abort flag to re-sync.",
                     );
                 }
             } else {
                 throw new RuntimeException(
-                    "db-sync already completed. Use --abort flag to start over.",
+                    "db-pull already completed. Use --abort flag to start over.",
                 );
             }
         }
@@ -3272,7 +3272,7 @@ class ImportClient
             $stage = $this->state["stage"] ?? "db-index";
             $this->audit_log(
                 sprintf(
-                    "RESUME db-sync | stage=%s | cursor=%s",
+                    "RESUME db-pull | stage=%s | cursor=%s",
                     $stage,
                     !empty($this->state["cursor"])
                         ? substr($this->state["cursor"], 0, 20) . "..."
@@ -3282,14 +3282,14 @@ class ImportClient
             );
 
             if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "Resuming db-sync (stage: {$stage})\n");
+                fwrite($this->progress_fd, "Resuming db-pull (stage: {$stage})\n");
             }
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
                 "command" => "db-pull",
                 "stage" => $stage,
-                "message" => "Resuming db-sync (stage: {$stage})",
+                "message" => "Resuming db-pull (stage: {$stage})",
             ], true);
         } else {
             // Starting fresh
@@ -3301,16 +3301,16 @@ class ImportClient
             $this->state["db_index"] = $this->default_state()["db_index"];
             $this->save_state($this->state);
 
-            $this->audit_log("START db-sync", true);
+            $this->audit_log("START db-pull", true);
 
             if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "Starting db-sync\n");
+                fwrite($this->progress_fd, "Starting db-pull\n");
             }
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
                 "command" => "db-pull",
-                "message" => "Starting db-sync",
+                "message" => "Starting db-pull",
             ], true);
         }
 
@@ -3335,7 +3335,7 @@ class ImportClient
 
             $tables = (int) ($this->state["db_index"]["tables"] ?? 0);
             $this->audit_log(
-                sprintf("db-sync db-index stage complete: %d tables", $tables),
+                sprintf("db-pull db-index stage complete: %d tables", $tables),
             );
 
             // Transition to sql stage
@@ -3362,10 +3362,10 @@ class ImportClient
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
-        $this->audit_log("db-sync complete", true);
+        $this->audit_log("db-pull complete", true);
 
         if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "db-sync complete\n");
+            fwrite($this->progress_fd, "db-pull complete\n");
             if ($this->sql_output_mode === "file") {
                 fwrite($this->progress_fd, "SQL file: {$sql_file}\n");
             } elseif ($this->sql_output_mode === "stdout") {
@@ -3381,7 +3381,7 @@ class ImportClient
             "command" => "db-pull",
             "sql_output_mode" => $this->sql_output_mode,
             "audit_log" => $this->audit_log,
-            "message" => "db-sync complete",
+            "message" => "db-pull complete",
         ];
         if ($this->sql_output_mode === "file") {
             $db_sync_complete["sql_file"] = $sql_file;
@@ -3406,7 +3406,7 @@ class ImportClient
         $sql_file = $this->state_dir . "/db.sql";
 
         if (file_exists($domains_file)) {
-            // Fast path: domains were already discovered during db-sync
+            // Fast path: domains were already discovered during db-pull
             $domains = json_decode(file_get_contents($domains_file), true);
             if (!is_array($domains)) {
                 throw new RuntimeException(
@@ -3414,7 +3414,7 @@ class ImportClient
                 );
             }
         } elseif (file_exists($sql_file)) {
-            // Scan db.sql for domains using the same pipeline as db-sync
+            // Scan db.sql for domains using the same pipeline as db-pull
             $query_stream = new \WP_MySQL_Naive_Query_Stream();
             $domain_collector = new \DomainCollector();
 
@@ -3455,7 +3455,7 @@ class ImportClient
             );
         } else {
             throw new RuntimeException(
-                "No domain data found. Run db-sync first, or place a db.sql file in {$this->state_dir}.",
+                "No domain data found. Run db-pull first, or place a db.sql file in {$this->state_dir}.",
             );
         }
 
@@ -3859,7 +3859,7 @@ class ImportClient
      * missing locally.
      *
      * The proxy is active in two cases:
-     * - files-sync is still incomplete
+     * - files-pull is still incomplete
      * - a prior --filter=essential-files run left skipped uploads on disk
      */
     private function maybe_enable_remote_upload_proxy(RuntimeManifest $manifest, array $preflight_data): void
@@ -3898,7 +3898,7 @@ class ImportClient
     /**
      * Decide whether runtime should proxy missing uploads from the source.
      *
-     * Once files-sync is fully complete and no skipped uploads remain, the
+     * Once files-pull is fully complete and no skipped uploads remain, the
      * proxy is disabled so requests are served only from local files.
      */
     private function should_enable_remote_upload_proxy(): bool
@@ -4713,7 +4713,7 @@ class ImportClient
         $sql_file = $this->state_dir . "/db.sql";
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
-                "db.sql not found in {$this->state_dir}. Run db-sync first.",
+                "db.sql not found in {$this->state_dir}. Run db-pull first.",
             );
         }
 
@@ -4864,7 +4864,7 @@ class ImportClient
         $save_every = 100;
         $stmts_since_save = 0;
 
-        // Load pre-computed statement count from db-sync for progress reporting
+        // Load pre-computed statement count from db-pull for progress reporting
         $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
         $statements_total = null;
         if (file_exists($sql_stats_file)) {
@@ -10104,7 +10104,7 @@ if (
             'commands' => [],
         ],
 
-        // ── files-sync options ───────────────────────────────────
+        // ── files-pull options ───────────────────────────────────
         [
             'name' => 'filter',
             'type' => 'value',
@@ -10123,7 +10123,7 @@ if (
             'commands' => ['files-pull', 'files-index'],
         ],
 
-        // ── db-sync options ──────────────────────────────────────
+        // ── db-pull options ──────────────────────────────────────
         [
             'name' => 'max-allowed-packet',
             'type' => 'value',
@@ -10862,7 +10862,6 @@ if (
 
     $command = $argv[1];
 
-    // Command aliases — maps user-facing names and legacy names to
     // Legacy command names that still work on the CLI.
     $command_aliases = [
         "files-sync" => "files-pull",

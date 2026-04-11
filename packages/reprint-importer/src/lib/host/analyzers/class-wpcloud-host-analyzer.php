@@ -108,7 +108,7 @@ class WpcloudHostAnalyzer implements HostAnalyzer
 
         // auto_prepend_file on Atomic points to /scripts/env.php — a
         // directory outside the WordPress roots.  Record it so that
-        // files-sync downloads it and the runtime applier can mount it.
+        // files-pull downloads it and the runtime applier can mount it.
         $manifest->extra_directories = $this->detect_extra_directories($preflight_data);
 
         return $manifest;

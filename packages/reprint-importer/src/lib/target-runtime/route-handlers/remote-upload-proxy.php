@@ -9,7 +9,7 @@ function remote_upload_proxy_code(): string
 {
     return <<<'PHP'
 /**
- * Proxy missing uploads from the source site until files-sync completes.
+ * Proxy missing uploads from the source site until files-pull completes.
  *
  * This runs before WordPress boots. If a request under /wp-content/uploads/
  * is missing locally, it fetches the corresponding source URL with cURL and
