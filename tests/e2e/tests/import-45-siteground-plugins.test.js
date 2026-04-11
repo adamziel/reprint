@@ -157,6 +157,17 @@ describe('Import: SiteGround plugin stripping', () => {
 
         it('sg plugins are removed from active_plugins', async () => {
             const importDb = `${getDbName(site)}_import`;
+
+            // Debug: print the audit log to help diagnose CI failures.
+            const auditPath = join(tempDir, '.import-audit.log');
+            if (existsSync(auditPath)) {
+                const auditContent = readFileSync(auditPath, 'utf-8');
+                const deactivateLines = auditContent.split('\n').filter(
+                    l => l.includes('deactivat') || l.includes('DB-APPLY') || l.includes('webhost'),
+                );
+                console.log('DEBUG audit log (deactivation-related):', deactivateLines.join('\n'));
+            }
+
             const conn = await createMysqlConnection(importDb);
             try {
                 const [rows] = await conn.query(
