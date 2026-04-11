@@ -10639,6 +10639,33 @@ if (
     // The Options: section itself is generated from $option_defs so that
     // every declared option for a command is guaranteed to appear.
     $command_info = [
+        "preflight" => [
+            "short" => "Probe the remote site and cache its environment",
+            "description" =>
+                "Contacts the remote site and collects environment details:\n" .
+                "PHP/MySQL versions, memory limits, filesystem access, database\n" .
+                "connectivity, WordPress version, plugins, themes, directory layout,\n" .
+                "and runtime scripts (auto_prepend_file, auto_append_file).\n" .
+                "\n" .
+                "Results are saved to state for use by later commands.\n" .
+                "Prints the full response as pretty-printed JSON.\n" .
+                "Exits 0 if the site reported OK, 1 otherwise.\n",
+            "extra" => null,
+        ],
+        "preflight-assert" => [
+            "short" => "Verify the remote site can be mirrored (exits 0 or 1)",
+            "description" =>
+                "Runs the same check as the preflight command, then evaluates\n" .
+                "key assertions:\n" .
+                "\n" .
+                "  - Remote site responded with HTTP 200\n" .
+                "  - Preflight OK flag is set\n" .
+                "  - Filesystem directories are accessible\n" .
+                "  - Database connection works\n" .
+                "\n" .
+                "Prints a PASS/FAIL summary and exits 0 if all checks pass, 1 if not.\n",
+            "extra" => null,
+        ],
         "files-sync" => [
             "display" => "files-pull",
             "short" => "Pull all files (initial) or only changes (delta)",
@@ -10668,10 +10695,15 @@ if (
                 "  .import-audit.log                       Audit log\n",
         ],
         "files-index" => [
-            "short" => "Pull the remote file index (metadata only, no file contents)",
+            "short" => "Index all remote files (initial) or detect changes (delta)",
             "description" =>
                 "Streams the full remote directory tree over HTTP and writes each\n" .
                 "entry (path, size, ctime, type) to .import-remote-index.jsonl.\n" .
+                "\n" .
+                "On the first run, builds the complete index. On subsequent runs,\n" .
+                "re-indexes and diffs against the prior snapshot to produce a\n" .
+                "download list of changed files.\n" .
+                "\n" .
                 "When symlink-following is enabled, recursively discovers and indexes\n" .
                 "additional directories outside the primary roots.\n" .
                 "\n" .
@@ -10743,33 +10775,6 @@ if (
                 "  reprint db-apply - --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite --target-sqlite-path=/path/to/db.sqlite \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n",
-        ],
-        "preflight" => [
-            "short" => "Probe the remote site and cache its environment",
-            "description" =>
-                "Contacts the remote site and collects environment details:\n" .
-                "PHP/MySQL versions, memory limits, filesystem access, database\n" .
-                "connectivity, WordPress version, plugins, themes, directory layout,\n" .
-                "and runtime scripts (auto_prepend_file, auto_append_file).\n" .
-                "\n" .
-                "Results are saved to state for use by later commands.\n" .
-                "Prints the full response as pretty-printed JSON.\n" .
-                "Exits 0 if the site reported OK, 1 otherwise.\n",
-            "extra" => null,
-        ],
-        "preflight-assert" => [
-            "short" => "Verify the remote site can be mirrored (exits 0 or 1)",
-            "description" =>
-                "Runs the same check as the preflight command, then evaluates\n" .
-                "key assertions:\n" .
-                "\n" .
-                "  - Remote site responded with HTTP 200\n" .
-                "  - Preflight OK flag is set\n" .
-                "  - Filesystem directories are accessible\n" .
-                "  - Database connection works\n" .
-                "\n" .
-                "Prints a PASS/FAIL summary and exits 0 if all checks pass, 1 if not.\n",
-            "extra" => null,
         ],
         "flat-document-root" => [
             "display" => "flat-docroot",
