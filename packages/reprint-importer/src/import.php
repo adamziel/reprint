@@ -1403,18 +1403,6 @@ class ImportClient
 
         $this->state = $this->load_state();
 
-        // Migrate legacy command names stored in state files from older versions.
-        $legacy_commands = [
-            "files-sync" => "files-pull",
-            "db-sync" => "db-pull",
-            "flat-document-root" => "flat-docroot",
-        ];
-        $state_cmd = $this->state["command"] ?? null;
-        if ($state_cmd && isset($legacy_commands[$state_cmd])) {
-            $this->state["command"] = $legacy_commands[$state_cmd];
-            $this->save_state($this->state);
-        }
-
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
         if (isset($options["follow_symlinks"])) {
@@ -3899,7 +3887,7 @@ class ImportClient
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
             "condition" => "file_not_found",
-            "description" => "Proxy missing uploads from the source site until files-sync completes",
+            "description" => "Proxy missing uploads from the source site until files-pull completes",
         ];
         $this->audit_log(
             "APPLY-RUNTIME | enabled remote upload proxy ({$base_url})",
@@ -9657,7 +9645,20 @@ class ImportClient
         }
 
         $state = $this->normalize_state($state);
-        return $this->decode_state_paths($state);
+        $state = $this->decode_state_paths($state);
+
+        // Migrate legacy command names from older state files.
+        static $legacy_commands = [
+            "files-sync" => "files-pull",
+            "db-sync" => "db-pull",
+            "flat-document-root" => "flat-docroot",
+        ];
+        $state_cmd = $state["command"] ?? null;
+        if ($state_cmd && isset($legacy_commands[$state_cmd])) {
+            $state["command"] = $legacy_commands[$state_cmd];
+        }
+
+        return $state;
     }
 
     /**

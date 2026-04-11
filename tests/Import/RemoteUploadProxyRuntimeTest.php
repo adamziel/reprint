@@ -181,7 +181,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
     public function testApplyRuntimeAddsProxyWhileFilesSyncIsIncomplete(): void
     {
         $this->writeState([
-            'command' => 'files-sync',
+            'command' => 'files-pull',
             'status' => 'partial',
             'stage' => 'fetch',
         ]);
@@ -199,7 +199,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             $runtime,
         );
         $this->assertStringContainsString(
-            "Proxy missing uploads from the source site until files-sync completes.",
+            "Proxy missing uploads from the source site until files-pull completes.",
             $runtime,
         );
     }
@@ -207,7 +207,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
     public function testApplyRuntimeOmitsProxyAfterFilesSyncCompletes(): void
     {
         $this->writeState([
-            'command' => 'files-sync',
+            'command' => 'files-pull',
             'status' => 'complete',
             'filter' => 'none',
         ]);

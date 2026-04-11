@@ -185,7 +185,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testApplyRuntimeRemovesObjectCacheFile(): void
     {
-        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
+        $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
         $this->createProductionDropIns();
 
         $objectCachePath = $this->fsRoot . '/wp-content/object-cache.php';
@@ -200,7 +200,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testApplyRuntimeRemovesWpcomshDirectory(): void
     {
-        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
+        $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
         $this->createProductionDropIns();
 
         $wpcomshDir = $this->fsRoot . '/wp-content/mu-plugins/wpcomsh';
@@ -215,7 +215,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testApplyRuntimeRemovesWpcomshDevDirectory(): void
     {
-        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
+        $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
         $this->createProductionDropIns();
 
         $wpcomshDevDir = $this->fsRoot . '/wp-content/mu-plugins/wpcomsh-dev';
@@ -230,7 +230,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testApplyRuntimeRemovesWpcomshLoaderFile(): void
     {
-        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
+        $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
         $this->createProductionDropIns();
 
         $loaderPath = $this->fsRoot . '/wp-content/mu-plugins/wpcomsh-loader.php';
@@ -247,7 +247,7 @@ class ProductionDropInRemovalTest extends TestCase
     {
         // Don't create any drop-in files. The removal loop should skip
         // them gracefully without errors.
-        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
+        $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
         mkdir($this->fsRoot . '/wp-content', 0755, true);
 
         $client = $this->makeClient();
@@ -260,7 +260,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testApplyRuntimePreservesUnrelatedFiles(): void
     {
-        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
+        $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
         $this->createProductionDropIns();
 
         // Create a legitimate mu-plugin that should NOT be removed.
@@ -276,7 +276,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testApplyRuntimeLogsRemovalsToAuditLog(): void
     {
-        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
+        $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
         $this->createProductionDropIns();
 
         $client = $this->makeClient();
@@ -302,7 +302,7 @@ class ProductionDropInRemovalTest extends TestCase
 
     public function testApplyRuntimePersistsPathsRemovedToState(): void
     {
-        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
+        $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
         $this->createProductionDropIns();
 
         $client = $this->makeClient();
@@ -327,7 +327,7 @@ class ProductionDropInRemovalTest extends TestCase
         // Override webhost to 'other' — the DefaultHostAnalyzer should
         // produce an empty paths_to_remove.
         $this->writeState([
-            'command' => 'files-sync',
+            'command' => 'files-pull',
             'status' => 'complete',
             'webhost' => 'other',
             'preflight' => [

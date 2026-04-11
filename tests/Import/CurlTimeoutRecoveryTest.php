@@ -119,7 +119,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testSqlDownloadTimeoutSavesPartialState()
     {
         $this->writeState([
-            "command" => "db-sync",
+            "command" => "db-pull",
             "status" => "in_progress",
             "stage" => "sql",
             "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
@@ -160,7 +160,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testFileFetchTimeoutSavesPartialState()
     {
         $this->writeState([
-            "command" => "files-sync",
+            "command" => "files-pull",
             "status" => "in_progress",
             "stage" => "fetch",
             "fetch" => [
@@ -201,7 +201,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testRemoteIndexTimeoutSavesPartialState()
     {
         $this->writeState([
-            "command" => "files-sync",
+            "command" => "files-pull",
             "status" => "in_progress",
             "stage" => "index",
             "index" => [
@@ -249,7 +249,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testDbIndexTimeoutSavesPartialState()
     {
         $this->writeState([
-            "command" => "db-sync",
+            "command" => "db-pull",
             "status" => "in_progress",
             "stage" => "db-index",
             "cursor" => base64_encode('{"table_offset":5}'),
@@ -282,7 +282,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testRunDbSyncExitsPartialOnSqlTimeout()
     {
         $this->writeState([
-            "command" => "db-sync",
+            "command" => "db-pull",
             "status" => "in_progress",
             "stage" => "sql",
             "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
@@ -334,7 +334,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testTrackConsecutiveTimeoutIncrementsOnNoProgress()
     {
         $this->writeState([
-            "command" => "db-sync",
+            "command" => "db-pull",
             "status" => "in_progress",
             "consecutive_timeouts" => 0,
         ]);
@@ -356,7 +356,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testTrackConsecutiveTimeoutResetsOnProgress()
     {
         $this->writeState([
-            "command" => "db-sync",
+            "command" => "db-pull",
             "status" => "in_progress",
             "consecutive_timeouts" => 2,
         ]);
@@ -374,7 +374,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testTrackConsecutiveTimeoutThrowsAtMax()
     {
         $this->writeState([
-            "command" => "db-sync",
+            "command" => "db-pull",
             "status" => "in_progress",
             "consecutive_timeouts" => 2,
         ]);
@@ -397,7 +397,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testSqlDownloadGivesUpAfterMaxConsecutiveTimeouts()
     {
         $this->writeState([
-            "command" => "db-sync",
+            "command" => "db-pull",
             "status" => "in_progress",
             "stage" => "sql",
             "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
@@ -423,7 +423,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testFirstTimeoutIncrementsCounterInState()
     {
         $this->writeState([
-            "command" => "db-sync",
+            "command" => "db-pull",
             "status" => "in_progress",
             "stage" => "sql",
             "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
@@ -454,7 +454,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testSuccessfulRequestResetsCounter()
     {
         $this->writeState([
-            "command" => "files-sync",
+            "command" => "files-pull",
             "status" => "in_progress",
             "stage" => "index",
             "index" => [

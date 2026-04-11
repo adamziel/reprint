@@ -42,7 +42,7 @@ function remote_upload_proxy_code(): string
 				$command = $state['command'] ?? null;
 				$status = $state['status'] ?? null;
 				$proxy_enabled =
-					$command === 'files-sync' &&
+					($command === 'files-pull' || $command === 'files-sync') &&
 					$status !== null &&
 					$status !== 'complete';
 			}

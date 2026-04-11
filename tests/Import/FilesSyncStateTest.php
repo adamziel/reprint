@@ -158,7 +158,7 @@ class FilesSyncStateTest extends TestCase
     public function testCompletedFilesSyncRefusesToRerun()
     {
         $this->writeState([
-            "command" => "files-sync",
+            "command" => "files-pull",
             "status" => "complete",
         ]);
 
@@ -169,7 +169,7 @@ class FilesSyncStateTest extends TestCase
 
         $state = $this->readState();
         $this->assertEquals("complete", $state["status"]);
-        $this->assertEquals("files-sync", $state["command"]);
+        $this->assertEquals("files-pull", $state["command"]);
     }
 
     /**
@@ -181,14 +181,14 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
-            "command" => "files-sync",
+            "command" => "files-pull",
             "status" => "complete",
         ]);
 
         [$client, $reflection] = $this->prepareClient();
 
         $abortMethod = $reflection->getMethod('handle_abort');
-        $abortMethod->invoke($client, 'files-sync');
+        $abortMethod->invoke($client, 'files-pull');
 
         $state = $this->readState();
         $this->assertNotEquals(
@@ -208,13 +208,13 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
-            "command" => "files-sync",
+            "command" => "files-pull",
             "status" => "complete",
         ]);
 
         // Step 1: abort
         [$client, $reflection] = $this->prepareClient();
-        $reflection->getMethod('handle_abort')->invoke($client, 'files-sync');
+        $reflection->getMethod('handle_abort')->invoke($client, 'files-pull');
 
         // Step 2: new client, try run_files_sync
         [$client2, $reflection2] = $this->prepareClient();
@@ -231,7 +231,7 @@ class FilesSyncStateTest extends TestCase
             $state["status"],
             "After abort + re-run, the sync should start fresh, not report 'already complete'",
         );
-        $this->assertEquals("files-sync", $state["command"]);
+        $this->assertEquals("files-pull", $state["command"]);
     }
 
     // ---------------------------------------------------------------
@@ -261,7 +261,7 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($localFile, 'old content');
 
         $this->writeState([
-            "command" => "files-sync",
+            "command" => "files-pull",
             "status" => "in_progress",
             "stage" => "diff",
         ]);
@@ -299,7 +299,7 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($localFile, 'local drop-in');
 
         $this->writeState([
-            "command" => "files-sync",
+            "command" => "files-pull",
             "status" => "in_progress",
             "stage" => "diff",
         ]);
@@ -335,7 +335,7 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($localFile, 'old content');
 
         $this->writeState([
-            "command" => "files-sync",
+            "command" => "files-pull",
             "status" => "in_progress",
             "stage" => "fetch",
         ]);
