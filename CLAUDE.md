@@ -147,7 +147,9 @@ The `apply-runtime` command separates source host detection from target runtime 
 1. **Host analyzer** (in `packages/reprint-importer/src/lib/host/analyzers/`) reads preflight data and produces a `RuntimeManifest` — a pure-data object with INI directives, constants, server vars, routes, `paths_to_remove`, and `extra_directories`.
 2. **Runtime applier** (in `packages/reprint-importer/src/lib/target-runtime/`) reads the manifest and generates server-specific configuration files.
 
-The `WpcloudHostAnalyzer` auto-detects WP Cloud production infrastructure that won't work locally: Memcached-backed `object-cache.php`, wpcomsh mu-plugins, and `auto_prepend_file`/`auto_append_file` directories. It populates `paths_to_remove` (stripped after flattening) and `extra_directories` (auto-included in the export file list).
+The `WpcloudHostAnalyzer` auto-detects WP Cloud production infrastructure that won't work locally: Memcached-backed `object-cache.php`, wpcomsh mu-plugins, and `auto_prepend_file`/`auto_append_file` directories. It populates `paths_to_remove` (stripped after flattening) and `extra_directories` (auto-included in the export file list). The `SitegroundHostAnalyzer` detects SiteGround hosting via `sg-*` plugin prefixes and strips `sg-cachepress` and `sg-security` from disk.
+
+Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic plugin deactivation: `apply-runtime` connects to the target database and removes matching entries from the `active_plugins` option. This prevents "plugin file does not exist" warnings in wp-admin. The deactivation is derived from `paths_to_remove` — there is no separate manifest field for it.
 
 ### SQL Streaming Crash Recovery
 

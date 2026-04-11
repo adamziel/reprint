@@ -69,11 +69,17 @@ class RuntimeManifest
      * Paths relative to the fs-root that should be removed after
      * flattening because they depend on production infrastructure not
      * available locally.  Examples: Memcached-backed object-cache
-     * drop-ins, hosting-specific mu-plugins.
+     * drop-ins, hosting-specific mu-plugins, hosting-specific plugins.
      *
      * Each entry is a relative path like 'wp-content/object-cache.php'
      * or 'wp-content/mu-plugins/wpcomsh'.  Directories are removed
      * recursively.  The audit log records every removal.
+     *
+     * Entries under 'wp-content/plugins/' also trigger automatic
+     * deactivation: any active plugin whose basename starts with the
+     * removed directory name is stripped from the active_plugins option
+     * in the target database, preventing "plugin file does not exist"
+     * warnings in wp-admin.
      *
      * @var string[]
      */
@@ -92,18 +98,6 @@ class RuntimeManifest
      * @var string[]  Absolute remote directory paths (e.g. ['/scripts'])
      */
     public array $extra_directories = [];
-
-    /**
-     * Plugin directory names to deactivate in the WordPress database
-     * after import.  Each entry is a plugin directory name (e.g.
-     * 'sg-security') — any active plugin whose basename starts with
-     * that directory + '/' will be removed from the active_plugins
-     * option.  The corresponding plugin files should also appear in
-     * paths_to_remove so they are deleted from disk.
-     *
-     * @var string[]
-     */
-    public array $plugins_to_deactivate = [];
 
     /**
      * SQLite database configuration.  When non-null, the target uses

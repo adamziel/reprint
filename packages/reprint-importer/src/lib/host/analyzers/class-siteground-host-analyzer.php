@@ -48,14 +48,11 @@ class SitegroundHostAnalyzer implements HostAnalyzer
         // SiteGround server infrastructure (their custom caching layer,
         // server-level security rules).  They won't work on a local
         // environment and produce warnings in wp-admin, so strip them
-        // from disk and deactivate them in the database.
+        // from disk.  Plugins under wp-content/plugins/ are also
+        // automatically deactivated in the database by apply-runtime.
         $manifest->paths_to_remove = [
             'wp-content/plugins/sg-cachepress',
             'wp-content/plugins/sg-security',
-        ];
-        $manifest->plugins_to_deactivate = [
-            'sg-cachepress',
-            'sg-security',
         ];
 
         return $manifest;

@@ -99,15 +99,6 @@ class SitegroundHostAnalyzerTest extends TestCase
         $this->assertContains('wp-content/plugins/sg-security', $manifest->paths_to_remove);
     }
 
-    public function testAnalyzePopulatesPluginsToDeactivate(): void
-    {
-        $analyzer = new \SitegroundHostAnalyzer();
-        $manifest = $analyzer->analyze($this->sitegroundPreflight());
-
-        $this->assertContains('sg-cachepress', $manifest->plugins_to_deactivate);
-        $this->assertContains('sg-security', $manifest->plugins_to_deactivate);
-    }
-
     public function testAnalyzeSetsSourceToSiteground(): void
     {
         $analyzer = new \SitegroundHostAnalyzer();

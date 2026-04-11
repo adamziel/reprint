@@ -3838,14 +3838,20 @@ class ImportClient
             $this->audit_log("APPLY-RUNTIME | {$line}");
         }
 
-        // Deactivate host-specific plugins in the target database so
-        // WordPress doesn't show "plugin file does not exist" warnings.
-        // This runs after path removal so the files are already gone.
+        // Any paths_to_remove entry under wp-content/plugins/ implies that
+        // the plugin should also be deactivated in the database, otherwise
+        // WordPress shows "plugin file does not exist" warnings in wp-admin.
+        $plugin_dirs = [];
+        foreach ($manifest->paths_to_remove as $rel_path) {
+            if (preg_match('#^wp-content/plugins/([^/]+)$#', $rel_path, $m)) {
+                $plugin_dirs[] = $m[1];
+            }
+        }
         $deactivated_plugins = [];
-        if (!empty($manifest->plugins_to_deactivate) && $target_engine !== null) {
+        if (!empty($plugin_dirs) && $target_engine !== null) {
             $deactivated_plugins = $this->deactivate_plugins_in_target_db(
                 $apply_state,
-                $manifest->plugins_to_deactivate,
+                $plugin_dirs,
                 $preflight_data,
             );
             foreach ($deactivated_plugins as $plugin_basename) {
