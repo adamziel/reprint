@@ -3915,12 +3915,10 @@ class ImportClient
         // Use 0- prefix so it loads before other mu-plugins.
         $mu_path = $mu_dir . '/0-reprint-deactivate-plugins.php';
 
-        $prefixes_php = "array(\n";
-        foreach ($plugin_dirs as $dir) {
-            $escaped = addslashes($dir);
-            $prefixes_php .= "        '{$escaped}/',\n";
-        }
-        $prefixes_php .= "    )";
+        // Append '/' to each directory name so strpos matches the plugin
+        // basename format ("sg-security/sg-security.php").
+        $prefixes = array_map(fn($dir) => $dir . '/', $plugin_dirs);
+        $prefixes_exported = var_export($prefixes, true);
 
         $code = <<<PHP
 <?php
@@ -3931,7 +3929,7 @@ class ImportClient
  * strips the listed plugins from active_plugins so they don't trigger
  * "plugin file does not exist" errors, then deletes itself.
  */
-\$_reprint_prefixes = {$prefixes_php};
+\$_reprint_prefixes = {$prefixes_exported};
 
 \$_reprint_active = get_option( 'active_plugins', array() );
 \$_reprint_filtered = array_values( array_filter( \$_reprint_active, function ( \$p ) use ( \$_reprint_prefixes ) {
