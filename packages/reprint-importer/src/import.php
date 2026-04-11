@@ -1383,16 +1383,16 @@ class ImportClient
 
         if (
             !in_array($command, [
-                "files-sync",
+                "files-pull",
                 "files-index",
-                "db-sync",
+                "db-pull",
                 "db-index",
                 "db-domains",
                 "db-apply",
                 "files-stats",
                 "preflight",
                 "preflight-assert",
-                "flat-document-root",
+                "flat-docroot",
                 "apply-runtime",
             ])
         ) {
@@ -1402,6 +1402,18 @@ class ImportClient
         }
 
         $this->state = $this->load_state();
+
+        // Migrate legacy command names stored in state files from older versions.
+        $legacy_commands = [
+            "files-sync" => "files-pull",
+            "db-sync" => "db-pull",
+            "flat-document-root" => "flat-docroot",
+        ];
+        $state_cmd = $this->state["command"] ?? null;
+        if ($state_cmd && isset($legacy_commands[$state_cmd])) {
+            $this->state["command"] = $legacy_commands[$state_cmd];
+            $this->save_state($this->state);
+        }
 
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
@@ -1560,7 +1572,7 @@ class ImportClient
             $this->run_files_stats();
             return;
         }
-        if ($command === "flat-document-root") {
+        if ($command === "flat-docroot") {
             $this->run_flat_document_root($options);
             return;
         }
@@ -1612,7 +1624,7 @@ class ImportClient
                     $this->run_preflight_assert();
                     return;
 
-                case "files-sync":
+                case "files-pull":
                     $this->run_files_sync();
                     break;
 
@@ -1620,7 +1632,7 @@ class ImportClient
                     $this->run_files_index();
                     break;
 
-                case "db-sync":
+                case "db-pull":
                     $this->run_db_sync();
                     break;
                 case "db-index":
@@ -1657,7 +1669,7 @@ class ImportClient
     private function handle_abort(string $command): void
     {
         switch ($command) {
-            case "files-sync":
+            case "files-pull":
                 // Clear sync progress (cursor, stage, status) and transient
                 // files, but keep the local index and downloaded files intact.
                 // This way the next `files-sync` sees a completed local index
@@ -1721,7 +1733,7 @@ class ImportClient
                 $this->save_state($this->state);
                 break;
 
-            case "db-sync":
+            case "db-pull":
                 $this->audit_log(
                     "RESTART | Clearing db-sync state",
                     true,
@@ -2358,11 +2370,11 @@ class ImportClient
     {
         $state_command = $this->state["command"] ?? null;
         $current_status =
-            $state_command === "files-sync"
+            $state_command === "files-pull"
                 ? $this->state["status"] ?? null
                 : null;
         $has_progress =
-            $state_command === "files-sync" &&
+            $state_command === "files-pull" &&
             $current_status !== null &&
             $current_status !== "complete";
 
@@ -2394,7 +2406,7 @@ class ImportClient
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
-                    "command" => "files-sync",
+                    "command" => "files-pull",
                     "stage" => "fetch-skipped",
                     "message" => "Downloading previously skipped files",
                 ], true);
@@ -2427,7 +2439,7 @@ class ImportClient
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "already_complete",
-                "command" => "files-sync",
+                "command" => "files-pull",
                 "files_indexed" => $index_size,
                 "has_skipped" => $has_skipped,
                 "message" => "files-sync already complete: {$index_size} files indexed",
@@ -2478,7 +2490,7 @@ class ImportClient
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
-                "command" => "files-sync",
+                "command" => "files-pull",
                 "stage" => $stage,
                 "index_size" => $index_size,
                 "message" => "Resuming files-sync (stage: {$stage}, indexed: {$index_size} files)",
@@ -2494,7 +2506,7 @@ class ImportClient
                 );
             }
 
-            $this->state["command"] = "files-sync";
+            $this->state["command"] = "files-pull";
             $this->state["status"] = "in_progress";
             $this->state["stage"] = "index";
             $this->state["diff"] = $this->default_state()["diff"];
@@ -2520,7 +2532,7 @@ class ImportClient
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
-                    "command" => "files-sync",
+                    "command" => "files-pull",
                     "delta" => true,
                     "index_size" => $index_size,
                     "message" => "Starting files-sync (delta, {$index_size} files indexed)",
@@ -2537,13 +2549,13 @@ class ImportClient
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
-                    "command" => "files-sync",
+                    "command" => "files-pull",
                     "message" => "Starting files-sync",
                 ], true);
             }
         }
 
-        $this->state["command"] = "files-sync";
+        $this->state["command"] = "files-pull";
         $this->state["status"] = "in_progress";
         $this->save_state($this->state);
 
@@ -2559,7 +2571,7 @@ class ImportClient
 
         $this->clear_progress_line();
         $index_size = $this->index_count();
-        $label = $is_delta ? "files-sync (delta)" : "files-sync";
+        $label = $is_delta ? "files-sync (delta)" : "files-pull";
 
         $this->audit_log(
             sprintf("%s complete: %d files indexed", $label, $index_size),
@@ -2573,7 +2585,7 @@ class ImportClient
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
-            "command" => "files-sync",
+            "command" => "files-pull",
             "delta" => $is_delta,
             "files_indexed" => $index_size,
             "audit_log" => $this->audit_log,
@@ -3241,10 +3253,10 @@ class ImportClient
         $sql_file = $this->state_dir . "/db.sql";
 
         $has_progress =
-            $state_command === "db-sync" &&
+            $state_command === "db-pull" &&
             ($this->state["status"] ?? null) === "in_progress";
         $current_status =
-            $state_command === "db-sync"
+            $state_command === "db-pull"
                 ? $this->state["status"] ?? null
                 : null;
 
@@ -3287,13 +3299,13 @@ class ImportClient
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
-                "command" => "db-sync",
+                "command" => "db-pull",
                 "stage" => $stage,
                 "message" => "Resuming db-sync (stage: {$stage})",
             ], true);
         } else {
             // Starting fresh
-            $this->state["command"] = "db-sync";
+            $this->state["command"] = "db-pull";
             $this->state["status"] = "in_progress";
             $this->state["cursor"] = null;
             $this->state["stage"] = "db-index";
@@ -3309,12 +3321,12 @@ class ImportClient
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
-                "command" => "db-sync",
+                "command" => "db-pull",
                 "message" => "Starting db-sync",
             ], true);
         }
 
-        $this->state["command"] = "db-sync";
+        $this->state["command"] = "db-pull";
         $this->save_state($this->state);
 
         // Stage 1: db-index (table metadata for progress estimation)
@@ -3378,7 +3390,7 @@ class ImportClient
         $db_sync_complete = [
             "type" => "lifecycle",
             "event" => "complete",
-            "command" => "db-sync",
+            "command" => "db-pull",
             "sql_output_mode" => $this->sql_output_mode,
             "audit_log" => $this->audit_log,
             "message" => "db-sync complete",
@@ -3910,7 +3922,7 @@ class ImportClient
             return true;
         }
 
-        if (($this->state["command"] ?? null) !== "files-sync") {
+        if (($this->state["command"] ?? null) !== "files-pull") {
             return false;
         }
 
@@ -10007,7 +10019,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['files-sync', 'files-index', 'db-sync', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'abort',
@@ -10015,7 +10027,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['files-sync', 'files-index', 'db-sync', 'db-index', 'db-apply'],
+            'commands' => ['files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
         ],
         [
             'name' => 'verbose',
@@ -10024,7 +10036,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['files-sync', 'files-index', 'db-sync', 'db-index', 'db-apply', 'flat-document-root', 'apply-runtime'],
+            'commands' => ['files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -10033,7 +10045,7 @@ if (
             'flag_value' => false,
             'help' => 'Do not follow symlinks pointing outside root directories',
             'help_section' => 'global',
-            'commands' => ['files-sync'],
+            'commands' => ['files-pull'],
         ],
         [
             'name' => 'follow-symlinks',
@@ -10050,7 +10062,7 @@ if (
             'placeholder' => 'MODE',
             'help' => 'What to do when fs root is non-empty (error|preserve-local)',
             'help_section' => 'global',
-            'commands' => ['files-sync'],
+            'commands' => ['files-pull'],
             'aliases' => ['on-docroot-nonempty'],
         ],
         [
@@ -10099,7 +10111,7 @@ if (
             'placeholder' => 'MODE',
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
             'help' => 'Filter which files to download (none|essential-files|skipped-earlier)',
-            'commands' => ['files-sync'],
+            'commands' => ['files-pull'],
         ],
         [
             'name' => 'extra-directory',
@@ -10107,7 +10119,7 @@ if (
             'target' => 'extra_directory',
             'placeholder' => 'DIR',
             'help' => 'Additional remote directory to include in the export',
-            'commands' => ['files-sync', 'files-index'],
+            'commands' => ['files-pull', 'files-index'],
         ],
 
         // ── db-sync options ──────────────────────────────────────
@@ -10118,7 +10130,7 @@ if (
             'placeholder' => 'SIZE',
             'cast' => 'size',
             'help' => 'Client max_allowed_packet (e.g. 16M, 64M)',
-            'commands' => ['db-sync'],
+            'commands' => ['db-pull'],
         ],
         [
             'name' => 'sql-output',
@@ -10126,7 +10138,7 @@ if (
             'target' => 'sql_output',
             'placeholder' => 'MODE',
             'help' => 'Output mode: file (default), stdout, mysql',
-            'commands' => ['db-sync'],
+            'commands' => ['db-pull'],
         ],
         [
             'name' => 'mysql-host',
@@ -10134,7 +10146,7 @@ if (
             'target' => 'mysql_host',
             'placeholder' => 'HOST',
             'help' => 'MySQL host (default: 127.0.0.1, for --sql-output=mysql)',
-            'commands' => ['db-sync'],
+            'commands' => ['db-pull'],
         ],
         [
             'name' => 'mysql-port',
@@ -10142,7 +10154,7 @@ if (
             'target' => 'mysql_port',
             'placeholder' => 'PORT',
             'help' => 'MySQL port (default: 3306, for --sql-output=mysql)',
-            'commands' => ['db-sync'],
+            'commands' => ['db-pull'],
         ],
         [
             'name' => 'mysql-user',
@@ -10150,7 +10162,7 @@ if (
             'target' => 'mysql_user',
             'placeholder' => 'USER',
             'help' => 'MySQL user (default: root, for --sql-output=mysql)',
-            'commands' => ['db-sync'],
+            'commands' => ['db-pull'],
         ],
         [
             'name' => 'mysql-password',
@@ -10158,7 +10170,7 @@ if (
             'target' => 'mysql_password',
             'placeholder' => 'PASS',
             'help' => 'MySQL password (or set MYSQL_PASSWORD env)',
-            'commands' => ['db-sync'],
+            'commands' => ['db-pull'],
         ],
         [
             'name' => 'mysql-database',
@@ -10166,7 +10178,7 @@ if (
             'target' => 'mysql_database',
             'placeholder' => 'DB',
             'help' => 'MySQL database (required for --sql-output=mysql)',
-            'commands' => ['db-sync'],
+            'commands' => ['db-pull'],
         ],
 
         // ── db-apply options ─────────────────────────────────────
@@ -10244,21 +10256,21 @@ if (
             'commands' => ['db-apply'],
         ],
 
-        // ── flat-document-root options ───────────────────────────
+        // ── flat-docroot options ────────────────────────────────
         [
             'name' => 'flatten-to',
             'type' => 'value',
             'target' => 'flatten_to',
             'placeholder' => 'PATH',
             'help' => 'Target directory for the flattened layout (required)',
-            'commands' => ['flat-document-root'],
+            'commands' => ['flat-docroot'],
         ],
         [
             'name' => 'force',
             'type' => 'flag',
             'target' => 'force',
             'help' => 'Remove conflicting non-symlink files and replace with symlinks',
-            'commands' => ['flat-document-root'],
+            'commands' => ['flat-docroot'],
         ],
 
         // ── apply-runtime options ────────────────────────────────
@@ -10487,14 +10499,9 @@ if (
         echo "Usage: reprint <command> <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
         echo "\n";
         echo "Commands:\n";
-        $display_names = [];
+        $max_len = max(array_map('strlen', array_keys($command_info)));
         foreach ($command_info as $name => $info) {
-            $display_names[] = $info["display"] ?? $name;
-        }
-        $max_len = max(array_map('strlen', $display_names));
-        foreach ($command_info as $name => $info) {
-            $display = $info["display"] ?? $name;
-            echo "  " . str_pad($display, $max_len + 2) . $info["short"] . "\n";
+            echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
         }
         echo "\n";
         echo "Run 'reprint <command> --help' for command-specific help.\n";
@@ -10539,8 +10546,7 @@ if (
         }
 
         $info = $command_info[$command];
-        $display = $info["display"] ?? $command;
-        echo "Usage: reprint {$display} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
+        echo "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
         echo "\n";
         echo $info["description"];
 
@@ -10664,8 +10670,7 @@ if (
                 "Prints a PASS/FAIL summary and exits 0 if all checks pass, 1 if not.\n",
             "extra" => null,
         ],
-        "files-sync" => [
-            "display" => "files-pull",
+        "files-pull" => [
             "short" => "Pull all files (initial) or only changes (delta)",
             "description" =>
                 "Downloads files from the remote site into --fs-root.\n" .
@@ -10720,8 +10725,7 @@ if (
                 "Requires a prior files-index or files-pull run.\n",
             "extra" => null,
         ],
-        "db-sync" => [
-            "display" => "db-pull",
+        "db-pull" => [
             "short" => "Pull the database as a SQL dump (index + download)",
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
@@ -10774,8 +10778,7 @@ if (
                 "    --target-engine=sqlite --target-sqlite-path=/path/to/db.sqlite \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
-        "flat-document-root" => [
-            "display" => "flat-docroot",
+        "flat-docroot" => [
             "short" => "Reassemble pulled files into a standard WordPress layout",
             "description" =>
                 "Creates a directory at --flatten-to with symlinks that map the\n" .
@@ -10859,12 +10862,12 @@ if (
     $command = $argv[1];
 
     // Command aliases — maps user-facing names and legacy names to
-    // the internal command names used by run() and state files.
+    // Legacy command names that still work on the CLI.
     $command_aliases = [
-        "files-pull" => "files-sync",
-        "db-pull" => "db-sync",
-        "flat-docroot" => "flat-document-root",
-        "flatten-docroot" => "flat-document-root",
+        "files-sync" => "files-pull",
+        "db-sync" => "db-pull",
+        "flat-document-root" => "flat-docroot",
+        "flatten-docroot" => "flat-docroot",
     ];
     if (isset($command_aliases[$command])) {
         $command = $command_aliases[$command];
