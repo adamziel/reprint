@@ -5188,9 +5188,17 @@ class ImportClient
         );
         $stmt->execute([$new_value]);
         $affected = $stmt->rowCount();
+
+        // Verify the update took effect.
+        $verify = $pdo->prepare(
+            "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
+        );
+        $verify->execute();
+        $after = $verify->fetchColumn();
         $this->audit_log(
             "DB-APPLY | updated active_plugins ({$affected} row(s) affected, " .
-            count($removed) . " plugin(s) removed)",
+            count($removed) . " plugin(s) removed) | " .
+            "verify=" . ($after === $new_value ? 'OK' : 'MISMATCH after=' . substr($after, 0, 200)),
         );
 
         return $removed;
