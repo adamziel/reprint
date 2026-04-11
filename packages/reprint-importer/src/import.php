@@ -1371,6 +1371,18 @@ class ImportClient
             }
         }
         $command = $options["command"] ?? null;
+
+        // Apply legacy command aliases so callers using old names still work.
+        static $command_aliases = [
+            "files-sync" => "files-pull",
+            "db-sync" => "db-pull",
+            "flat-document-root" => "flat-docroot",
+            "flatten-docroot" => "flat-docroot",
+        ];
+        if ($command && isset($command_aliases[$command])) {
+            $command = $command_aliases[$command];
+        }
+
         $abort = $options["abort"] ?? false;
         $this->pipeline_step = $options["pipeline_step"] ?? null;
         $this->pipeline_steps = $options["pipeline_steps"] ?? null;
