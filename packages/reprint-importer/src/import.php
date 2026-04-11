@@ -3838,28 +3838,8 @@ class ImportClient
             $this->audit_log("APPLY-RUNTIME | {$line}");
         }
 
-        // Any paths_to_remove entry under wp-content/plugins/ implies that
-        // the plugin should also be deactivated in the database, otherwise
-        // WordPress shows "plugin file does not exist" warnings in wp-admin.
-        // We drop a self-destructing mu-plugin that deactivates them on the
-        // first WordPress load — no direct database connection needed.
-        $plugin_dirs = [];
-        foreach ($manifest->paths_to_remove as $rel_path) {
-            if (preg_match('#^wp-content/plugins/([^/]+)$#', $rel_path, $m)) {
-                $plugin_dirs[] = $m[1];
-            }
-        }
-        if (!empty($plugin_dirs)) {
-            $mu_path = $this->write_deactivate_plugins_mu_plugin($abs_fs_root, $plugin_dirs);
-            if ($mu_path !== null) {
-                $summary[] = "Wrote deactivation mu-plugin for: " . implode(', ', $plugin_dirs);
-                $this->audit_log("APPLY-RUNTIME | wrote deactivation mu-plugin: {$mu_path}");
-            }
-        }
-
         // Persist which paths were removed so callers can inspect state.
         $this->state["apply"]["remote_paths_removed_from_local_site"] = $manifest->paths_to_remove;
-        $this->state["apply"]["plugins_to_deactivate"] = $plugin_dirs;
         $this->save_state($this->state);
 
         // Output the summary and manifest as structured JSON for callers,
@@ -3872,7 +3852,6 @@ class ImportClient
             "webhost_source" => $manifest->source,
             "target_engine" => $target_engine,
             "paths_removed" => $manifest->paths_to_remove,
-            "plugins_to_deactivate" => $plugin_dirs,
             "extra_directories" => $manifest->extra_directories,
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
@@ -3887,76 +3866,6 @@ class ImportClient
         foreach ($summary as $line) {
             fwrite(STDERR, "{$line}\n");
         }
-    }
-
-    /**
-     * Write a self-destructing mu-plugin that deactivates host-specific
-     * plugins on the first WordPress load.
-     *
-     * The mu-plugin runs before regular plugins load, strips matching
-     * entries from the active_plugins option, and then deletes itself.
-     * This avoids needing a database connection from the importer.
-     *
-     * @param string   $abs_fs_root  Absolute path to the site's fs-root.
-     * @param string[] $plugin_dirs  Plugin directory names to deactivate
-     *                               (e.g. ["sg-cachepress", "sg-security"]).
-     * @return string|null  Path to the written mu-plugin, or null on failure.
-     */
-    private function write_deactivate_plugins_mu_plugin(string $abs_fs_root, array $plugin_dirs): ?string
-    {
-        $mu_dir = $abs_fs_root . '/wp-content/mu-plugins';
-        if (!is_dir($mu_dir)) {
-            if (!@mkdir($mu_dir, 0755, true)) {
-                $this->audit_log("APPLY-RUNTIME | could not create mu-plugins directory: {$mu_dir}");
-                return null;
-            }
-        }
-
-        // Use 0- prefix so it loads before other mu-plugins.
-        $mu_path = $mu_dir . '/0-reprint-deactivate-plugins.php';
-
-        // Append '/' to each directory name so strpos matches the plugin
-        // basename format ("sg-security/sg-security.php").
-        $prefixes = array_map(fn($dir) => $dir . '/', $plugin_dirs);
-        $prefixes_exported = var_export($prefixes, true);
-
-        $code = <<<PHP
-<?php
-/**
- * One-shot mu-plugin: remove host-specific plugins from active_plugins
- * and self-destruct.
- *
- * Written by reprint apply-runtime. The plugin files have already been
- * deleted from disk, so we bypass deactivate_plugins() — that function
- * fires deactivation hooks, but the plugin code no longer exists to
- * handle them. Instead we directly update the option to remove the
- * entries, which is all that's needed to stop WordPress from looking
- * for the missing files.
- */
-\$_reprint_prefixes = {$prefixes_exported};
-\$_reprint_active = get_option( 'active_plugins', array() );
-\$_reprint_filtered = array_values( array_filter( \$_reprint_active, function ( \$p ) use ( \$_reprint_prefixes ) {
-    foreach ( \$_reprint_prefixes as \$prefix ) {
-        if ( strpos( \$p, \$prefix ) === 0 ) {
-            return false;
-        }
-    }
-    return true;
-} ) );
-if ( count( \$_reprint_filtered ) !== count( \$_reprint_active ) ) {
-    update_option( 'active_plugins', \$_reprint_filtered );
-}
-
-// Self-destruct — the file is already loaded, so unlinking is safe.
-@unlink( __FILE__ );
-PHP;
-
-        if (file_put_contents($mu_path, $code) === false) {
-            $this->audit_log("APPLY-RUNTIME | failed to write deactivation mu-plugin: {$mu_path}");
-            return null;
-        }
-
-        return $mu_path;
     }
 
     /**
@@ -5152,6 +5061,20 @@ PHP;
                     "message" => "db-apply partial: {$statements_executed} statements executed",
                 ], true);
             } else {
+                // Deactivate host-specific plugins before marking complete.
+                // The host analyzer declares paths_to_remove; any entry under
+                // wp-content/plugins/ means that plugin will be deleted from
+                // disk during apply-runtime. We remove it from active_plugins
+                // now, while the database connection is still open, so
+                // WordPress won't complain about missing plugin files.
+                // We skip deactivate_plugins() because the plugin files will
+                // be gone by the time WordPress boots — firing deactivation
+                // hooks into absent code is pointless.
+                $deactivated = $this->deactivate_host_plugins($pdo);
+                foreach ($deactivated as $basename) {
+                    $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
+                }
+
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
@@ -5183,6 +5106,81 @@ PHP;
         } finally {
             fclose($sql_handle);
         }
+    }
+
+    /**
+     * Deactivate host-specific plugins in the target database.
+     *
+     * Looks at the detected webhost's paths_to_remove for entries under
+     * wp-content/plugins/ and removes matching basenames from the
+     * active_plugins option. This runs at the end of db-apply while the
+     * PDO connection is still open.
+     *
+     * @return string[]  Plugin basenames actually removed.
+     */
+    private function deactivate_host_plugins(PDO $pdo): array
+    {
+        $webhost = $this->state["webhost"] ?? "other";
+        $analyzer = host_analyzer_for($webhost);
+        $preflight_data = $this->state["preflight"]["data"] ?? [];
+        $manifest = $analyzer->analyze($preflight_data);
+
+        $plugin_dirs = [];
+        foreach ($manifest->paths_to_remove as $rel_path) {
+            if (preg_match('#^wp-content/plugins/([^/]+)$#', $rel_path, $m)) {
+                $plugin_dirs[] = $m[1];
+            }
+        }
+
+        if (empty($plugin_dirs)) {
+            return [];
+        }
+
+        $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
+        $options_table = $table_prefix . 'options';
+
+        $stmt = $pdo->prepare(
+            "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
+        );
+        $stmt->execute();
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row || !isset($row['option_value'])) {
+            return [];
+        }
+
+        $active_plugins = @unserialize($row['option_value']);
+        if (!is_array($active_plugins)) {
+            return [];
+        }
+
+        $removed = [];
+        $filtered = [];
+        foreach ($active_plugins as $basename) {
+            $dominated = false;
+            foreach ($plugin_dirs as $dir) {
+                if (strpos($basename, $dir . '/') === 0) {
+                    $dominated = true;
+                    break;
+                }
+            }
+            if ($dominated) {
+                $removed[] = $basename;
+            } else {
+                $filtered[] = $basename;
+            }
+        }
+
+        if (empty($removed)) {
+            return [];
+        }
+
+        $filtered = array_values($filtered);
+        $stmt = $pdo->prepare(
+            "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
+        );
+        $stmt->execute([serialize($filtered)]);
+
+        return $removed;
     }
 
     /**

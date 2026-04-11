@@ -5,9 +5,8 @@
  * sg-security are installed and active.  Verifies that after the full
  * import pipeline (preflight -> files-sync -> db-sync -> db-apply ->
  * apply-runtime), both plugins are:
- *   1. Removed from the local filesystem
- *   2. A self-destructing mu-plugin is written to deactivate them on
- *      the first WordPress load
+ *   1. Deactivated in the target database during db-apply
+ *   2. Removed from the local filesystem during apply-runtime
  *   3. Unrelated plugins are preserved
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -18,7 +17,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir, getDbName,
+    fsRootDir, getDbName, createMysqlConnection,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -132,27 +131,79 @@ describe('Import: SiteGround plugin stripping', () => {
         assert.ok(existsSync(join(tempDir, 'db.sql')), 'db.sql should exist');
     });
 
-    it('db-apply imports into a separate database', () => {
-        const sourceDomain = new URL(getSiteUrl(site)).origin;
-        const result = runImporter(importUrl(), tempDir, 'db-apply', {
-            secret: getSiteSecret(site),
-            extraArgs: [
-                '--target-engine=mysql',
-                `--target-db=${getDbName(site)}_import`,
-                '--target-user=e2e_admin',
-                '--target-pass=e2e_password',
-                '--target-host=127.0.0.1',
-                '--rewrite-url', sourceDomain, `http://127.0.0.1:9999`,
-            ],
+    describe('db-apply deactivates SG plugins', () => {
+        beforeAll(() => {
+            const sourceDomain = new URL(getSiteUrl(site)).origin;
+            const result = runImporter(importUrl(), tempDir, 'db-apply', {
+                secret: getSiteSecret(site),
+                extraArgs: [
+                    '--target-engine=mysql',
+                    `--target-db=${getDbName(site)}_import`,
+                    '--target-user=e2e_admin',
+                    '--target-pass=e2e_password',
+                    '--target-host=127.0.0.1',
+                    '--rewrite-url', sourceDomain, `http://127.0.0.1:9999`,
+                ],
+            });
+            assert.equal(result.exitCode, 0, `db-apply failed:\n${result.stderr}`);
         });
-        assert.equal(result.exitCode, 0, `db-apply failed:\n${result.stderr}`);
+
+        it('sg plugins are removed from active_plugins', async () => {
+            const importDb = `${getDbName(site)}_import`;
+            const conn = await createMysqlConnection(importDb);
+            try {
+                const [rows] = await conn.query(
+                    "SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'"
+                );
+                assert.ok(rows.length > 0, 'active_plugins option should exist');
+
+                const raw = rows[0].option_value;
+                assert.ok(
+                    !raw.includes('sg-cachepress'),
+                    `active_plugins should not contain sg-cachepress, got: ${raw}`,
+                );
+                assert.ok(
+                    !raw.includes('sg-security'),
+                    `active_plugins should not contain sg-security, got: ${raw}`,
+                );
+            } finally {
+                await conn.end();
+            }
+        });
+
+        it('non-SG plugins remain active', async () => {
+            const importDb = `${getDbName(site)}_import`;
+            const conn = await createMysqlConnection(importDb);
+            try {
+                const [rows] = await conn.query(
+                    "SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'"
+                );
+                const raw = rows[0].option_value;
+                assert.ok(
+                    raw.includes('site-export'),
+                    `active_plugins should still contain site-export, got: ${raw}`,
+                );
+            } finally {
+                await conn.end();
+            }
+        });
+
+        it('audit log records the deactivations', () => {
+            const auditLog = readFileSync(join(tempDir, '.import-audit.log'), 'utf-8');
+            assert.ok(
+                auditLog.includes('deactivated plugin') && auditLog.includes('sg-cachepress'),
+                'audit log should record sg-cachepress deactivation',
+            );
+            assert.ok(
+                auditLog.includes('deactivated plugin') && auditLog.includes('sg-security'),
+                'audit log should record sg-security deactivation',
+            );
+        });
     });
 
-    describe('after apply-runtime', () => {
+    describe('apply-runtime removes SG plugin files', () => {
         beforeAll(() => {
-            const siteDir = getSiteDir(site);
             const flatDir = join(tempDir, 'flattened');
-            // Flatten first so apply-runtime has a standard layout to work with.
             const flatResult = runImporter(importUrl(), tempDir, 'flat-document-root', {
                 secret: getSiteSecret(site),
                 extraArgs: [`--flatten-to=${flatDir}`],
@@ -174,7 +225,7 @@ describe('Import: SiteGround plugin stripping', () => {
             });
         });
 
-        it('sg-cachepress plugin directory is removed from disk', () => {
+        it('sg-cachepress directory is removed from disk', () => {
             const flatDir = join(tempDir, 'flattened');
             assert.ok(
                 !existsSync(join(flatDir, 'wp-content', 'plugins', 'sg-cachepress')),
@@ -182,7 +233,7 @@ describe('Import: SiteGround plugin stripping', () => {
             );
         });
 
-        it('sg-security plugin directory is removed from disk', () => {
+        it('sg-security directory is removed from disk', () => {
             const flatDir = join(tempDir, 'flattened');
             assert.ok(
                 !existsSync(join(flatDir, 'wp-content', 'plugins', 'sg-security')),
@@ -192,59 +243,9 @@ describe('Import: SiteGround plugin stripping', () => {
 
         it('unrelated plugins are preserved on disk', () => {
             const flatDir = join(tempDir, 'flattened');
-            // The site-export plugin should still exist.
             assert.ok(
                 existsSync(join(flatDir, 'wp-content', 'plugins', 'site-export')),
                 'site-export plugin should still exist after apply-runtime',
-            );
-        });
-
-        it('deactivation mu-plugin is written with both SG plugin prefixes', () => {
-            const flatDir = join(tempDir, 'flattened');
-            const muPlugin = join(flatDir, 'wp-content', 'mu-plugins', '0-reprint-deactivate-plugins.php');
-            assert.ok(existsSync(muPlugin), 'deactivation mu-plugin should exist');
-
-            const contents = readFileSync(muPlugin, 'utf-8');
-            assert.ok(
-                contents.includes("'sg-cachepress/'"),
-                'mu-plugin should target sg-cachepress',
-            );
-            assert.ok(
-                contents.includes("'sg-security/'"),
-                'mu-plugin should target sg-security',
-            );
-            assert.ok(
-                contents.includes('unlink'),
-                'mu-plugin should self-destruct',
-            );
-        });
-
-        it('state records plugins to deactivate', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-            const toDeactivate = state.apply?.plugins_to_deactivate ?? [];
-            assert.ok(
-                toDeactivate.includes('sg-cachepress'),
-                `Expected sg-cachepress in plugins_to_deactivate, got: ${JSON.stringify(toDeactivate)}`,
-            );
-            assert.ok(
-                toDeactivate.includes('sg-security'),
-                `Expected sg-security in plugins_to_deactivate, got: ${JSON.stringify(toDeactivate)}`,
-            );
-        });
-
-        it('audit log records the removals and deactivation mu-plugin', () => {
-            const auditLog = readFileSync(join(tempDir, '.import-audit.log'), 'utf-8');
-            assert.ok(
-                auditLog.includes('removed wp-content/plugins/sg-cachepress (production-only)'),
-                'audit log should record sg-cachepress removal',
-            );
-            assert.ok(
-                auditLog.includes('removed wp-content/plugins/sg-security (production-only)'),
-                'audit log should record sg-security removal',
-            );
-            assert.ok(
-                auditLog.includes('wrote deactivation mu-plugin'),
-                'audit log should record mu-plugin creation',
             );
         });
     });

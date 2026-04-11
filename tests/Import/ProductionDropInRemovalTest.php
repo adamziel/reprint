@@ -448,25 +448,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertDirectoryExists($plugins . '/woocommerce');
     }
 
-    public function testSitegroundWritesDeactivationMuPlugin(): void
-    {
-        $this->writeSitegroundState();
-        $this->createSitegroundPlugins();
-
-        $client = $this->makeClient();
-        $this->loadClientState($client);
-        $this->runApplyRuntime($client);
-
-        $muPlugin = $this->fsRoot . '/wp-content/mu-plugins/0-reprint-deactivate-plugins.php';
-        $this->assertFileExists($muPlugin);
-
-        $contents = file_get_contents($muPlugin);
-        $this->assertStringContainsString('sg-cachepress/', $contents);
-        $this->assertStringContainsString('sg-security/', $contents);
-        $this->assertStringContainsString('update_option', $contents, 'mu-plugin should update active_plugins directly');
-        $this->assertStringContainsString('unlink', $contents, 'mu-plugin should self-destruct');
-    }
-
     public function testSitegroundLogsRemovalsToAuditLog(): void
     {
         $this->writeSitegroundState();
@@ -484,10 +465,6 @@ class ProductionDropInRemovalTest extends TestCase
         );
         $this->assertStringContainsString(
             'removed wp-content/plugins/sg-security (production-only)',
-            $auditLog,
-        );
-        $this->assertStringContainsString(
-            'wrote deactivation mu-plugin',
             $auditLog,
         );
     }
@@ -516,18 +493,4 @@ class ProductionDropInRemovalTest extends TestCase
         );
     }
 
-    public function testWpcloudDoesNotWriteDeactivationMuPlugin(): void
-    {
-        // WP Cloud's paths_to_remove are mu-plugins and drop-ins, not
-        // regular plugins, so no deactivation mu-plugin should be written.
-        $this->writeState(['command' => 'files-sync', 'status' => 'complete']);
-        $this->createProductionDropIns();
-
-        $client = $this->makeClient();
-        $this->loadClientState($client);
-        $this->runApplyRuntime($client);
-
-        $muPlugin = $this->fsRoot . '/wp-content/mu-plugins/0-reprint-deactivate-plugins.php';
-        $this->assertFileDoesNotExist($muPlugin);
-    }
 }
