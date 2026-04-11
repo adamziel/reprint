@@ -158,15 +158,6 @@ describe('Import: SiteGround plugin stripping', () => {
         it('sg plugins are removed from active_plugins', () => {
             const importDb = `${getDbName(site)}_import`;
 
-            // Dump audit log for CI debugging.
-            const auditPath = join(tempDir, '.import-audit.log');
-            if (existsSync(auditPath)) {
-                const lines = readFileSync(auditPath, 'utf-8').split('\n').filter(
-                    l => l.includes('DB-APPLY'),
-                );
-                console.log('DEBUG DB-APPLY audit lines:', lines.join('\n'));
-            }
-
             // Query using PHP to use the same MySQL driver as the importer.
             const raw = execFileSync('php', ['-r', `
                 \$pdo = new PDO('mysql:host=127.0.0.1;dbname=${importDb};charset=utf8mb4', 'e2e_admin', 'e2e_password');

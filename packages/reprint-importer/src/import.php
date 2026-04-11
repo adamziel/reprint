@@ -5132,12 +5132,6 @@ class ImportClient
             }
         }
 
-        $this->audit_log(
-            "DB-APPLY | deactivate_host_plugins: webhost={$webhost}, " .
-            "paths_to_remove=" . implode(',', $manifest->paths_to_remove) . ", " .
-            "plugin_dirs=" . implode(',', $plugin_dirs),
-        );
-
         if (empty($plugin_dirs)) {
             return [];
         }
@@ -5187,18 +5181,13 @@ class ImportClient
             "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
         );
         $stmt->execute([$new_value]);
-        $affected = $stmt->rowCount();
+        // The SQL dump runs with AUTOCOMMIT=0 and issues a final COMMIT,
+        // but autocommit stays off. Our UPDATE needs an explicit COMMIT.
+        $pdo->exec('COMMIT');
 
-        // Verify the update took effect.
-        $verify = $pdo->prepare(
-            "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
-        );
-        $verify->execute();
-        $after = $verify->fetchColumn();
         $this->audit_log(
-            "DB-APPLY | updated active_plugins ({$affected} row(s) affected, " .
-            count($removed) . " plugin(s) removed) | " .
-            "verify=" . ($after === $new_value ? 'OK' : 'MISMATCH after=' . substr($after, 0, 200)),
+            "DB-APPLY | updated active_plugins (" .
+            count($removed) . " plugin(s) removed)",
         );
 
         return $removed;
