@@ -77,8 +77,10 @@ cd tests/e2e
 ./run-all-tests.sh
 
 # Run a single scenario
-cd scenarios/vanilla-wp && ./run-test.sh
+npm run test -- tests/import-01-basic-file-sync.test.js
 ```
+
+There are 49 E2E test files in `tests/e2e/tests/`, named `import-NN-description.test.js`. Each test spins up Docker containers with WordPress and runs a full import scenario.
 
 ### Database Configuration
 
@@ -95,6 +97,10 @@ Override with environment variables if needed.
 ### Symlink Security
 
 Symlinks ARE automatically recreated during import. This is safe because all paths are relative to the `--fs-root` directory, preventing directory traversal outside it. Errors are logged to the audit log.
+
+### Server-Side Directory Dedup
+
+The file indexer (`endpoint_file_index` in `export.php`) prevents duplicate traversal of directories that overlap with configured roots. The `should_skip_index_root()` function checks each directory's `realpath()` against the scheduled root list — if a directory is a duplicate or parent of an already-scheduled root, traversal skips it. This is critical for WP.com Atomic sites where symlinks create overlapping paths (e.g. `/srv/htdocs/srv` → `/srv` creating infinite cycles, or `/wordpress/` and `/srv/htdocs/wordpress/` resolving to the same location).
 
 ### Non-Empty fs-root Handling (`--on-fs-root-nonempty`)
 
@@ -134,12 +140,33 @@ PHPUnit tests automatically create/drop test databases. The naming convention is
 - Export database: `test_mysql_dump`
 - Import database: `test_mysql_dump_import`
 
+### Runtime Manifest and Host Analyzers
+
+The `apply-runtime` command separates source host detection from target runtime configuration. The flow is:
+
+1. **Host analyzer** (in `packages/reprint-importer/src/lib/host/analyzers/`) reads preflight data and produces a `RuntimeManifest` — a pure-data object with INI directives, constants, server vars, routes, `paths_to_remove`, and `extra_directories`.
+2. **Runtime applier** (in `packages/reprint-importer/src/lib/target-runtime/`) reads the manifest and generates server-specific configuration files.
+
+The `WpcloudHostAnalyzer` auto-detects WP Cloud production infrastructure that won't work locally: Memcached-backed `object-cache.php`, wpcomsh mu-plugins, and `auto_prepend_file`/`auto_append_file` directories. It populates `paths_to_remove` (stripped after flattening) and `extra_directories` (auto-included in the export file list).
+
+### SQL Streaming Crash Recovery
+
+When the export server crashes mid-SQL-stream (`--sql-output=mysql` mode), the importer detects the transport failure (missing completion chunk, curl communication errors), saves the cursor, persists accumulated SQL in a `.sql-buffer` file, and exits with code 2 for automatic retry. The next run reloads the buffer and continues. The `finally` block avoids masking the original exception with a secondary buffer-related throw.
+
+### Progress Tracking
+
+During the file fetch phase, progress and heartbeat records include `files_done` (cumulative across restarts, derived from download list byte offset + current batch count) and `files_total` (total download list entries, fixed after the diff phase). Both are emitted together only when the download list exists. The `files_imported` field is still emitted for backward compatibility.
+
 ## File Organization
 
 - packages/reprint-exporter/: Packagist exporter package
   - src/: Core export engine (export.php, producers, HMAC client, utilities)
 - packages/reprint-importer/: Packagist importer package
   - src/: Import client and importer runtime support code
+  - src/lib/host/: Host analyzers and RuntimeManifest (WpcloudHostAnalyzer, SitegroundHostAnalyzer, DefaultHostAnalyzer)
+  - src/lib/target-runtime/: Runtime appliers (NginxFpmApplier, PhpBuiltinApplier, PlaygroundCliApplier)
+  - src/lib/url-rewrite/: URL rewriting for db-apply
+  - src/lib/mysql-query-stream/: MySQL query stream parser for direct streaming
 - reprint-exporter-wp/: Self-contained WordPress plugin distribution directory
   - index.php: WordPress plugin entry point — intercepts `?site-export-api` requests during plugin load, requires lib.php
   - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
@@ -160,6 +187,18 @@ Every test follows a 5-step pattern:
 5. Verify: Compare original and imported data for integrity
 
 This ensures SQL is correct, valid, and preserves data without loss or corruption.
+
+## WP.com Atomic Hosting Layout
+
+WP.com Atomic sites have a non-standard directory structure that drives many of the recent dedup and split-root fixes. Understanding it helps when working on file sync:
+
+- **ABSPATH** points to `/srv/htdocs/__wp__/` (shared WordPress core), not the document root.
+- **Document root** is `/srv/htdocs/`, which contains `wp-content/` with the site's actual plugins, themes, and uploads — separate from the `__wp__/` tree.
+- **Symlink cycles**: `/srv/htdocs/srv` → `/srv` creates infinite recursion during traversal.
+- **Overlapping roots**: `/wordpress/` and `/srv/htdocs/wordpress/` can resolve to the same physical directory.
+- **Production drop-ins**: Memcached `object-cache.php`, `wpcomsh` mu-plugins, and `auto_prepend_file` scripts in `/scripts/` that depend on production APIs.
+
+The exporter must scan both roots (document root + ABSPATH) without infinite loops, and the importer must strip production-only infrastructure before the site can run locally.
 
 ## Common Gotchas
 
