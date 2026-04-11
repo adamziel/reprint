@@ -3923,27 +3923,28 @@ class ImportClient
         $code = <<<PHP
 <?php
 /**
- * One-shot mu-plugin: deactivate host-specific plugins and self-destruct.
+ * One-shot mu-plugin: remove host-specific plugins from active_plugins
+ * and self-destruct.
  *
- * Written by reprint apply-runtime. On the first WordPress load this
- * strips the listed plugins from active_plugins so they don't trigger
- * "plugin file does not exist" errors, then deletes itself.
+ * Written by reprint apply-runtime. The plugin files have already been
+ * deleted from disk, so we bypass deactivate_plugins() — that function
+ * fires deactivation hooks, but the plugin code no longer exists to
+ * handle them. Instead we directly update the option to remove the
+ * entries, which is all that's needed to stop WordPress from looking
+ * for the missing files.
  */
-require_once ABSPATH . 'wp-admin/includes/plugin.php';
-
 \$_reprint_prefixes = {$prefixes_exported};
 \$_reprint_active = get_option( 'active_plugins', array() );
-\$_reprint_to_deactivate = array();
-foreach ( \$_reprint_active as \$plugin ) {
+\$_reprint_filtered = array_values( array_filter( \$_reprint_active, function ( \$p ) use ( \$_reprint_prefixes ) {
     foreach ( \$_reprint_prefixes as \$prefix ) {
-        if ( strpos( \$plugin, \$prefix ) === 0 ) {
-            \$_reprint_to_deactivate[] = \$plugin;
-            break;
+        if ( strpos( \$p, \$prefix ) === 0 ) {
+            return false;
         }
     }
-}
-if ( ! empty( \$_reprint_to_deactivate ) ) {
-    deactivate_plugins( \$_reprint_to_deactivate );
+    return true;
+} ) );
+if ( count( \$_reprint_filtered ) !== count( \$_reprint_active ) ) {
+    update_option( 'active_plugins', \$_reprint_filtered );
 }
 
 // Self-destruct — the file is already loaded, so unlinking is safe.

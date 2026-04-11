@@ -463,7 +463,7 @@ class ProductionDropInRemovalTest extends TestCase
         $contents = file_get_contents($muPlugin);
         $this->assertStringContainsString('sg-cachepress/', $contents);
         $this->assertStringContainsString('sg-security/', $contents);
-        $this->assertStringContainsString('deactivate_plugins', $contents, 'mu-plugin should use deactivate_plugins()');
+        $this->assertStringContainsString('update_option', $contents, 'mu-plugin should update active_plugins directly');
         $this->assertStringContainsString('unlink', $contents, 'mu-plugin should self-destruct');
     }
 
