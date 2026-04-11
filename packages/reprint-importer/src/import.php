@@ -3841,28 +3841,25 @@ class ImportClient
         // Any paths_to_remove entry under wp-content/plugins/ implies that
         // the plugin should also be deactivated in the database, otherwise
         // WordPress shows "plugin file does not exist" warnings in wp-admin.
+        // We drop a self-destructing mu-plugin that deactivates them on the
+        // first WordPress load — no direct database connection needed.
         $plugin_dirs = [];
         foreach ($manifest->paths_to_remove as $rel_path) {
             if (preg_match('#^wp-content/plugins/([^/]+)$#', $rel_path, $m)) {
                 $plugin_dirs[] = $m[1];
             }
         }
-        $deactivated_plugins = [];
-        if (!empty($plugin_dirs) && $target_engine !== null) {
-            $deactivated_plugins = $this->deactivate_plugins_in_target_db(
-                $apply_state,
-                $plugin_dirs,
-                $preflight_data,
-            );
-            foreach ($deactivated_plugins as $plugin_basename) {
-                $summary[] = "Deactivated plugin: {$plugin_basename}";
-                $this->audit_log("APPLY-RUNTIME | deactivated {$plugin_basename} (host-specific)");
+        if (!empty($plugin_dirs)) {
+            $mu_path = $this->write_deactivate_plugins_mu_plugin($abs_fs_root, $plugin_dirs);
+            if ($mu_path !== null) {
+                $summary[] = "Wrote deactivation mu-plugin for: " . implode(', ', $plugin_dirs);
+                $this->audit_log("APPLY-RUNTIME | wrote deactivation mu-plugin: {$mu_path}");
             }
         }
 
         // Persist which paths were removed so callers can inspect state.
         $this->state["apply"]["remote_paths_removed_from_local_site"] = $manifest->paths_to_remove;
-        $this->state["apply"]["plugins_deactivated"] = $deactivated_plugins;
+        $this->state["apply"]["plugins_to_deactivate"] = $plugin_dirs;
         $this->save_state($this->state);
 
         // Output the summary and manifest as structured JSON for callers,
@@ -3875,7 +3872,7 @@ class ImportClient
             "webhost_source" => $manifest->source,
             "target_engine" => $target_engine,
             "paths_removed" => $manifest->paths_to_remove,
-            "plugins_deactivated" => $deactivated_plugins,
+            "plugins_to_deactivate" => $plugin_dirs,
             "extra_directories" => $manifest->extra_directories,
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
@@ -3893,121 +3890,73 @@ class ImportClient
     }
 
     /**
-     * Remove host-specific plugins from the active_plugins option in
-     * the target database.  Each entry in $plugin_dirs is a plugin
-     * directory name (e.g. "sg-security"); any active plugin whose
-     * basename starts with that directory + "/" is removed.
+     * Write a self-destructing mu-plugin that deactivates host-specific
+     * plugins on the first WordPress load.
      *
-     * @param array    $apply_state  The apply state with target DB credentials.
-     * @param string[] $plugin_dirs  Plugin directory names to deactivate.
-     * @param array    $preflight_data  Preflight data (for table prefix).
-     * @return string[]  Basenames actually removed (e.g. ["sg-security/sg-security.php"]).
+     * The mu-plugin runs before regular plugins load, strips matching
+     * entries from the active_plugins option, and then deletes itself.
+     * This avoids needing a database connection from the importer.
+     *
+     * @param string   $abs_fs_root  Absolute path to the site's fs-root.
+     * @param string[] $plugin_dirs  Plugin directory names to deactivate
+     *                               (e.g. ["sg-cachepress", "sg-security"]).
+     * @return string|null  Path to the written mu-plugin, or null on failure.
      */
-    private function deactivate_plugins_in_target_db(array $apply_state, array $plugin_dirs, array $preflight_data): array
+    private function write_deactivate_plugins_mu_plugin(string $abs_fs_root, array $plugin_dirs): ?string
     {
-        $target_engine = $apply_state["target_engine"] ?? null;
-        if ($target_engine === null) {
-            return [];
+        $mu_dir = $abs_fs_root . '/wp-content/mu-plugins';
+        if (!is_dir($mu_dir)) {
+            if (!@mkdir($mu_dir, 0755, true)) {
+                $this->audit_log("APPLY-RUNTIME | could not create mu-plugins directory: {$mu_dir}");
+                return null;
+            }
         }
 
-        $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
-        $options_table = $table_prefix . 'options';
+        // Use 0- prefix so it loads before other mu-plugins.
+        $mu_path = $mu_dir . '/0-reprint-deactivate-plugins.php';
 
-        try {
-            $pdo = $this->connect_to_target_db($apply_state);
-        } catch (RuntimeException $e) {
-            $this->audit_log("APPLY-RUNTIME | plugin deactivation skipped: " . $e->getMessage());
-            return [];
+        $prefixes_php = "array(\n";
+        foreach ($plugin_dirs as $dir) {
+            $escaped = addslashes($dir);
+            $prefixes_php .= "        '{$escaped}/',\n";
         }
+        $prefixes_php .= "    )";
 
-        try {
-            $stmt = $pdo->prepare(
-                "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
-            );
-            $stmt->execute();
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            if (!$row || !isset($row['option_value'])) {
-                return [];
-            }
+        $code = <<<PHP
+<?php
+/**
+ * One-shot mu-plugin: deactivate host-specific plugins and self-destruct.
+ *
+ * Written by reprint apply-runtime. On the first WordPress load this
+ * strips the listed plugins from active_plugins so they don't trigger
+ * "plugin file does not exist" errors, then deletes itself.
+ */
+\$_reprint_prefixes = {$prefixes_php};
 
-            $active_plugins = @unserialize($row['option_value']);
-            if (!is_array($active_plugins)) {
-                return [];
-            }
-
-            $removed = [];
-            $filtered = [];
-            foreach ($active_plugins as $basename) {
-                $should_remove = false;
-                foreach ($plugin_dirs as $dir) {
-                    if (strpos($basename, $dir . '/') === 0) {
-                        $should_remove = true;
-                        break;
-                    }
-                }
-                if ($should_remove) {
-                    $removed[] = $basename;
-                } else {
-                    $filtered[] = $basename;
-                }
-            }
-
-            if (empty($removed)) {
-                return [];
-            }
-
-            // Re-index so the serialized array uses sequential integer keys,
-            // matching how WordPress stores active_plugins.
-            $filtered = array_values($filtered);
-
-            $stmt = $pdo->prepare(
-                "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
-            );
-            $stmt->execute([serialize($filtered)]);
-
-            return $removed;
-        } finally {
-            $pdo = null;
+\$_reprint_active = get_option( 'active_plugins', array() );
+\$_reprint_filtered = array_values( array_filter( \$_reprint_active, function ( \$p ) use ( \$_reprint_prefixes ) {
+    foreach ( \$_reprint_prefixes as \$prefix ) {
+        if ( strpos( \$p, \$prefix ) === 0 ) {
+            return false;
         }
     }
+    return true;
+} ) );
 
-    /**
-     * Create a PDO connection to the target database using credentials
-     * persisted by db-apply.
-     */
-    private function connect_to_target_db(array $apply_state): PDO
-    {
-        $engine = $apply_state["target_engine"] ?? null;
+if ( count( \$_reprint_filtered ) !== count( \$_reprint_active ) ) {
+    update_option( 'active_plugins', \$_reprint_filtered );
+}
 
-        if ($engine === "sqlite") {
-            $path = $apply_state["target_sqlite_path"] ?? null;
-            $db = $apply_state["target_db"] ?? "sqlite_database";
-            if (!$path) {
-                throw new RuntimeException("No SQLite path in apply state");
-            }
-            return $this->create_sqlite_target_pdo($path, $db);
+// Self-destruct — the file is already loaded, so unlinking is safe.
+@unlink( __FILE__ );
+PHP;
+
+        if (file_put_contents($mu_path, $code) === false) {
+            $this->audit_log("APPLY-RUNTIME | failed to write deactivation mu-plugin: {$mu_path}");
+            return null;
         }
 
-        if ($engine === "mysql") {
-            $host = $apply_state["target_host"] ?? "127.0.0.1";
-            $port = (int) ($apply_state["target_port"] ?? 3306);
-            $user = $apply_state["target_user"] ?? null;
-            $pass = $apply_state["target_pass"] ?? "";
-            $db = $apply_state["target_db"] ?? null;
-
-            if (!$user || !$db) {
-                throw new RuntimeException("Incomplete MySQL credentials in apply state");
-            }
-
-            $dsn = "mysql:host={$host};port={$port};dbname={$db};charset=utf8mb4";
-            return new PDO($dsn, $user, $pass, [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::MYSQL_ATTR_LOCAL_INFILE => false,
-            ]);
-        }
-
-        throw new RuntimeException("Unknown target engine: {$engine}");
+        return $mu_path;
     }
 
     /**
