@@ -10472,17 +10472,15 @@ if (
      */
     function _cli_render_main_help(array $option_defs, array $command_info): void
     {
-        if (function_exists("posix_isatty") && posix_isatty(STDOUT)) {
-            // Colored ASCII art banner — each letter clearly separated.
-            $re = "\033[35m";              // magenta (Re)
-            $pr = "\033[38;5;63m";         // WP Blueberry ~#3858E9 (Print)
-            $r  = "\033[0m";
-            echo "{$re} ___         {$pr}___         _          _   {$r}\n";
-            echo "{$re}| _ \\  ___  {$pr}| _ \\  _ _  (_)  _ _   | |_ {$r}\n";
-            echo "{$re}|   / / -_) {$pr}|  _/ | '_| | | | ' \\  |  _|{$r}\n";
-            echo "{$re}|_|_\\ \\___| {$pr}|_|   |_|   |_| |_||_|  \\__|{$r}\n";
-            echo "\n";
-        }
+        $is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
+        $re = $is_tty ? "\033[35m" : "";              // magenta (Re)
+        $pr = $is_tty ? "\033[38;5;63m" : "";         // WP Blueberry ~#3858E9 (Print)
+        $r  = $is_tty ? "\033[0m" : "";
+        echo "{$re} ___         {$pr}___         _          _   {$r}\n";
+        echo "{$re}| _ \\  ___  {$pr}| _ \\  _ _  (_)  _ _   | |_ {$r}\n";
+        echo "{$re}|   / / -_) {$pr}|  _/ | '_| | | | ' \\  |  _|{$r}\n";
+        echo "{$re}|_|_\\ \\___| {$pr}|_|   |_|   |_| |_||_|  \\__|{$r}\n";
+        echo "\n";
         echo "Mirror any WordPress site over HTTP.\n";
         echo "Version " . get_importer_version() . "\n";
         echo "\n";
