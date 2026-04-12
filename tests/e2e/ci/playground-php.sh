@@ -35,16 +35,15 @@ done
 # Deduplicate mount args
 UNIQUE_MOUNTS=($(printf '%s\n' "${MOUNT_ARGS[@]}" | sort -u))
 
-# Resolve the @wp-playground/cli entry point.
-# Use node directly with --experimental-wasm-jspi to enable JSPI networking.
+# Resolve the CLI entry point and invoke node with --experimental-wasm-jspi.
 # NODE_OPTIONS doesn't allow this flag, so we must pass it to node directly.
-CLI_PATH=$(node -e "console.log(require.resolve('@wp-playground/cli/cli.js'))" 2>/dev/null || true)
+CLI_PATH=$(which wp-playground-cli 2>/dev/null || echo "")
 if [ -z "$CLI_PATH" ]; then
-    CLI_PATH=$(npx --yes which @wp-playground/cli 2>/dev/null || echo "")
-    if [ -z "$CLI_PATH" ]; then
-        # Fallback: just use npx
-        exec npx @wp-playground/cli php "${UNIQUE_MOUNTS[@]}" -- "$@"
-    fi
+    CLI_PATH="$(npm root -g)/@wp-playground/cli/cli.js"
+fi
+if [ ! -f "$CLI_PATH" ]; then
+    # Fallback: just use npx (without JSPI)
+    exec npx @wp-playground/cli php "${UNIQUE_MOUNTS[@]}" -- "$@"
 fi
 
 exec node --experimental-wasm-jspi "$CLI_PATH" php "${UNIQUE_MOUNTS[@]}" -- "$@"
