@@ -87,8 +87,8 @@ jobs:
           echo "=== Importer preflight ==="
           timeout 30 php "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
 
-          echo "=== Importer files-sync ==="
-          timeout 30 php "$IMPORTER_PATH" files-sync "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+          echo "=== Importer files-pull ==="
+          timeout 30 php "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
 
       - name: Run E2E tests
         env:

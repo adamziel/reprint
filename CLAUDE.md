@@ -104,7 +104,7 @@ The file indexer (`endpoint_file_index` in `export.php`) prevents duplicate trav
 
 ### Non-Empty fs-root Handling (`--on-fs-root-nonempty`)
 
-By default, `files-sync` refuses to start if `--fs-root` is non-empty (to prevent accidental overwrites). The `--on-fs-root-nonempty` flag controls this behavior:
+By default, `files-pull` refuses to start if `--fs-root` is non-empty (to prevent accidental overwrites). The `--on-fs-root-nonempty` flag controls this behavior:
 
 - `--on-fs-root-nonempty=error` (default): throw an error and abort.
 - `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.

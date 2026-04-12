@@ -4,7 +4,7 @@
  *
  * WP Cloud sites have a non-standard directory layout: WordPress core lives
  * at a versioned path (/wordpress/core/X.Y.Z/) and wp-content is a separate
- * tree under /srv/htdocs/. After flat-document-root, the local layout uses a
+ * tree under /srv/htdocs/. After flat-docroot, the local layout uses a
  * __wp__ directory for core.
  *
  * The export only ships original-size uploads, so the manifest declares a
@@ -73,7 +73,7 @@ class WpcloudHostAnalyzer implements HostAnalyzer
         $manifest->constants = $this->build_constants($preflight_data);
         $manifest->server_vars = [
             // WP Cloud uses a __wp__ directory for WordPress core. After
-            // flat-document-root, it lives at {fs-root}/__wp__/.
+            // flat-docroot, it lives at {fs-root}/__wp__/.
             'WP_DIR' => '{fs-root}/__wp__/',
         ];
 
@@ -108,7 +108,7 @@ class WpcloudHostAnalyzer implements HostAnalyzer
 
         // auto_prepend_file on Atomic points to /scripts/env.php — a
         // directory outside the WordPress roots.  Record it so that
-        // files-sync downloads it and the runtime applier can mount it.
+        // files-pull downloads it and the runtime applier can mount it.
         $manifest->extra_directories = $this->detect_extra_directories($preflight_data);
 
         return $manifest;

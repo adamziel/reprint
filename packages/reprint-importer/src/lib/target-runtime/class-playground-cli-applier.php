@@ -127,7 +127,7 @@ class PlaygroundCliApplier implements RuntimeApplier
      * corresponding Playground mounts.
      *
      * Some route handlers need importer metadata produced outside the mounted
-     * WordPress tree, for example the files-sync state used by the temporary
+     * WordPress tree, for example the files-pull state used by the temporary
      * remote uploads proxy. Playground can only see files that are mounted
      * explicitly, so we map those constants to /tmp paths in the VM.
      *
