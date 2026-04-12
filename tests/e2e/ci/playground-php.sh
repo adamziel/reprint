@@ -6,6 +6,9 @@
 # - The workspace root (for reprint.phar and project files)
 # - /tmp (for temporary test output)
 # - /srv (for e2e test site data)
+#
+# Uses JSPI (JavaScript Promise Integration) for proper async networking.
+# Without JSPI, the Asyncify-based curl crashes on gzip decompression.
 set -euo pipefail
 
 MOUNT_ARGS=()
@@ -31,5 +34,9 @@ done
 
 # Deduplicate mount args
 UNIQUE_MOUNTS=($(printf '%s\n' "${MOUNT_ARGS[@]}" | sort -u))
+
+# Enable JSPI for proper async networking in WASM PHP.
+# Without this, curl's gzip decompression crashes with "RuntimeError: unreachable".
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-wasm-jspi"
 
 exec npx @wp-playground/cli php "${UNIQUE_MOUNTS[@]}" -- "$@"
