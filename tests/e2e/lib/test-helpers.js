@@ -249,7 +249,7 @@ export function runImporter(url, outputDir, command, options = {}) {
 
         try {
             const result = execFileSync(PHP_BINARY, args, {
-                timeout: options.timeout || 60000,
+                timeout: options.timeout || (PHP_BINARY === 'php' ? 60000 : 120000),
                 encoding: 'utf-8',
                 env: { ...process.env },
                 maxBuffer: 50 * 1024 * 1024,
@@ -286,7 +286,9 @@ export function runImporter(url, outputDir, command, options = {}) {
     }
 
     const commandExtraArgs = options.extraArgs || [];
-    const wallTimeout = options.wallTimeout || 120000; // 2 minutes total wall-clock
+    // WASM PHP (Playground CLI) takes ~12s per invocation, so allow more time
+    const defaultWallTimeout = PHP_BINARY === 'php' ? 120000 : 300000;
+    const wallTimeout = options.wallTimeout || defaultWallTimeout;
     const wallStart = Date.now();
     let result = runImporterOnce(command, commandExtraArgs);
     if (

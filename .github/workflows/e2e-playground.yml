@@ -32,7 +32,7 @@ jobs:
     name: E2E (Playground CLI)
     needs: build-phar
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +115,8 @@ jobs:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
           PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
         working-directory: tests/e2e
-        run: npx vitest run
+        # WASM PHP takes ~12s per invocation, so bump per-test timeout from 60s to 180s
+        run: npx vitest run --test-timeout=180000
 
       - name: Debug logs
         if: always()
