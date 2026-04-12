@@ -5137,7 +5137,8 @@ class ImportClient
         }
 
         $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
-        $options_table = $table_prefix . 'options';
+        // Quote the table name to prevent SQL injection from a crafted prefix.
+        $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
 
         $stmt = $pdo->prepare(
             "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
@@ -5179,14 +5180,7 @@ class ImportClient
             return [];
         }
 
-        // Rebuild the serialized array with sequential integer keys.
-        // active_plugins is always a flat array of strings, so we can
-        // produce valid serialization without calling serialize().
-        $parts = [];
-        foreach ($kept as $i => $v) {
-            $parts[] = 'i:' . $i . ';s:' . strlen($v) . ':"' . $v . '";';
-        }
-        $new_value = 'a:' . count($kept) . ':{' . implode('', $parts) . '}';
+        $new_value = serialize(array_values($kept));
         $stmt = $pdo->prepare(
             "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
         );
