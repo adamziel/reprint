@@ -35,8 +35,16 @@ done
 # Deduplicate mount args
 UNIQUE_MOUNTS=($(printf '%s\n' "${MOUNT_ARGS[@]}" | sort -u))
 
-# Enable JSPI for proper async networking in WASM PHP.
-# Without this, curl's gzip decompression crashes with "RuntimeError: unreachable".
-export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-wasm-jspi"
+# Resolve the @wp-playground/cli entry point.
+# Use node directly with --experimental-wasm-jspi to enable JSPI networking.
+# NODE_OPTIONS doesn't allow this flag, so we must pass it to node directly.
+CLI_PATH=$(node -e "console.log(require.resolve('@wp-playground/cli/cli.js'))" 2>/dev/null || true)
+if [ -z "$CLI_PATH" ]; then
+    CLI_PATH=$(npx --yes which @wp-playground/cli 2>/dev/null || echo "")
+    if [ -z "$CLI_PATH" ]; then
+        # Fallback: just use npx
+        exec npx @wp-playground/cli php "${UNIQUE_MOUNTS[@]}" -- "$@"
+    fi
+fi
 
-exec npx @wp-playground/cli php "${UNIQUE_MOUNTS[@]}" -- "$@"
+exec node --experimental-wasm-jspi "$CLI_PATH" php "${UNIQUE_MOUNTS[@]}" -- "$@"
