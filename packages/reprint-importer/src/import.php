@@ -2036,6 +2036,8 @@ class ImportClient
                     $body = json_decode($chunk["body"] ?? "{}", true);
                     $error_path = isset($body["path"]) ? base64_decode($body["path"]) : "unknown";
                     $this->audit_log("Fetch error for {$error_path}: " . ($body["message"] ?? "unknown"));
+                } elseif ($chunk_type === "completion") {
+                    $context->saw_completion = true;
                 }
             };
 
