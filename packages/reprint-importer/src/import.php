@@ -1395,12 +1395,13 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Command is required. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
             );
         }
 
         if (
             !in_array($command, [
+                "pull",
                 "files-pull",
                 "files-index",
                 "db-pull",
@@ -1415,7 +1416,7 @@ class ImportClient
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Invalid command: {$command}. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
             );
         }
 
@@ -1559,6 +1560,36 @@ class ImportClient
                 );
             }
             $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
+        }
+
+        // pull orchestrates the full pipeline (preflight → files → db → apply)
+        // internally, so it must run before the normal command dispatch.
+        if ($command === "pull") {
+            if ($abort) {
+                $this->pull_prepare_repull();
+                if ($this->is_tty && !$this->verbose_mode) {
+                    fwrite($this->progress_fd, "Pull state cleared. Downloaded files are preserved.\n");
+                }
+                $this->output_progress([
+                    "type" => "lifecycle",
+                    "event" => "aborted",
+                    "command" => "pull",
+                    "message" => "Pull state cleared",
+                ], true);
+                return;
+            }
+            try {
+                $this->run_pull($options);
+            } catch (\Exception $e) {
+                $this->output_progress([
+                    "status" => "error",
+                    "error" => $e->getMessage(),
+                    "message" => "Error: " . $e->getMessage(),
+                ]);
+                $this->write_status_file($e->getMessage());
+                throw $e;
+            }
+            return;
         }
 
         // preflight and preflight-assert run the preflight themselves and
@@ -3627,6 +3658,389 @@ class ImportClient
         }
 
         echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
+    }
+
+    // =========================================================================
+    // pull: Full site clone pipeline
+    // =========================================================================
+
+    /**
+     * Determine the pipeline stages for a pull based on the provided options.
+     *
+     * Always includes preflight, files-pull, and db-pull.
+     * Adds db-apply if any database target is configured.
+     * Adds flat-docroot if --flatten-to is provided.
+     * Adds apply-runtime if --runtime is provided.
+     */
+    private function pull_stages(array $options): array
+    {
+        $stages = ['preflight', 'files-pull', 'db-pull'];
+        $has_db_target =
+            !empty($options['target_db']) ||
+            !empty($options['target_engine']) ||
+            !empty($options['target_sqlite_path']) ||
+            !empty($options['target_user']);
+        if ($has_db_target) {
+            $stages[] = 'db-apply';
+        }
+        if (!empty($options['flatten_to'])) {
+            $stages[] = 'flat-docroot';
+        }
+        if (!empty($options['runtime'])) {
+            $stages[] = 'apply-runtime';
+        }
+        return $stages;
+    }
+
+    /**
+     * Human-readable label for a pull pipeline stage.
+     */
+    private function pull_stage_label(string $stage): string
+    {
+        switch ($stage) {
+            case 'preflight':     return 'Preflight';
+            case 'files-pull':    return 'Pulling files';
+            case 'db-pull':       return 'Pulling database';
+            case 'db-apply':      return 'Importing database';
+            case 'flat-docroot':  return 'Flattening layout';
+            case 'apply-runtime': return 'Generating runtime';
+            default:              return $stage;
+        }
+    }
+
+    /**
+     * Print a pull stage header to the TTY progress stream.
+     */
+    private function pull_print_header(int $step, int $total, string $stage): void
+    {
+        if (!$this->is_tty) {
+            return;
+        }
+        $label = $this->pull_stage_label($stage);
+        $dim = "\033[2m";
+        $bold = "\033[1m";
+        $r = "\033[0m";
+        fwrite($this->progress_fd, "\n{$dim}[{$step}/{$total}]{$r} {$bold}{$label}{$r}\n");
+    }
+
+    /**
+     * Print a checkmark line for a completed stage.
+     */
+    private function pull_print_done(int $step, int $total, string $stage, ?string $summary = null): void
+    {
+        if (!$this->is_tty) {
+            return;
+        }
+        $green = "\033[32m";
+        $dim = "\033[2m";
+        $r = "\033[0m";
+        $label = $this->pull_stage_label($stage);
+        $extra = $summary ? " {$dim}— {$summary}{$r}" : "";
+        fwrite($this->progress_fd, "{$green}  ✓{$r} {$label}{$extra}\n");
+    }
+
+    /**
+     * Print a dim line for a previously completed stage (on resume).
+     */
+    private function pull_print_skipped(int $step, int $total, string $stage): void
+    {
+        if (!$this->is_tty) {
+            return;
+        }
+        $dim = "\033[2m";
+        $r = "\033[0m";
+        $label = $this->pull_stage_label($stage);
+        fwrite($this->progress_fd, "{$dim}[{$step}/{$total}] {$label} ✓{$r}\n");
+    }
+
+    /**
+     * Build a one-line summary of preflight results for the pull output.
+     */
+    private function pull_preflight_summary(): ?string
+    {
+        $data = $this->state["preflight"]["data"] ?? null;
+        if (!is_array($data)) {
+            return null;
+        }
+        $parts = [];
+        $wp = $data["database"]["wp"]["wp_version"] ?? null;
+        if ($wp) {
+            $parts[] = "WordPress {$wp}";
+        }
+        $php = $data["runtime"]["phpversion"] ?? null;
+        if ($php) {
+            $parts[] = "PHP {$php}";
+        }
+        return $parts ? implode(", ", $parts) : null;
+    }
+
+    /**
+     * Run a sub-command handler in a retry loop until it completes.
+     *
+     * Sub-commands return with state["status"]="partial" when the server
+     * times out or the connection drops. This loop retries automatically,
+     * resetting the status to "in_progress" so the handler enters its
+     * resume path (it reads the cursor and stage from state to continue
+     * where it left off).
+     */
+    private function pull_run_until_complete(callable $handler): void
+    {
+        for ($attempt = 0; $attempt < 1000; $attempt++) {
+            $handler();
+
+            $status = $this->state['status'] ?? null;
+            if ($status !== 'partial') {
+                break;
+            }
+
+            // The cursor and stage are preserved in state. Set status
+            // to "in_progress" so the handler enters the resume path
+            // instead of starting fresh — it specifically checks for
+            // this value.
+            $this->state['status'] = 'in_progress';
+            $this->exit_code = 0;
+        }
+    }
+
+    /**
+     * Reset sub-command state for a delta re-pull.
+     *
+     * Clears the command/status tracking and db-related state so the
+     * sub-command handlers start fresh. Preserves the local file index
+     * so files-pull runs in delta mode (re-index remote, diff, download
+     * only changes). Also preserves preflight data.
+     */
+    private function pull_prepare_repull(): void
+    {
+        $this->state['pull']['stage'] = null;
+
+        // Clear sub-command state so handlers don't see "already complete"
+        $this->state['command'] = null;
+        $this->state['status'] = null;
+        $this->state['cursor'] = null;
+        $this->state['stage'] = null;
+        $this->state['consecutive_timeouts'] = 0;
+        $this->state['sql_bytes'] = null;
+        $this->state['current_file'] = null;
+        $this->state['current_file_bytes'] = null;
+
+        // Reset db-pull state for fresh download
+        $defaults = $this->default_state();
+        $this->state['db_index'] = $defaults['db_index'];
+        $this->state['diff'] = $defaults['diff'];
+        $this->state['fetch'] = $defaults['fetch'];
+        $this->state['fetch_skipped'] = $defaults['fetch_skipped'];
+        $this->state['apply'] = $defaults['apply'];
+        $this->state['sql_output'] = null;
+
+        // Delete db.sql and domains cache so db-pull starts fresh
+        $sql_file = $this->state_dir . "/db.sql";
+        if (file_exists($sql_file)) {
+            @unlink($sql_file);
+        }
+        $domains_file = $this->state_dir . "/.import-domains.json";
+        if (file_exists($domains_file)) {
+            @unlink($domains_file);
+        }
+
+        // Delete remote index so files-pull re-indexes the remote tree.
+        // The local index (.import-index.jsonl) is kept for delta sync.
+        $remote_index = $this->state_dir . "/.import-remote-index.jsonl";
+        if (file_exists($remote_index)) {
+            @unlink($remote_index);
+        }
+        $download_list = $this->state_dir . "/.import-download-list.jsonl";
+        if (file_exists($download_list)) {
+            @unlink($download_list);
+        }
+        $skipped_list = $this->state_dir . "/.import-download-list-skipped.jsonl";
+        if (file_exists($skipped_list)) {
+            @unlink($skipped_list);
+        }
+
+        $this->save_state($this->state);
+        $this->audit_log("PULL | prepared for delta re-pull", true);
+    }
+
+    /**
+     * Command: pull
+     *
+     * Orchestrates a full site clone by running the lower-level commands
+     * in sequence: preflight → files-pull → db-pull → db-apply →
+     * flat-docroot → apply-runtime. Each step retries automatically on
+     * server timeouts (exit code 2). If the process is interrupted,
+     * re-running pull resumes from the last completed step.
+     *
+     * Like `git pull` composing fetch + merge, `reprint pull` composes
+     * the individual import commands into a single high-level operation.
+     */
+    private function run_pull(array $options): void
+    {
+        $stages = $this->pull_stages($options);
+        $total = count($stages);
+        $completed_stage = $this->state['pull']['stage'] ?? null;
+
+        // If the prior pull completed, prepare for a delta re-pull.
+        if ($completed_stage === 'complete') {
+            $this->pull_prepare_repull();
+            $completed_stage = null;
+        }
+
+        // Find where to start in the pipeline.
+        $start_index = 0;
+        if ($completed_stage !== null) {
+            $idx = array_search($completed_stage, $stages);
+            if ($idx !== false) {
+                $start_index = $idx + 1;
+            }
+        }
+
+        // Print header
+        if ($this->is_tty && !$this->verbose_mode) {
+            $bold = "\033[1m";
+            $dim = "\033[2m";
+            $r = "\033[0m";
+            $host = parse_url($this->remote_url, PHP_URL_HOST) ?? $this->remote_url;
+            fwrite($this->progress_fd, "{$bold}Pulling {$host}{$r}\n");
+        }
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "starting",
+            "command" => "pull",
+            "stages" => $stages,
+            "resume_from" => $start_index,
+            "message" => "Starting pull",
+        ], true);
+
+        $this->audit_log(
+            sprintf("PULL | stages=%s | resume_from=%d", implode(",", $stages), $start_index),
+            true,
+        );
+
+        // Show previously completed stages (on resume)
+        for ($i = 0; $i < $start_index; $i++) {
+            $this->pull_print_skipped($i + 1, $total, $stages[$i]);
+        }
+
+        // Execute the pipeline
+        for ($i = $start_index; $i < $total; $i++) {
+            $stage = $stages[$i];
+            $step = $i + 1;
+
+            $this->pull_print_header($step, $total, $stage);
+
+            try {
+                switch ($stage) {
+                    case 'preflight':
+                        $this->run_preflight();
+                        $this->pull_print_done($step, $total, $stage, $this->pull_preflight_summary());
+                        break;
+
+                    case 'files-pull':
+                        $this->pull_run_until_complete(function () {
+                            $this->run_files_sync();
+                        });
+                        $this->pull_print_done($step, $total, $stage);
+                        break;
+
+                    case 'db-pull':
+                        $this->pull_run_until_complete(function () {
+                            $this->run_db_sync();
+                        });
+                        $this->pull_print_done($step, $total, $stage);
+                        break;
+
+                    case 'db-apply':
+                        $this->pull_run_until_complete(function () use ($options) {
+                            $this->run_db_apply($options);
+                        });
+                        $this->pull_print_done($step, $total, $stage);
+                        break;
+
+                    case 'flat-docroot':
+                        $this->run_flat_document_root($options);
+                        $this->pull_print_done($step, $total, $stage);
+                        break;
+
+                    case 'apply-runtime':
+                        $this->run_apply_runtime($options);
+                        $this->pull_print_done($step, $total, $stage);
+                        break;
+                }
+            } catch (\Exception $e) {
+                // Output the error with context about where in the pipeline we failed
+                $this->output_progress([
+                    "status" => "error",
+                    "command" => "pull",
+                    "failed_stage" => $stage,
+                    "completed_stages" => array_slice($stages, 0, $i),
+                    "error" => $e->getMessage(),
+                    "message" => "Pull failed at {$stage}: " . $e->getMessage(),
+                ]);
+                $this->write_status_file("Pull failed at {$stage}: " . $e->getMessage());
+
+                if ($this->is_tty && !$this->verbose_mode) {
+                    $red = "\033[31m";
+                    $dim = "\033[2m";
+                    $r = "\033[0m";
+                    fwrite($this->progress_fd, "\n{$red}✗ Pull failed at: " . $this->pull_stage_label($stage) . "{$r}\n");
+                    fwrite($this->progress_fd, "  {$dim}" . $e->getMessage() . "{$r}\n");
+                    fwrite($this->progress_fd, "\n  Re-run the same command to resume from this point.\n");
+                }
+                throw $e;
+            }
+
+            // Mark stage complete in the pull pipeline state
+            $this->state['pull']['stage'] = $stage;
+            $this->save_state($this->state);
+        }
+
+        // All stages done
+        $this->state['pull']['stage'] = 'complete';
+        $this->state['status'] = 'complete';
+        $this->save_state($this->state);
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            $green = "\033[32m";
+            $bold = "\033[1m";
+            $dim = "\033[2m";
+            $r = "\033[0m";
+            fwrite($this->progress_fd, "\n{$green}{$bold}✓ Pull complete{$r}\n");
+            fwrite($this->progress_fd, "  {$dim}Files:{$r}  {$this->fs_root}\n");
+            fwrite($this->progress_fd, "  {$dim}State:{$r}  {$this->state_dir}\n");
+            $sql_file = $this->state_dir . "/db.sql";
+            if (file_exists($sql_file)) {
+                $size = filesize($sql_file);
+                $human = $this->format_bytes($size);
+                fwrite($this->progress_fd, "  {$dim}SQL:{$r}    {$sql_file} ({$human})\n");
+            }
+            fwrite($this->progress_fd, "  {$dim}Log:{$r}    {$this->audit_log}\n");
+        }
+
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "complete",
+            "command" => "pull",
+            "stages" => $stages,
+            "message" => "Pull complete",
+        ], true);
+    }
+
+    /**
+     * Format a byte count into a human-readable string.
+     */
+    private function format_bytes(int $bytes): string
+    {
+        if ($bytes >= 1073741824) {
+            return sprintf("%.1f GB", $bytes / 1073741824);
+        }
+        if ($bytes >= 1048576) {
+            return sprintf("%.1f MB", $bytes / 1048576);
+        }
+        if ($bytes >= 1024) {
+            return sprintf("%.1f KB", $bytes / 1024);
+        }
+        return "{$bytes} B";
     }
 
     /**
@@ -9543,6 +9957,7 @@ class ImportClient
         $follow = $this->state["follow_symlinks"] ?? false;
         $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
+        $pull = $this->state["pull"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
         $this->state["version"] = $version;
@@ -9550,6 +9965,9 @@ class ImportClient
         $this->state["follow_symlinks"] = $follow;
         $this->state["fs_root_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
+        if ($pull !== null) {
+            $this->state["pull"] = $pull;
+        }
     }
 
     private function default_state(): array
@@ -9633,6 +10051,12 @@ class ImportClient
                 "config" => [],
                 "state" => [],
             ],
+            // Pull pipeline state — tracks progress through the composite
+            // preflight → files-pull → db-pull → db-apply → ... pipeline.
+            // "stage" is the last completed stage name, or "complete".
+            "pull" => [
+                "stage" => null,
+            ],
         ];
     }
 
@@ -9688,6 +10112,12 @@ class ImportClient
         }
         $apply = array_intersect_key($apply, $defaults["apply"]);
         $state["apply"] = array_merge($defaults["apply"], $apply);
+        $pull = $state["pull"] ?? [];
+        if (!is_array($pull)) {
+            $pull = [];
+        }
+        $pull = array_intersect_key($pull, $defaults["pull"]);
+        $state["pull"] = array_merge($defaults["pull"], $pull);
         return $state;
     }
 
@@ -10327,7 +10757,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'abort',
@@ -10335,7 +10765,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
+            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
         ],
         [
             'name' => 'verbose',
@@ -10344,7 +10774,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -10353,7 +10783,7 @@ if (
             'flag_value' => false,
             'help' => 'Do not follow symlinks pointing outside root directories',
             'help_section' => 'global',
-            'commands' => ['files-pull'],
+            'commands' => ['pull', 'files-pull'],
         ],
         [
             'name' => 'follow-symlinks',
@@ -10370,7 +10800,7 @@ if (
             'placeholder' => 'MODE',
             'help' => 'What to do when fs root is non-empty (error|preserve-local)',
             'help_section' => 'global',
-            'commands' => ['files-pull'],
+            'commands' => ['pull', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
         ],
         [
@@ -10496,7 +10926,7 @@ if (
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
             'help' => 'Target database engine: mysql (default) or sqlite',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-host',
@@ -10504,7 +10934,7 @@ if (
             'target' => 'target_host',
             'placeholder' => 'HOST',
             'help' => 'Target MySQL host (default: 127.0.0.1)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-port',
@@ -10513,7 +10943,7 @@ if (
             'placeholder' => 'PORT',
             'cast' => 'int',
             'help' => 'Target MySQL port (default: 3306)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-user',
@@ -10521,7 +10951,7 @@ if (
             'target' => 'target_user',
             'placeholder' => 'USER',
             'help' => 'Target MySQL user (required for mysql)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-pass',
@@ -10529,7 +10959,7 @@ if (
             'target' => 'target_pass',
             'placeholder' => 'PASS',
             'help' => 'Target MySQL password',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-db',
@@ -10537,7 +10967,7 @@ if (
             'target' => 'target_db',
             'placeholder' => 'NAME',
             'help' => 'Target DB name (required for mysql, optional for sqlite)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-sqlite-path',
@@ -10545,7 +10975,7 @@ if (
             'target' => 'target_sqlite_path',
             'placeholder' => 'PATH',
             'help' => 'Target SQLite database file (default: <wp-content>/database/.ht.sqlite)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'rewrite-url',
@@ -10553,7 +10983,7 @@ if (
             'target' => 'rewrite_url',
             'pair_args' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'new-site-url',
@@ -10561,7 +10991,7 @@ if (
             'target' => 'new_site_url',
             'placeholder' => 'URL',
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
@@ -10570,15 +11000,15 @@ if (
             'type' => 'value',
             'target' => 'flatten_to',
             'placeholder' => 'PATH',
-            'help' => 'Target directory for the flattened layout (required)',
-            'commands' => ['flat-docroot'],
+            'help' => 'Target directory for the flattened layout',
+            'commands' => ['pull', 'flat-docroot'],
         ],
         [
             'name' => 'force',
             'type' => 'flag',
             'target' => 'force',
             'help' => 'Remove conflicting non-symlink files and replace with symlinks',
-            'commands' => ['flat-docroot'],
+            'commands' => ['pull', 'flat-docroot'],
         ],
 
         // ── apply-runtime options ────────────────────────────────
@@ -10587,16 +11017,16 @@ if (
             'type' => 'value',
             'target' => 'runtime',
             'placeholder' => 'RUNTIME',
-            'help' => 'Target server runtime: nginx-fpm, php-builtin, or playground-cli (required)',
-            'commands' => ['apply-runtime'],
+            'help' => 'Target server runtime: nginx-fpm, php-builtin, or playground-cli',
+            'commands' => ['pull', 'apply-runtime'],
         ],
         [
             'name' => 'output-dir',
             'type' => 'value',
             'target' => 'output_dir',
             'placeholder' => 'DIR',
-            'help' => 'Directory for generated runtime files (required)',
-            'commands' => ['apply-runtime'],
+            'help' => 'Directory for generated runtime files',
+            'commands' => ['pull', 'apply-runtime'],
         ],
         [
             'name' => 'flat-document-root',
@@ -11020,6 +11450,41 @@ if (
                 "The exporter plugin must be installed on the remote site before\n" .
                 "any other reprint command can connect to it.\n",
             "extra" => null,
+        ],
+        "pull" => [
+            "short" => "Clone a remote site (preflight + files + database + import)",
+            "description" =>
+                "Full site clone in a single command. Composes lower-level commands into\n" .
+                "a resumable pipeline:\n" .
+                "\n" .
+                "  1. Preflight — probe the remote site environment\n" .
+                "  2. Files     — download all remote files into --fs-root\n" .
+                "  3. Database  — download the SQL dump\n" .
+                "  4. Import    — apply SQL to a local database (if --target-db)\n" .
+                "  5. Flatten   — reassemble into standard WP layout (if --flatten-to)\n" .
+                "  6. Runtime   — generate server config (if --runtime)\n" .
+                "\n" .
+                "Each step retries automatically on server timeouts. If the process is\n" .
+                "interrupted, re-run the same command to resume from where it left off.\n" .
+                "Running pull again after completion performs a delta sync.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  # Download files and database (no import):\n" .
+                "  reprint pull https://example.com/?site-export-api \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
+                "\n" .
+                "  # Full clone with MySQL import and URL rewriting:\n" .
+                "  reprint pull https://example.com/?site-export-api \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --target-user=root --target-db=wp_local \\\n" .
+                "    --new-site-url=http://localhost:8881\n" .
+                "\n" .
+                "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
+                "  reprint pull https://example.com/?site-export-api \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --target-engine=sqlite \\\n" .
+                "    --new-site-url=http://localhost:8881 \\\n" .
+                "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n",
         ],
         "preflight" => [
             "short" => "Probe the remote site and cache its environment",
