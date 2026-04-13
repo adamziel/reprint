@@ -10728,10 +10728,6 @@ if (
             echo "\n";
             echo "Download the latest release from:\n";
             echo "  {$cyan}{$releases_url}{$reset}\n";
-            echo "\n";
-            echo "Or build from source:\n";
-            echo "  cd reprint-exporter-wp && composer install --no-dev\n";
-            echo "  zip -r reprint-exporter-wp.zip . -x '*/secret.php'\n";
         } else {
             echo "{$bold}Step 1: Download the plugin{$reset}\n";
             echo "\n";
@@ -10751,7 +10747,7 @@ if (
         echo "  2. Enter a shared secret and save\n";
         echo "  3. Use the same secret with reprint:\n";
         echo "\n";
-        echo "     {$dim}reprint preflight https://your-site.com \\\n";
+        echo "     {$dim}php reprint.phar preflight https://your-site.com \\\n";
         echo "       --secret=YOUR_SECRET \\\n";
         echo "       --state-dir=./state --fs-root=./files{$reset}\n";
         echo "\n";
