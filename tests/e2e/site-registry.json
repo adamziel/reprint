@@ -112,6 +112,9 @@
     },
     "runtime-download": {
       "port": 8116
+    },
+    "siteground-plugins": {
+      "port": 8117
     }
   }
 }

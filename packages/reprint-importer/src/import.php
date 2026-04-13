@@ -5061,6 +5061,20 @@ class ImportClient
                     "message" => "db-apply partial: {$statements_executed} statements executed",
                 ], true);
             } else {
+                // Deactivate host-specific plugins before marking complete.
+                // The host analyzer declares paths_to_remove; any entry under
+                // wp-content/plugins/ means that plugin will be deleted from
+                // disk during apply-runtime. We remove it from active_plugins
+                // now, while the database connection is still open, so
+                // WordPress won't complain about missing plugin files.
+                // We skip deactivate_plugins() because the plugin files will
+                // be gone by the time WordPress boots — firing deactivation
+                // hooks into absent code is pointless.
+                $deactivated = $this->deactivate_host_plugins($pdo);
+                foreach ($deactivated as $basename) {
+                    $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
+                }
+
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
@@ -5092,6 +5106,96 @@ class ImportClient
         } finally {
             fclose($sql_handle);
         }
+    }
+
+    /**
+     * Deactivate host-specific plugins in the target database.
+     *
+     * Looks at the detected webhost's paths_to_remove for entries under
+     * wp-content/plugins/ and removes matching basenames from the
+     * active_plugins option. This runs at the end of db-apply while the
+     * PDO connection is still open.
+     *
+     * @return string[]  Plugin basenames actually removed.
+     */
+    private function deactivate_host_plugins(PDO $pdo): array
+    {
+        $webhost = $this->state["webhost"] ?? "other";
+        $analyzer = host_analyzer_for($webhost);
+        $preflight_data = $this->state["preflight"]["data"] ?? [];
+        $manifest = $analyzer->analyze($preflight_data);
+
+        $plugin_dirs = [];
+        foreach ($manifest->paths_to_remove as $rel_path) {
+            if (preg_match('#^wp-content/plugins/([^/]+)$#', $rel_path, $m)) {
+                $plugin_dirs[] = $m[1];
+            }
+        }
+
+        if (empty($plugin_dirs)) {
+            return [];
+        }
+
+        $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
+        // Quote the table name to prevent SQL injection from a crafted prefix.
+        $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
+
+        $stmt = $pdo->prepare(
+            "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
+        );
+        $stmt->execute();
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row || !isset($row['option_value'])) {
+            return [];
+        }
+
+        // Use PhpSerializationProcessor to iterate string values safely —
+        // no unserialize(), no risk of arbitrary object instantiation.
+        $serialized = $row['option_value'];
+        $processor = new \PhpSerializationProcessor($serialized);
+        if ($processor->is_malformed()) {
+            return [];
+        }
+
+        // List plugins to deactivate based on the removed directories.
+        $deactivated_plugins = [];
+        $retained_plugins = [];
+        while ($processor->next_value()) {
+            $basename = $processor->get_value();
+            $is_host_specific = false;
+            foreach ($plugin_dirs as $dir) {
+                if (strpos($basename, $dir . '/') === 0) {
+                    $is_host_specific = true;
+                    break;
+                }
+            }
+            if ($is_host_specific) {
+                $deactivated_plugins[] = $basename;
+            } else {
+                $retained_plugins[] = $basename;
+            }
+        }
+
+        if (empty($deactivated_plugins)) {
+            $this->audit_log("DB-APPLY | no host-specific plugins found in active_plugins");
+            return [];
+        }
+
+        $new_value = serialize(array_values($retained_plugins));
+        $stmt = $pdo->prepare(
+            "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
+        );
+        $stmt->execute([$new_value]);
+        // The SQL dump runs with AUTOCOMMIT=0 and issues a final COMMIT,
+        // but autocommit stays off. Our UPDATE needs an explicit COMMIT.
+        $pdo->exec('COMMIT');
+
+        $this->audit_log(
+            "DB-APPLY | updated active_plugins (" .
+            count($deactivated_plugins) . " plugin(s) removed)",
+        );
+
+        return $deactivated_plugins;
     }
 
     /**
