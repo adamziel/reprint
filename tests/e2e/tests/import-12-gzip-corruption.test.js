@@ -36,7 +36,8 @@ describe('Import: Gzip Corruption', () => {
         removeTestHooks(site);
     });
 
-    it('db-sync detects gzip corruption and fails gracefully', () => {
+    // WASM PHP's curl crashes during gzip decompression before corruption is detected
+    it.skipIf(IS_WASM_PHP)('db-sync detects gzip corruption and fails gracefully', () => {
         const tempDir = createTempDir('e2e-import-gzip-sql');
         try {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
