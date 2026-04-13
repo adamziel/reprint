@@ -10736,22 +10736,14 @@ if (
             echo "{$bold}Step 1: Download the plugin{$reset}\n";
             echo "\n";
             echo "  {$cyan}{$zip_url}{$reset}\n";
-            echo "\n";
-            echo "  Or with curl:\n";
-            echo "  {$dim}curl -L -o reprint-exporter-wp.zip \\\n";
-            echo "    \"{$zip_url}\"{$reset}\n";
         }
 
         echo "\n";
         echo "{$bold}Step 2: Install on your WordPress site{$reset}\n";
         echo "\n";
-        echo "  Option A — WordPress admin:\n";
-        echo "    1. Log in to wp-admin\n";
-        echo "    2. Go to Plugins → Add New Plugin → Upload Plugin\n";
-        echo "    3. Upload reprint-exporter-wp.zip and activate it\n";
-        echo "\n";
-        echo "  Option B — WP-CLI:\n";
-        echo "    {$dim}wp plugin install reprint-exporter-wp.zip --activate{$reset}\n";
+        echo "  1. Log in to wp-admin\n";
+        echo "  2. Go to Plugins → Add New Plugin → Upload Plugin\n";
+        echo "  3. Upload reprint-exporter-wp.zip and activate it\n";
         echo "\n";
         echo "{$bold}Step 3: Configure the shared secret{$reset}\n";
         echo "\n";
