@@ -115,9 +115,6 @@
     },
     "siteground-plugins": {
       "port": 8117
-    },
-    "pull-crash": {
-      "port": 8118
     }
   }
 }

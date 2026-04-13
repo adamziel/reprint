@@ -32,7 +32,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Pull Crash Resume', { timeout: 300000 }, () => {
-    const site = 'pull-crash';
+    const site = 'sql-crash';
     const importDb = 'e2e_pull_crash_48';
     let tempDir;
 
