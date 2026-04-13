@@ -3974,6 +3974,29 @@ class ImportClient
         $flatten_to = rtrim($flatten_to, "/");
         $force = $options["force"] ?? false;
 
+        // realpath() returns VFS paths inside PHP WASM, producing symlinks
+        // like ../docroot/wp-admin that break on the host. --host-fs-root
+        // and --host-flatten-to are the real host paths so symlink targets
+        // resolve on the host filesystem.
+        $host_fs_root = $options["host_fs_root"] ?? null;
+        if (empty($host_fs_root)) {
+            throw new InvalidArgumentException(
+                "flat-document-root requires --host-fs-root=PATH",
+            );
+        }
+        $host_flatten_to = $options["host_flatten_to"] ?? null;
+        if (empty($host_flatten_to)) {
+            throw new InvalidArgumentException(
+                "flat-document-root requires --host-flatten-to=PATH",
+            );
+        }
+        $host_fs_root = rtrim($host_fs_root, "/");
+        $host_flatten_to = rtrim($host_flatten_to, "/");
+        $symlink_path_map = [
+            $this->fs_root => $host_fs_root,
+            $flatten_to => $host_flatten_to,
+        ];
+
         // Ensure the fs root exists
         if (!is_dir($this->fs_root)) {
             throw new RuntimeException(
@@ -4153,6 +4176,7 @@ class ImportClient
                 $created,
                 $refreshed,
                 $forced,
+                $symlink_path_map,
             );
         }
 
@@ -4166,6 +4190,7 @@ class ImportClient
                 $created,
                 $refreshed,
                 $forced,
+                $symlink_path_map,
             );
         }
         if ($wp_includes_detached && $local_wp_includes !== null && is_dir($local_wp_includes)) {
@@ -4176,6 +4201,7 @@ class ImportClient
                 $created,
                 $refreshed,
                 $forced,
+                $symlink_path_map,
             );
         }
 
@@ -4221,6 +4247,7 @@ class ImportClient
                         $created,
                         $refreshed,
                         $forced,
+                        $symlink_path_map,
                     );
                 }
             }
@@ -4235,6 +4262,7 @@ class ImportClient
                     $created,
                     $refreshed,
                     $forced,
+                    $symlink_path_map,
                 );
             }
             if ($mu_plugins_detached && is_dir($local_mu_plugins_dir)) {
@@ -4246,6 +4274,7 @@ class ImportClient
                     $created,
                     $refreshed,
                     $forced,
+                    $symlink_path_map,
                 );
             }
             if ($uploads_detached && is_dir($local_uploads_basedir)) {
@@ -4257,6 +4286,7 @@ class ImportClient
                     $created,
                     $refreshed,
                     $forced,
+                    $symlink_path_map,
                 );
             }
         } elseif ($content_detached && $local_content_dir !== null) {
@@ -4271,6 +4301,7 @@ class ImportClient
                     $created,
                     $refreshed,
                     $forced,
+                    $symlink_path_map,
                 );
             } else {
                 $this->audit_log(
@@ -4356,6 +4387,12 @@ class ImportClient
      * The symlink value is computed as a relative path from the symlink's
      * parent directory to the source, so it works regardless of CWD and
      * survives directory moves.
+     *
+     * $symlink_path_map maps VFS path prefixes to host path prefixes.
+     * The relative symlink value is computed using the translated host
+     * paths so symlinks resolve on the host filesystem, not just inside
+     * the VFS. When VFS = host (non-WASM), the map entries are identity
+     * mappings and the translation is a no-op.
      */
     private function flatten_place_symlink(
         string $source,
@@ -4363,7 +4400,8 @@ class ImportClient
         bool $force,
         int &$created,
         int &$refreshed,
-        int &$forced
+        int &$forced,
+        array $symlink_path_map
     ): void {
         // Resolve both paths to absolute so we can compute a correct
         // relative symlink value.  The source may not have a realpath()
@@ -4389,7 +4427,21 @@ class ImportClient
             );
         }
 
-        $link_value = self::compute_relative_path($target_parent_real, $abs_source);
+        // Translate VFS paths to host paths so the relative symlink
+        // resolves on the host filesystem. When VFS = host (non-WASM),
+        // the map entries are identity mappings and this is a no-op.
+        $source_for_link = $abs_source;
+        $target_for_link = $target_parent_real;
+        foreach ($symlink_path_map as $vfs_prefix => $host_prefix) {
+            if ($source_for_link === $vfs_prefix || strpos($source_for_link, $vfs_prefix . "/") === 0) {
+                $source_for_link = $host_prefix . substr($source_for_link, strlen($vfs_prefix));
+            }
+            if ($target_for_link === $vfs_prefix || strpos($target_for_link, $vfs_prefix . "/") === 0) {
+                $target_for_link = $host_prefix . substr($target_for_link, strlen($vfs_prefix));
+            }
+        }
+
+        $link_value = self::compute_relative_path($target_for_link, $source_for_link);
 
         // If the target is already a symlink, check if it resolves to the
         // same place. Refresh if not, skip if already correct.
@@ -10258,6 +10310,22 @@ if (
             'type' => 'flag',
             'target' => 'force',
             'help' => 'Remove conflicting non-symlink files and replace with symlinks',
+            'commands' => ['flat-document-root'],
+        ],
+        [
+            'name' => 'host-fs-root',
+            'type' => 'value',
+            'target' => 'host_fs_root',
+            'placeholder' => 'PATH',
+            'help' => 'Host path corresponding to --fs-root (required)',
+            'commands' => ['flat-document-root'],
+        ],
+        [
+            'name' => 'host-flatten-to',
+            'type' => 'value',
+            'target' => 'host_flatten_to',
+            'placeholder' => 'PATH',
+            'help' => 'Host path corresponding to --flatten-to (required)',
             'commands' => ['flat-document-root'],
         ],
 
