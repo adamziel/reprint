@@ -301,13 +301,20 @@ export function runImporter(url, outputDir, command, options = {}) {
         command !== 'preflight-assert'
     ) {
         let attempts = 0;
-        // WASM PHP's curl occasionally crashes with "Error: fetch failed"
-        // or "RuntimeError: unreachable". Treat these as retryable rather
-        // than fatal — the next invocation usually succeeds.
-        const isWasmCrash = (r) => IS_WASM_PHP && r.exitCode === 1 && (
-            (r.stdout + r.stderr).includes('fetch failed') ||
-            (r.stdout + r.stderr).includes('RuntimeError: unreachable')
-        );
+        // WASM PHP's curl occasionally crashes in several ways:
+        // - "Error: fetch failed" or "RuntimeError: unreachable" in output
+        // - Silent crash: exit code 1 with no PHP error JSON in output
+        //   (our PHP code always emits {"error":...} on failure, so a missing
+        //   error field means the WASM runtime died before PHP could report)
+        // Treat all of these as retryable — the next invocation usually succeeds.
+        const isWasmCrash = (r) => {
+            if (!IS_WASM_PHP || r.exitCode !== 1) return false;
+            const output = r.stdout + r.stderr;
+            if (output.includes('fetch failed') || output.includes('RuntimeError: unreachable')) return true;
+            // Silent crash: no PHP-level error JSON means WASM died mid-execution
+            if (!output.includes('"error"')) return true;
+            return false;
+        };
         const isRetryable = (r) => r.exitCode === 2 || isWasmCrash(r);
         while (isRetryable(result) && attempts < maxResumeAttempts) {
             if (Date.now() - wallStart > wallTimeout) {
