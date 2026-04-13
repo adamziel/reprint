@@ -5161,14 +5161,14 @@ class ImportClient
         $kept = [];
         while ($processor->next_value()) {
             $basename = $processor->get_value();
-            $dominated = false;
+            $is_host_specific = false;
             foreach ($plugin_dirs as $dir) {
                 if (strpos($basename, $dir . '/') === 0) {
-                    $dominated = true;
+                    $is_host_specific = true;
                     break;
                 }
             }
-            if ($dominated) {
+            if ($is_host_specific) {
                 $removed[] = $basename;
             } else {
                 $kept[] = $basename;
