@@ -1,0 +1,95 @@
+/**
+ * Test 47: Pull — Multiple Requests Per Phase
+ *
+ * Runs `reprint pull` with --max-exec=1 to force very short server
+ * execution times. Each phase (files-pull, db-pull) requires many
+ * HTTP requests to complete. The pull command's internal retry loop
+ * handles all the partial responses transparently, and the final
+ * result matches the source.
+ */
+import { describe, it, beforeAll, afterAll } from 'vitest';
+import assert from 'node:assert/strict';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+    runImporter, createTempDir, cleanupTempDir,
+    getSiteUrl, getSiteSecret, getSiteDir,
+    assertTreesMatch, assertSiteMirror,
+    fsRootDir, readAuditLog,
+    compareDatabases, createMysqlConnection, getDbName,
+} from '../lib/test-helpers.js';
+import { ensureSite } from '../lib/site-setup.js';
+
+describe('Import: Pull Multi-Request', { timeout: 300000 }, () => {
+    const site = 'basic';
+    const importDb = 'e2e_pull_multi_47';
+    let tempDir;
+
+    beforeAll(async () => {
+        await ensureSite(site);
+        tempDir = createTempDir('e2e-pull-multi-request');
+        const conn = await createMysqlConnection();
+        await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
+        await conn.query(`CREATE DATABASE \`${importDb}\``);
+        await conn.end();
+    });
+
+    afterAll(async () => {
+        cleanupTempDir(tempDir);
+        const conn = await createMysqlConnection();
+        await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
+        await conn.end();
+    });
+
+    function importUrl() {
+        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
+    }
+
+    it('pull completes with --max-exec=1 (many small requests)', () => {
+        const result = runImporter(importUrl(), tempDir, 'pull', {
+            secret: getSiteSecret(site),
+            skipPreflight: true,
+            timeout: 120000,
+            wallTimeout: 300000,
+            extraArgs: [
+                '--max-exec=1',
+                `--target-user=e2e_admin`,
+                `--target-pass=e2e_password`,
+                `--target-db=${importDb}`,
+                `--new-site-url=http://localhost:9999`,
+            ],
+        });
+        assert.equal(result.exitCode, 0,
+            `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+    });
+
+    it('state shows pull complete', () => {
+        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        assert.equal(state.pull.stage, 'complete');
+    });
+
+    it('audit log shows multiple resume cycles', () => {
+        const audit = readAuditLog(tempDir);
+        // With --max-exec=1, each phase should require multiple requests.
+        // The audit log records RESUME entries for each continuation.
+        const resumeCount = (audit.match(/RESUME/g) || []).length;
+        assert.ok(resumeCount >= 3,
+            `Expected at least 3 resume entries in audit log, got ${resumeCount}`);
+    });
+
+    it('files match source', () => {
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
+        assertTreesMatch(getSiteDir(site), importedRoot);
+    });
+
+    it('imported files form valid WordPress structure', () => {
+        assertSiteMirror(join(fsRootDir(tempDir), getSiteDir(site)));
+    });
+
+    it('database matches source', async () => {
+        const comparison = await compareDatabases(getDbName(site), importDb);
+        assert.ok(comparison.match,
+            `Database mismatch: missing=${JSON.stringify(comparison.missingTables)}, ` +
+            `counts=${JSON.stringify(comparison.rowCounts)}`);
+    });
+});
