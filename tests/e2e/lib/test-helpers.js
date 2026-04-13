@@ -301,7 +301,11 @@ export function runImporter(url, outputDir, command, options = {}) {
         command !== 'preflight-assert'
     ) {
         let attempts = 0;
-        while (result.exitCode === 2 && attempts < maxResumeAttempts) {
+        // WASM PHP's curl occasionally crashes with "Error: fetch failed".
+        // Treat this as retryable (like exit code 2) rather than fatal.
+        const isRetryable = (r) => r.exitCode === 2 ||
+            (IS_WASM_PHP && r.exitCode === 1 && (r.stdout + r.stderr).includes('fetch failed'));
+        while (isRetryable(result) && attempts < maxResumeAttempts) {
             if (Date.now() - wallStart > wallTimeout) {
                 result = {
                     ...result,

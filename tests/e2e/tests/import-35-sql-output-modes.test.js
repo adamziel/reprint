@@ -115,7 +115,8 @@ describe('Import: SQL Output Modes', () => {
                 `counts=${JSON.stringify(comparison.rowCounts)}`);
         });
 
-        it('state file records sql_output mode', () => {
+        // Depends on the SQL streaming test above, which is skipped under WASM PHP
+        it.skipIf(IS_WASM_PHP)('state file records sql_output mode', () => {
             const stateFile = join(tempDir, '.import-state.json');
             assert.ok(existsSync(stateFile), 'Expected state file to exist');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
