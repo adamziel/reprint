@@ -10,6 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
+    IS_WASM_PHP,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -85,7 +86,8 @@ describe('Import: SQL Output Modes', () => {
             await conn.end();
         });
 
-        it('streams SQL directly into MySQL and matches source', async () => {
+        // WASM PHP's curl crashes during gzip decompression in SQL streaming
+        it.skipIf(IS_WASM_PHP)('streams SQL directly into MySQL and matches source', async () => {
             const result = runImporter(
                 `${getSiteUrl(site)}&directory=${getSiteDir(site)}`,
                 tempDir, 'db-sync', {

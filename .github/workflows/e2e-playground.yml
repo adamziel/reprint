@@ -45,7 +45,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "20"
 
       # The export side still needs real PHP-FPM + nginx.
       # Use PHP 8.2 for the server; the importer will use Playground CLI's PHP 8.0.
@@ -67,20 +67,11 @@ jobs:
           echo "=== Playground CLI version ==="
           npx @wp-playground/cli --version || echo "no --version flag"
 
-          echo "=== Resolve CLI path ==="
-          CLI_PATH=$(which wp-playground-cli || npx --yes which wp-playground-cli 2>/dev/null || echo "")
-          if [ -z "$CLI_PATH" ]; then
-            # Find it in the global npm prefix
-            CLI_PATH="$(npm root -g)/@wp-playground/cli/cli.js"
-          fi
-          echo "CLI_PATH=$CLI_PATH"
-          ls -la "$CLI_PATH" || echo "NOT FOUND"
+          echo "=== Test PHP execution ==="
+          npx @wp-playground/cli php -- -r "echo 'Hello from Playground PHP ' . PHP_VERSION . PHP_EOL;"
 
-          echo "=== Test PHP execution (with JSPI) ==="
-          node --experimental-wasm-jspi "$CLI_PATH" php -- -r "echo 'Hello from Playground PHP ' . PHP_VERSION . PHP_EOL;"
-
-          echo "=== Test PHAR with mount + JSPI ==="
-          node --experimental-wasm-jspi "$CLI_PATH" php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- "${GITHUB_WORKSPACE}/reprint.phar" --help || echo "EXIT: $?"
+          echo "=== Test PHAR with mount ==="
+          npx @wp-playground/cli php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- "${GITHUB_WORKSPACE}/reprint.phar" --help || echo "EXIT: $?"
 
       - name: Provision basic site and smoke-test API
         env:

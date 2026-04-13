@@ -18,6 +18,10 @@ const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
+// WASM PHP's curl crashes with "RuntimeError: unreachable" during gzip
+// decompression in error/edge-case scenarios. Tests that trigger these
+// curl code paths must be skipped when running under WASM PHP.
+const IS_WASM_PHP = PHP_BINARY !== 'php';
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
 const DB_PASS = REGISTRY.dbPass;
@@ -748,4 +752,4 @@ export function assertTreesMatch(sourceDir, importedDir, options = {}) {
 }
 
 // Re-export constants
-export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, PHP_BINARY, DB_HOST, DB_USER, DB_PASS };
+export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, PHP_BINARY, IS_WASM_PHP, DB_HOST, DB_USER, DB_PASS };

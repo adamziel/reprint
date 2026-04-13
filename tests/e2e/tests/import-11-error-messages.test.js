@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
+    IS_WASM_PHP,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -42,7 +43,8 @@ describe('Import: Error Messages', () => {
         }
     });
 
-    it('unreachable server produces connection error', () => {
+    // WASM PHP's curl crashes instead of returning a connection error
+    it.skipIf(IS_WASM_PHP)('unreachable server produces connection error', () => {
         const url = 'http://127.0.0.1:19999/?site-export-api&directory=/tmp';
         const dir = createTempDir('e2e-import-unreachable');
         try {

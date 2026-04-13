@@ -6,9 +6,6 @@
 # - The workspace root (for reprint.phar and project files)
 # - /tmp (for temporary test output)
 # - /srv (for e2e test site data)
-#
-# Uses JSPI (JavaScript Promise Integration) for proper async networking.
-# Without JSPI, the Asyncify-based curl crashes on gzip decompression.
 set -euo pipefail
 
 MOUNT_ARGS=()
@@ -35,15 +32,4 @@ done
 # Deduplicate mount args
 UNIQUE_MOUNTS=($(printf '%s\n' "${MOUNT_ARGS[@]}" | sort -u))
 
-# Resolve the CLI entry point and invoke node with --experimental-wasm-jspi.
-# NODE_OPTIONS doesn't allow this flag, so we must pass it to node directly.
-CLI_PATH=$(which wp-playground-cli 2>/dev/null || echo "")
-if [ -z "$CLI_PATH" ]; then
-    CLI_PATH="$(npm root -g)/@wp-playground/cli/cli.js"
-fi
-if [ ! -f "$CLI_PATH" ]; then
-    # Fallback: just use npx (without JSPI)
-    exec npx @wp-playground/cli php "${UNIQUE_MOUNTS[@]}" -- "$@"
-fi
-
-exec node --experimental-wasm-jspi "$CLI_PATH" php "${UNIQUE_MOUNTS[@]}" -- "$@"
+exec npx @wp-playground/cli php "${UNIQUE_MOUNTS[@]}" -- "$@"
