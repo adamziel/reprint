@@ -10697,6 +10697,75 @@ if (
     }
 
     /**
+     * Render the install-exporter guide.
+     *
+     * Shows the download URL for the exporter plugin matching this version
+     * of reprint, and step-by-step installation instructions.
+     */
+    function _cli_render_install_exporter(): void
+    {
+        $version = get_importer_version();
+        $is_dev = str_contains($version, '-trunk') || $version === 'v0.0.0';
+        $is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
+        $bold  = $is_tty ? "\033[1m" : "";
+        $dim   = $is_tty ? "\033[2m" : "";
+        $cyan  = $is_tty ? "\033[36m" : "";
+        $reset = $is_tty ? "\033[0m" : "";
+
+        $repo = "adamziel/streaming-site-migration";
+        $zip_url = "https://github.com/{$repo}/releases/download/{$version}/reprint-exporter-wp.zip";
+        $releases_url = "https://github.com/{$repo}/releases";
+
+        echo "{$bold}Install the RePrint Exporter Plugin{$reset}\n";
+        echo "\n";
+        echo "The exporter plugin must be installed on the WordPress site you\n";
+        echo "want to mirror. It exposes the HTTP API that reprint connects to.\n";
+        echo "\n";
+
+        if ($is_dev) {
+            echo "{$bold}You are running a development build ({$version}).{$reset}\n";
+            echo "There is no pre-built release for this version.\n";
+            echo "\n";
+            echo "Download the latest release from:\n";
+            echo "  {$cyan}{$releases_url}{$reset}\n";
+            echo "\n";
+            echo "Or build from source:\n";
+            echo "  cd reprint-exporter-wp && composer install --no-dev\n";
+            echo "  zip -r reprint-exporter-wp.zip . -x '*/secret.php'\n";
+        } else {
+            echo "{$bold}Step 1: Download the plugin{$reset}\n";
+            echo "\n";
+            echo "  {$cyan}{$zip_url}{$reset}\n";
+            echo "\n";
+            echo "  Or with curl:\n";
+            echo "  {$dim}curl -L -o reprint-exporter-wp.zip \\\n";
+            echo "    \"{$zip_url}\"{$reset}\n";
+        }
+
+        echo "\n";
+        echo "{$bold}Step 2: Install on your WordPress site{$reset}\n";
+        echo "\n";
+        echo "  Option A — WordPress admin:\n";
+        echo "    1. Log in to wp-admin\n";
+        echo "    2. Go to Plugins → Add New Plugin → Upload Plugin\n";
+        echo "    3. Upload reprint-exporter-wp.zip and activate it\n";
+        echo "\n";
+        echo "  Option B — WP-CLI:\n";
+        echo "    {$dim}wp plugin install reprint-exporter-wp.zip --activate{$reset}\n";
+        echo "\n";
+        echo "{$bold}Step 3: Configure the shared secret{$reset}\n";
+        echo "\n";
+        echo "  1. In wp-admin, go to Site Export (in the sidebar)\n";
+        echo "  2. Enter a shared secret and save\n";
+        echo "  3. Use the same secret with reprint:\n";
+        echo "\n";
+        echo "     {$dim}reprint preflight https://your-site.com \\\n";
+        echo "       --secret=YOUR_SECRET \\\n";
+        echo "       --state-dir=./state --fs-root=./files{$reset}\n";
+        echo "\n";
+    }
+
+    /**
      * Render a list of options with aligned descriptions.
      *
      * @param array $defs   Option definition entries (only those with non-null help are rendered).
@@ -10762,6 +10831,17 @@ if (
     // The Options: section itself is generated from $option_defs so that
     // every declared option for a command is guaranteed to appear.
     $command_info = [
+        "install-exporter" => [
+            "short" => "Show how to install the exporter plugin on your site",
+            "description" =>
+                "Prints the download URL for the exporter WordPress plugin that\n" .
+                "matches this version of reprint, and step-by-step installation\n" .
+                "instructions.\n" .
+                "\n" .
+                "The exporter plugin must be installed on the remote site before\n" .
+                "any other reprint command can connect to it.\n",
+            "extra" => null,
+        ],
         "preflight" => [
             "short" => "Probe the remote site and cache its environment",
             "description" =>
@@ -10989,6 +11069,13 @@ if (
     ];
     if (isset($command_aliases[$command])) {
         $command = $command_aliases[$command];
+    }
+
+    // install-exporter is a standalone guide — no URL, state-dir, or fs-root needed.
+    // Handle it before per-command --help so it always shows the full guide.
+    if ($command === "install-exporter") {
+        _cli_render_install_exporter();
+        exit(0);
     }
 
     // Per-command --help (can be requested before providing url/path)
