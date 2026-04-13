@@ -49,7 +49,7 @@ class SitegroundHostAnalyzer implements HostAnalyzer
         // server-level security rules).  They won't work on a local
         // environment and produce warnings in wp-admin, so strip them
         // from disk.  Plugins under wp-content/plugins/ are also
-        // automatically deactivated in the database by apply-runtime.
+        // automatically deactivated in the database by db-apply.
         $manifest->paths_to_remove = [
             'wp-content/plugins/sg-cachepress',
             'wp-content/plugins/sg-security',

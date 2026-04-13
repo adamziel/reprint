@@ -5157,6 +5157,12 @@ class ImportClient
             return [];
         }
 
+        // Walk every string value in the serialized active_plugins array.
+        // A plugin basename like "sg-security/sg-security.php" is
+        // host-specific if its directory prefix ("sg-security/") matches
+        // one of the dirs we need to strip.  We skip deactivate_plugins()
+        // because the plugin files will already be gone from disk by the
+        // time WordPress boots — firing hooks into absent code is pointless.
         $removed = [];
         $kept = [];
         while ($processor->next_value()) {
