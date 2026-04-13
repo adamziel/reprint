@@ -5157,14 +5157,9 @@ class ImportClient
             return [];
         }
 
-        // Walk every string value in the serialized active_plugins array.
-        // A plugin basename like "sg-security/sg-security.php" is
-        // host-specific if its directory prefix ("sg-security/") matches
-        // one of the dirs we need to strip.  We skip deactivate_plugins()
-        // because the plugin files will already be gone from disk by the
-        // time WordPress boots — firing hooks into absent code is pointless.
-        $removed = [];
-        $kept = [];
+        // List plugins to deactivate based on the removed directories.
+        $deactivated_plugins = [];
+        $retained_plugins = [];
         while ($processor->next_value()) {
             $basename = $processor->get_value();
             $is_host_specific = false;
@@ -5175,18 +5170,18 @@ class ImportClient
                 }
             }
             if ($is_host_specific) {
-                $removed[] = $basename;
+                $deactivated_plugins[] = $basename;
             } else {
-                $kept[] = $basename;
+                $retained_plugins[] = $basename;
             }
         }
 
-        if (empty($removed)) {
+        if (empty($deactivated_plugins)) {
             $this->audit_log("DB-APPLY | no host-specific plugins found in active_plugins");
             return [];
         }
 
-        $new_value = serialize(array_values($kept));
+        $new_value = serialize(array_values($retained_plugins));
         $stmt = $pdo->prepare(
             "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
         );
@@ -5197,10 +5192,10 @@ class ImportClient
 
         $this->audit_log(
             "DB-APPLY | updated active_plugins (" .
-            count($removed) . " plugin(s) removed)",
+            count($deactivated_plugins) . " plugin(s) removed)",
         );
 
-        return $removed;
+        return $deactivated_plugins;
     }
 
     /**
