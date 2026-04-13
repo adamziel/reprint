@@ -25,6 +25,7 @@ import { execSync } from 'node:child_process';
 describe('Import: Runtime file download', () => {
     const site = 'runtime-download';
     let tempDir;
+    let preflightResult;
 
     function importUrlWithDirectory() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
@@ -54,11 +55,11 @@ describe('Import: Runtime file download', () => {
 
         tempDir = createTempDir('e2e-runtime-download');
 
-        const result = runImporter(importUrlWithDirectory(), tempDir, 'preflight', {
+        preflightResult = runImporter(importUrlWithDirectory(), tempDir, 'preflight', {
             secret: getSiteSecret(site),
         });
-        assert.equal(result.exitCode, 0,
-            `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        assert.equal(preflightResult.exitCode, 0,
+            `Expected exit 0\nstderr: ${preflightResult.stderr}\nstdout: ${preflightResult.stdout}`);
     });
 
     afterAll(() => {
@@ -94,6 +95,24 @@ describe('Import: Runtime file download', () => {
         assert.ok(
             savedPath.includes('env.php'),
             `Saved path should contain env.php, got: ${savedPath}`,
+        );
+    });
+
+    it('preflight stdout is single-line JSON (not pretty-printed)', () => {
+        const lines = preflightResult.stdout.trim().split('\n');
+        const lastLine = lines[lines.length - 1];
+        let parsed;
+        try {
+            parsed = JSON.parse(lastLine);
+        } catch {
+            assert.fail(
+                `Last stdout line is not valid JSON: ${lastLine.substring(0, 200)}`,
+            );
+        }
+        assert.ok(parsed.timestamp, 'Parsed result should have a timestamp field');
+        assert.ok(
+            !lastLine.includes('\n'),
+            'Preflight result must be a single line so last-line trackers can capture it',
         );
     });
 
