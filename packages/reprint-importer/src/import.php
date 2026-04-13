@@ -2116,7 +2116,7 @@ class ImportClient
             exit(1);
         }
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
-        echo json_encode($entry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+        echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
         $this->write_status_file($ok ? null : "Preflight failed");
         exit($ok ? 0 : 1);
