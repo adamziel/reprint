@@ -28,7 +28,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Pull Crash Resume', { timeout: 300000 }, () => {
-    const site = 'sql-crash';
+    const site = 'sha1-verify';
     const importDb = 'e2e_pull_crash_48';
     let tempDir;
 
@@ -82,6 +82,13 @@ describe('Import: Pull Crash Resume', { timeout: 300000 }, () => {
         `--target-pass=e2e_password`,
         `--target-db=${importDb}`,
         `--new-site-url=http://localhost:9999`,
+        // Force small SQL batches so the standard WP install produces
+        // 3+ SQL batches. Without this, everything fits in one batch
+        // and the crash hook on batch 1 would prevent any SQL from
+        // being sent.
+        '--sql-fragments-start=5',
+        '--sql-fragments-max=5',
+        '--sql-fragments-min=5',
     ];
 
     it('pull completes despite SQL crash (retried internally)', () => {
