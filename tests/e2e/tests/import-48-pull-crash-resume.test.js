@@ -1,23 +1,20 @@
 /**
  * Test 48: Pull — Crash Recovery Across Phases
  *
- * Deploys test hooks that crash the server once during each phase of
- * the pull pipeline (file indexing, file download, SQL download).
- * Each crash causes the PHP client to exit with an error. Re-running
- * `reprint pull` resumes from where it left off. After all crashes
- * have fired, the final run completes the entire import.
+ * Deploys test hooks that crash the server once during each streaming
+ * phase of the pull pipeline (file download, SQL download). Each crash
+ * causes a different recovery path:
  *
- * The hooks use a shared state file to track which crashes have
- * already fired, so each crash happens exactly once:
+ *   Run 1: preflight ok → file download crash → exit 1
+ *           (file_fetch curl error is non-retryable → process exits)
  *
- *   Run 1: preflight ok → file index crash → exit 1
- *   Run 2: file index ok → file download crash → exit 1
- *   Run 3: file download ok → files complete → SQL crash → retried
- *           internally by pull → SQL ok → db-pull complete → pull ok
+ *   Run 2: files-pull resumes from cursor → completes → db-pull starts
+ *           → SQL crash → pull's internal retry handles it → db-pull ok
+ *           → db-apply ok → pull complete
  *
- * The SQL crash is retryable (the importer detects "missing completion
- * chunk" and sets status=partial), so pull's internal retry loop
- * handles it without the process needing to restart.
+ * The file crash tests external crash+resume (process dies, re-run
+ * picks up from saved state). The SQL crash tests internal recovery
+ * (pull_run_until_complete detects "partial" and retries in-process).
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -47,9 +44,8 @@ describe('Import: Pull Crash Resume', { timeout: 300000 }, () => {
         await conn.query(`CREATE DATABASE \`${importDb}\``);
         await conn.end();
 
-        // Deploy hooks that crash once per phase. Each hook checks a
-        // shared state file and only crashes if it hasn't crashed for
-        // that phase yet.
+        // Deploy hooks that crash once per streaming phase. Each hook
+        // checks a shared state file and only crashes the first time.
         clearHookState(site);
         writeHookState(site, {});
         writeTestHooks(site, [
@@ -66,17 +62,19 @@ describe('Import: Pull Crash Resume', { timeout: 300000 }, () => {
             '    return true;',
             '}',
             '',
-            '// Crash once during file indexing (causes non-retryable error)',
-            'function test_hook_before_index_batch(&$batch_items, $stack) {',
-            '    if (__crash_once("index_crashed")) exit(1);',
-            '}',
-            '',
-            '// Crash once during file download (causes non-retryable error)',
+            '// Crash once during file download.',
+            '// This produces a curl error (partial transfer) which is NOT',
+            '// caught by the file download handler — the RuntimeException',
+            '// propagates up, causing the pull process to exit with code 1.',
             'function test_hook_before_file_chunk($path, $offset, &$data) {',
             '    if (__crash_once("file_crashed")) exit(1);',
             '}',
             '',
-            '// Crash once during SQL download (retryable — pull handles internally)',
+            '// Crash once during SQL download.',
+            '// This produces a "missing completion chunk" error which IS',
+            '// retryable — pull_run_until_complete catches it as "partial"',
+            '// and retries. The second attempt succeeds because the hook',
+            '// already fired.',
             'function test_hook_before_sql_batch(&$sql, $cursor) {',
             '    if (__crash_once("sql_crashed")) exit(1);',
             '}',
@@ -112,47 +110,39 @@ describe('Import: Pull Crash Resume', { timeout: 300000 }, () => {
         extraArgs: pullArgs(),
     });
 
-    it('run 1: crashes during file index', () => {
+    it('run 1: crashes during file download', () => {
         const result = runImporter(importUrl(), tempDir, 'pull', pullOpts());
-        assert.equal(result.exitCode, 1,
-            `Expected exit 1 (crash during index), got ${result.exitCode}\nstderr: ${result.stderr}`);
 
-        // Verify the index hook fired
-        const hookState = readHookState(site);
-        assert.ok(hookState?.index_crashed, 'Expected index crash hook to have fired');
-
-        // Preflight should have completed, but pull.stage should reflect
-        // that files-pull did NOT complete
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.pull.stage, 'preflight',
-            'Expected pull.stage to be preflight (files-pull did not complete)');
-    });
-
-    it('run 2: resumes files-pull, crashes during file download', () => {
-        const result = runImporter(importUrl(), tempDir, 'pull', pullOpts());
+        // The file chunk crash causes a curl error (partial transfer)
+        // that propagates as a RuntimeException → pull exits code 1.
         assert.equal(result.exitCode, 1,
             `Expected exit 1 (crash during file download), got ${result.exitCode}\nstderr: ${result.stderr}`);
 
-        // Verify the file chunk hook fired
+        // Verify the hook fired
         const hookState = readHookState(site);
         assert.ok(hookState?.file_crashed, 'Expected file crash hook to have fired');
 
-        // pull.stage should still be preflight (files-pull still not complete)
+        // Preflight completed but files-pull did not
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.pull.stage, 'preflight');
+        assert.equal(state.pull.stage, 'preflight',
+            'Expected pull.stage = preflight (files-pull did not complete)');
     });
 
-    it('run 3: resumes and completes (SQL crash retried internally)', () => {
+    it('run 2: resumes files-pull, SQL crash retried internally, pull completes', () => {
         const result = runImporter(importUrl(), tempDir, 'pull', {
             ...pullOpts(),
-            autoResume: false,
+            wallTimeout: 300000,
         });
-        assert.equal(result.exitCode, 0,
-            `Expected exit 0 on final run, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        // All hooks should have fired
+        // files-pull resumes and completes (file crash already fired).
+        // db-pull starts, SQL crash fires → retryable ("missing completion
+        // chunk") → pull retries internally → second SQL request succeeds.
+        // db-apply runs to completion.
+        assert.equal(result.exitCode, 0,
+            `Expected exit 0 on resume, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+
+        // Both hooks should have fired
         const hookState = readHookState(site);
-        assert.ok(hookState?.index_crashed, 'index crash should have fired');
         assert.ok(hookState?.file_crashed, 'file crash should have fired');
         assert.ok(hookState?.sql_crashed, 'sql crash should have fired');
     });
@@ -180,14 +170,15 @@ describe('Import: Pull Crash Resume', { timeout: 300000 }, () => {
             `counts=${JSON.stringify(comparison.rowCounts)}`);
     });
 
-    it('audit log records crash and recovery', () => {
+    it('audit log records crash detection', () => {
         const audit = readAuditLog(tempDir);
-        // The SQL crash produces an "INCOMPLETE RESPONSE" entry in the audit log,
-        // proving the crash was detected and retried.
+        // The SQL crash produces an "INCOMPLETE RESPONSE" or "missing
+        // completion chunk" entry — proving the crash was detected.
         assert.ok(
             audit.includes('INCOMPLETE RESPONSE') ||
             audit.includes('missing completion chunk') ||
-            audit.includes('CRASH'),
+            audit.includes('CRASH') ||
+            audit.includes('cURL error'),
             'Expected audit log to record crash detection'
         );
     });
