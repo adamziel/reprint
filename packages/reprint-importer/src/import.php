@@ -3842,6 +3842,15 @@ class ImportClient
         $this->state["apply"]["remote_paths_removed_from_local_site"] = $manifest->paths_to_remove;
         $this->save_state($this->state);
 
+        // Read the structured start config if the applier wrote one.
+        // Playground CLI writes start.json with mount paths as seen by
+        // this PHP process — callers (e.g. Studio) map them to host paths.
+        $start_config_path = $abs_output_dir . '/start.json';
+        $start_config = null;
+        if (file_exists($start_config_path)) {
+            $start_config = json_decode(file_get_contents($start_config_path), true);
+        }
+
         // Output the summary and manifest as structured JSON for callers,
         // and print the human-readable summary to stderr.
         $this->output_progress([
@@ -3853,6 +3862,7 @@ class ImportClient
             "target_engine" => $target_engine,
             "paths_removed" => $manifest->paths_to_remove,
             "extra_directories" => $manifest->extra_directories,
+            "start_config" => $start_config,
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
 

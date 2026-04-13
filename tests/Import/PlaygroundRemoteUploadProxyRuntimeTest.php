@@ -107,5 +107,16 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
             "--mount='" . $this->skippedFile . ":/tmp/reprint/.import-download-list-skipped.jsonl'",
             $startSh,
         );
+
+        // start.json should contain the same mounts as structured data.
+        $startJson = json_decode(file_get_contents($this->outputDir . '/start.json'), true);
+        $this->assertNotNull($startJson, 'start.json should be valid JSON');
+
+        $mount_sources = array_column($startJson['mounts'], 'source');
+        $mount_targets = array_column($startJson['mounts'], 'target');
+        $this->assertContains($this->stateFile, $mount_sources);
+        $this->assertContains($this->skippedFile, $mount_sources);
+        $this->assertContains('/tmp/reprint/.import-state.json', $mount_targets);
+        $this->assertContains('/tmp/reprint/.import-download-list-skipped.jsonl', $mount_targets);
     }
 }
