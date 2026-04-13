@@ -4567,6 +4567,50 @@ class ImportClient
         return str_replace(';', ';;', $value);
     }
 
+    /**
+     * Walk each component of $path and resolve symlinks encountered
+     * along the way.
+     *
+     * PHP's mkdir() fails when a path component is a relative symlink
+     * whose target only resolves correctly in a VFS namespace — common
+     * after flat-document-root creates cross-mount symlinks in WASM.
+     * By resolving symlinks ourselves we give mkdir() an absolute,
+     * symlink-free path it can create.
+     */
+    private static function resolve_symlinks_in_path(string $path): string
+    {
+        $parts = explode('/', $path);
+        $resolved = '';
+        foreach ($parts as $part) {
+            if ($part === '' || $part === '.') {
+                continue;
+            }
+            if ($part === '..') {
+                $resolved = dirname($resolved);
+                if ($resolved === '/') {
+                    $resolved = '';
+                }
+                continue;
+            }
+            $candidate = $resolved . '/' . $part;
+            if (is_link($candidate)) {
+                $link_target = @readlink($candidate);
+                if ($link_target !== false) {
+                    if ($link_target[0] === '/') {
+                        $resolved = normalize_path($link_target);
+                    } else {
+                        $resolved = normalize_path(
+                            $resolved . '/' . $link_target,
+                        );
+                    }
+                    continue;
+                }
+            }
+            $resolved = $candidate;
+        }
+        return $resolved ?: '/';
+    }
+
     private function create_sqlite_target_pdo(string $target_path, string $target_db): PDO
     {
         if (!extension_loaded("pdo_sqlite")) {
@@ -4581,7 +4625,12 @@ class ImportClient
         if ($target_path !== ':memory:') {
             $target_dir = dirname($target_path);
             if ($target_dir !== '' && $target_dir !== '.' && !is_dir($target_dir)) {
-                if (!mkdir($target_dir, 0777, true) && !is_dir($target_dir)) {
+                // Resolve symlinks in ancestor path components so mkdir()
+                // works even when a component is a relative symlink whose
+                // target only resolves within the VFS namespace (e.g. after
+                // flat-document-root creates cross-mount symlinks in WASM).
+                $resolved_dir = self::resolve_symlinks_in_path($target_dir);
+                if (!mkdir($resolved_dir, 0777, true) && !is_dir($resolved_dir)) {
                     throw new RuntimeException(
                         "Cannot create SQLite directory: {$target_dir}",
                     );
