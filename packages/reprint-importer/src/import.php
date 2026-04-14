@@ -8801,21 +8801,25 @@ class ImportClient
     private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null): array
     {
         $body = $body !== null && $body !== false ? trim($body) : '';
-        $looks_like_html = $body !== '' && (
-            stripos($body, '<html') !== false ||
-            stripos($body, '<!doctype') !== false ||
-            // Starts with a tag but not a JSON brace
-            (str_starts_with($body, '<') && !str_starts_with($body, '{'))
-        );
 
-        // Try to extract a JSON error message from the body.
+        // Try JSON first — when the exporter is responding, the body
+        // is always a JSON object with an "error" field.
         $server_msg = null;
-        if ($body !== '' && !$looks_like_html) {
+        $is_json = false;
+        if ($body !== '') {
             $decoded = json_decode($body, true);
-            if (is_array($decoded) && isset($decoded['error'])) {
-                $server_msg = $decoded['error'];
+            if (is_array($decoded)) {
+                $is_json = true;
+                $server_msg = $decoded['error'] ?? null;
             }
         }
+
+        // Only guess HTML when json_decode didn't parse anything.
+        $looks_like_html = !$is_json && $body !== '' && (
+            stripos($body, '<html') !== false ||
+            stripos($body, '<!doctype') !== false ||
+            str_starts_with($body, '<')
+        );
 
         // ── Redirects ────────────────────────────────────────────
         if ($http_code >= 300 && $http_code < 400) {
