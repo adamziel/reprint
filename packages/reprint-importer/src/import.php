@@ -3899,7 +3899,9 @@ class ImportClient
             $r = "\033[0m";
             fwrite($this->progress_fd, "\n{$red}  ✗ Preflight failed{$r}\n");
             if ($error) {
-                fwrite($this->progress_fd, "  {$dim}" . $error . "{$r}\n");
+                // Indent each line of the error message for readability.
+                $indented = implode("\n  ", explode("\n", $error));
+                fwrite($this->progress_fd, "  {$indented}\n");
             }
         }
 
@@ -3927,8 +3929,26 @@ class ImportClient
      * Like `git pull` composing fetch + merge, `reprint pull` composes
      * the individual import commands into a single high-level operation.
      */
+    /**
+     * Ensure the remote URL contains the site-export-api query parameter.
+     *
+     * Users naturally pass bare site URLs like https://example.com to pull.
+     * The export API is mounted at ?site-export-api, so we append it when
+     * missing. This mirrors what a user would type in a browser to verify
+     * the plugin is working.
+     */
+    private function pull_normalize_url(): void
+    {
+        if (strpos($this->remote_url, 'site-export-api') === false) {
+            $separator = strpos($this->remote_url, '?') === false ? '?' : '&';
+            $this->remote_url = $this->remote_url . $separator . 'site-export-api';
+        }
+    }
+
     private function run_pull(array $options): void
     {
+        $this->pull_normalize_url();
+
         $stages = $this->pull_stages($options);
         $total = count($stages);
         $completed_stage = $this->state['pull']['stage'] ?? null;
@@ -11532,21 +11552,24 @@ if (
                 "\n" .
                 "Each step retries automatically on server timeouts. If the process is\n" .
                 "interrupted, re-run the same command to resume from where it left off.\n" .
-                "Running pull again after completion performs a delta sync.\n",
+                "Running pull again after completion performs a delta sync.\n" .
+                "\n" .
+                "The ?site-export-api query parameter is added automatically if missing,\n" .
+                "so you can pass just the site URL.\n",
             "extra" =>
                 "Examples:\n" .
                 "  # Download files and database (no import):\n" .
-                "  reprint pull https://example.com/?site-export-api \\\n" .
+                "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
                 "\n" .
                 "  # Full clone with MySQL import and URL rewriting:\n" .
-                "  reprint pull https://example.com/?site-export-api \\\n" .
+                "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-user=root --target-db=wp_local \\\n" .
                 "    --new-site-url=http://localhost:8881\n" .
                 "\n" .
                 "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
-                "  reprint pull https://example.com/?site-export-api \\\n" .
+                "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite \\\n" .
                 "    --new-site-url=http://localhost:8881 \\\n" .
