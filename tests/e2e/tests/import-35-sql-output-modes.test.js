@@ -10,7 +10,6 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
-    IS_WASM_PHP,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -86,8 +85,7 @@ describe('Import: SQL Output Modes', () => {
             await conn.end();
         });
 
-        // WASM PHP's curl crashes during gzip decompression in SQL streaming
-        it.skipIf(IS_WASM_PHP)('streams SQL directly into MySQL and matches source', async () => {
+        it('streams SQL directly into MySQL and matches source', async () => {
             const result = runImporter(
                 `${getSiteUrl(site)}&directory=${getSiteDir(site)}`,
                 tempDir, 'db-sync', {
@@ -115,8 +113,7 @@ describe('Import: SQL Output Modes', () => {
                 `counts=${JSON.stringify(comparison.rowCounts)}`);
         });
 
-        // Depends on the SQL streaming test above, which is skipped under WASM PHP
-        it.skipIf(IS_WASM_PHP)('state file records sql_output mode', () => {
+        it('state file records sql_output mode', () => {
             const stateFile = join(tempDir, '.import-state.json');
             assert.ok(existsSync(stateFile), 'Expected state file to exist');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));

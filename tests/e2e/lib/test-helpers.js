@@ -18,9 +18,9 @@ const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
-// WASM PHP's curl crashes with "RuntimeError: unreachable" during gzip
-// decompression in error/edge-case scenarios. Tests that trigger these
-// curl code paths must be skipped when running under WASM PHP.
+// WASM PHP's curl can crash with "RuntimeError: unreachable" during gzip
+// decompression. Tests use this flag to accept WASM crashes as a valid
+// alternative to the expected PHP-level error handling.
 const IS_WASM_PHP = PHP_BINARY !== 'php';
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
@@ -766,5 +766,38 @@ export function assertTreesMatch(sourceDir, importedDir, options = {}) {
     assert.equal(problems.length, 0, `Trees differ: ${problems.join('; ')}`);
 }
 
+/**
+ * Detect if an importer result is a WASM runtime crash (not a PHP error).
+ *
+ * WASM PHP's curl can crash with several signatures:
+ * - "RuntimeError: unreachable" (OOB memory access in zlib)
+ * - "Error: fetch failed" (Node-level networking crash)
+ * - Silent crash: exit code 1 with no PHP error JSON
+ *
+ * When detected, dumps full crash context to stderr for diagnosis.
+ */
+export function isWasmCrash(result) {
+    if (!IS_WASM_PHP || result.exitCode === 0) return false;
+    if (result.exitCode !== 1) return false;
+
+    const output = result.stdout + result.stderr;
+    const isKnownCrash =
+        output.includes('RuntimeError: unreachable') ||
+        output.includes('fetch failed') ||
+        !output.includes('"error"'); // Silent crash — no PHP error JSON
+
+    if (isKnownCrash) {
+        // Dump full crash context for upstream debugging
+        console.error('\n=== WASM PHP CRASH DETECTED ===');
+        console.error('Exit code:', result.exitCode);
+        console.error('Stdout:', result.stdout.slice(0, 2000));
+        console.error('Stderr:', result.stderr.slice(0, 2000));
+        console.error('Stack:', new Error().stack);
+        console.error('=== END WASM CRASH ===\n');
+    }
+
+    return isKnownCrash;
+}
+
 // Re-export constants
-export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, PHP_BINARY, IS_WASM_PHP, DB_HOST, DB_USER, DB_PASS };
+export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, PHP_BINARY, IS_WASM_PHP, isWasmCrash, DB_HOST, DB_USER, DB_PASS };

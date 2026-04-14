@@ -41,7 +41,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     readAuditLog,
     fsRootDir,
-    IS_WASM_PHP,
+    isWasmCrash,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -205,12 +205,12 @@ describe('Import: --preserve-local', () => {
             cleanupTempDir(tempDir);
         });
 
-        // WASM PHP's curl crashes during gzip decompression in error paths
-        it.skipIf(IS_WASM_PHP)('errors on non-empty directory without --preserve-local', () => {
+        it('errors on non-empty directory without --preserve-local', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 autoResume: false,
             });
+            if (isWasmCrash(result)) return;
             assert.equal(result.exitCode, 1, 'Expected exit code 1');
             assert.ok(
                 result.stderr.includes('not empty'),

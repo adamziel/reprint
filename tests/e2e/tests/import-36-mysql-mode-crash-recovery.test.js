@@ -17,7 +17,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir, IS_WASM_PHP,
+    getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
     readAuditLog,
 } from '../lib/test-helpers.js';
@@ -61,8 +61,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             await conn.end();
         });
 
-        // WASM PHP's curl crashes during gzip decompression in streaming SQL paths
-        it.skipIf(IS_WASM_PHP)('completes via multiple resume cycles and database matches source', async () => {
+        it('completes via multiple resume cycles and database matches source', async () => {
             // Use --max-exec=1 to force the server to pause frequently,
             // creating many resume cycles. auto-resume handles exit code 2.
             const result = runImporter(importUrl(), tempDir, 'db-sync', {
@@ -80,7 +79,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
                 `counts=${JSON.stringify(comparison.rowCounts)}`);
         });
 
-        it.skipIf(IS_WASM_PHP)('.sql-buffer is cleaned up after completion', () => {
+        it('.sql-buffer is cleaned up after completion', () => {
             assert.ok(!existsSync(join(tempDir, '.sql-buffer')),
                 'Expected .sql-buffer to be cleaned up after successful completion');
         });
@@ -110,7 +109,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             await conn.end();
         });
 
-        it.skipIf(IS_WASM_PHP)('loads .sql-buffer from disk and logs recovery', () => {
+        it('loads .sql-buffer from disk and logs recovery', () => {
             // Run preflight so db-sync can proceed
             runImporter(importUrl(), tempDir, 'preflight', {
                 secret: getSiteSecret(site),

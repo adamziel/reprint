@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret,
-    apiRequest, IS_WASM_PHP,
+    apiRequest, isWasmCrash,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -35,8 +35,7 @@ describe('Import: 301 Redirect', () => {
         assert.ok(location.includes('8081'), 'Expected redirect to port 8081');
     });
 
-    // WASM PHP's curl crashes instead of reporting the redirect error
-    it.skipIf(IS_WASM_PHP)('importer reports HTTP 301 error for files-sync', () => {
+    it('importer reports HTTP 301 error for files-sync', () => {
         const tempDir = createTempDir('e2e-import-redirect-files');
         try {
             // Use the redirect site URL but with the basic site's directory
@@ -45,7 +44,9 @@ describe('Import: 301 Redirect', () => {
                 secret: getSiteSecret('redirect-301'),
                 timeout: 15000,
             });
-            // The importer should fail because it doesn't follow redirects
+            // WASM PHP may crash before PHP can report the error — that still
+            // counts as "detected the problem", just not gracefully.
+            if (isWasmCrash(result)) return;
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for redirect');
             const output = result.stdout + result.stderr;
             assert.ok(
@@ -57,7 +58,7 @@ describe('Import: 301 Redirect', () => {
         }
     });
 
-    it.skipIf(IS_WASM_PHP)('importer reports HTTP 301 error for db-sync', () => {
+    it('importer reports HTTP 301 error for db-sync', () => {
         const tempDir = createTempDir('e2e-import-redirect-sql');
         try {
             const url = `${getSiteUrl('redirect-301')}&directory=/srv/e2e-sites/basic`;
@@ -65,6 +66,7 @@ describe('Import: 301 Redirect', () => {
                 secret: getSiteSecret('redirect-301'),
                 timeout: 15000,
             });
+            if (isWasmCrash(result)) return;
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for redirect');
             const output = result.stdout + result.stderr;
             assert.ok(

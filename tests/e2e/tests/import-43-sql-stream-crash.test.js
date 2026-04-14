@@ -26,7 +26,6 @@ import {
     readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
-    IS_WASM_PHP,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -149,8 +148,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
             );
         });
 
-        // WASM PHP's curl crashes during gzip decompression in crash-recovery paths
-        it.skipIf(IS_WASM_PHP)('resume completes after removing crash hook', async () => {
+        it('resume completes after removing crash hook', async () => {
             // Remove the crashing hook so subsequent requests succeed.
             removeTestHooks(site);
 
@@ -165,7 +163,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
                 `stderr: ${result.stderr}`);
         });
 
-        it.skipIf(IS_WASM_PHP)('database matches source after recovery', async () => {
+        it('database matches source after recovery', async () => {
             const comparison = await compareDatabases(getDbName(site), importDb);
             assert.ok(comparison.match,
                 `Database mismatch after crash recovery: ` +
@@ -173,7 +171,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
                 `counts=${JSON.stringify(comparison.rowCounts)}`);
         });
 
-        it.skipIf(IS_WASM_PHP)('.sql-buffer is cleaned up after completion', () => {
+        it('.sql-buffer is cleaned up after completion', () => {
             assert.ok(!existsSync(join(tempDir, '.sql-buffer')),
                 'Expected .sql-buffer to be cleaned up after successful completion');
         });

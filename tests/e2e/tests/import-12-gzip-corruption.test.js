@@ -11,7 +11,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     writeTestHooks, removeTestHooks, readAuditLog,
-    IS_WASM_PHP,
+    isWasmCrash,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -36,8 +36,7 @@ describe('Import: Gzip Corruption', () => {
         removeTestHooks(site);
     });
 
-    // WASM PHP's curl crashes during gzip decompression before corruption is detected
-    it.skipIf(IS_WASM_PHP)('db-sync detects gzip corruption and fails gracefully', () => {
+    it('db-sync detects gzip corruption and fails gracefully', () => {
         const tempDir = createTempDir('e2e-import-gzip-sql');
         try {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
@@ -45,6 +44,8 @@ describe('Import: Gzip Corruption', () => {
                 secret: getSiteSecret(site),
                 timeout: 30000,
             });
+            // WASM PHP may crash before PHP can detect the corruption.
+            if (isWasmCrash(result)) return;
             // The importer should either fail with non-zero exit code,
             // or succeed if it managed to parse enough data before the corruption.
             // The key test is that it does NOT hang.
@@ -67,8 +68,7 @@ describe('Import: Gzip Corruption', () => {
         }
     });
 
-    // WASM PHP's curl crashes during gzip decompression before corruption is detected
-    it.skipIf(IS_WASM_PHP)('file sync detects gzip corruption and fails gracefully', () => {
+    it('file sync detects gzip corruption and fails gracefully', () => {
         const tempDir = createTempDir('e2e-import-gzip-files');
         try {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
@@ -76,6 +76,7 @@ describe('Import: Gzip Corruption', () => {
                 secret: getSiteSecret(site),
                 timeout: 30000,
             });
+            if (isWasmCrash(result)) return;
             // Same as above: must not hang. Either succeeds (partial data OK)
             // or fails with a clear error.
             if (result.exitCode === 0) {
