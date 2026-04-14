@@ -8941,8 +8941,8 @@ class ImportClient
             return ['code' => 'SERVER_ERROR', 'message' => $msg];
         }
 
-        // ── HTML response on 200 (plugin not installed / wrong URL) ──
-        if ($http_code === 200 && $looks_like_html) {
+        // ── HTML response (plugin not installed / wrong URL) ─────
+        if ($looks_like_html) {
             return [
                 'code' => 'HTML_RESPONSE',
                 'message' =>
