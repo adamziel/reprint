@@ -100,6 +100,207 @@ jobs:
           echo "=== Playground CLI importer preflight ==="
           timeout 60 "$PHP_BINARY" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
 
+      - name: Reproduce WASM curl crash
+        env:
+          PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
+        run: |
+          mkdir -p /tmp/wasm-curl-repro
+
+          # Strategy A: Against the real export API (PHP-FPM → Nginx → gzip)
+          echo "=== Strategy A: Real export API ==="
+          SECRET="test-secret-basic"
+          BASE="http://127.0.0.1:8081/?site-export-api"
+          DIR="/srv/e2e-sites/basic"
+          URL="${BASE}&endpoint=sql_chunk&directory=${DIR}"
+
+          # First save raw bytes with native PHP
+          php -r '
+            $url = $argv[1];
+            $secret = $argv[2];
+            $ts = time();
+            $nonce = bin2hex(random_bytes(16));
+            $sig = hash_hmac("sha256", $ts . $nonce, $secret);
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+              CURLOPT_RETURNTRANSFER => true,
+              CURLOPT_TIMEOUT => 15,
+              CURLOPT_HEADER => true,
+              CURLOPT_HTTPHEADER => [
+                "X-Auth-Signature: $sig",
+                "X-Auth-Timestamp: $ts",
+                "X-Auth-Nonce: $nonce",
+                "Accept-Encoding: gzip",
+              ],
+            ]);
+            $resp = curl_exec($ch);
+            $hs = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            file_put_contents("/tmp/wasm-curl-repro/api-headers.txt", substr($resp, 0, $hs));
+            file_put_contents("/tmp/wasm-curl-repro/api-raw.bin", substr($resp, $hs));
+            echo "Saved " . (strlen($resp) - $hs) . " raw bytes\n";
+            curl_close($ch);
+          ' "$URL" "$SECRET" || echo "Native fetch failed: $?"
+
+          echo "=== Raw response info ==="
+          head -20 /tmp/wasm-curl-repro/api-headers.txt 2>/dev/null || echo "No headers"
+          wc -c /tmp/wasm-curl-repro/api-raw.bin 2>/dev/null || echo "No raw file"
+          xxd /tmp/wasm-curl-repro/api-raw.bin 2>/dev/null | head -5
+
+          # Now try with WASM PHP + CURLOPT_ENCODING against the same API
+          echo "=== WASM PHP against real export API ==="
+          "$PHP_BINARY" -r '
+            $url = $argv[1];
+            $secret = $argv[2];
+            $ts = time();
+            $nonce = bin2hex(random_bytes(16));
+            $sig = hash_hmac("sha256", $ts . $nonce, $secret);
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+              CURLOPT_RETURNTRANSFER => true,
+              CURLOPT_ENCODING => "gzip, deflate",
+              CURLOPT_TIMEOUT => 15,
+              CURLOPT_HTTPHEADER => [
+                "X-Auth-Signature: $sig",
+                "X-Auth-Timestamp: $ts",
+                "X-Auth-Nonce: $nonce",
+              ],
+            ]);
+            $body = curl_exec($ch);
+            $errno = curl_errno($ch);
+            echo "Result: errno=$errno len=" . strlen($body ?: "") . "\n";
+            if ($errno) echo "Error: " . curl_error($ch) . "\n";
+            curl_close($ch);
+          ' "$URL" "$SECRET" 2>&1 || echo "WASM PHP EXIT: $?"
+
+          # Strategy B: Replay saved raw bytes through a local Node server
+          echo ""
+          echo "=== Strategy B: Replay raw bytes ==="
+          if [ -f /tmp/wasm-curl-repro/api-raw.bin ]; then
+            RAW_SIZE=$(wc -c < /tmp/wasm-curl-repro/api-raw.bin)
+            echo "Replaying $RAW_SIZE bytes through local server..."
+
+            # Extract Content-Encoding from saved headers
+            CONTENT_ENCODING=$(grep -i "^content-encoding:" /tmp/wasm-curl-repro/api-headers.txt | head -1 | tr -d '\r')
+            CONTENT_TYPE=$(grep -i "^content-type:" /tmp/wasm-curl-repro/api-headers.txt | head -1 | tr -d '\r')
+            TRANSFER_ENCODING=$(grep -i "^transfer-encoding:" /tmp/wasm-curl-repro/api-headers.txt | head -1 | tr -d '\r')
+            echo "Original headers: $CONTENT_ENCODING | $CONTENT_TYPE | $TRANSFER_ENCODING"
+
+            # Start a replay server
+            node -e "
+              const http = require('http');
+              const fs = require('fs');
+              const raw = fs.readFileSync('/tmp/wasm-curl-repro/api-raw.bin');
+              const server = http.createServer((req, res) => {
+                const headers = { 'Content-Length': raw.length };
+                const ce = '${CONTENT_ENCODING}'.split(': ')[1];
+                const ct = '${CONTENT_TYPE}'.split(': ')[1];
+                if (ce) headers['Content-Encoding'] = ce;
+                if (ct) headers['Content-Type'] = ct;
+                res.writeHead(200, headers);
+                res.end(raw);
+              });
+              server.listen(18788, '127.0.0.1', () => {
+                console.log('Replay server on :18788');
+              });
+            " &
+            REPLAY_PID=$!
+            sleep 2
+
+            # Try WASM PHP against the replay
+            echo "=== WASM PHP against replay server ==="
+            "$PHP_BINARY" -r '
+              $ch = curl_init("http://127.0.0.1:18788");
+              curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_ENCODING => "gzip, deflate",
+                CURLOPT_TIMEOUT => 15,
+              ]);
+              $body = curl_exec($ch);
+              $errno = curl_errno($ch);
+              echo "Replay result: errno=$errno len=" . strlen($body ?: "") . "\n";
+              if ($errno) echo "Error: " . curl_error($ch) . "\n";
+              curl_close($ch);
+            ' 2>&1 || echo "WASM PHP REPLAY EXIT: $?"
+
+            # Also try chunked replay
+            echo "=== WASM PHP against chunked replay ==="
+            kill $REPLAY_PID 2>/dev/null; wait $REPLAY_PID 2>/dev/null
+            node -e "
+              const http = require('http');
+              const fs = require('fs');
+              const raw = fs.readFileSync('/tmp/wasm-curl-repro/api-raw.bin');
+              const server = http.createServer(async (req, res) => {
+                const ce = '${CONTENT_ENCODING}'.split(': ')[1];
+                const ct = '${CONTENT_TYPE}'.split(': ')[1];
+                const headers = {};
+                if (ce) headers['Content-Encoding'] = ce;
+                if (ct) headers['Content-Type'] = ct;
+                headers['Transfer-Encoding'] = 'chunked';
+                res.writeHead(200, headers);
+                // Send in 256-byte chunks with 1ms delays
+                for (let i = 0; i < raw.length; i += 256) {
+                  res.write(raw.subarray(i, Math.min(i + 256, raw.length)));
+                  await new Promise(r => setTimeout(r, 1));
+                }
+                res.end();
+              });
+              server.listen(18788, '127.0.0.1', () => {
+                console.log('Chunked replay server on :18788');
+              });
+            " &
+            REPLAY_PID=$!
+            sleep 2
+
+            "$PHP_BINARY" -r '
+              $ch = curl_init("http://127.0.0.1:18788");
+              curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_ENCODING => "gzip, deflate",
+                CURLOPT_TIMEOUT => 30,
+              ]);
+              $body = curl_exec($ch);
+              $errno = curl_errno($ch);
+              echo "Chunked replay result: errno=$errno len=" . strlen($body ?: "") . "\n";
+              if ($errno) echo "Error: " . curl_error($ch) . "\n";
+              curl_close($ch);
+            ' 2>&1 || echo "WASM PHP CHUNKED REPLAY EXIT: $?"
+
+            kill $REPLAY_PID 2>/dev/null; wait $REPLAY_PID 2>/dev/null
+          fi
+
+          # Strategy C: Our test server
+          echo ""
+          echo "=== Strategy C: Test server ==="
+          node tests/wasm-curl-repro/server.js &
+          SERVER_PID=$!
+          sleep 2
+          "$PHP_BINARY" -r '
+            $endpoints = ["/slow-chunks", "/many-flushes", "/burst-pause", "/corrupt-mid-stream"];
+            foreach ($endpoints as $ep) {
+              for ($i = 0; $i < 3; $i++) {
+                $ch = curl_init("http://127.0.0.1:18787$ep");
+                curl_setopt_array($ch, [
+                  CURLOPT_RETURNTRANSFER => true,
+                  CURLOPT_ENCODING => "gzip, deflate",
+                  CURLOPT_TIMEOUT => 15,
+                ]);
+                $body = curl_exec($ch);
+                $errno = curl_errno($ch);
+                echo "$ep #$i: errno=$errno len=" . strlen($body ?: "") . "\n";
+                if ($errno) echo "  Error: " . curl_error($ch) . "\n";
+                curl_close($ch);
+              }
+            }
+            echo "Test server tests done.\n";
+          ' 2>&1 || echo "WASM PHP TEST SERVER EXIT: $?"
+          kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null
+
+      - name: Upload crash repro artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-curl-repro
+          path: /tmp/wasm-curl-repro/
+
       - name: Run E2E tests
         env:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
