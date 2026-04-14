@@ -6,6 +6,7 @@
  * 1. {output_dir}/runtime.php     — constants, server vars, route handlers
  * 2. {output_dir}/blueprint.json  — minimal Playground Blueprint
  * 3. {output_dir}/start.sh        — shell script with the full CLI invocation
+ * 4. {output_dir}/start.json      — structured config for programmatic consumers
  *
  * Unlike nginx-fpm and php-builtin which write server config files,
  * Playground CLI handles most configuration through command-line flags.
@@ -97,6 +98,21 @@ class PlaygroundCliApplier implements RuntimeApplier
         write_runtime_file($start_path, $start_script);
         chmod($start_path, 0755);
         $summary[] = "Wrote {$start_path}";
+
+        // 4. Write start.json — structured config for programmatic consumers
+        // (e.g. Studio). The source paths are as seen by this PHP process;
+        // callers running inside a VFS must map them to host paths.
+        $config_path = $output_dir . '/start.json';
+        $config = $this->generate_start_config(
+            $fs_root,
+            $output_dir,
+            $runtime_path,
+            $port,
+            $options,
+            $extra_mounts,
+        );
+        write_runtime_file($config_path, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+        $summary[] = "Wrote {$config_path}";
 
         $summary[] = '';
         $summary[] = 'Start the server:';
@@ -219,8 +235,67 @@ class PlaygroundCliApplier implements RuntimeApplier
     }
 
     /**
+     * Build a structured config describing the Playground CLI invocation.
+     *
+     * Programmatic consumers (e.g. Studio) read this instead of parsing
+     * start.sh, and map the source paths from whatever filesystem the
+     * importer ran on to the actual host paths.
+     */
+    private function generate_start_config(
+        string $fs_root,
+        string $output_dir,
+        string $runtime_path,
+        int $port,
+        array $options,
+        array $extra_mounts = []
+    ): array {
+        $config = [
+            'document_root' => self::VFS_ROOT,
+            'mounts_before_install' => [],
+            'mounts' => [],
+            'blueprint' => $output_dir . '/blueprint.json',
+            'port' => $port,
+            'follow_symlinks' => true,
+            'wordpress_install_mode' => 'do-not-attempt-installing',
+        ];
+
+        // WordPress layout mounts. For standard sites this is a single
+        // mount. For WPCloud-style sites, three mounts assemble a standard
+        // layout from separate directories.
+        foreach ($this->build_mounts($fs_root, $options) as $mount) {
+            [$source, $target] = explode(':', $mount, 2);
+            $config['mounts_before_install'][] = [
+                'source' => $source,
+                'target' => $target,
+            ];
+        }
+
+        // Runtime mu-plugin. The 0- prefix ensures it loads before other
+        // mu-plugins. mu-plugins don't need a Plugin Name header.
+        $config['mounts'][] = [
+            'source' => $runtime_path,
+            'target' => self::VFS_ROOT . '/wp-content/mu-plugins/0-playground-runtime.php',
+        ];
+
+        // Additional runtime helper files (e.g. state files for the
+        // remote upload proxy).
+        foreach ($extra_mounts as $mount) {
+            [$source, $target] = explode(':', $mount, 2);
+            $config['mounts'][] = [
+                'source' => $source,
+                'target' => $target,
+            ];
+        }
+
+        return $config;
+    }
+
+    /**
      * Generate a shell script that starts Playground CLI with the right
      * mount points and flags.
+     *
+     * Derived from generate_start_config() so start.sh and start.json
+     * always describe the same invocation.
      */
     private function generate_start_script(
         RuntimeManifest $manifest,
@@ -231,6 +306,8 @@ class PlaygroundCliApplier implements RuntimeApplier
         array $options,
         array $extra_mounts = []
     ): string {
+        $config = $this->generate_start_config($fs_root, $output_dir, $runtime_path, $port, $options, $extra_mounts);
+
         $lines = [];
         $lines[] = '#!/usr/bin/env bash';
         $lines[] = '# Start WordPress Playground CLI for the imported site.';
@@ -247,35 +324,34 @@ class PlaygroundCliApplier implements RuntimeApplier
         // Mount the WordPress directory layout. For standard sites this
         // is a single mount. For WPCloud-style sites, three mounts
         // assemble a standard layout from separate directories.
-        foreach ($this->build_mounts($fs_root, $options) as $mount) {
-            $args[] = '--mount-before-install=' . escapeshellarg($mount);
+        foreach ($config['mounts_before_install'] as $mount) {
+            $args[] = '--mount-before-install=' . escapeshellarg($mount['source'] . ':' . $mount['target']);
         }
 
-        // Mount runtime.php as a mu-plugin. The 0- prefix ensures it loads
-        // before other mu-plugins. mu-plugins don't need a Plugin Name
-        // header and load on every request.
-        $args[] = '--mount=' . escapeshellarg($runtime_path . ':/wordpress/wp-content/mu-plugins/0-playground-runtime.php');
-
-        // Mount additional runtime helper files needed by specific handlers.
-        foreach ($extra_mounts as $mount) {
-            $args[] = '--mount=' . escapeshellarg($mount);
+        // Mount runtime.php as a mu-plugin (0- prefix ensures it loads
+        // first) and any additional runtime helper files (e.g. state
+        // files for the remote upload proxy).
+        foreach ($config['mounts'] as $mount) {
+            $args[] = '--mount=' . escapeshellarg($mount['source'] . ':' . $mount['target']);
         }
 
         // The site is already installed — don't run Playground's WordPress
         // installer or download a fresh copy.
-        $args[] = '--wordpress-install-mode=do-not-attempt-installing';
+        $args[] = '--wordpress-install-mode=' . $config['wordpress_install_mode'];
 
         // Let Playground resolve symlinks within mounted directories.
         // WPCloud sites have symlinks in wp-content/themes, plugins, and
         // mu-plugins pointing to shared host directories — this flag
         // makes them work without needing individual mounts for each.
-        $args[] = '--follow-symlinks';
+        if ($config['follow_symlinks']) {
+            $args[] = '--follow-symlinks';
+        }
 
-        $args[] = '--blueprint=' . escapeshellarg($output_dir . '/blueprint.json');
-        $args[] = '--port=' . $port;
+        $args[] = '--blueprint=' . escapeshellarg($config['blueprint']);
+        $args[] = '--port=' . $config['port'];
 
         $lines[] = 'echo "Starting WordPress Playground CLI..."';
-        $lines[] = 'echo "  http://127.0.0.1:' . $port . '"';
+        $lines[] = 'echo "  http://127.0.0.1:' . $config['port'] . '"';
         $lines[] = 'echo ""';
         $lines[] = '';
         $lines[] = implode(" \\\n    ", $args);
