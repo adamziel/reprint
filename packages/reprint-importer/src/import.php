@@ -8945,10 +8945,11 @@ class ImportClient
         if ($looks_like_html) {
             return [
                 'code' => 'HTML_RESPONSE',
+                'http_code' => $http_code,
                 'message' =>
                     "The exporter plugin is not installed on the remote site. " .
-                    "The server returned an HTML page instead of a JSON API " .
-                    "response.\n\n" .
+                    "The server returned an HTML page (HTTP {$http_code}) " .
+                    "instead of a JSON API response.\n\n" .
                     "Run `php reprint.phar install-exporter` for setup " .
                     "instructions.",
             ];
