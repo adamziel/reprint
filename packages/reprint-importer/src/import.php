@@ -10728,10 +10728,10 @@ if (
             echo "  You are running an unreleased development build ({$version}).\n";
             echo "  Install the exporter plugin from the same branch:\n";
             echo "\n";
-            echo "  {$dim}cd reprint-exporter-wp && composer install --no-dev{$reset}\n";
+            echo "  {$dim}composer build:exporter-plugin{$reset}\n";
             echo "\n";
-            echo "  Then zip and upload the reprint-exporter-wp/ directory,\n";
-            echo "  or symlink it into wp-content/plugins/ on your test site.\n";
+            echo "  Then upload reprint-exporter-wp.zip through wp-admin,\n";
+            echo "  or symlink reprint-exporter-wp/ into wp-content/plugins/.\n";
         } else {
             echo "  {$cyan}{$zip_url}{$reset}\n";
         }
