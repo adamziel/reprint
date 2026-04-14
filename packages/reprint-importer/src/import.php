@@ -1016,6 +1016,14 @@ class ImportClient
     /** @var string|null Machine-readable error code from the last diagnose_http_error() call. */
     public $last_error_code = null;
 
+    /**
+     * @var bool When true, sub-commands suppress their multi-line TTY lifecycle
+     * messages (Starting/Resuming/Complete blocks) while keeping the single-line
+     * progress updates. Set by run_pull() so the pull pipeline controls the
+     * stage framing and sub-commands only contribute the progress line.
+     */
+    private $pull_mode = false;
+
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
 
@@ -1267,7 +1275,7 @@ class ImportClient
             true,
         );
 
-        if ($this->is_tty && !$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
             fwrite($this->progress_fd, "{$count} file(s) changed during sync and need re-syncing (run files-pull again):\n");
         }
 
@@ -1276,7 +1284,7 @@ class ImportClient
                 ? " (changed {$changes} times — may be too volatile to sync)"
                 : " (changed {$changes} time" . ($changes > 1 ? "s" : "") . ")";
             $this->audit_log("  VOLATILE FILE | path={$path} | count={$changes}");
-            if ($this->is_tty && !$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                 fwrite($this->progress_fd, "  {$path}{$suffix}\n");
             }
         }
@@ -2458,7 +2466,7 @@ class ImportClient
                     "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
                     true,
                 );
-                if ($this->is_tty && !$this->verbose_mode) {
+                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                     fwrite($this->progress_fd, "Downloading previously skipped files\n");
                 }
                 $this->output_progress([
@@ -2486,7 +2494,7 @@ class ImportClient
                 true,
             );
 
-            if ($this->is_tty && !$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                 fwrite($this->progress_fd, "files-pull already complete: {$index_size} files indexed\n");
                 if ($has_skipped) {
                     fwrite($this->progress_fd, "Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
@@ -2540,7 +2548,7 @@ class ImportClient
                 true,
             );
 
-            if ($this->is_tty && !$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                 fwrite($this->progress_fd, "Resuming files-pull\n");
                 fwrite($this->progress_fd, "  Stage: {$stage}\n");
                 fwrite($this->progress_fd, "  Already indexed: {$index_size} files\n");
@@ -2582,7 +2590,7 @@ class ImportClient
                     true,
                 );
 
-                if ($this->is_tty && !$this->verbose_mode) {
+                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                     fwrite($this->progress_fd, "Starting files-pull (delta)\n");
                     fwrite($this->progress_fd, "  Index contains: {$index_size} files\n");
                     fwrite($this->progress_fd, "  Stage: index\n");
@@ -2601,7 +2609,7 @@ class ImportClient
                     true,
                 );
 
-                if ($this->is_tty && !$this->verbose_mode) {
+                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                     fwrite($this->progress_fd, "Starting files-pull\n");
                 }
                 $this->output_progress([
@@ -2636,7 +2644,7 @@ class ImportClient
             true,
         );
 
-        if ($this->is_tty && !$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
             fwrite($this->progress_fd, "{$label} complete: {$index_size} files indexed\n");
             fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
         }
@@ -3351,7 +3359,7 @@ class ImportClient
                 true,
             );
 
-            if ($this->is_tty && !$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                 fwrite($this->progress_fd, "Resuming db-pull (stage: {$stage})\n");
             }
             $this->output_progress([
@@ -3373,7 +3381,7 @@ class ImportClient
 
             $this->audit_log("START db-pull", true);
 
-            if ($this->is_tty && !$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                 fwrite($this->progress_fd, "Starting db-pull\n");
             }
             $this->output_progress([
@@ -3434,7 +3442,7 @@ class ImportClient
 
         $this->audit_log("db-pull complete", true);
 
-        if ($this->is_tty && !$this->verbose_mode) {
+        if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
             fwrite($this->progress_fd, "db-pull complete\n");
             if ($this->sql_output_mode === "file") {
                 fwrite($this->progress_fd, "SQL file: {$sql_file}\n");
@@ -3716,6 +3724,7 @@ class ImportClient
         if (!$this->is_tty) {
             return;
         }
+        $this->clear_progress_line();
         $label = $this->pull_stage_label($stage);
         $dim = "\033[2m";
         $bold = "\033[1m";
@@ -3731,6 +3740,8 @@ class ImportClient
         if (!$this->is_tty) {
             return;
         }
+        // Clear the sub-command's progress line before printing the checkmark
+        $this->clear_progress_line();
         $green = "\033[32m";
         $dim = "\033[2m";
         $r = "\033[0m";
@@ -3948,6 +3959,7 @@ class ImportClient
     private function run_pull(array $options): void
     {
         $this->pull_normalize_url();
+        $this->pull_mode = true;
 
         $stages = $this->pull_stages($options);
         $total = count($stages);
@@ -5287,7 +5299,7 @@ class ImportClient
                     sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
                     false,
                 );
-                if ($this->is_tty && !$this->verbose_mode) {
+                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                     echo "Discovered domains in SQL dump:\n";
                     foreach ($domains as $domain) {
                         $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
@@ -5331,7 +5343,7 @@ class ImportClient
                 ),
                 true,
             );
-            if ($this->is_tty && !$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                 echo "Resuming db-apply (executed: {$statements_executed} statements)\n";
             }
             $this->output_progress([
@@ -5354,7 +5366,7 @@ class ImportClient
             $bytes_read = 0;
 
             $this->audit_log("START db-apply", true);
-            if ($this->is_tty && !$this->verbose_mode) {
+            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                 echo "Starting db-apply\n";
             }
             $this->output_progress([
@@ -5632,7 +5644,7 @@ class ImportClient
                     "message" => "db-apply complete ({$statements_executed} statements executed)",
                 ]);
 
-                if ($this->is_tty && !$this->verbose_mode) {
+                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
                     // Clear the progress line before printing the final message
                     fwrite($this->progress_fd, "\r\033[K");
                     echo "db-apply complete ({$statements_executed} statements executed)\n";
