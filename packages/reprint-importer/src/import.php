@@ -8787,6 +8787,117 @@ class ImportClient
     }
 
     /**
+     * Diagnose an HTTP error and return a user-friendly message with
+     * actionable advice. Used by fetch_json() and fetch_streaming() to
+     * turn opaque "HTTP 403" messages into something a non-expert can
+     * act on.
+     *
+     * Returns ['message' => ..., 'suggestion' => ..., 'code' => ...].
+     */
+    private function diagnose_http_error(int $http_code, ?string $body): array
+    {
+        $body = $body !== null && $body !== false ? trim($body) : '';
+        $looks_like_html = $body !== '' && (
+            stripos($body, '<html') !== false ||
+            stripos($body, '<!doctype') !== false ||
+            // Starts with a tag but not a JSON brace
+            (str_starts_with($body, '<') && !str_starts_with($body, '{'))
+        );
+
+        // Try to extract a JSON error message from the body.
+        $server_msg = null;
+        if ($body !== '' && !$looks_like_html) {
+            $decoded = json_decode($body, true);
+            if (is_array($decoded) && isset($decoded['error'])) {
+                $server_msg = $decoded['error'];
+            }
+        }
+
+        // ── Redirects ────────────────────────────────────────────
+        if ($http_code >= 300 && $http_code < 400) {
+            return [
+                'code' => 'REDIRECT',
+                'message' => "The server returned a redirect (HTTP {$http_code}) instead of the export API response.",
+                'suggestion' =>
+                    "Double-check the site URL — make sure you are using the canonical URL " .
+                    "(http vs https, www vs non-www). " .
+                    "Reprint does not follow redirects to avoid silently connecting to the wrong server.",
+            ];
+        }
+
+        // ── Authentication / authorization ───────────────────────
+        if ($http_code === 401 || $http_code === 403) {
+            $msg = $server_msg ?? "Authentication failed (HTTP {$http_code}).";
+            return [
+                'code' => 'AUTH_FAILED',
+                'message' => $msg,
+                'suggestion' =>
+                    "Double-check that --secret matches the secret configured in the " .
+                    "Site Export plugin settings on the remote site.",
+            ];
+        }
+
+        // ── Not found ────────────────────────────────────────────
+        if ($http_code === 404) {
+            return [
+                'code' => 'NOT_FOUND',
+                'message' => "The export API was not found at this URL (HTTP 404).",
+                'suggestion' =>
+                    "Make sure the exporter plugin is installed and activated " .
+                    "on the remote site. Run `php reprint.phar install-exporter` for setup instructions.",
+            ];
+        }
+
+        // ── Server errors ────────────────────────────────────────
+        if ($http_code >= 500) {
+            $msg = $server_msg
+                ? "The remote server returned an error: {$server_msg}"
+                : "The remote server returned an internal error (HTTP {$http_code}).";
+            return [
+                'code' => 'SERVER_ERROR',
+                'message' => $msg,
+                'suggestion' =>
+                    "This is a problem on the remote server, not on your side. " .
+                    "Check the remote server's PHP error log for details.",
+            ];
+        }
+
+        // ── HTML response on 200 (plugin not installed / wrong URL) ──
+        if ($http_code === 200 && $looks_like_html) {
+            return [
+                'code' => 'HTML_RESPONSE',
+                'message' => "The server returned an HTML page instead of JSON.",
+                'suggestion' =>
+                    "The exporter plugin is probably not installed, or the URL " .
+                    "points to a regular web page instead of the export API. " .
+                    "Run `php reprint.phar install-exporter` for setup instructions.",
+            ];
+        }
+
+        // ── Fallback ─────────────────────────────────────────────
+        return [
+            'code' => 'HTTP_ERROR',
+            'message' => $server_msg
+                ? "HTTP error {$http_code}: {$server_msg}"
+                : "Unexpected HTTP status {$http_code}.",
+            'suggestion' => null,
+        ];
+    }
+
+    /**
+     * Format a diagnosed error as a single string.
+     * Combines the message and suggestion into one readable block.
+     */
+    private function format_diagnosed_error(array $diagnosis): string
+    {
+        $out = $diagnosis['message'];
+        if ($diagnosis['suggestion']) {
+            $out .= "\n\n" . $diagnosis['suggestion'];
+        }
+        return $out;
+    }
+
+    /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
     private function fetch_json(string $url): array
@@ -8834,23 +8945,34 @@ class ImportClient
         @curl_close($ch);
 
         if ($http_code !== 200) {
+            $diagnosis = $this->diagnose_http_error($http_code, $body);
             return [
                 "ok" => false,
                 "http_code" => $http_code,
                 "elapsed" => $elapsed,
                 "body" => $body,
                 "json" => null,
-                "error" => "HTTP error {$http_code}" .
-                    ($body ? ": " . substr($body, 0, 500) : ""),
+                "error" => $this->format_diagnosed_error($diagnosis),
+                "error_code" => $diagnosis['code'],
             ];
         }
 
         $json = null;
         $json_error = null;
+        $error_code = null;
         if ($body !== false && $body !== "") {
             $json = json_decode($body, true);
             if ($json === null && json_last_error() !== JSON_ERROR_NONE) {
-                $json_error = "Invalid JSON: " . json_last_error_msg();
+                // HTTP 200 but body isn't valid JSON — likely an HTML page
+                // from a site that doesn't have the exporter installed.
+                $diagnosis = $this->diagnose_http_error(200, $body);
+                if ($diagnosis['code'] === 'HTML_RESPONSE') {
+                    $json_error = $this->format_diagnosed_error($diagnosis);
+                    $error_code = $diagnosis['code'];
+                } else {
+                    $json_error = "Invalid JSON: " . json_last_error_msg();
+                    $error_code = 'INVALID_JSON';
+                }
             }
         }
 
@@ -8861,6 +8983,7 @@ class ImportClient
             "body" => $body,
             "json" => $json,
             "error" => $json_error,
+            "error_code" => $error_code,
         ];
     }
 
@@ -9169,7 +9292,6 @@ class ImportClient
                     "curl_errno" => 0,
                 ]);
             }
-            $error_msg = "HTTP error {$http_code}";
 
             // Log what we received
             $this->audit_log(
@@ -9178,30 +9300,15 @@ class ImportClient
                 true,
             );
 
-            // Try to parse error response as JSON
+            $diagnosis = $this->diagnose_http_error($http_code, $error_body);
+            $error_msg = $this->format_diagnosed_error($diagnosis);
+
+            // Append stack trace from the server if available.
             if ($error_body) {
                 $error_data = json_decode($error_body, true);
-                if ($error_data && isset($error_data["error"])) {
-                    $error_msg .= ": " . $error_data["error"];
-                    if (isset($error_data["trace"])) {
-                        $error_msg .=
-                            "\n\nStack trace:\n" . $error_data["trace"];
-                    }
-                } else {
-                    // Not JSON, show raw body
-                    $error_msg .=
-                        "\n\nResponse: " . substr($error_body, 0, 1000);
+                if (is_array($error_data) && isset($error_data["trace"])) {
+                    $error_msg .= "\n\nServer stack trace:\n" . $error_data["trace"];
                 }
-            } else {
-                // No error body captured - server might have sent multipart response
-                // Check server error log for details
-                $error_msg .=
-                    "\n\nNo error body received. Check server error log at:\n";
-                $error_msg .=
-                    "  " .
-                    dirname(parse_url($url, PHP_URL_PATH)) .
-                    "/error_log\n";
-                $error_msg .= "  or enable display_errors on the server";
             }
 
             throw new RuntimeException($error_msg);
@@ -10900,17 +11007,22 @@ if (
         $client->run($options ?? []);
         exit($client->exit_code);
     } catch (\Throwable $e) {
-        $error = [
-            "error" => $e->getMessage(),
-            "exception" => get_class($e),
-            "file" => $e->getFile(),
-            "line" => $e->getLine(),
-        ];
-        $json = json_encode($error);
-        if ($json === false) {
-            $json = '{"error":"' . addslashes($e->getMessage()) . '","exception":"' . get_class($e) . '"}';
+        $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
+        if ($is_tty) {
+            fwrite(STDERR, "\nError: " . $e->getMessage() . "\n");
+        } else {
+            $error = [
+                "error" => $e->getMessage(),
+                "exception" => get_class($e),
+                "file" => $e->getFile(),
+                "line" => $e->getLine(),
+            ];
+            $json = json_encode($error);
+            if ($json === false) {
+                $json = '{"error":"' . addslashes($e->getMessage()) . '","exception":"' . get_class($e) . '"}';
+            }
+            fwrite(STDERR, $json . "\n");
         }
-        fwrite(STDERR, $json . "\n");
         exit(1);
     }
 }
