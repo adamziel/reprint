@@ -40,6 +40,9 @@ require_once __DIR__ . '/lib/host/load.php';
 // Load target runtime appliers (consume a manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
+// External merge sort for large index files when exec() is unavailable
+require_once __DIR__ . '/lib/external-merge-sort.php';
+
 /**
  * The wire-protocol version this importer speaks.
  *
@@ -8708,10 +8711,28 @@ class ImportClient
         // In-memory sorting requires roughly 4-5x the file size (raw lines +
         // parsed entries + sorted output string), so be conservative.
         if ($size * 5 > $available) {
-            throw new RuntimeException(
-                "Index file is too large to sort without exec() " .
-                "({$size} bytes, ~" . round($available / 1024 / 1024) . " MB available)",
+            // Too large for in-memory sort — use external merge sort which
+            // processes the file in chunks and needs only a fraction of the
+            // memory.  Works in pure PHP, no exec() needed.
+            $this->audit_log(
+                "Index file too large for in-memory sort " .
+                "(" . round($size / 1024 / 1024) . " MB, " .
+                "needs ~" . round($size * 5 / 1024 / 1024) . " MB, " .
+                "only " . round($available / 1024 / 1024) . " MB available), " .
+                "using external merge sort",
             );
+            $key_extractor = function (string $line): ?string {
+                $entry = $this->parse_index_line($line);
+                return $entry !== null ? $entry['path'] : null;
+            };
+            $sorter = new ExternalMergeSort(
+                $key_extractor,
+                (int) ($available * 0.8),
+                true,
+                dirname($path),
+            );
+            $sorter->sort($path);
+            return;
         }
 
         $raw_lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
