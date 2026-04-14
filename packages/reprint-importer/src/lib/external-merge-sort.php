@@ -45,7 +45,7 @@ class ExternalMergeSort
         callable $key_extractor,
         int $chunk_budget,
         bool $deduplicate = true,
-        ?string $tmp_dir = null,
+        ?string $tmp_dir = null
     ) {
         if ($chunk_budget < 1024) {
             throw new InvalidArgumentException("chunk_budget must be at least 1024 bytes");
