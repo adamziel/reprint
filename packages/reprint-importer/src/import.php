@@ -1017,12 +1017,12 @@ class ImportClient
     public $last_error_code = null;
 
     /**
-     * @var bool When true, sub-commands suppress their multi-line TTY lifecycle
-     * messages (Starting/Resuming/Complete blocks) while keeping the single-line
-     * progress updates. Set by run_pull() so the pull pipeline controls the
-     * stage framing and sub-commands only contribute the progress line.
+     * @var bool Suppresses multi-line TTY lifecycle messages (Starting/Resuming/
+     * Complete) while keeping single-line progress updates. Used by composite
+     * commands like pull that provide their own stage framing and don't want
+     * sub-commands printing their own headers.
      */
-    private $pull_mode = false;
+    private $quiet_lifecycle = false;
 
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
@@ -1275,18 +1275,14 @@ class ImportClient
             true,
         );
 
-        if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-            fwrite($this->progress_fd, "{$count} file(s) changed during sync and need re-syncing (run files-pull again):\n");
-        }
+        $this->show_lifecycle_line("{$count} file(s) changed during sync and need re-syncing (run files-pull again):\n");
 
         foreach ($files as $path => $changes) {
             $suffix = $changes >= 3
                 ? " (changed {$changes} times — may be too volatile to sync)"
                 : " (changed {$changes} time" . ($changes > 1 ? "s" : "") . ")";
             $this->audit_log("  VOLATILE FILE | path={$path} | count={$changes}");
-            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                fwrite($this->progress_fd, "  {$path}{$suffix}\n");
-            }
+            $this->show_lifecycle_line("  {$path}{$suffix}\n");
         }
 
         $this->output_progress(
@@ -1318,6 +1314,25 @@ class ImportClient
 
             // Clear line and write progress
             fwrite($this->progress_fd, "\r\033[K" . $message);
+        }
+    }
+
+    /**
+     * Print a multi-line lifecycle message (TTY mode only).
+     *
+     * Lifecycle messages announce phase transitions: "Starting files-pull",
+     * "Resuming db-pull (stage: sql)", "files-pull complete: 5091 files".
+     * They are suppressed when quiet_lifecycle is set, so composite
+     * commands like pull can provide their own stage framing without
+     * sub-commands adding noise.
+     *
+     * Contrast with show_progress_line(), which shows a single refreshing
+     * line (file counts, current path) and is always displayed.
+     */
+    private function show_lifecycle_line(string $message): void
+    {
+        if ($this->is_tty && !$this->verbose_mode && !$this->quiet_lifecycle) {
+            fwrite($this->progress_fd, $message);
         }
     }
 
@@ -2466,9 +2481,7 @@ class ImportClient
                     "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
                     true,
                 );
-                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                    fwrite($this->progress_fd, "Downloading previously skipped files\n");
-                }
+                $this->show_lifecycle_line("Downloading previously skipped files\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
@@ -2494,13 +2507,11 @@ class ImportClient
                 true,
             );
 
-            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                fwrite($this->progress_fd, "files-pull already complete: {$index_size} files indexed\n");
-                if ($has_skipped) {
-                    fwrite($this->progress_fd, "Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
-                } else {
-                    fwrite($this->progress_fd, "To re-sync, run with --abort first to clear state.\n");
-                }
+            $this->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
+            if ($has_skipped) {
+                $this->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
+            } else {
+                $this->show_lifecycle_line("To re-sync, run with --abort first to clear state.\n");
             }
             $this->output_progress([
                 "type" => "lifecycle",
@@ -2548,11 +2559,9 @@ class ImportClient
                 true,
             );
 
-            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                fwrite($this->progress_fd, "Resuming files-pull\n");
-                fwrite($this->progress_fd, "  Stage: {$stage}\n");
-                fwrite($this->progress_fd, "  Already indexed: {$index_size} files\n");
-            }
+            $this->show_lifecycle_line("Resuming files-pull\n");
+            $this->show_lifecycle_line("  Stage: {$stage}\n");
+            $this->show_lifecycle_line("  Already indexed: {$index_size} files\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -2590,11 +2599,9 @@ class ImportClient
                     true,
                 );
 
-                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                    fwrite($this->progress_fd, "Starting files-pull (delta)\n");
-                    fwrite($this->progress_fd, "  Index contains: {$index_size} files\n");
-                    fwrite($this->progress_fd, "  Stage: index\n");
-                }
+                $this->show_lifecycle_line("Starting files-pull (delta)\n");
+                $this->show_lifecycle_line("  Index contains: {$index_size} files\n");
+                $this->show_lifecycle_line("  Stage: index\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
@@ -2609,9 +2616,7 @@ class ImportClient
                     true,
                 );
 
-                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                    fwrite($this->progress_fd, "Starting files-pull\n");
-                }
+                $this->show_lifecycle_line("Starting files-pull\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
@@ -2644,10 +2649,8 @@ class ImportClient
             true,
         );
 
-        if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-            fwrite($this->progress_fd, "{$label} complete: {$index_size} files indexed\n");
-            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
-        }
+        $this->show_lifecycle_line("{$label} complete: {$index_size} files indexed\n");
+        $this->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
@@ -3359,9 +3362,7 @@ class ImportClient
                 true,
             );
 
-            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                fwrite($this->progress_fd, "Resuming db-pull (stage: {$stage})\n");
-            }
+            $this->show_lifecycle_line("Resuming db-pull (stage: {$stage})\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -3381,9 +3382,7 @@ class ImportClient
 
             $this->audit_log("START db-pull", true);
 
-            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                fwrite($this->progress_fd, "Starting db-pull\n");
-            }
+            $this->show_lifecycle_line("Starting db-pull\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
@@ -3442,17 +3441,15 @@ class ImportClient
 
         $this->audit_log("db-pull complete", true);
 
-        if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-            fwrite($this->progress_fd, "db-pull complete\n");
-            if ($this->sql_output_mode === "file") {
-                fwrite($this->progress_fd, "SQL file: {$sql_file}\n");
-            } elseif ($this->sql_output_mode === "stdout") {
-                fwrite($this->progress_fd, "SQL written to stdout\n");
-            } elseif ($this->sql_output_mode === "mysql") {
-                fwrite($this->progress_fd, "SQL imported into {$this->mysql_database}\n");
-            }
-            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
+        $this->show_lifecycle_line("db-pull complete\n");
+        if ($this->sql_output_mode === "file") {
+            $this->show_lifecycle_line("SQL file: {$sql_file}\n");
+        } elseif ($this->sql_output_mode === "stdout") {
+            $this->show_lifecycle_line("SQL written to stdout\n");
+        } elseif ($this->sql_output_mode === "mysql") {
+            $this->show_lifecycle_line("SQL imported into {$this->mysql_database}\n");
         }
+        $this->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $db_sync_complete = [
             "type" => "lifecycle",
             "event" => "complete",
@@ -3959,7 +3956,7 @@ class ImportClient
     private function run_pull(array $options): void
     {
         $this->pull_normalize_url();
-        $this->pull_mode = true;
+        $this->quiet_lifecycle = true;
 
         $stages = $this->pull_stages($options);
         $total = count($stages);
@@ -5299,14 +5296,12 @@ class ImportClient
                     sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
                     false,
                 );
-                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                    echo "Discovered domains in SQL dump:\n";
-                    foreach ($domains as $domain) {
-                        $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
-                        echo "  {$domain}{$mapped}\n";
-                    }
-                    echo "\n";
+                $this->show_lifecycle_line("Discovered domains in SQL dump:\n");
+                foreach ($domains as $domain) {
+                    $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
+                    $this->show_lifecycle_line("  {$domain}{$mapped}\n");
                 }
+                $this->show_lifecycle_line("\n");
                 $domain_map = [];
                 foreach ($domains as $domain) {
                     $domain_map[$domain] = $url_mapping[$domain] ?? null;
@@ -5343,9 +5338,7 @@ class ImportClient
                 ),
                 true,
             );
-            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                echo "Resuming db-apply (executed: {$statements_executed} statements)\n";
-            }
+            $this->show_lifecycle_line("Resuming db-apply (executed: {$statements_executed} statements)\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -5366,9 +5359,7 @@ class ImportClient
             $bytes_read = 0;
 
             $this->audit_log("START db-apply", true);
-            if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
-                echo "Starting db-apply\n";
-            }
+            $this->show_lifecycle_line("Starting db-apply\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
@@ -5644,11 +5635,11 @@ class ImportClient
                     "message" => "db-apply complete ({$statements_executed} statements executed)",
                 ]);
 
-                if ($this->is_tty && !$this->verbose_mode && !$this->pull_mode) {
+                if (!$this->quiet_lifecycle) {
                     // Clear the progress line before printing the final message
-                    fwrite($this->progress_fd, "\r\033[K");
-                    echo "db-apply complete ({$statements_executed} statements executed)\n";
+                    $this->clear_progress_line();
                 }
+                $this->show_lifecycle_line("db-apply complete ({$statements_executed} statements executed)\n");
             }
         } finally {
             fclose($sql_handle);
