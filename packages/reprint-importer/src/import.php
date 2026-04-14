@@ -1584,15 +1584,12 @@ class ImportClient
                     $this->exit_code = 2;
                 }
             } catch (Exception $e) {
-                $progress = [
+                $this->output_progress([
                     "status" => "error",
                     "error" => $e->getMessage(),
+                    "error_code" => $this->last_error_code,
                     "message" => "Error: " . $e->getMessage(),
-                ];
-                if ($this->last_error_code !== null) {
-                    $progress["error_code"] = $this->last_error_code;
-                }
-                $this->output_progress($progress);
+                ]);
                 $this->write_status_file($e->getMessage());
                 throw $e;
             }
@@ -1644,15 +1641,12 @@ class ImportClient
                 $this->exit_code = 2;
             }
         } catch (Exception $e) {
-            $progress = [
+            $this->output_progress([
                 "status" => "error",
                 "error" => $e->getMessage(),
+                "error_code" => $this->last_error_code,
                 "message" => "Error: " . $e->getMessage(),
-            ];
-            if ($this->last_error_code !== null) {
-                $progress["error_code"] = $this->last_error_code;
-            }
-            $this->output_progress($progress);
+            ]);
             $this->write_status_file($e->getMessage());
             throw $e;
         }
