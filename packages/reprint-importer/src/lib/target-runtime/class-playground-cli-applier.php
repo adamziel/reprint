@@ -250,6 +250,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         array $extra_mounts = []
     ): array {
         $config = [
+            'document_root' => self::VFS_ROOT,
             'mounts_before_install' => [],
             'mounts' => [],
             'blueprint' => $output_dir . '/blueprint.json',
