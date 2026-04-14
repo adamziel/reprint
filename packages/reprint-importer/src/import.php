@@ -1013,6 +1013,9 @@ class ImportClient
     /** @var bool Whether the last curl request timed out. */
     private $last_curl_timeout = false;
 
+    /** @var string|null Machine-readable error code from the last diagnose_http_error() call. */
+    public $last_error_code = null;
+
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
 
@@ -1599,6 +1602,7 @@ class ImportClient
                 $this->output_progress([
                     "status" => "error",
                     "error" => $e->getMessage(),
+                    "error_code" => $this->last_error_code,
                     "message" => "Error: " . $e->getMessage(),
                 ]);
                 $this->write_status_file($e->getMessage());
@@ -1655,6 +1659,7 @@ class ImportClient
             $this->output_progress([
                 "status" => "error",
                 "error" => $e->getMessage(),
+                "error_code" => $this->last_error_code,
                 "message" => "Error: " . $e->getMessage(),
             ]);
             $this->write_status_file($e->getMessage());
@@ -8880,6 +8885,190 @@ class ImportClient
     }
 
     /**
+     * Diagnose an HTTP error and return a user-friendly message with
+     * actionable advice. Used by fetch_json() and fetch_streaming() to
+     * turn opaque "HTTP 403" messages into something a non-expert can
+     * act on.
+     *
+     * Returns ['message' => ..., 'code' => ...].
+     *
+     * @param int         $http_code    HTTP status code (0 for connection failures).
+     * @param string|null $body         Response body (may be HTML, JSON, or empty).
+     * @param string|null $redirect_url The Location header / CURLINFO_REDIRECT_URL for 3xx responses.
+     */
+    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null): array
+    {
+        $body = ($body !== null && $body !== false) ? $body : '';
+
+        $decoded = json_decode($body, true);
+        $server_msg = is_array($decoded) ? ($decoded['error'] ?? null) : null;
+
+        $looks_like_html = !is_array($decoded) && $body !== '' && (
+            stripos($body, '<html') !== false ||
+            stripos($body, '<!doctype') !== false ||
+            str_starts_with($body, '<')
+        );
+
+        // ── Redirects ────────────────────────────────────────────
+        if ($http_code >= 300 && $http_code < 400) {
+            $msg = $redirect_url
+                ? "Wrong URL. The server redirected to {$redirect_url} " .
+                  "(HTTP {$http_code}).\n\n" .
+                  "Reprint does not follow redirects to avoid silently " .
+                  "connecting to the wrong server. Retry with the target " .
+                  "URL above."
+                : "Wrong URL. The server returned a redirect (HTTP {$http_code}) " .
+                  "instead of the export API.\n\n" .
+                  "Reprint does not follow redirects. Check whether the site " .
+                  "uses http vs https or www vs non-www and retry with the " .
+                  "canonical URL.";
+            return ['code' => 'REDIRECT', 'message' => $msg];
+        }
+
+        // ── Authentication / authorization ───────────────────────
+        if ($http_code === 401 || $http_code === 403) {
+            if ($this->hmac_client === null) {
+                return [
+                    'code' => 'AUTH_NO_SECRET',
+                    'message' =>
+                        "No --secret was provided. The remote site requires " .
+                        "authentication.\n\n" .
+                        "Pass --secret=YOUR_SECRET using the same secret " .
+                        "configured in the Site Export plugin on the remote site.",
+                ];
+            }
+
+            if ($server_msg === null) {
+                return [
+                    'code' => 'AUTH_FAILED',
+                    'message' =>
+                        "The request was blocked (HTTP {$http_code}) but the " .
+                        "server did not say why. The exporter plugin always " .
+                        "explains authentication failures, so something " .
+                        "upstream is blocking the request — a server-level " .
+                        "firewall, .htaccess rule, or security plugin.",
+                ];
+            }
+
+            // The server tells us exactly what went wrong. Map each known
+            // HMAC error to a targeted message.
+
+            if (str_contains($server_msg, 'HMAC signature verification failed')) {
+                return [
+                    'code' => 'AUTH_SECRET_MISMATCH',
+                    'message' =>
+                        "Wrong shared secret. The --secret value does not match " .
+                        "the one configured in the Site Export plugin settings " .
+                        "(wp-admin → Site Export).",
+                ];
+            }
+
+            if (str_contains($server_msg, 'timestamp expired')) {
+                return [
+                    'code' => 'AUTH_CLOCK_SKEW',
+                    'message' =>
+                        "Clock out of sync. {$server_msg}\n\n" .
+                        "Check this machine's clock (run `date`) and compare " .
+                        "it with the server's time.",
+                ];
+            }
+
+            if (str_contains($server_msg, 'Content hash mismatch')) {
+                return [
+                    'code' => 'AUTH_CONTENT_TAMPERED',
+                    'message' =>
+                        "Request body was modified in transit. A proxy, CDN, " .
+                        "or firewall between this machine and the server is " .
+                        "altering the request content.",
+                ];
+            }
+
+            if (str_contains($server_msg, 'Missing X-Auth-')) {
+                return [
+                    'code' => 'AUTH_HEADERS_STRIPPED',
+                    'message' =>
+                        "Authentication headers were stripped. The server " .
+                        "reported: {$server_msg}\n\n" .
+                        "A proxy, CDN, or security plugin is removing custom " .
+                        "HTTP headers before they reach WordPress.",
+                ];
+            }
+
+            return [
+                'code' => 'AUTH_FAILED',
+                'message' => "Authentication failed: {$server_msg}",
+            ];
+        }
+
+        // ── Export not configured (503 from exporter) ────────────
+        if ($http_code === 503 && $server_msg !== null) {
+            return [
+                'code' => 'EXPORT_NOT_CONFIGURED',
+                'message' =>
+                    "The exporter plugin is installed but not configured. " .
+                    "The server reported: {$server_msg}",
+            ];
+        }
+
+        // ── Not found ────────────────────────────────────────────
+        if ($http_code === 404) {
+            $msg = "The exporter plugin is not installed on the remote site.";
+            if ($looks_like_html) {
+                $msg .= " The server returned an HTML 404 page instead of " .
+                         "the export API.";
+            } else {
+                $msg .= " The server returned HTTP 404.";
+            }
+            $msg .= "\n\nRun `php reprint.phar install-exporter` for setup " .
+                     "instructions.";
+            return ['code' => 'NOT_FOUND', 'message' => $msg];
+        }
+
+        // ── Server errors ────────────────────────────────────────
+        if ($http_code >= 500) {
+            $msg = $server_msg
+                ? "The remote server crashed: {$server_msg}"
+                : "The remote server crashed (HTTP {$http_code}).";
+            $msg .= "\n\nThis is a problem on the remote server. " .
+                     "Check its PHP error log for details.";
+            return ['code' => 'SERVER_ERROR', 'message' => $msg];
+        }
+
+        // ── HTML response (plugin not installed / wrong URL) ─────
+        if ($looks_like_html) {
+            return [
+                'code' => 'HTML_RESPONSE',
+                'http_code' => $http_code,
+                'message' =>
+                    "The exporter plugin is not installed on the remote site. " .
+                    "The server returned an HTML page (HTTP {$http_code}) " .
+                    "instead of a JSON API response.\n\n" .
+                    "Run `php reprint.phar install-exporter` for setup " .
+                    "instructions.",
+            ];
+        }
+
+        // ── Fallback ─────────────────────────────────────────────
+        return [
+            'code' => 'HTTP_ERROR',
+            'message' => $server_msg
+                ? "HTTP error {$http_code}: {$server_msg}"
+                : "Unexpected HTTP status {$http_code}.",
+        ];
+    }
+
+    /**
+     * Format a diagnosed error as a single string for display.
+     * Also stores the error code on the instance for output_progress
+     * and write_status_file to pick up.
+     */
+    private function format_diagnosed_error(array $diagnosis): string
+    {
+        $this->last_error_code = $diagnosis['code'];
+        return $diagnosis['message'];
+    }
+
+    /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
     private function fetch_json(string $url): array
@@ -8924,26 +9113,38 @@ class ImportClient
         }
 
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
         @curl_close($ch);
 
         if ($http_code !== 200) {
+            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
             return [
                 "ok" => false,
                 "http_code" => $http_code,
                 "elapsed" => $elapsed,
                 "body" => $body,
                 "json" => null,
-                "error" => "HTTP error {$http_code}" .
-                    ($body ? ": " . substr($body, 0, 500) : ""),
+                "error" => $this->format_diagnosed_error($diagnosis),
+                "error_code" => $diagnosis['code'],
             ];
         }
 
         $json = null;
         $json_error = null;
+        $error_code = null;
         if ($body !== false && $body !== "") {
             $json = json_decode($body, true);
             if ($json === null && json_last_error() !== JSON_ERROR_NONE) {
-                $json_error = "Invalid JSON: " . json_last_error_msg();
+                // HTTP 200 but body isn't valid JSON — likely an HTML page
+                // from a site that doesn't have the exporter installed.
+                $diagnosis = $this->diagnose_http_error(200, $body);
+                if ($diagnosis['code'] === 'HTML_RESPONSE') {
+                    $json_error = $this->format_diagnosed_error($diagnosis);
+                    $error_code = $diagnosis['code'];
+                } else {
+                    $json_error = "Invalid JSON: " . json_last_error_msg();
+                    $error_code = 'INVALID_JSON';
+                }
             }
         }
 
@@ -8954,6 +9155,7 @@ class ImportClient
             "body" => $body,
             "json" => $json,
             "error" => $json_error,
+            "error_code" => $error_code,
         ];
     }
 
@@ -9242,6 +9444,7 @@ class ImportClient
             }
 
             $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
             $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
             $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
         } finally {
@@ -9262,7 +9465,6 @@ class ImportClient
                     "curl_errno" => 0,
                 ]);
             }
-            $error_msg = "HTTP error {$http_code}";
 
             // Log what we received
             $this->audit_log(
@@ -9271,30 +9473,15 @@ class ImportClient
                 true,
             );
 
-            // Try to parse error response as JSON
+            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url);
+            $error_msg = $this->format_diagnosed_error($diagnosis);
+
+            // Append stack trace from the server if available.
             if ($error_body) {
                 $error_data = json_decode($error_body, true);
-                if ($error_data && isset($error_data["error"])) {
-                    $error_msg .= ": " . $error_data["error"];
-                    if (isset($error_data["trace"])) {
-                        $error_msg .=
-                            "\n\nStack trace:\n" . $error_data["trace"];
-                    }
-                } else {
-                    // Not JSON, show raw body
-                    $error_msg .=
-                        "\n\nResponse: " . substr($error_body, 0, 1000);
+                if (is_array($error_data) && isset($error_data["trace"])) {
+                    $error_msg .= "\n\nServer stack trace:\n" . $error_data["trace"];
                 }
-            } else {
-                // No error body captured - server might have sent multipart response
-                // Check server error log for details
-                $error_msg .=
-                    "\n\nNo error body received. Check server error log at:\n";
-                $error_msg .=
-                    "  " .
-                    dirname(parse_url($url, PHP_URL_PATH)) .
-                    "/error_log\n";
-                $error_msg .= "  or enable display_errors on the server";
             }
 
             throw new RuntimeException($error_msg);
@@ -9829,6 +10016,7 @@ class ImportClient
             "status" => $status,
             "phase" => $phase,
             "error" => $error,
+            "error_code" => $error !== null ? $this->last_error_code : null,
             "ts" => microtime(true),
         ];
 
@@ -11103,17 +11291,24 @@ if (
         $client->run($options ?? []);
         exit($client->exit_code);
     } catch (\Throwable $e) {
-        $error = [
-            "error" => $e->getMessage(),
-            "exception" => get_class($e),
-            "file" => $e->getFile(),
-            "line" => $e->getLine(),
-        ];
-        $json = json_encode($error);
-        if ($json === false) {
-            $json = '{"error":"' . addslashes($e->getMessage()) . '","exception":"' . get_class($e) . '"}';
+        $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
+        $error_code = isset($client) ? $client->last_error_code : null;
+        if ($is_tty) {
+            fwrite(STDERR, "\nError: " . $e->getMessage() . "\n");
+        } else {
+            $error = [
+                "error" => $e->getMessage(),
+                "error_code" => $error_code,
+                "exception" => get_class($e),
+                "file" => $e->getFile(),
+                "line" => $e->getLine(),
+            ];
+            $json = json_encode($error);
+            if ($json === false) {
+                $json = '{"error":"' . addslashes($e->getMessage()) . '","exception":"' . get_class($e) . '"}';
+            }
+            fwrite(STDERR, $json . "\n");
         }
-        fwrite(STDERR, $json . "\n");
         exit(1);
     }
 }
