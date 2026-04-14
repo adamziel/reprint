@@ -4023,10 +4023,17 @@ class ImportClient
         $this->pull_normalize_url();
         $this->quiet_lifecycle = true;
 
+        // Default --runtime to php-builtin so pull always ends with a
+        // running local server. Users can override with --runtime=nginx-fpm
+        // or --runtime=playground-cli for other environments.
+        if (empty($options['runtime'])) {
+            $options['runtime'] = 'php-builtin';
+        }
+
         // Default --output-dir to {state-dir}/runtime when --runtime is
         // provided. This lets users skip the --output-dir flag for the
         // common case of just wanting to start the site.
-        if (!empty($options['runtime']) && empty($options['output_dir'])) {
+        if (empty($options['output_dir'])) {
             $options['output_dir'] = $this->state_dir . '/runtime';
         }
 
@@ -7584,6 +7591,10 @@ class ImportClient
                                 $sql_statements_counted,
                             );
                         }
+                        // Show download progress on the TTY progress line.
+                        // The bytes accumulate across chunks and requests.
+                        $this->show_progress_line("Downloading SQL: " . $this->format_bytes($sql_bytes_written));
+
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
                     } elseif ($chunk_type === "completion") {
@@ -11631,8 +11642,8 @@ if (
                 "  3. Database  — download the SQL dump\n" .
                 "  4. Import    — apply SQL to a local database (if --target-db)\n" .
                 "  5. Flatten   — reassemble into standard WP layout (if --flatten-to)\n" .
-                "  6. Runtime   — generate server config (if --runtime)\n" .
-                "  7. Start     — launch the local server (--runtime=php-builtin only)\n" .
+                "  6. Runtime   — generate server config (default: php-builtin)\n" .
+                "  7. Start     — launch the local server (php-builtin only)\n" .
                 "\n" .
                 "Each step retries automatically on server timeouts. If the process is\n" .
                 "interrupted, re-run the same command to resume from where it left off.\n" .
