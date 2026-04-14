@@ -8813,14 +8813,18 @@ class ImportClient
 
         // ── Redirects ────────────────────────────────────────────
         if ($http_code >= 300 && $http_code < 400) {
-            $target = $redirect_url ? " to {$redirect_url}" : '';
-            return [
-                'code' => 'REDIRECT',
-                'message' =>
-                    "The server redirected{$target} (HTTP {$http_code}).\n\n" .
-                    "Reprint does not follow redirects to avoid silently connecting " .
-                    "to the wrong server. Retry with the target URL above.",
-            ];
+            $msg = $redirect_url
+                ? "Wrong URL. The server redirected to {$redirect_url} " .
+                  "(HTTP {$http_code}).\n\n" .
+                  "Reprint does not follow redirects to avoid silently " .
+                  "connecting to the wrong server. Retry with the target " .
+                  "URL above."
+                : "Wrong URL. The server returned a redirect (HTTP {$http_code}) " .
+                  "instead of the export API.\n\n" .
+                  "Reprint does not follow redirects. Check whether the site " .
+                  "uses http vs https or www vs non-www and retry with the " .
+                  "canonical URL.";
+            return ['code' => 'REDIRECT', 'message' => $msg];
         }
 
         // ── Authentication / authorization ───────────────────────
@@ -8829,9 +8833,9 @@ class ImportClient
                 return [
                     'code' => 'AUTH_NO_SECRET',
                     'message' =>
-                        "The remote site requires authentication but no --secret " .
-                        "was provided.\n\n" .
-                        "Pass --secret=YOUR_SECRET using the same secret that is " .
+                        "No --secret was provided. The remote site requires " .
+                        "authentication.\n\n" .
+                        "Pass --secret=YOUR_SECRET using the same secret " .
                         "configured in the Site Export plugin on the remote site.",
                 ];
             }
@@ -8840,12 +8844,11 @@ class ImportClient
                 return [
                     'code' => 'AUTH_FAILED',
                     'message' =>
-                        "The server rejected the request (HTTP {$http_code}) " .
-                        "but did not say why. This is unusual — the exporter " .
-                        "plugin always explains authentication failures.\n\n" .
-                        "A server-level firewall, .htaccess rule, or security " .
-                        "plugin may be blocking the request before it reaches " .
-                        "WordPress.",
+                        "The request was blocked (HTTP {$http_code}) but the " .
+                        "server did not say why. The exporter plugin always " .
+                        "explains authentication failures, so something " .
+                        "upstream is blocking the request — a server-level " .
+                        "firewall, .htaccess rule, or security plugin.",
                 ];
             }
 
@@ -8856,9 +8859,9 @@ class ImportClient
                 return [
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
-                        "The shared secret does not match. The --secret value must " .
-                        "be identical to the one configured in the Site Export " .
-                        "plugin settings (wp-admin → Site Export).",
+                        "Wrong shared secret. The --secret value does not match " .
+                        "the one configured in the Site Export plugin settings " .
+                        "(wp-admin → Site Export).",
                 ];
             }
 
@@ -8866,10 +8869,9 @@ class ImportClient
                 return [
                     'code' => 'AUTH_CLOCK_SKEW',
                     'message' =>
-                        "The request was rejected because the clocks are out of " .
-                        "sync. {$server_msg}\n\n" .
-                        "Make sure this machine's clock is accurate (run `date` " .
-                        "to check).",
+                        "Clock out of sync. {$server_msg}\n\n" .
+                        "Check this machine's clock (run `date`) and compare " .
+                        "it with the server's time.",
                 ];
             }
 
@@ -8877,9 +8879,9 @@ class ImportClient
                 return [
                     'code' => 'AUTH_CONTENT_TAMPERED',
                     'message' =>
-                        "The request body was modified between this machine and " .
-                        "the server. A proxy, CDN, or firewall may be altering " .
-                        "requests in transit.",
+                        "Request body was modified in transit. A proxy, CDN, " .
+                        "or firewall between this machine and the server is " .
+                        "altering the request content.",
                 ];
             }
 
@@ -8887,9 +8889,10 @@ class ImportClient
                 return [
                     'code' => 'AUTH_HEADERS_STRIPPED',
                     'message' =>
-                        "The server did not receive the authentication headers " .
-                        "({$server_msg}). A proxy, CDN, or security plugin may " .
-                        "be stripping custom headers from the request.",
+                        "Authentication headers were stripped. The server " .
+                        "reported: {$server_msg}\n\n" .
+                        "A proxy, CDN, or security plugin is removing custom " .
+                        "HTTP headers before they reach WordPress.",
                 ];
             }
 
@@ -8903,44 +8906,34 @@ class ImportClient
         if ($http_code === 503 && $server_msg !== null) {
             return [
                 'code' => 'EXPORT_NOT_CONFIGURED',
-                'message' => $server_msg,
+                'message' =>
+                    "The exporter plugin is installed but not configured. " .
+                    "The server reported: {$server_msg}",
             ];
         }
 
         // ── Not found ────────────────────────────────────────────
         if ($http_code === 404) {
+            $msg = "The exporter plugin is not installed on the remote site.";
             if ($looks_like_html) {
-                return [
-                    'code' => 'NOT_FOUND',
-                    'message' =>
-                        "The export API was not found (HTTP 404). The server " .
-                        "returned an HTML page, which means the exporter plugin " .
-                        "is not installed on the remote site.\n\n" .
-                        "Run `php reprint.phar install-exporter` for setup instructions.",
-                ];
+                $msg .= " The server returned an HTML 404 page instead of " .
+                         "the export API.";
+            } else {
+                $msg .= " The server returned HTTP 404.";
             }
-            return [
-                'code' => 'NOT_FOUND',
-                'message' =>
-                    "The export API was not found at this URL (HTTP 404).\n\n" .
-                    "Make sure the exporter plugin is installed and activated " .
-                    "on the remote site. Run `php reprint.phar install-exporter` " .
-                    "for setup instructions.",
-            ];
+            $msg .= "\n\nRun `php reprint.phar install-exporter` for setup " .
+                     "instructions.";
+            return ['code' => 'NOT_FOUND', 'message' => $msg];
         }
 
         // ── Server errors ────────────────────────────────────────
         if ($http_code >= 500) {
             $msg = $server_msg
-                ? "The remote server returned an error: {$server_msg}"
-                : "The remote server returned an internal error (HTTP {$http_code}).";
-            return [
-                'code' => 'SERVER_ERROR',
-                'message' =>
-                    $msg . "\n\n" .
-                    "This is a problem on the remote server. " .
-                    "Check its PHP error log for details.",
-            ];
+                ? "The remote server crashed: {$server_msg}"
+                : "The remote server crashed (HTTP {$http_code}).";
+            $msg .= "\n\nThis is a problem on the remote server. " .
+                     "Check its PHP error log for details.";
+            return ['code' => 'SERVER_ERROR', 'message' => $msg];
         }
 
         // ── HTML response on 200 (plugin not installed / wrong URL) ──
@@ -8948,10 +8941,11 @@ class ImportClient
             return [
                 'code' => 'HTML_RESPONSE',
                 'message' =>
-                    "The server returned an HTML page instead of the export API " .
-                    "response. The exporter plugin is not installed, or the URL " .
-                    "points to a regular web page.\n\n" .
-                    "Run `php reprint.phar install-exporter` for setup instructions.",
+                    "The exporter plugin is not installed on the remote site. " .
+                    "The server returned an HTML page instead of a JSON API " .
+                    "response.\n\n" .
+                    "Run `php reprint.phar install-exporter` for setup " .
+                    "instructions.",
             ];
         }
 
