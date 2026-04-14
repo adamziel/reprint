@@ -8825,7 +8825,72 @@ class ImportClient
 
         // ── Authentication / authorization ───────────────────────
         if ($http_code === 401 || $http_code === 403) {
-            return $this->diagnose_auth_error($http_code, $server_msg);
+            if ($this->hmac_client === null) {
+                return [
+                    'code' => 'AUTH_NO_SECRET',
+                    'message' =>
+                        "The remote site requires authentication but no --secret " .
+                        "was provided.\n\n" .
+                        "Pass --secret=YOUR_SECRET using the same secret that is " .
+                        "configured in the Site Export plugin on the remote site.",
+                ];
+            }
+
+            if ($server_msg === null) {
+                return [
+                    'code' => 'AUTH_FAILED',
+                    'message' => "Authentication failed (HTTP {$http_code}).",
+                ];
+            }
+
+            // The server tells us exactly what went wrong. Map each known
+            // HMAC error to a targeted message.
+
+            if (str_contains($server_msg, 'HMAC signature verification failed')) {
+                return [
+                    'code' => 'AUTH_SECRET_MISMATCH',
+                    'message' =>
+                        "The shared secret does not match. The --secret value must " .
+                        "be identical to the one configured in the Site Export " .
+                        "plugin settings (wp-admin → Site Export).",
+                ];
+            }
+
+            if (str_contains($server_msg, 'timestamp expired')) {
+                return [
+                    'code' => 'AUTH_CLOCK_SKEW',
+                    'message' =>
+                        "The request was rejected because the clocks are out of " .
+                        "sync. {$server_msg}\n\n" .
+                        "Make sure this machine's clock is accurate (run `date` " .
+                        "to check).",
+                ];
+            }
+
+            if (str_contains($server_msg, 'Content hash mismatch')) {
+                return [
+                    'code' => 'AUTH_CONTENT_TAMPERED',
+                    'message' =>
+                        "The request body was modified between this machine and " .
+                        "the server. A proxy, CDN, or firewall may be altering " .
+                        "requests in transit.",
+                ];
+            }
+
+            if (str_contains($server_msg, 'Missing X-Auth-')) {
+                return [
+                    'code' => 'AUTH_HEADERS_STRIPPED',
+                    'message' =>
+                        "The server did not receive the authentication headers " .
+                        "({$server_msg}). A proxy, CDN, or security plugin may " .
+                        "be stripping custom headers from the request.",
+                ];
+            }
+
+            return [
+                'code' => 'AUTH_FAILED',
+                'message' => "Authentication failed: {$server_msg}",
+            ];
         }
 
         // ── Export not configured (503 from exporter) ────────────
@@ -8890,83 +8955,6 @@ class ImportClient
             'message' => $server_msg
                 ? "HTTP error {$http_code}: {$server_msg}"
                 : "Unexpected HTTP status {$http_code}.",
-        ];
-    }
-
-    /**
-     * Diagnose a 401/403 authentication error by parsing the server's
-     * error message. The exporter returns specific HMAC failure reasons
-     * that we can turn into precise advice.
-     */
-    private function diagnose_auth_error(int $http_code, ?string $server_msg): array
-    {
-        // No --secret was passed but the server requires one.
-        if ($this->hmac_client === null) {
-            return [
-                'code' => 'AUTH_NO_SECRET',
-                'message' =>
-                    "The remote site requires authentication but no --secret " .
-                    "was provided.\n\n" .
-                    "Pass --secret=YOUR_SECRET using the same secret that is " .
-                    "configured in the Site Export plugin on the remote site.",
-            ];
-        }
-
-        if ($server_msg === null) {
-            return [
-                'code' => 'AUTH_FAILED',
-                'message' => "Authentication failed (HTTP {$http_code}).",
-            ];
-        }
-
-        // The server tells us exactly what went wrong. Map each known
-        // HMAC error to a targeted message.
-
-        if (str_contains($server_msg, 'HMAC signature verification failed')) {
-            return [
-                'code' => 'AUTH_SECRET_MISMATCH',
-                'message' =>
-                    "The shared secret does not match. The --secret value must " .
-                    "be identical to the one configured in the Site Export " .
-                    "plugin settings (wp-admin → Site Export).",
-            ];
-        }
-
-        if (str_contains($server_msg, 'timestamp expired')) {
-            return [
-                'code' => 'AUTH_CLOCK_SKEW',
-                'message' =>
-                    "The request was rejected because the clocks are out of " .
-                    "sync. {$server_msg}\n\n" .
-                    "Make sure this machine's clock is accurate (run `date` " .
-                    "to check).",
-            ];
-        }
-
-        if (str_contains($server_msg, 'Content hash mismatch')) {
-            return [
-                'code' => 'AUTH_CONTENT_TAMPERED',
-                'message' =>
-                    "The request body was modified between this machine and " .
-                    "the server. A proxy, CDN, or firewall may be altering " .
-                    "requests in transit.",
-            ];
-        }
-
-        if (str_contains($server_msg, 'Missing X-Auth-')) {
-            return [
-                'code' => 'AUTH_HEADERS_STRIPPED',
-                'message' =>
-                    "The server did not receive the authentication headers " .
-                    "({$server_msg}). A proxy, CDN, or security plugin may " .
-                    "be stripping custom headers from the request.",
-            ];
-        }
-
-        // Unknown auth error — show the server's message as-is.
-        return [
-            'code' => 'AUTH_FAILED',
-            'message' => "Authentication failed: {$server_msg}",
         ];
     }
 
