@@ -3693,6 +3693,11 @@ class ImportClient
         }
         if (!empty($options['runtime'])) {
             $stages[] = 'apply-runtime';
+            // php-builtin is the only runtime where we can start the server
+            // directly from the CLI (the others need external services).
+            if ($options['runtime'] === 'php-builtin') {
+                $stages[] = 'start';
+            }
         }
         return $stages;
     }
@@ -3709,6 +3714,7 @@ class ImportClient
             case 'db-apply':      return 'Importing database';
             case 'flat-docroot':  return 'Flattening layout';
             case 'apply-runtime': return 'Generating runtime';
+            case 'start':         return 'Starting server';
             default:              return $stage;
         }
     }
@@ -3953,10 +3959,76 @@ class ImportClient
         }
     }
 
+    /**
+     * Start the local server after apply-runtime has generated the config.
+     *
+     * For php-builtin, this runs start.sh via passthru so the user sees
+     * the server output directly. The process blocks until the user
+     * stops it with Ctrl-C. This is the last step in the pipeline — the
+     * pull is already marked complete before the server starts.
+     */
+    private function pull_start_server(array $options, int $step, int $total): void
+    {
+        $output_dir = $options['output_dir'] ?? $this->state_dir . '/runtime';
+        $start_sh = $output_dir . '/start.sh';
+
+        if (!file_exists($start_sh)) {
+            throw new RuntimeException(
+                "start.sh not found at {$start_sh}. " .
+                "apply-runtime may have failed to generate it."
+            );
+        }
+
+        $host = $options['host'] ?? 'localhost';
+        $port = (int) ($options['port'] ?? 8881);
+        $url = "http://{$host}:{$port}";
+
+        // Mark pull complete BEFORE starting the server, since the
+        // server blocks until Ctrl-C. This way, if the user kills the
+        // process, the state correctly shows "complete" and re-running
+        // pull won't redo the whole pipeline.
+        $this->state['pull']['stage'] = 'start';
+        $this->state['status'] = 'complete';
+        $this->save_state($this->state);
+
+        if ($this->is_tty && !$this->verbose_mode) {
+            $green = "\033[32m";
+            $bold = "\033[1m";
+            $dim = "\033[2m";
+            $cyan = "\033[36m";
+            $r = "\033[0m";
+            $this->clear_progress_line();
+            fwrite($this->progress_fd, "\n{$green}{$bold}✓ Pull complete{$r}\n\n");
+            fwrite($this->progress_fd, "  Starting the server at {$cyan}{$url}{$r}\n");
+            fwrite($this->progress_fd, "  {$dim}Press Ctrl-C to stop.{$r}\n\n");
+        }
+
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "server_starting",
+            "command" => "pull",
+            "url" => $url,
+            "start_sh" => $start_sh,
+            "message" => "Starting server at {$url}",
+        ], true);
+
+        // Hand off to start.sh. passthru passes stdout/stderr directly
+        // to the terminal so the user sees the PHP built-in server output.
+        passthru("bash " . escapeshellarg($start_sh), $exit_code);
+        $this->exit_code = $exit_code;
+    }
+
     private function run_pull(array $options): void
     {
         $this->pull_normalize_url();
         $this->quiet_lifecycle = true;
+
+        // Default --output-dir to {state-dir}/runtime when --runtime is
+        // provided. This lets users skip the --output-dir flag for the
+        // common case of just wanting to start the site.
+        if (!empty($options['runtime']) && empty($options['output_dir'])) {
+            $options['output_dir'] = $this->state_dir . '/runtime';
+        }
 
         $stages = $this->pull_stages($options);
         $total = count($stages);
@@ -4060,6 +4132,10 @@ class ImportClient
                         $this->run_apply_runtime($options);
                         $this->pull_print_done($step, $total, $stage);
                         break;
+
+                    case 'start':
+                        $this->pull_start_server($options, $step, $total);
+                        break;
                 }
             } catch (\Exception $e) {
                 // Output the error with context about where in the pipeline we failed
@@ -4090,26 +4166,30 @@ class ImportClient
             $this->save_state($this->state);
         }
 
-        // All stages done
-        $this->state['pull']['stage'] = 'complete';
-        $this->state['status'] = 'complete';
-        $this->save_state($this->state);
+        // All stages done. The 'start' stage handles its own completion
+        // message and state persistence (it needs to save before blocking
+        // on the server process).
+        if (!in_array('start', $stages)) {
+            $this->state['pull']['stage'] = 'complete';
+            $this->state['status'] = 'complete';
+            $this->save_state($this->state);
 
-        if ($this->is_tty && !$this->verbose_mode) {
-            $green = "\033[32m";
-            $bold = "\033[1m";
-            $dim = "\033[2m";
-            $r = "\033[0m";
-            fwrite($this->progress_fd, "\n{$green}{$bold}✓ Pull complete{$r}\n");
-            fwrite($this->progress_fd, "  {$dim}Files:{$r}  {$this->fs_root}\n");
-            fwrite($this->progress_fd, "  {$dim}State:{$r}  {$this->state_dir}\n");
-            $sql_file = $this->state_dir . "/db.sql";
-            if (file_exists($sql_file)) {
-                $size = filesize($sql_file);
-                $human = $this->format_bytes($size);
-                fwrite($this->progress_fd, "  {$dim}SQL:{$r}    {$sql_file} ({$human})\n");
+            if ($this->is_tty && !$this->verbose_mode) {
+                $green = "\033[32m";
+                $bold = "\033[1m";
+                $dim = "\033[2m";
+                $r = "\033[0m";
+                fwrite($this->progress_fd, "\n{$green}{$bold}✓ Pull complete{$r}\n");
+                fwrite($this->progress_fd, "  {$dim}Files:{$r}  {$this->fs_root}\n");
+                fwrite($this->progress_fd, "  {$dim}State:{$r}  {$this->state_dir}\n");
+                $sql_file = $this->state_dir . "/db.sql";
+                if (file_exists($sql_file)) {
+                    $size = filesize($sql_file);
+                    $human = $this->format_bytes($size);
+                    fwrite($this->progress_fd, "  {$dim}SQL:{$r}    {$sql_file} ({$human})\n");
+                }
+                fwrite($this->progress_fd, "  {$dim}Log:{$r}    {$this->audit_log}\n");
             }
-            fwrite($this->progress_fd, "  {$dim}Log:{$r}    {$this->audit_log}\n");
         }
 
         $this->output_progress([
@@ -11552,6 +11632,7 @@ if (
                 "  4. Import    — apply SQL to a local database (if --target-db)\n" .
                 "  5. Flatten   — reassemble into standard WP layout (if --flatten-to)\n" .
                 "  6. Runtime   — generate server config (if --runtime)\n" .
+                "  7. Start     — launch the local server (--runtime=php-builtin only)\n" .
                 "\n" .
                 "Each step retries automatically on server timeouts. If the process is\n" .
                 "interrupted, re-run the same command to resume from where it left off.\n" .
