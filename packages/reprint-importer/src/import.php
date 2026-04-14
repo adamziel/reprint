@@ -1010,6 +1010,9 @@ class ImportClient
     /** @var bool Whether the last curl request timed out. */
     private $last_curl_timeout = false;
 
+    /** @var string|null Machine-readable error code from the last diagnose_http_error() call. */
+    public $last_error_code = null;
+
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
 
@@ -1581,11 +1584,15 @@ class ImportClient
                     $this->exit_code = 2;
                 }
             } catch (Exception $e) {
-                $this->output_progress([
+                $progress = [
                     "status" => "error",
                     "error" => $e->getMessage(),
                     "message" => "Error: " . $e->getMessage(),
-                ]);
+                ];
+                if ($this->last_error_code !== null) {
+                    $progress["error_code"] = $this->last_error_code;
+                }
+                $this->output_progress($progress);
                 $this->write_status_file($e->getMessage());
                 throw $e;
             }
@@ -1637,11 +1644,15 @@ class ImportClient
                 $this->exit_code = 2;
             }
         } catch (Exception $e) {
-            $this->output_progress([
+            $progress = [
                 "status" => "error",
                 "error" => $e->getMessage(),
                 "message" => "Error: " . $e->getMessage(),
-            ]);
+            ];
+            if ($this->last_error_code !== null) {
+                $progress["error_code"] = $this->last_error_code;
+            }
+            $this->output_progress($progress);
             $this->write_status_file($e->getMessage());
             throw $e;
         }
@@ -8960,9 +8971,12 @@ class ImportClient
 
     /**
      * Format a diagnosed error as a single string for display.
+     * Also stores the error code on the instance for output_progress
+     * and write_status_file to pick up.
      */
     private function format_diagnosed_error(array $diagnosis): string
     {
+        $this->last_error_code = $diagnosis['code'];
         return $diagnosis['message'];
     }
 
@@ -9901,6 +9915,7 @@ class ImportClient
             "status" => $status,
             "phase" => $phase,
             "error" => $error,
+            "error_code" => $error !== null ? $this->last_error_code : null,
             "ts" => microtime(true),
         ];
 
@@ -11079,11 +11094,13 @@ if (
         exit($client->exit_code);
     } catch (\Throwable $e) {
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
+        $error_code = isset($client) ? $client->last_error_code : null;
         if ($is_tty) {
             fwrite(STDERR, "\nError: " . $e->getMessage() . "\n");
         } else {
             $error = [
                 "error" => $e->getMessage(),
+                "error_code" => $error_code,
                 "exception" => get_class($e),
                 "file" => $e->getFile(),
                 "line" => $e->getLine(),
