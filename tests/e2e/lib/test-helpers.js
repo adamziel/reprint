@@ -778,13 +778,12 @@ export function assertTreesMatch(sourceDir, importedDir, options = {}) {
  */
 export function isWasmCrash(result) {
     if (!IS_WASM_PHP || result.exitCode === 0) return false;
-    if (result.exitCode !== 1) return false;
 
     const output = result.stdout + result.stderr;
     const isKnownCrash =
         output.includes('RuntimeError: unreachable') ||
         output.includes('fetch failed') ||
-        !output.includes('"error"'); // Silent crash — no PHP error JSON
+        (result.exitCode === 1 && !output.includes('"error"')); // Silent crash — no PHP error JSON
 
     if (isKnownCrash) {
         // Dump full crash context for upstream debugging

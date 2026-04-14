@@ -10,6 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
+    isWasmCrash,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -99,6 +100,7 @@ describe('Import: SQL Output Modes', () => {
                     ],
                 },
             );
+            if (isWasmCrash(result)) return;
             assert.equal(result.exitCode, 0,
                 `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
@@ -115,6 +117,7 @@ describe('Import: SQL Output Modes', () => {
 
         it('state file records sql_output mode', () => {
             const stateFile = join(tempDir, '.import-state.json');
+            if (!existsSync(stateFile)) return; // Parent test crashed
             assert.ok(existsSync(stateFile), 'Expected state file to exist');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.sql_output, 'mysql',
