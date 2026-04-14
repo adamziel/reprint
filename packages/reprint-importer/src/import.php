@@ -8792,9 +8792,13 @@ class ImportClient
      * turn opaque "HTTP 403" messages into something a non-expert can
      * act on.
      *
-     * Returns ['message' => ..., 'suggestion' => ..., 'code' => ...].
+     * Returns ['message' => ..., 'code' => ...].
+     *
+     * @param int         $http_code    HTTP status code (0 for connection failures).
+     * @param string|null $body         Response body (may be HTML, JSON, or empty).
+     * @param string|null $redirect_url The Location header / CURLINFO_REDIRECT_URL for 3xx responses.
      */
-    private function diagnose_http_error(int $http_code, ?string $body): array
+    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null): array
     {
         $body = $body !== null && $body !== false ? trim($body) : '';
         $looks_like_html = $body !== '' && (
@@ -8815,36 +8819,48 @@ class ImportClient
 
         // ── Redirects ────────────────────────────────────────────
         if ($http_code >= 300 && $http_code < 400) {
+            $target = $redirect_url ? " to {$redirect_url}" : '';
             return [
                 'code' => 'REDIRECT',
-                'message' => "The server returned a redirect (HTTP {$http_code}) instead of the export API response.",
-                'suggestion' =>
-                    "Double-check the site URL — make sure you are using the canonical URL " .
-                    "(http vs https, www vs non-www). " .
-                    "Reprint does not follow redirects to avoid silently connecting to the wrong server.",
+                'message' =>
+                    "The server redirected{$target} (HTTP {$http_code}).\n\n" .
+                    "Reprint does not follow redirects to avoid silently connecting " .
+                    "to the wrong server. Retry with the target URL above.",
             ];
         }
 
         // ── Authentication / authorization ───────────────────────
         if ($http_code === 401 || $http_code === 403) {
-            $msg = $server_msg ?? "Authentication failed (HTTP {$http_code}).";
+            return $this->diagnose_auth_error($http_code, $server_msg);
+        }
+
+        // ── Export not configured (503 from exporter) ────────────
+        if ($http_code === 503 && $server_msg !== null) {
             return [
-                'code' => 'AUTH_FAILED',
-                'message' => $msg,
-                'suggestion' =>
-                    "Double-check that --secret matches the secret configured in the " .
-                    "Site Export plugin settings on the remote site.",
+                'code' => 'EXPORT_NOT_CONFIGURED',
+                'message' => $server_msg,
             ];
         }
 
         // ── Not found ────────────────────────────────────────────
         if ($http_code === 404) {
+            if ($looks_like_html) {
+                return [
+                    'code' => 'NOT_FOUND',
+                    'message' =>
+                        "The export API was not found (HTTP 404). The server " .
+                        "returned an HTML page, which means the exporter plugin " .
+                        "is not installed on the remote site.\n\n" .
+                        "Run `php reprint.phar install-exporter` for setup instructions.",
+                ];
+            }
             return [
                 'code' => 'NOT_FOUND',
-                'message' => "The export API was not found at this URL (HTTP 404).",
-                'suggestion' =>
+                'message' =>
+                    "The export API was not found at this URL (HTTP 404).\n\n" .
                     "Make sure the exporter plugin is installed and activated " .
-                    "on the remote site. Run `php reprint.phar install-exporter` for setup instructions.",
+                    "on the remote site. Run `php reprint.phar install-exporter` " .
+                    "for setup instructions.",
             ];
         }
 
@@ -8855,10 +8871,10 @@ class ImportClient
                 : "The remote server returned an internal error (HTTP {$http_code}).";
             return [
                 'code' => 'SERVER_ERROR',
-                'message' => $msg,
-                'suggestion' =>
-                    "This is a problem on the remote server, not on your side. " .
-                    "Check the remote server's PHP error log for details.",
+                'message' =>
+                    $msg . "\n\n" .
+                    "This is a problem on the remote server. " .
+                    "Check its PHP error log for details.",
             ];
         }
 
@@ -8866,10 +8882,10 @@ class ImportClient
         if ($http_code === 200 && $looks_like_html) {
             return [
                 'code' => 'HTML_RESPONSE',
-                'message' => "The server returned an HTML page instead of JSON.",
-                'suggestion' =>
-                    "The exporter plugin is probably not installed, or the URL " .
-                    "points to a regular web page instead of the export API. " .
+                'message' =>
+                    "The server returned an HTML page instead of the export API " .
+                    "response. The exporter plugin is not installed, or the URL " .
+                    "points to a regular web page.\n\n" .
                     "Run `php reprint.phar install-exporter` for setup instructions.",
             ];
         }
@@ -8880,21 +8896,92 @@ class ImportClient
             'message' => $server_msg
                 ? "HTTP error {$http_code}: {$server_msg}"
                 : "Unexpected HTTP status {$http_code}.",
-            'suggestion' => null,
         ];
     }
 
     /**
-     * Format a diagnosed error as a single string.
-     * Combines the message and suggestion into one readable block.
+     * Diagnose a 401/403 authentication error by parsing the server's
+     * error message. The exporter returns specific HMAC failure reasons
+     * that we can turn into precise advice.
+     */
+    private function diagnose_auth_error(int $http_code, ?string $server_msg): array
+    {
+        // No --secret was passed but the server requires one.
+        if ($this->hmac_client === null) {
+            return [
+                'code' => 'AUTH_NO_SECRET',
+                'message' =>
+                    "The remote site requires authentication but no --secret " .
+                    "was provided.\n\n" .
+                    "Pass --secret=YOUR_SECRET using the same secret that is " .
+                    "configured in the Site Export plugin on the remote site.",
+            ];
+        }
+
+        if ($server_msg === null) {
+            return [
+                'code' => 'AUTH_FAILED',
+                'message' => "Authentication failed (HTTP {$http_code}).",
+            ];
+        }
+
+        // The server tells us exactly what went wrong. Map each known
+        // HMAC error to a targeted message.
+
+        if (str_contains($server_msg, 'HMAC signature verification failed')) {
+            return [
+                'code' => 'AUTH_SECRET_MISMATCH',
+                'message' =>
+                    "The shared secret does not match. The --secret value must " .
+                    "be identical to the one configured in the Site Export " .
+                    "plugin settings (wp-admin → Site Export).",
+            ];
+        }
+
+        if (str_contains($server_msg, 'timestamp expired')) {
+            return [
+                'code' => 'AUTH_CLOCK_SKEW',
+                'message' =>
+                    "The request was rejected because the clocks are out of " .
+                    "sync. {$server_msg}\n\n" .
+                    "Make sure this machine's clock is accurate (run `date` " .
+                    "to check).",
+            ];
+        }
+
+        if (str_contains($server_msg, 'Content hash mismatch')) {
+            return [
+                'code' => 'AUTH_CONTENT_TAMPERED',
+                'message' =>
+                    "The request body was modified between this machine and " .
+                    "the server. A proxy, CDN, or firewall may be altering " .
+                    "requests in transit.",
+            ];
+        }
+
+        if (str_contains($server_msg, 'Missing X-Auth-')) {
+            return [
+                'code' => 'AUTH_HEADERS_STRIPPED',
+                'message' =>
+                    "The server did not receive the authentication headers " .
+                    "({$server_msg}). A proxy, CDN, or security plugin may " .
+                    "be stripping custom headers from the request.",
+            ];
+        }
+
+        // Unknown auth error — show the server's message as-is.
+        return [
+            'code' => 'AUTH_FAILED',
+            'message' => "Authentication failed: {$server_msg}",
+        ];
+    }
+
+    /**
+     * Format a diagnosed error as a single string for display.
      */
     private function format_diagnosed_error(array $diagnosis): string
     {
-        $out = $diagnosis['message'];
-        if ($diagnosis['suggestion']) {
-            $out .= "\n\n" . $diagnosis['suggestion'];
-        }
-        return $out;
+        return $diagnosis['message'];
     }
 
     /**
@@ -8942,10 +9029,11 @@ class ImportClient
         }
 
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
         @curl_close($ch);
 
         if ($http_code !== 200) {
-            $diagnosis = $this->diagnose_http_error($http_code, $body);
+            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
             return [
                 "ok" => false,
                 "http_code" => $http_code,
@@ -9272,6 +9360,7 @@ class ImportClient
             }
 
             $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
             $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
             $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
         } finally {
@@ -9300,7 +9389,7 @@ class ImportClient
                 true,
             );
 
-            $diagnosis = $this->diagnose_http_error($http_code, $error_body);
+            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url);
             $error_msg = $this->format_diagnosed_error($diagnosis);
 
             // Append stack trace from the server if available.
