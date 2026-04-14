@@ -8802,20 +8802,10 @@ class ImportClient
     {
         $body = $body !== null && $body !== false ? trim($body) : '';
 
-        // Try JSON first — when the exporter is responding, the body
-        // is always a JSON object with an "error" field.
-        $server_msg = null;
-        $is_json = false;
-        if ($body !== '') {
-            $decoded = json_decode($body, true);
-            if (is_array($decoded)) {
-                $is_json = true;
-                $server_msg = $decoded['error'] ?? null;
-            }
-        }
+        $decoded = json_decode($body, true);
+        $server_msg = is_array($decoded) ? ($decoded['error'] ?? null) : null;
 
-        // Only guess HTML when json_decode didn't parse anything.
-        $looks_like_html = !$is_json && $body !== '' && (
+        $looks_like_html = !is_array($decoded) && $body !== '' && (
             stripos($body, '<html') !== false ||
             stripos($body, '<!doctype') !== false ||
             str_starts_with($body, '<')
