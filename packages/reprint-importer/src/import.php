@@ -40,6 +40,9 @@ require_once __DIR__ . '/lib/host/load.php';
 // Load target runtime appliers (consume a manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
+// External merge sort for large index files when exec() is unavailable
+require_once __DIR__ . '/lib/external-merge-sort.php';
+
 /**
  * The wire-protocol version this importer speaks.
  *
@@ -8686,15 +8689,16 @@ class ImportClient
 
         $tmp = $path . ".sorted";
 
-        // Try the fast path first: shell out to `sort` for O(n log n) with
-        // no memory pressure.  If anything goes wrong, fall through to the
-        // PHP-native sorting below.
+        // Fast path: shell out to `sort` for O(n log n) with no memory
+        // pressure.  If anything goes wrong, fall through to the pure-PHP
+        // external merge sort below.
         if ($this->try_exec_sort($path, $tmp)) {
             return;
         }
 
-        // Estimate how much memory we can use: 60% of whatever headroom
-        // remains between current usage and the PHP memory limit.
+        // Pure-PHP fallback: external merge sort.  Splits the file into
+        // memory-sized chunks, sorts each in memory, then streams a k-way
+        // merge.  Handles files of any size without exec().
         $mem_limit_raw = ini_get("memory_limit");
         $mem_limit = ($mem_limit_raw === "-1" || $mem_limit_raw === "" || $mem_limit_raw === "0")
             ? 0
@@ -8704,56 +8708,17 @@ class ImportClient
             ? (int) (($mem_limit - $mem_used) * 0.6)
             : 256 * 1024 * 1024;
 
-        $size = filesize($path);
-        // In-memory sorting requires roughly 4-5x the file size (raw lines +
-        // parsed entries + sorted output string), so be conservative.
-        if ($size * 5 > $available) {
-            throw new RuntimeException(
-                "Index file is too large to sort without exec() " .
-                "({$size} bytes, ~" . round($available / 1024 / 1024) . " MB available)",
-            );
-        }
-
-        $raw_lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        if ($raw_lines === false) {
-            throw new RuntimeException("Failed to read index file for sorting");
-        }
-        $entries = [];
-        foreach ($raw_lines as $line) {
+        $key_extractor = function (string $line): ?string {
             $entry = $this->parse_index_line($line);
-            if ($entry === null) {
-                continue;
-            }
-            $entries[] = [
-                "path" => $entry["path"],
-                "line" => $line,
-            ];
-        }
-        // Free the raw lines array before sorting — we've extracted what we need.
-        unset($raw_lines);
-
-        usort($entries, function ($a, $b) {
-            return strcmp($a["path"], $b["path"]);
-        });
-
-        $out = fopen($tmp, "w");
-        if (!$out) {
-            throw new RuntimeException("Failed to write sorted index file");
-        }
-        $prev_path = null;
-        foreach ($entries as $entry) {
-            if ($entry["path"] === $prev_path) {
-                continue;
-            }
-            $prev_path = $entry["path"];
-            fwrite($out, $entry["line"] . "\n");
-        }
-        fclose($out);
-        unset($entries);
-
-        if (!rename($tmp, $path)) {
-            throw new RuntimeException("Failed to replace sorted index file");
-        }
+            return $entry !== null ? $entry['path'] : null;
+        };
+        $sorter = new ExternalMergeSort(
+            $key_extractor,
+            max(1024, (int) ($available * 0.8)),
+            true,
+            dirname($path),
+        );
+        $sorter->sort($path);
     }
 
     /**
