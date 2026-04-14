@@ -8800,7 +8800,7 @@ class ImportClient
      */
     private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null): array
     {
-        $body = $body !== null && $body !== false ? trim($body) : '';
+        $body = ($body !== null && $body !== false) ? $body : '';
 
         $decoded = json_decode($body, true);
         $server_msg = is_array($decoded) ? ($decoded['error'] ?? null) : null;
