@@ -3863,6 +3863,59 @@ class ImportClient
     }
 
     /**
+     * Check whether preflight detected that the exporter plugin is not
+     * installed. If so, show a friendly error with setup instructions
+     * for TTY users and a machine-readable error code for programmatic
+     * consumers. Returns true if the plugin is missing (caller should
+     * abort the pipeline).
+     */
+    private function pull_check_plugin_installed(int $step, int $total): bool
+    {
+        $preflight = $this->state["preflight"] ?? null;
+        $ok = ($preflight["http_code"] ?? 0) === 200 && !empty($preflight["data"]["ok"]);
+        if ($ok) {
+            return false;
+        }
+
+        $error = $preflight["error"] ?? null;
+        $error_code = $this->last_error_code;
+        $is_not_installed =
+            $error_code === 'NOT_FOUND' ||
+            $error_code === 'HTML_RESPONSE';
+
+        if ($is_not_installed && $this->is_tty && !$this->verbose_mode) {
+            $red = "\033[31m";
+            $bold = "\033[1m";
+            $dim = "\033[2m";
+            $cyan = "\033[36m";
+            $r = "\033[0m";
+            fwrite($this->progress_fd, "\n{$red}  ✗ The exporter plugin is not installed on this site.{$r}\n\n");
+            fwrite($this->progress_fd, "  To set it up, run:\n\n");
+            fwrite($this->progress_fd, "    {$cyan}php reprint.phar install-exporter{$r}\n\n");
+            fwrite($this->progress_fd, "  {$dim}This will show the download URL and step-by-step instructions.{$r}\n");
+        } elseif ($this->is_tty && !$this->verbose_mode) {
+            $red = "\033[31m";
+            $dim = "\033[2m";
+            $r = "\033[0m";
+            fwrite($this->progress_fd, "\n{$red}  ✗ Preflight failed{$r}\n");
+            if ($error) {
+                fwrite($this->progress_fd, "  {$dim}" . $error . "{$r}\n");
+            }
+        }
+
+        $this->output_progress([
+            "status" => "error",
+            "command" => "pull",
+            "failed_stage" => "preflight",
+            "error_code" => $error_code,
+            "error" => $error ?? "Preflight check failed",
+            "message" => $error ?? "Preflight check failed",
+        ]);
+
+        return true;
+    }
+
+    /**
      * Command: pull
      *
      * Orchestrates a full site clone by running the lower-level commands
@@ -3896,12 +3949,16 @@ class ImportClient
         }
 
         // Print header
+        $host = parse_url($this->remote_url, PHP_URL_HOST) ?? $this->remote_url;
         if ($this->is_tty && !$this->verbose_mode) {
             $bold = "\033[1m";
             $dim = "\033[2m";
             $r = "\033[0m";
-            $host = parse_url($this->remote_url, PHP_URL_HOST) ?? $this->remote_url;
-            fwrite($this->progress_fd, "{$bold}Pulling {$host}{$r}\n");
+            if ($start_index > 0) {
+                fwrite($this->progress_fd, "{$bold}Resuming pull from {$host}{$r}\n");
+            } else {
+                fwrite($this->progress_fd, "{$bold}Pulling {$host}{$r}\n");
+            }
         }
         $this->output_progress([
             "type" => "lifecycle",
@@ -3933,6 +3990,14 @@ class ImportClient
                 switch ($stage) {
                     case 'preflight':
                         $this->run_preflight();
+                        // Check whether the exporter plugin is installed. If
+                        // not, show setup instructions and stop early instead
+                        // of continuing to files-pull (which would fail with
+                        // a confusing "no root directories" error).
+                        if ($this->pull_check_plugin_installed($step, $total)) {
+                            $this->exit_code = 1;
+                            return;
+                        }
                         $this->pull_print_done($step, $total, $stage, $this->pull_preflight_summary());
                         break;
 
@@ -3974,6 +4039,7 @@ class ImportClient
                     "command" => "pull",
                     "failed_stage" => $stage,
                     "completed_stages" => array_slice($stages, 0, $i),
+                    "error_code" => $this->last_error_code,
                     "error" => $e->getMessage(),
                     "message" => "Pull failed at {$stage}: " . $e->getMessage(),
                 ]);
