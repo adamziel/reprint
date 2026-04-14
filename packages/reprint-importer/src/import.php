@@ -10722,15 +10722,13 @@ if (
         echo "want to mirror. It exposes the HTTP API that reprint connects to.\n";
         echo "\n";
 
+        echo "{$bold}Step 1: Download the plugin{$reset}\n";
+        echo "\n";
         if ($is_dev) {
-            echo "{$bold}You are running a development build ({$version}).{$reset}\n";
-            echo "There is no pre-built release for this version.\n";
-            echo "\n";
-            echo "Download the latest release from:\n";
+            echo "  You are running a development build ({$version}).\n";
+            echo "  Download the latest release from:\n";
             echo "  {$cyan}{$releases_url}{$reset}\n";
         } else {
-            echo "{$bold}Step 1: Download the plugin{$reset}\n";
-            echo "\n";
             echo "  {$cyan}{$zip_url}{$reset}\n";
         }
 
