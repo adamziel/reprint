@@ -8839,7 +8839,13 @@ class ImportClient
             if ($server_msg === null) {
                 return [
                     'code' => 'AUTH_FAILED',
-                    'message' => "Authentication failed (HTTP {$http_code}).",
+                    'message' =>
+                        "The server rejected the request (HTTP {$http_code}) " .
+                        "but did not say why. This is unusual — the exporter " .
+                        "plugin always explains authentication failures.\n\n" .
+                        "A server-level firewall, .htaccess rule, or security " .
+                        "plugin may be blocking the request before it reaches " .
+                        "WordPress.",
                 ];
             }
 
