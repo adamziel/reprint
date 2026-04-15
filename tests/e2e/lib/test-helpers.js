@@ -326,16 +326,11 @@ export function runImporter(url, outputDir, command, options = {}) {
                 };
                 break;
             }
-            // If the WASM runtime keeps crashing (not just partial exit 2),
-            // bail out after 2 consecutive crashes instead of burning the
-            // entire wall timeout on a deterministic crash.
+            // If the WASM runtime crashes, bail out immediately.
+            // Retrying is pointless — the crash is deterministic for these
+            // code paths, and each attempt takes ~40s of WASM startup.
             if (isWasmCrash(result)) {
-                consecutiveCrashes++;
-                if (consecutiveCrashes >= 2) {
-                    break;
-                }
-            } else {
-                consecutiveCrashes = 0;
+                break;
             }
             attempts += 1;
             const next = runImporterOnce(command, commandExtraArgs);
