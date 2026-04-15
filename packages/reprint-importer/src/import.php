@@ -6438,11 +6438,12 @@ class ImportClient
                     }
                     $this->index_entries_counted++;
                 }
-                // Show indexing progress so the user knows something is
-                // happening during the (often lengthy) index phase.
-                if ($this->index_entries_counted > 0) {
-                    $this->show_progress_line("Indexing — " . number_format($this->index_entries_counted) . " files found");
-                }
+                // Tick the spinner so the user sees activity during
+                // the (often lengthy) index phase. Don't show a count —
+                // the raw index includes shared directories and symlink
+                // targets that won't all be downloaded, so the number
+                // would be confusingly larger than the download total.
+                $this->tick_spinner();
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "index");
             } elseif ($chunk_type === "metadata") {
