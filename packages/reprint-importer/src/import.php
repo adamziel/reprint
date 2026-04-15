@@ -8059,11 +8059,6 @@ class ImportClient
         }
 
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
-        $target_for_local = $this->map_absolute_symlink_target_for_local_mirror(
-            $path,
-            $local_path,
-            $target,
-        );
 
         // Skip if anything already exists at this path — regular file, symlink
         // (even to a file), or directory.  This preserves hosting symlinks like
