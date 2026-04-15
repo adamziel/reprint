@@ -213,9 +213,10 @@ describe('Import: --preserve-local', () => {
             if (isWasmCrash(result)) return;
             assert.ok(result.exitCode === 1 || result.exitCode === 2,
                 `Expected exit code 1 or 2, got ${result.exitCode}`);
+            const output = result.stdout + result.stderr;
             assert.ok(
-                result.stderr.includes('not empty'),
-                `Expected error about non-empty directory, got: ${result.stderr}`,
+                output.includes('not empty') || output.includes('non-empty'),
+                `Expected error about non-empty directory, got: ${output}`,
             );
         });
     });

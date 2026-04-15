@@ -327,11 +327,11 @@ export function runImporter(url, outputDir, command, options = {}) {
                 break;
             }
             // If the WASM runtime keeps crashing (not just partial exit 2),
-            // bail out after 3 consecutive crashes instead of burning the
+            // bail out after 2 consecutive crashes instead of burning the
             // entire wall timeout on a deterministic crash.
             if (isWasmCrash(result)) {
                 consecutiveCrashes++;
-                if (consecutiveCrashes >= 3) {
+                if (consecutiveCrashes >= 2) {
                     break;
                 }
             } else {

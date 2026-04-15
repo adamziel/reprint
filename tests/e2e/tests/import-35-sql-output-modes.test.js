@@ -98,6 +98,7 @@ describe('Import: SQL Output Modes', () => {
                         '--mysql-user=e2e_admin',
                         '--mysql-password=e2e_password',
                     ],
+                    wallTimeout: 150000, // Must fit within vitest's 180s test timeout
                 },
             );
             if (isWasmCrash(result)) return;
