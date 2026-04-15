@@ -1024,6 +1024,12 @@ class ImportClient
      */
     private $quiet_lifecycle = false;
 
+    /** @var int Spinner frame counter for pull progress. */
+    private $spinner_tick = 0;
+
+    /** @var string|null Label of the currently active pull stage (for the spinner line). */
+    private $pull_active_label = null;
+
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
 
@@ -1305,6 +1311,15 @@ class ImportClient
     private function show_progress_line(string $message): void
     {
         if ($this->is_tty && !$this->verbose_mode) {
+            // In pull mode, prefix with a rotating spinner character.
+            if ($this->quiet_lifecycle) {
+                $frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+                // Each frame is 3 bytes (UTF-8 Braille)
+                $idx = ($this->spinner_tick++ % 10) * 3;
+                $char = substr($frames, $idx, 3);
+                $message = "  \033[36m{$char}\033[0m " . $message;
+            }
+
             $width = $this->get_terminal_width();
 
             // Truncate message if too long, leaving room for "..."
@@ -3706,19 +3721,21 @@ class ImportClient
     private function pull_stage_label(string $stage): string
     {
         switch ($stage) {
-            case 'preflight':     return 'Preflight';
-            case 'files-pull':    return 'Pulling files';
-            case 'db-pull':       return 'Pulling database';
+            case 'preflight':     return 'Connecting';
+            case 'files-pull':    return 'Downloading files';
+            case 'db-pull':       return 'Downloading database';
             case 'db-apply':      return 'Importing database';
             case 'flat-docroot':  return 'Flattening layout';
-            case 'apply-runtime': return 'Generating runtime';
+            case 'apply-runtime': return 'Preparing runtime';
             case 'start':         return 'Starting server';
             default:              return $stage;
         }
     }
 
     /**
-     * Print a pull stage header to the TTY progress stream.
+     * Print the initial spinner line when a pull stage starts.
+     * This line will be overwritten by progress updates and eventually
+     * replaced by a checkmark when the stage completes.
      */
     private function pull_print_header(int $step, int $total, string $stage): void
     {
@@ -3727,32 +3744,32 @@ class ImportClient
         }
         $this->clear_progress_line();
         $label = $this->pull_stage_label($stage);
-        $dim = "\033[2m";
-        $bold = "\033[1m";
+        $this->pull_active_label = $label;
+        $cyan = "\033[36m";
         $r = "\033[0m";
-        fwrite($this->progress_fd, "\n{$dim}[{$step}/{$total}]{$r} {$bold}{$label}{$r}\n");
+        fwrite($this->progress_fd, "\r\033[K  {$cyan}⠋{$r} {$label}");
     }
 
     /**
-     * Print a checkmark line for a completed stage.
+     * Replace the spinner line with a checkmark and summary.
      */
     private function pull_print_done(int $step, int $total, string $stage, ?string $summary = null): void
     {
         if (!$this->is_tty) {
             return;
         }
-        // Clear the sub-command's progress line before printing the checkmark
         $this->clear_progress_line();
         $green = "\033[32m";
         $dim = "\033[2m";
         $r = "\033[0m";
         $label = $this->pull_stage_label($stage);
         $extra = $summary ? " {$dim}— {$summary}{$r}" : "";
-        fwrite($this->progress_fd, "{$green}  ✓{$r} {$label}{$extra}\n");
+        fwrite($this->progress_fd, "  {$green}✓{$r} {$label}{$extra}\n");
+        $this->pull_active_label = null;
     }
 
     /**
-     * Print a dim line for a previously completed stage (on resume).
+     * Print a dim checkmark for a previously completed stage (on resume).
      */
     private function pull_print_skipped(int $step, int $total, string $stage): void
     {
@@ -3762,7 +3779,7 @@ class ImportClient
         $dim = "\033[2m";
         $r = "\033[0m";
         $label = $this->pull_stage_label($stage);
-        fwrite($this->progress_fd, "{$dim}[{$step}/{$total}] {$label} ✓{$r}\n");
+        fwrite($this->progress_fd, "  {$dim}✓ {$label}{$r}\n");
     }
 
     /**
@@ -3996,9 +4013,8 @@ class ImportClient
             $cyan = "\033[36m";
             $r = "\033[0m";
             $this->clear_progress_line();
-            fwrite($this->progress_fd, "\n{$green}{$bold}✓ Pull complete{$r}\n\n");
-            fwrite($this->progress_fd, "  Starting the server at {$cyan}{$url}{$r}\n");
-            fwrite($this->progress_fd, "  {$dim}Press Ctrl-C to stop.{$r}\n\n");
+            fwrite($this->progress_fd, "  {$green}✓{$r} Ready at {$cyan}{$bold}{$url}{$r}\n");
+            fwrite($this->progress_fd, "    {$dim}Press Ctrl-C to stop.{$r}\n\n");
         }
 
         $this->output_progress([
@@ -4105,13 +4121,8 @@ class ImportClient
         $host = parse_url($this->remote_url, PHP_URL_HOST) ?? $this->remote_url;
         if ($this->is_tty && !$this->verbose_mode) {
             $bold = "\033[1m";
-            $dim = "\033[2m";
             $r = "\033[0m";
-            if ($start_index > 0) {
-                fwrite($this->progress_fd, "{$bold}Resuming pull from {$host}{$r}\n");
-            } else {
-                fwrite($this->progress_fd, "{$bold}Pulling {$host}{$r}\n");
-            }
+            fwrite($this->progress_fd, "\n{$bold}Pulling {$host}{$r}\n\n");
         }
         $this->output_progress([
             "type" => "lifecycle",
@@ -4143,10 +4154,6 @@ class ImportClient
                 switch ($stage) {
                     case 'preflight':
                         $this->run_preflight();
-                        // Check whether the exporter plugin is installed. If
-                        // not, show setup instructions and stop early instead
-                        // of continuing to files-pull (which would fail with
-                        // a confusing "no root directories" error).
                         if ($this->pull_check_plugin_installed($step, $total)) {
                             $this->exit_code = 1;
                             return;
@@ -4158,21 +4165,27 @@ class ImportClient
                         $this->pull_run_until_complete(function () {
                             $this->run_files_sync();
                         });
-                        $this->pull_print_done($step, $total, $stage);
+                        $count = $this->index_count();
+                        $this->pull_print_done($step, $total, $stage,
+                            $count > 0 ? number_format($count) . " files" : null);
                         break;
 
                     case 'db-pull':
                         $this->pull_run_until_complete(function () {
                             $this->run_db_sync();
                         });
-                        $this->pull_print_done($step, $total, $stage);
+                        $sql_file = $this->state_dir . "/db.sql";
+                        $size = file_exists($sql_file) ? $this->format_bytes(filesize($sql_file)) : null;
+                        $this->pull_print_done($step, $total, $stage, $size);
                         break;
 
                     case 'db-apply':
                         $this->pull_run_until_complete(function () use ($options) {
                             $this->run_db_apply($options);
                         });
-                        $this->pull_print_done($step, $total, $stage);
+                        $stmts = (int) ($this->state["apply"]["statements_executed"] ?? 0);
+                        $this->pull_print_done($step, $total, $stage,
+                            $stmts > 0 ? number_format($stmts) . " statements" : null);
                         break;
 
                     case 'flat-docroot':
@@ -4206,9 +4219,10 @@ class ImportClient
                     $red = "\033[31m";
                     $dim = "\033[2m";
                     $r = "\033[0m";
-                    fwrite($this->progress_fd, "\n{$red}✗ Pull failed at: " . $this->pull_stage_label($stage) . "{$r}\n");
-                    fwrite($this->progress_fd, "  {$dim}" . $e->getMessage() . "{$r}\n");
-                    fwrite($this->progress_fd, "\n  Re-run the same command to resume from this point.\n");
+                    $this->clear_progress_line();
+                    fwrite($this->progress_fd, "  {$red}✗ " . $this->pull_stage_label($stage) . "{$r}\n");
+                    fwrite($this->progress_fd, "    {$dim}" . $e->getMessage() . "{$r}\n\n");
+                    fwrite($this->progress_fd, "  Re-run the same command to resume.\n");
                 }
                 throw $e;
             }
@@ -4231,16 +4245,7 @@ class ImportClient
                 $bold = "\033[1m";
                 $dim = "\033[2m";
                 $r = "\033[0m";
-                fwrite($this->progress_fd, "\n{$green}{$bold}✓ Pull complete{$r}\n");
-                fwrite($this->progress_fd, "  {$dim}Files:{$r}  {$this->fs_root}\n");
-                fwrite($this->progress_fd, "  {$dim}State:{$r}  {$this->state_dir}\n");
-                $sql_file = $this->state_dir . "/db.sql";
-                if (file_exists($sql_file)) {
-                    $size = filesize($sql_file);
-                    $human = $this->format_bytes($size);
-                    fwrite($this->progress_fd, "  {$dim}SQL:{$r}    {$sql_file} ({$human})\n");
-                }
-                fwrite($this->progress_fd, "  {$dim}Log:{$r}    {$this->audit_log}\n");
+                fwrite($this->progress_fd, "\n{$green}{$bold}Done.{$r} {$dim}Files in {$this->fs_root}{$r}\n");
             }
         }
 
