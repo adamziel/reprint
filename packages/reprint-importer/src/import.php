@@ -1027,6 +1027,9 @@ class ImportClient
     /** @var int Spinner frame counter for pull progress. */
     private $spinner_tick = 0;
 
+    /** @var int Cumulative count of index entries written (survives retries). */
+    private $index_entries_counted = 0;
+
     /** @var float Last time the spinner was drawn (microtime). */
     private $spinner_last_draw = 0.0;
 
@@ -6305,6 +6308,11 @@ class ImportClient
         }
 
         $mode = file_exists($this->remote_index_file) ? "a" : "w";
+        // Initialize the index counter from the existing file so resume
+        // shows a monotonically increasing count.
+        if ($mode === "a" && $this->index_entries_counted === 0) {
+            $this->index_entries_counted = $this->count_newlines($this->remote_index_file);
+        }
         if ($mode === "w") {
             $this->audit_log(
                 "FILE CREATE | {$this->remote_index_file} | downloading fresh remote index",
@@ -6428,13 +6436,12 @@ class ImportClient
                     if ($bytes === false) {
                         throw new RuntimeException("Failed to write to remote index file (disk full?)");
                     }
-                    $context->index_entries_written = ($context->index_entries_written ?? 0) + 1;
+                    $this->index_entries_counted++;
                 }
                 // Show indexing progress so the user knows something is
                 // happening during the (often lengthy) index phase.
-                $n = $context->index_entries_written ?? 0;
-                if ($n > 0) {
-                    $this->show_progress_line("Indexing — " . number_format($n) . " files found");
+                if ($this->index_entries_counted > 0) {
+                    $this->show_progress_line("Indexing — " . number_format($this->index_entries_counted) . " files found");
                 }
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "index");
@@ -11009,8 +11016,6 @@ class StreamingContext
     public $saw_completion = false;
     // When true, skip writing the current file (preserve-local mode)
     public $skip_current_file = false;
-    // Index entries written so far (for progress display during file_index)
-    public $index_entries_written = 0;
 }
 
 /**
