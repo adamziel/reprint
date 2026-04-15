@@ -1,6 +1,6 @@
 <?php
 /**
- * Site Export library – constants and function declarations, no request handling.
+ * Reprint Exporter library – constants and function declarations, no request handling.
  *
  * Require this file to get access to the export API functions without
  * triggering any HTTP dispatch.
@@ -167,7 +167,7 @@ function _site_export_verify_hmac(string $secret): ?string {
     }
 
     if (!class_exists('Site_Export_HMAC_Server')) {
-        return 'Site Export runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.';
+        return 'Reprint Exporter runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.';
     }
 
     $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
@@ -192,7 +192,7 @@ function _site_export_default_authenticate(): void {
     }
 
     if (empty($secret) || !is_string($secret)) {
-        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Site Export.');
+        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Reprint Exporter.');
     }
 
     $auth_error = _site_export_verify_hmac($secret);
@@ -252,7 +252,7 @@ function _site_export_handle_api_request(array $options = []): void {
             'line' => $errline,
             'type' => $errno,
         ];
-        error_log('Site Export API error: ' . json_encode($error));
+        error_log('Reprint Exporter API error: ' . json_encode($error));
         http_response_code(500);
         @header('Content-Type: application/json');
         echo json_encode($error);
@@ -265,7 +265,7 @@ function _site_export_handle_api_request(array $options = []): void {
             'file' => $e->getFile(),
             'line' => $e->getLine(),
         ];
-        error_log('Site Export API exception: ' . json_encode($error));
+        error_log('Reprint Exporter API exception: ' . json_encode($error));
         http_response_code(500);
         @header('Content-Type: application/json');
         echo json_encode($error);
@@ -285,7 +285,7 @@ function _site_export_handle_api_request(array $options = []): void {
     if ($export_runtime === null) {
         _site_export_error(
             500,
-            'Site Export runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.'
+            'Reprint Exporter runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.'
         );
     }
 

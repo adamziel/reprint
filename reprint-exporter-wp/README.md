@@ -1,4 +1,4 @@
-# Reprint — WordPress Plugin
+# Reprint Exporter — WordPress Plugin
 
 When working from this monorepo checkout, run `composer install` in
 `reprint-exporter-wp/` to populate the bundled `vendor/` directory used by the
