@@ -1030,8 +1030,6 @@ class ImportClient
     /** @var int Cumulative count of index entries written (survives retries). */
     private $index_entries_counted = 0;
 
-    /** @var int High-water mark for files_done — ensures the download progress only grows. */
-    private $files_done_hwm = 0;
 
 
     /** @var float Last time the spinner was drawn (microtime). */
@@ -8605,14 +8603,6 @@ class ImportClient
             );
 
             $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
-            // Never show a number lower than what was previously displayed.
-            // Between retries, files_imported resets to 0 but download_list_done
-            // catches up from the state offset — there's a brief window where
-            // the sum dips before the offset is recalculated.
-            if ($files_done > $this->files_done_hwm) {
-                $this->files_done_hwm = $files_done;
-            }
-            $files_done = $this->files_done_hwm;
             $files_total = $this->download_list_total;
             $file_fraction = ($files_total !== null && $files_total > 0)
                 ? $files_done / $files_total
