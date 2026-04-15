@@ -3691,9 +3691,9 @@ class ImportClient
         }
         if (!empty($options['runtime'])) {
             $stages[] = 'apply-runtime';
-            // php-builtin is the only runtime where we can start the server
-            // directly from the CLI (the others need external services).
-            if ($options['runtime'] === 'php-builtin') {
+            // php-builtin and playground-cli both generate a start.sh
+            // that can be launched directly from the CLI.
+            if (in_array($options['runtime'], ['php-builtin', 'playground-cli'], true)) {
                 $stages[] = 'start';
             }
         }
@@ -5324,7 +5324,6 @@ class ImportClient
             $target_db = $options["target_db"] ?? "sqlite_database";
 
             if (!$target_path) {
-                fwrite(STDERR, "[db-apply] No --target-sqlite-path specified");
                 $content_dir = rtrim(
                     $this->state["preflight"]["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
                     "/",
@@ -5335,7 +5334,8 @@ class ImportClient
                     );
                 }
                 $target_path = $this->get_filesystem_root_path() . $content_dir . '/database/.ht.sqlite';
-                fwrite(STDERR, "[db-apply] No --target-sqlite-path specified, defaulting to: $target_path\n");
+                $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
+                $this->show_lifecycle_line("SQLite path: {$target_path}\n");
             }
 
             // Persist target database configuration for apply-runtime.
