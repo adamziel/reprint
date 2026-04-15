@@ -83,3 +83,17 @@ jobs:
           git tag "v${{ steps.version.outputs.value }}"
           git push origin "v${{ steps.version.outputs.value }}"
           echo "Tagged and pushed v${{ steps.version.outputs.value }}"
+
+      - name: Bump trunk to next dev version
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          NEXT_DEV="${MAJOR}.$((MINOR + 1)).0-dev"
+
+          git checkout trunk
+          sed -i "s/Version: [0-9][0-9.]*\(-dev\)\{0,1\}/Version: $NEXT_DEV/" reprint-exporter-wp/index.php
+          sed -i "s/SITE_EXPORT_VERSION', '[0-9][0-9.]*\(-dev\)\{0,1\}'/SITE_EXPORT_VERSION', '$NEXT_DEV'/" reprint-exporter-wp/lib.php
+
+          git add reprint-exporter-wp/index.php reprint-exporter-wp/lib.php
+          git commit -m "Bump plugin version to $NEXT_DEV after v$VERSION release"
+          git push origin trunk
