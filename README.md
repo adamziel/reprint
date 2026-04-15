@@ -6,62 +6,32 @@
 
 # Reprint — WordPress Site Migration
 
-## Composer packages
+Reprint moves a WordPress site from one server to another over plain HTTP. It installs a small exporter plugin on the source site, then runs an importer CLI on the target. The importer pulls the entire filesystem and database in streaming chunks, resuming automatically when a request is interrupted by timeouts, memory limits, or network failures. No SSH, no full-site ZIP files, no manual database dumps.
 
-The exporter and importer are published as separate Composer packages:
+The system is designed for the cheapest shared hosting: PHP 7.4, two PHP workers, 64 MB memory, 30-second execution limits. It budgets its own resource usage to avoid tripping host abuse detectors, backs off adaptively when the server is slow, and recovers gracefully from mid-stream crashes. The result is a portable copy of the site — files, database, and generated runtime configuration — ready to serve on the new host.
 
-- [`wp-php-toolkit/reprint-exporter`](https://packagist.org/packages/wp-php-toolkit/reprint-exporter) — Streaming export engine (SQL dumps, file trees, cursor-based resumption).
-- [`wp-php-toolkit/reprint-importer`](https://packagist.org/packages/wp-php-toolkit/reprint-importer) — Streaming site importer with CLI and PHAR support.
+## Table of Contents
 
-Install whichever you need:
+- [Getting Started](#getting-started)
+- [Usage](#usage)
+  - [Migration walkthrough](#migration-walkthrough)
+  - [CLI reference](#cli-reference)
+  - [Status files](#status-files)
+- [Installation](#installation)
+  - [Composer packages](#composer-packages)
+  - [Technical requirements](#technical-requirements)
+  - [Repository layout](#repository-layout)
+- [Architecture](#architecture)
+  - [File synchronization](#file-synchronization)
+  - [Database synchronization](#database-synchronization)
+  - [Authentication](#authentication)
+  - [Error handling](#error-handling)
+  - [Resource management](#resource-management)
+  - [Transport](#transport)
+- [Known Limitations](#known-limitations)
+- [Development](#development)
 
-```bash
-composer require wp-php-toolkit/reprint-exporter
-composer require wp-php-toolkit/reprint-importer
-```
-
-Or add them to your `composer.json`:
-
-```json
-{
-    "require": {
-        "wp-php-toolkit/reprint-exporter": "dev-main",
-        "wp-php-toolkit/reprint-importer": "dev-main"
-    }
-}
-```
-
-Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org/packages/wp-php-toolkit/data-liberation) and [`wp-php-toolkit/html`](https://packagist.org/packages/wp-php-toolkit/html), which Composer pulls in automatically.
-
-## Repository layout
-
-- `packages/reprint-exporter` — Source for the `wp-php-toolkit/reprint-exporter` Composer package.
-- `packages/reprint-importer` — Source for the `wp-php-toolkit/reprint-importer` Composer package.
-- `reprint-exporter-wp` — WordPress plugin distribution that bundles `reprint-exporter`.
-- `importer/import.php` — thin compatibility wrapper for the importer package entrypoint.
-
-### Technical requirements
-
-On the **migration source** side:
-
- - PHP 7.4+
- - ext-json — JSON encoding/decoding
- - ext-hash — hash_hmac, hash_equals
- - ext-zlib — deflate_init/deflate_add for gzip streaming
- - ext-pdo + ext-pdo_mysql — database access (already in composer.json)
-
-On the **migration target** side:
-
- - PHP 7.4+
- - ext-json — JSON encoding/decoding
- - ext-hash — hash_hmac, hash_equals
- - ext-zlib — deflate_init/deflate_add for gzip streaming
- - ext-pdo + ext-pdo_mysql — for MySQL targets
- - ext-pdo + ext-pdo_sqlite — for SQLite targets via sqlite-database-integration
-
-## Integrating with a hosting platform
-
-### Getting started
+## Getting Started
 
 Download the latest release artifacts from [GitHub Releases](../../releases):
 
@@ -77,7 +47,9 @@ can be pre-packaged with a `./reprint-exporter-wp/secret.php` file where a pre-d
 return 'MY_SECRET_STRING';
 ```
 
-### Migrating the data
+## Usage
+
+### Migration walkthrough
 
 The migration process has a few steps:
 
@@ -344,7 +316,7 @@ INI values), SiteGround, and a generic default.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 
-#### Shoehorning the site onto your platform
+#### After the migration
 
 You've got a copy of the remote files in the `--fs-root` directory and
 the database either already applied (via `db-apply`) or in `--state-dir/db.sql`.
@@ -360,6 +332,27 @@ the same table prefix as your environment.
 If you used `--sql-output=mysql`, the SQL was already executed — there's
 no `db.sql` to import. For `--sql-output=stdout`, the SQL was piped to
 whatever tool was reading stdout (typically `mysql` CLI).
+
+### CLI reference
+
+The importer accepts the following commands:
+
+```
+php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
+```
+
+* `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
+* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
+* `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
+* `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
+* `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
+* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
+* `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
+* `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
+* `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
+* `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
+
+All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
 
 ### Status files
 
@@ -527,32 +520,66 @@ truncated or rotated, so it provides a complete history of the migration.
 Pass `--verbose` to also print audit log entries to the console as they happen.
 This is useful for debugging but noisy for production use.
 
-### Other CLI Commands
+## Installation
 
-The importer accepts the following commands:
+### Composer packages
 
+The exporter and importer are published as separate Composer packages:
+
+- [`wp-php-toolkit/reprint-exporter`](https://packagist.org/packages/wp-php-toolkit/reprint-exporter) — Streaming export engine (SQL dumps, file trees, cursor-based resumption).
+- [`wp-php-toolkit/reprint-importer`](https://packagist.org/packages/wp-php-toolkit/reprint-importer) — Streaming site importer with CLI and PHAR support.
+
+Install whichever you need:
+
+```bash
+composer require wp-php-toolkit/reprint-exporter
+composer require wp-php-toolkit/reprint-importer
 ```
-php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
+
+Or add them to your `composer.json`:
+
+```json
+{
+    "require": {
+        "wp-php-toolkit/reprint-exporter": "dev-main",
+        "wp-php-toolkit/reprint-importer": "dev-main"
+    }
+}
 ```
 
-* `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
-* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
-* `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
-* `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
-* `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
-* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
-* `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
-* `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
-* `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
-* `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
+Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org/packages/wp-php-toolkit/data-liberation) and [`wp-php-toolkit/html`](https://packagist.org/packages/wp-php-toolkit/html), which Composer pulls in automatically.
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+### Technical requirements
 
-# Architecture
+On the **migration source** side:
 
-## File synchronization
+ - PHP 7.4+
+ - ext-json — JSON encoding/decoding
+ - ext-hash — hash_hmac, hash_equals
+ - ext-zlib — deflate_init/deflate_add for gzip streaming
+ - ext-pdo + ext-pdo_mysql — database access (already in composer.json)
 
-### Synchronization approach
+On the **migration target** side:
+
+ - PHP 7.4+
+ - ext-json — JSON encoding/decoding
+ - ext-hash — hash_hmac, hash_equals
+ - ext-zlib — deflate_init/deflate_add for gzip streaming
+ - ext-pdo + ext-pdo_mysql — for MySQL targets
+ - ext-pdo + ext-pdo_sqlite — for SQLite targets via sqlite-database-integration
+
+### Repository layout
+
+- `packages/reprint-exporter` — Source for the `wp-php-toolkit/reprint-exporter` Composer package.
+- `packages/reprint-importer` — Source for the `wp-php-toolkit/reprint-importer` Composer package.
+- `reprint-exporter-wp` — WordPress plugin distribution that bundles `reprint-exporter`.
+- `importer/import.php` — thin compatibility wrapper for the importer package entrypoint.
+
+## Architecture
+
+### File synchronization
+
+#### Synchronization approach
 
 The system is designed to perform an initial directory tree synchronization followed by incremental updates.
 
@@ -574,7 +601,7 @@ Once the first HTTP request is completed, the migration target sends another HTT
 batch of files. It provides the cursor from the previous response. The migration source then responds
 with the next batch of files. This repeats until the initial synchronization is complete.
 
-### Synchronization Cursor
+#### Synchronization Cursor
 
 The cursor consists of the file path, ctime, and byte offset. When provided, the migration source will resume the traversal
 from the given point. If the cursor is not provided, the migration source will stream from the beginning of the first requested
@@ -584,7 +611,7 @@ root directory.
 since the last synchronization. If it has, the migration source will communicate that via a dedicated multipart chunk and move on to
 the next file.
 
-### Migration index
+#### Migration index
 
 As the migration target receives files from the migration source, it builds a local index of all the paths, ctimes, and filesizes
 it has seen. The on-disk index is a sorted JSON-lines file, where each line is a JSON object containing `path`, `ctime`, `size`,
@@ -609,7 +636,7 @@ What we **don't** do:
   it required keeping a local state on the remote site which is
   undesirable.
 
-### Directory listing order
+#### Directory listing order
 
 The file index is produced by traversing directories depth-first. Each directory's immediate entries are sorted in bytewise
 lexicographic order (equivalent to `strcmp` with `LC_ALL=C`). When a directory entry is encountered, that directory entry is
@@ -637,7 +664,7 @@ What we **don't** do:
 * Use a `DirectoryListing` abstraction class. We tried one and removed it — plain `scandir()` is simpler
   and the abstraction added complexity without benefit.
 
-### Volatile files
+#### Volatile files
 
 Sometimes a file will keep changing every minute and we'll start streaming it, but won't finish before it's modified again. In that case,
 the **migration target** chooses how to handle it. A few choices are:
@@ -648,7 +675,7 @@ the **migration target** chooses how to handle it. A few choices are:
 * Retry a few more times.
 * Just ignore that file (and tell the user).
 
-### Symlink handling
+#### Symlink handling
 
 Symlinks are automatically recreated during import. The importer receives symlink chunks from the
 export stream and calls `symlink()` to recreate them locally. This is safe because all paths are
@@ -663,7 +690,7 @@ the `--fs-root`.
 To disable this behavior, pass `--no-follow-symlinks`. Symlinks pointing
 outside the directory root will then be skipped instead of followed.
 
-#### Server-side cycle detection
+##### Server-side cycle detection
 
 Hosting environments like WP.com Atomic can have symlink structures that create
 infinite traversal loops — for example, `/srv/htdocs/srv` symlinked back to `/srv`,
@@ -677,9 +704,9 @@ already-scheduled root, traversal skips it. This catches cycles, overlapping roo
 and version aliases in a single check, preventing the index from exploding with
 duplicate entries.
 
-## Database synchronization
+### Database synchronization
 
-### SQL dump approach
+#### SQL dump approach
 
 MySQLDumpProducer generates SQL dumps in batches (default 250 rows per INSERT statement) with cursor-based
 resumption. The dump is standard SQL — `DROP TABLE IF EXISTS`, `CREATE TABLE`, and multi-row `INSERT`
@@ -688,7 +715,7 @@ statements — directly importable with `mysql` CLI or any standard tool.
 The cursor tracks the last row processed using either the primary key,
 when available, or offset otherwise.
 
-### Primary key strategies
+#### Primary key strategies
 
 The producer handles three scenarios:
 
@@ -697,20 +724,20 @@ The producer handles three scenarios:
 * **No PK**: Falls back to OFFSET-based pagination. This is slower (MySQL must skip rows on each resume)
   but is the only option when there's no stable key to anchor the cursor.
 
-### Oversized rows
+#### Oversized rows
 
 Rows whose encoded size exceeds the statement size limit need special handling. With a primary key,
 the producer skips the oversized row and advances the cursor past it — the row is lost but the dump
 can continue. Without a primary key, the producer fails entirely. OFFSET-based pagination can't reliably
 skip a single row without risking data loss, so failing loudly is the safer choice.
 
-### Binary and string data encoding
+#### Binary and string data encoding
 
 Binary and string column data is encoded as base64 in the SQL dump (wrapped in `FROM_BASE64()`). Earlier iterations
 tried raw hex encoding and escaped binary. Base64 was chosen as the
 most conscise option.
 
-### Statement size negotiation
+#### Statement size negotiation
 
 The client detects its local MySQL's `max_allowed_packet`, sends it to the server via the
 `--max-allowed-packet` option, and the server caps SQL statements at `min(client, server) * 0.8`.
@@ -723,20 +750,20 @@ What we **don't** do:
   is directly importable with standard MySQL tools. Still, it would
   be a nice optional feature to add.
 
-## Authentication
+### Authentication
 
 Every request is authenticated with HMAC signatures computed based on the request data and
 a shared secret. If the signature doesn't match the remote site's expectations, it refuses
 to process the request. The HTTP responses are assumed to be trusted and don't expose any HMAC.
 They couldn't do it easily anyway, since the response body is streamed and not known upfront.
 
-## Error handling
+### Error handling
 
 Streaming endpoints use try/catch with error chunks embedded inline in the multipart stream. When something
 goes wrong mid-response, the client sees the error as another multipart chunk rather than the default PHP 
 output such as "Fatal Error". Global error and shutdown handlers.
 
-## Resource management
+### Resource management
 
 We need to be careful about the resource usage or we risk web hosts blocking us.
 
@@ -781,7 +808,7 @@ What we **don't** do:
 * Aim for a fixed target runtime. The exporter almost always runs until its time budget expires, so the meaningful
   signal is throughput under that budget, not how close we got to an arbitrary time goal.
 
-## Transport
+### Transport
 
 Data is sent over HTTP using multipart/mixed content-type. It gives us a way to split large files into chunks and send
 them over multiple requests, while transmitting per-chunk metadata (cursor, chunk size, etc.).
@@ -843,32 +870,11 @@ state — the database references files that don't exist, or files exist that
 the database doesn't know about. For sites with significant write traffic,
 consider freezing writes or enabling maintenance mode during the migration.
 
-## Next steps
-
-* Possibly run more checks in `preflight-assert`. What would they be?
-* Make sure we can ctrl+c the process without hanging if we don't have pcntl and posix extensions.
-* More tests for large files and large databases.
-* Support SQLite sites.
-* Confirm the importer never sends a request larger than the allowed PHP
-  limits, or, if it does and the response indicates that, it backs off
-  and tries a smaller body size. Also, make sure the body's gzipped.
-* Importer — emit dedicated errors when we run out of disk space or DB space on the importing end.
-  We can be reactive (detect out-of-space errors when they happen) since we won't know the storage
-  quota upfront in most shared hosting environments.
-* Symlink handling — use a single bulk request to index all symlink targets instead of one request
-  per symlink.
-* Sites using multiple databases (either multiple MySQL instances or also Postgres, Redis, etc.)
-* Rewrite URLs in the incoming files. `db-apply --rewrite-url` handles the database, but files (CSS, JS, HTML
-  templates) may also contain hardcoded URLs. We have structured parsers for all these formats but it's a
-  significant addition.
-* Support for directories with more files than we can sort in memory at once. A million files with 64 byte names
-  require around 100MB of memory to sort. If you have so many files, you better have that much memory available.
-
 ## Development
 
 ### Submodule
 
-The MySQL lexer and parser live in the [sqlite-database-integration](https://github.com/WordPress/sqlite-database-integration) repository, pulled in as a git submodule at `lib/sqlite-database-integration/`. After cloning (see [Getting started](#getting-started)), run:
+The MySQL lexer and parser live in the [sqlite-database-integration](https://github.com/WordPress/sqlite-database-integration) repository, pulled in as a git submodule at `lib/sqlite-database-integration/`. After cloning, run:
 
 ```bash
 composer install
