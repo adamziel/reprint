@@ -149,7 +149,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
             );
         });
 
-        it('resume completes after removing crash hook', async () => {
+        it('resume completes after removing crash hook', { timeout: 300000 }, async () => {
             // Remove the crashing hook so subsequent requests succeed.
             removeTestHooks(site);
 
@@ -157,7 +157,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
                 secret: getSiteSecret(site),
                 extraArgs: mysqlArgs(importDb),
                 maxResumeAttempts: 50,
-                wallTimeout: 60000,
+                wallTimeout: 270000,
             });
             if (isWasmCrash(result)) return;
             assert.equal(result.exitCode, 0,

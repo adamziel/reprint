@@ -61,14 +61,15 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             await conn.end();
         });
 
-        it('completes via multiple resume cycles and database matches source', async () => {
+        it('completes via multiple resume cycles and database matches source', { timeout: 300000 }, async () => {
             // Use --max-exec=1 to force the server to pause frequently,
             // creating many resume cycles. auto-resume handles exit code 2.
+            // WASM PHP takes ~12s per invocation, so this needs a long timeout.
             const result = runImporter(importUrl(), tempDir, 'db-sync', {
                 secret: getSiteSecret(site),
                 extraArgs: [...mysqlArgs(importDb), '--max-exec=1'],
                 maxResumeAttempts: 200,
-                wallTimeout: 90000,
+                wallTimeout: 270000,
             });
             if (isWasmCrash(result)) return;
             assert.equal(result.exitCode, 0,
@@ -116,7 +117,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             await conn.end();
         });
 
-        it('loads .sql-buffer from disk and logs recovery', () => {
+        it('loads .sql-buffer from disk and logs recovery', { timeout: 300000 }, () => {
             // Run preflight so db-sync can proceed
             runImporter(importUrl(), tempDir, 'preflight', {
                 secret: getSiteSecret(site),
