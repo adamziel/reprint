@@ -31,6 +31,9 @@ jobs:
       - name: Build reprint.phar
         run: ./bin/build-reprint-phar.sh
 
+      - name: Stamp plugin version from git tag
+        run: ./bin/stamp-plugin-version.sh "${GITHUB_REF_NAME#v}"
+
       - name: Package reprint-exporter-wp.zip
         run: cd reprint-exporter-wp && zip -r ../reprint-exporter-wp.zip . -x '*/secret.php'
 
