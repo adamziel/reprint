@@ -1339,6 +1339,14 @@ class ImportClient
     {
         if ($this->is_tty && !$this->verbose_mode) {
             if ($this->quiet_lifecycle) {
+                // Rate-limit in pull mode to avoid flooding the terminal.
+                // Hundreds of updates per second cause visual artifacts
+                // because the terminal can't redraw fast enough — \r
+                // writes pile up and appear as scrolling lines.
+                $now = microtime(true);
+                if ($now - $this->spinner_last_draw < 0.05) {
+                    return;
+                }
                 $this->spinner_tick++;
                 $this->spinner_last_draw = microtime(true);
                 // Remember the raw content so tick_spinner can redraw
