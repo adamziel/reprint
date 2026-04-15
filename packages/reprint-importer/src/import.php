@@ -1357,7 +1357,11 @@ class ImportClient
             }
 
             $message = $this->truncate_for_terminal($message);
-            fwrite($this->progress_fd, "\r\033[K" . $message);
+            // Disable line wrap → write → re-enable. If truncation
+            // miscalculates width, the terminal clips at the right
+            // edge instead of wrapping onto the next line (which would
+            // leave ghost text that \r\033[K can't clear).
+            fwrite($this->progress_fd, "\033[?7l\r\033[K" . $message . "\033[?7h");
         }
     }
 
@@ -1409,14 +1413,15 @@ class ImportClient
                 $char = substr($frames, $idx, 3);
                 $line = "  \033[36m{$char}\033[0m {$this->pull_last_progress}";
             }
-            fwrite($this->progress_fd, "\r\033[K" . $this->truncate_for_terminal($line));
+            $line = $this->truncate_for_terminal($line);
+            fwrite($this->progress_fd, "\033[?7l\r\033[K{$line}\033[?7h");
             return;
         }
 
         $frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
         $idx = ($this->spinner_tick % 10) * 3;
         $char = substr($frames, $idx, 3);
-        fwrite($this->progress_fd, "\r\033[K  \033[36m{$char}\033[0m {$this->pull_active_label}");
+        fwrite($this->progress_fd, "\033[?7l\r\033[K  \033[36m{$char}\033[0m {$this->pull_active_label}\033[?7h");
     }
 
     /**
@@ -1453,8 +1458,19 @@ class ImportClient
 
     private ?int $terminal_width_cache = null;
 
-    private function get_terminal_width(): int
+    /** @internal Override point for tests — return non-null to bypass tput. */
+    protected function get_terminal_width_override(): ?int
     {
+        return null;
+    }
+
+    protected function get_terminal_width(): int
+    {
+        // Allow subclasses (tests) to override the width detection.
+        $override = $this->get_terminal_width_override();
+        if ($override !== null) {
+            return $override;
+        }
         if ($this->terminal_width_cache !== null) {
             return $this->terminal_width_cache;
         }
@@ -1470,30 +1486,69 @@ class ImportClient
     }
 
     /**
-     * Truncate a message to fit the terminal width.
-     *
-     * Strips ANSI escape codes for width measurement, uses mb_strwidth
-     * for correct multi-byte character widths (the progress bar uses
-     * Unicode ━ and ░ which are 3 bytes each but 1 display column), and
-     * uses mb_substr to avoid cutting mid-character.
+     * Measure the display width of a string, ignoring ANSI escape codes.
+     * Uses mb_strwidth when available for correct multi-byte widths.
      */
-    private function truncate_for_terminal(string $message): string
+    protected function display_width(string $message): int
     {
-        $width = $this->get_terminal_width();
         $stripped = preg_replace('/\033\[[0-9;]*m/', '', $message);
-        $display_len = function_exists('mb_strwidth')
+        return function_exists('mb_strwidth')
             ? mb_strwidth($stripped, 'UTF-8')
             : strlen($stripped);
-        if ($display_len <= $width) {
+    }
+
+    /**
+     * Truncate a message to fit the terminal width.
+     *
+     * Preserves ANSI escape codes (colors) while truncating the visible
+     * text. Walks through the string character by character, tracking
+     * display columns consumed, and cuts when the limit is reached.
+     */
+    protected function truncate_for_terminal(string $message): string
+    {
+        $width = $this->get_terminal_width();
+        if ($this->display_width($message) <= $width) {
             return $message;
         }
-        // How many display columns to trim. Cut from the stripped version
-        // then reconstruct with the ANSI codes dropped — simpler and
-        // reliable since escape codes have zero display width.
-        $cut = function_exists('mb_strimwidth')
-            ? mb_strimwidth($stripped, 0, $width - 3, '...', 'UTF-8')
-            : substr($stripped, 0, $width - 3) . '...';
-        return $cut;
+
+        // Walk through preserving ANSI codes but counting display chars.
+        $limit = $width - 3; // room for "..."
+        $result = '';
+        $cols = 0;
+        $len = strlen($message);
+        for ($i = 0; $i < $len; ) {
+            // ANSI escape sequence — copy verbatim, zero display width
+            if ($message[$i] === "\033" && $i + 1 < $len && $message[$i + 1] === '[') {
+                $end = $i + 2;
+                while ($end < $len && !ctype_alpha($message[$end])) {
+                    $end++;
+                }
+                if ($end < $len) $end++; // include the final letter
+                $result .= substr($message, $i, $end - $i);
+                $i = $end;
+                continue;
+            }
+
+            // Multi-byte UTF-8 character
+            $byte = ord($message[$i]);
+            if ($byte < 0x80) { $char_len = 1; }
+            elseif ($byte < 0xE0) { $char_len = 2; }
+            elseif ($byte < 0xF0) { $char_len = 3; }
+            else { $char_len = 4; }
+            $char = substr($message, $i, $char_len);
+
+            $char_width = function_exists('mb_strwidth')
+                ? mb_strwidth($char, 'UTF-8')
+                : 1;
+            if ($cols + $char_width > $limit) {
+                break;
+            }
+            $result .= $char;
+            $cols += $char_width;
+            $i += $char_len;
+        }
+
+        return $result . "\033[0m...";
     }
 
     /**
