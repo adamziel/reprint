@@ -32,10 +32,7 @@ jobs:
         run: ./bin/build-reprint-phar.sh
 
       - name: Stamp plugin version from git tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/Version: 0\.0\.0-dev/Version: $VERSION/" reprint-exporter-wp/index.php
-          sed -i "s/'0\.0\.0-dev'/'$VERSION'/" reprint-exporter-wp/lib.php
+        run: ./bin/stamp-plugin-version.sh "${GITHUB_REF_NAME#v}"
 
       - name: Package reprint-exporter-wp.zip
         run: cd reprint-exporter-wp && zip -r ../reprint-exporter-wp.zip . -x '*/secret.php'
