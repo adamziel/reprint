@@ -1,3 +1,9 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/reprint-logo-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/reprint-logo.svg">
+  <img src="assets/reprint-logo.svg" alt="Reprint" width="250">
+</picture>
+
 # Reprint — WordPress Site Migration
 
 ## Composer packages
