@@ -13,7 +13,6 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     createMysqlConnection,
-    isWasmCrash,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -90,7 +89,6 @@ CREATE TABLE wp_edge_cases (
         const result = runImporter(importUrl(), tempDir, 'db-sync', {
             secret: getSiteSecret(site),
         });
-        if (isWasmCrash(result)) return;
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
         const sqlFile = join(tempDir, 'db.sql');

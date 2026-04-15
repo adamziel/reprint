@@ -10,7 +10,6 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
-    isWasmCrash,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -101,7 +100,6 @@ describe('Import: SQL Output Modes', () => {
                     wallTimeout: 150000, // Must fit within vitest's 180s test timeout
                 },
             );
-            if (isWasmCrash(result)) return;
             assert.equal(result.exitCode, 0,
                 `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 

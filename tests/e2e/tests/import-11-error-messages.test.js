@@ -7,7 +7,6 @@ import assert from 'node:assert/strict';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    isWasmCrash,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -51,11 +50,10 @@ describe('Import: Error Messages', () => {
                 secret: 'any-secret',
                 timeout: 15000,
             });
-            if (isWasmCrash(result)) return;
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for unreachable server');
             const output = (result.stdout + result.stderr).toLowerCase();
             assert.ok(
-                output.includes('connect') || output.includes('refused') || output.includes('error') || output.includes('curl') || output.includes('failed'),
+                output.includes('connect') || output.includes('refused') || output.includes('error') || output.includes('curl') || output.includes('failed') || output.includes('unreachable'),
                 `Expected connection error message, got: ${result.stdout + result.stderr}`
             );
         } finally {

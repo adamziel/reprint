@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret,
-    apiRequest, isWasmCrash,
+    apiRequest,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -46,12 +46,11 @@ describe('Import: 301 Redirect', () => {
             });
             // WASM PHP may crash before PHP can report the error — that still
             // counts as "detected the problem", just not gracefully.
-            if (isWasmCrash(result)) return;
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for redirect');
             const output = result.stdout + result.stderr;
             assert.ok(
-                output.includes('301') || output.includes('HTTP error'),
-                `Expected 301 or HTTP error in output, got:\n${output}`
+                output.includes('301') || output.includes('HTTP error') || output.includes('RuntimeError') || output.includes('fetch failed'),
+                `Expected 301/HTTP error or WASM crash in output, got:\n${output}`
             );
         } finally {
             cleanupTempDir(tempDir);
@@ -66,12 +65,11 @@ describe('Import: 301 Redirect', () => {
                 secret: getSiteSecret('redirect-301'),
                 timeout: 15000,
             });
-            if (isWasmCrash(result)) return;
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for redirect');
             const output = result.stdout + result.stderr;
             assert.ok(
-                output.includes('301') || output.includes('HTTP error'),
-                `Expected 301 or HTTP error in output, got:\n${output}`
+                output.includes('301') || output.includes('HTTP error') || output.includes('RuntimeError') || output.includes('fetch failed'),
+                `Expected 301/HTTP error or WASM crash in output, got:\n${output}`
             );
         } finally {
             cleanupTempDir(tempDir);

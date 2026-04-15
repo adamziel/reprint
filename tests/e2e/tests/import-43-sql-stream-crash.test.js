@@ -26,7 +26,6 @@ import {
     readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
-    isWasmCrash,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -159,7 +158,6 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
                 maxResumeAttempts: 50,
                 wallTimeout: 270000,
             });
-            if (isWasmCrash(result)) return;
             assert.equal(result.exitCode, 0,
                 `Expected exit 0 on resume, got ${result.exitCode}\n` +
                 `stderr: ${result.stderr}`);

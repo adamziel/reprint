@@ -11,7 +11,6 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     writeTestHooks, removeTestHooks, readAuditLog,
-    isWasmCrash,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -44,22 +43,18 @@ describe('Import: Gzip Corruption', () => {
                 secret: getSiteSecret(site),
                 timeout: 30000,
             });
-            // WASM PHP may crash before PHP can detect the corruption.
-            if (isWasmCrash(result)) return;
             // The importer should either fail with non-zero exit code,
             // or succeed if it managed to parse enough data before the corruption.
             // The key test is that it does NOT hang.
+            // A WASM crash (RuntimeError: unreachable) is also a valid failure —
+            // it means the import failed, just not gracefully.
             if (result.exitCode === 0) {
-                // If it succeeded, the completion chunk was received before
-                // the corruption bytes were processed. This is acceptable —
-                // the important thing is it didn't hang.
                 const sqlFile = join(tempDir, 'db.sql');
                 assert.ok(existsSync(sqlFile), 'Expected db.sql to exist on success');
             } else {
-                // Non-zero exit code is the expected outcome: corruption was detected
                 const output = result.stdout + result.stderr;
                 assert.ok(
-                    output.includes('cURL error') || output.includes('error') || output.includes('Error'),
+                    output.includes('cURL error') || output.includes('error') || output.includes('Error') || output.includes('RuntimeError'),
                     `Expected error message in output, got:\n${output}`
                 );
             }
@@ -76,9 +71,8 @@ describe('Import: Gzip Corruption', () => {
                 secret: getSiteSecret(site),
                 timeout: 30000,
             });
-            if (isWasmCrash(result)) return;
             // Same as above: must not hang. Either succeeds (partial data OK)
-            // or fails with a clear error.
+            // or fails with a clear error. A WASM crash is also a valid failure.
             if (result.exitCode === 0) {
                 const stateFile = join(tempDir, '.import-state.json');
                 if (existsSync(stateFile)) {
@@ -91,7 +85,7 @@ describe('Import: Gzip Corruption', () => {
             } else {
                 const output = result.stdout + result.stderr;
                 assert.ok(
-                    output.includes('cURL error') || output.includes('error') || output.includes('Error'),
+                    output.includes('cURL error') || output.includes('error') || output.includes('Error') || output.includes('RuntimeError'),
                     `Expected error message in output, got:\n${output}`
                 );
             }
