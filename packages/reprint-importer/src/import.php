@@ -3842,7 +3842,11 @@ class ImportClient
         $this->pull_last_fraction = null;
         $cyan = "\033[36m";
         $r = "\033[0m";
-        fwrite($this->progress_fd, "\r\033[K  {$cyan}⠋{$r} {$label}");
+        // Start on a fresh line so the spinner never overwrites the
+        // header or the previous stage's checkmark. The \n claims a
+        // new line; subsequent show_progress_line calls overwrite it
+        // in place with \r\033[K.
+        fwrite($this->progress_fd, "\n\r\033[K  {$cyan}⠋{$r} {$label}");
     }
 
     /**
@@ -4220,7 +4224,7 @@ class ImportClient
         if ($this->is_tty && !$this->verbose_mode) {
             $bold = "\033[1m";
             $r = "\033[0m";
-            fwrite($this->progress_fd, "\n{$bold}Pulling {$host}{$r}\n\n");
+            fwrite($this->progress_fd, "\n{$bold}Pulling {$host}{$r}\n");
         }
         $this->output_progress([
             "type" => "lifecycle",
