@@ -1839,16 +1839,33 @@ class ImportClient
         $url = $this->build_url("preflight", null, []);
         $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
 
-        $result = $this->fetch_json($url);
-        $payload = $result["json"] ?? null;
+        // Try each User-Agent until one gets a JSON response.
+        // Some WAFs block certain UAs (e.g. browser UAs with custom auth
+        // headers), so we cycle through candidates and remember the winner.
+        $result = null;
+        $payload = null;
+        foreach (self::USER_AGENTS as $ua) {
+            $this->state["user_agent"] = $ua;
+            $result = $this->fetch_json($url);
+            $payload = $result["json"] ?? null;
+            if ($payload !== null) {
+                $this->audit_log("USER-AGENT OK | {$ua}", false);
+                break;
+            }
+            $this->audit_log("USER-AGENT BLOCKED | {$ua}", false);
+        }
 
         $entry = [
             "timestamp" => time(),
+            "url" => $url,
             "http_code" => (int) ($result["http_code"] ?? 0),
             "elapsed" => (float) ($result["elapsed"] ?? 0),
             "ok" => is_array($payload) ? ($payload["ok"] ?? null) : null,
             "data" => $payload,
             "error" => $result["error"] ?? null,
+            "response_body_preview" => $payload === null && isset($result["body"])
+                ? substr((string) $result["body"], 0, 200)
+                : null,
         ];
 
         $this->state["preflight"] = $entry;
@@ -8755,13 +8772,22 @@ class ImportClient
     }
 
     /**
-     * Build the shared browser-mimicry headers used by both fetch_json and
-     * fetch_streaming.  The Accept value differs between the two callers.
+     * User-Agent strings to try during preflight, in order of preference.
+     * Some WAFs block browser UAs that carry custom auth headers, so we
+     * start with an honest non-browser identity and fall back to common
+     * browser strings.
      */
+    private const USER_AGENTS = [
+        "Reprint/1.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+    ];
+
     private function get_base_headers(string $accept): array
     {
+        $ua = $this->state["user_agent"] ?? self::USER_AGENTS[0];
         return [
-            "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "User-Agent: {$ua}",
             "Accept: {$accept}",
             "Accept-Language: en-US,en;q=0.9",
             "Accept-Encoding: gzip, deflate",
