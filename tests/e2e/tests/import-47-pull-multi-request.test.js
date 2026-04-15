@@ -24,6 +24,7 @@ describe('Import: Pull Multi-Request', { timeout: 300000 }, () => {
     const site = 'basic';
     const importDb = 'e2e_pull_multi_47';
     let tempDir;
+    let pullStdout = '';
 
     beforeAll(async () => {
         await ensureSite(site);
@@ -59,6 +60,7 @@ describe('Import: Pull Multi-Request', { timeout: 300000 }, () => {
                 `--new-site-url=http://localhost:9999`,
             ],
         });
+        pullStdout = result.stdout;
         assert.equal(result.exitCode, 0,
             `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
@@ -75,6 +77,27 @@ describe('Import: Pull Multi-Request', { timeout: 300000 }, () => {
         const resumeCount = (audit.match(/RESUME/g) || []).length;
         assert.ok(resumeCount >= 3,
             `Expected at least 3 resume entries in audit log, got ${resumeCount}`);
+    });
+
+    it('file download counter never decreases across requests', () => {
+        // The JSONL output includes files_done in file_progress records.
+        // With --max-exec=1, there are many HTTP requests. The counter
+        // must be monotonically increasing — no resets between requests.
+        const filesDoneValues = pullStdout
+            .split('\n')
+            .filter(line => line.startsWith('{'))
+            .map(line => { try { return JSON.parse(line); } catch { return null; } })
+            .filter(obj => obj && typeof obj.files_done === 'number')
+            .map(obj => obj.files_done);
+
+        assert.ok(filesDoneValues.length >= 2,
+            `Expected at least 2 files_done progress records, got ${filesDoneValues.length}`);
+
+        for (let i = 1; i < filesDoneValues.length; i++) {
+            assert.ok(filesDoneValues[i] >= filesDoneValues[i - 1],
+                `files_done decreased from ${filesDoneValues[i - 1]} to ${filesDoneValues[i]} ` +
+                `at progress record ${i} of ${filesDoneValues.length}`);
+        }
     });
 
     it('files match source', () => {

@@ -2674,7 +2674,10 @@ class ImportClient
 
         // Resuming an in-progress sync
         if ($has_progress) {
-            $this->files_imported = 0;
+            // Don't reset files_imported here — it counts files within
+            // the current batch and is only reset when a batch completes
+            // (in download_files_from_list). Resetting it on entry would
+            // cause the progress counter to dip between pull retries.
             $index_size = $this->index_count();
 
 
@@ -2863,10 +2866,18 @@ class ImportClient
             $this->state["stage"] = $stage;
             $this->save_state($this->state);
 
-            // In pull mode, signal the transition from scanning to
-            // downloading so the progress display can show it.
-            if ($has_downloads && $this->quiet_lifecycle) {
+            // In pull mode, finalize the scanning line with a checkmark
+            // and start the download progress on a fresh line.
+            if ($has_downloads && $this->quiet_lifecycle && $this->is_tty && !$this->verbose_mode) {
+                $green = "\033[32m";
+                $dim = "\033[2m";
+                $r = "\033[0m";
+                $scanned = number_format($this->index_entries_counted);
+                $this->clear_progress_line();
+                fwrite($this->progress_fd, "  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
                 $total = $this->count_newlines($this->download_list_file);
+                $this->pull_last_progress = null;
+                $this->pull_last_fraction = null;
                 $this->show_progress_line(
                     "Downloading — 0 / " . number_format($total) . " files",
                     0.0
@@ -6829,10 +6840,14 @@ class ImportClient
             $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
         }
 
-        // Advance the done counter by the known batch size.
+        // Advance the done counter by the known batch size and reset
+        // the per-batch file counter. files_imported counted files within
+        // this batch; now that the batch is complete, those files are
+        // accounted for in download_list_done.
         if ($this->download_list_done !== null) {
             $this->download_list_done += $batch_entries;
         }
+        $this->files_imported = 0;
 
         $this->state[$state_key] = [
             "offset" => $next_offset,
