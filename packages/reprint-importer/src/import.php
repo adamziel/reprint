@@ -1311,28 +1311,61 @@ class ImportClient
      *
      * @param string $message Progress message
      */
-    private function show_progress_line(string $message): void
+    /**
+     * Show progress in a single refreshing line (TTY mode only).
+     *
+     * In pull mode, renders either a progress bar (when $fraction is
+     * provided) or a spinning Braille character. The bar uses Unicode
+     * block characters for a compact, visual display:
+     *
+     *   ⠋ Downloading files                       (spinner, no fraction)
+     *   ━━━━━━━━━━━━░░░░░░  1,234 / 5,091 files   (bar, fraction known)
+     *
+     * @param string $message  Progress text
+     * @param float|null $fraction  0.0–1.0 progress, or null for spinner
+     */
+    private function show_progress_line(string $message, ?float $fraction = null): void
     {
         if ($this->is_tty && !$this->verbose_mode) {
-            // In pull mode, prefix with a rotating spinner character.
             if ($this->quiet_lifecycle) {
-                $frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
-                // Each frame is 3 bytes (UTF-8 Braille)
-                $idx = ($this->spinner_tick++ % 10) * 3;
-                $char = substr($frames, $idx, 3);
-                $message = "  \033[36m{$char}\033[0m " . $message;
+                $this->spinner_tick++;
+                $this->spinner_last_draw = microtime(true);
+                if ($fraction !== null && $fraction >= 0) {
+                    $message = $this->render_progress_bar($message, $fraction);
+                } else {
+                    $frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+                    $idx = ($this->spinner_tick % 10) * 3;
+                    $char = substr($frames, $idx, 3);
+                    $message = "  \033[36m{$char}\033[0m {$message}";
+                }
             }
 
             $width = $this->get_terminal_width();
-
-            // Truncate message if too long, leaving room for "..."
-            if (strlen($message) > $width - 3) {
-                $message = substr($message, 0, $width - 3) . "...";
+            // Account for ANSI escape sequences when measuring display width.
+            $display_len = strlen(preg_replace('/\033\[[0-9;]*m/', '', $message));
+            if ($display_len > $width) {
+                // Truncate the visible text, keeping escape sequences.
+                $message = substr($message, 0, $width - 3 + (strlen($message) - $display_len)) . "...";
             }
 
-            // Clear line and write progress
             fwrite($this->progress_fd, "\r\033[K" . $message);
         }
+    }
+
+    /**
+     * Render a progress bar line for pull mode.
+     *
+     *   ━━━━━━━━━━━━░░░░░░  Downloading files — 1,234 / 5,091
+     */
+    private function render_progress_bar(string $label, float $fraction): string
+    {
+        $fraction = max(0.0, min(1.0, $fraction));
+        $bar_width = 20;
+        $filled = (int) round($fraction * $bar_width);
+        $empty = $bar_width - $filled;
+        $bar = str_repeat("━", $filled) . str_repeat("░", $empty);
+        $pct = (int) round($fraction * 100);
+        return "  \033[36m{$bar}\033[0m  {$label} \033[2m{$pct}%\033[0m";
     }
 
     /**
@@ -3750,8 +3783,8 @@ class ImportClient
     {
         switch ($stage) {
             case 'preflight':     return 'Connecting';
-            case 'files-pull':    return 'Downloading files';
-            case 'db-pull':       return 'Downloading database';
+            case 'files-pull':    return 'Pulling files';
+            case 'db-pull':       return 'Pulling database';
             case 'db-apply':      return 'Importing database';
             case 'flat-docroot':  return 'Flattening layout';
             case 'apply-runtime': return 'Preparing runtime';
@@ -5684,13 +5717,16 @@ class ImportClient
                         $stmts_since_save = 0;
 
                         // Progress output
-                        $pct = $sql_file_size > 0
-                            ? round(100 * $total_bytes_read / $sql_file_size, 1)
-                            : 0;
+                        $apply_fraction = $sql_file_size > 0
+                            ? $total_bytes_read / $sql_file_size
+                            : null;
+                        $pct = $apply_fraction !== null ? round($apply_fraction * 100, 1) : 0;
 
                         $progress_message = sprintf(
-                            "db-apply: %s statements (%.1f%%)",
-                            $statements_total === null ? $statements_executed : "{$statements_executed} / {$statements_total}",
+                            "%s statements",
+                            $statements_total === null
+                                ? number_format($statements_executed)
+                                : number_format($statements_executed) . " / " . number_format($statements_total),
                             $pct,
                         );
 
@@ -5704,7 +5740,7 @@ class ImportClient
                             "message" => $progress_message,
                         ]);
 
-                        $this->show_progress_line($progress_message);
+                        $this->show_progress_line($progress_message, $apply_fraction);
                     }
                 }
             }
@@ -6360,7 +6396,13 @@ class ImportClient
                     if ($bytes === false) {
                         throw new RuntimeException("Failed to write to remote index file (disk full?)");
                     }
-
+                    $context->index_entries_written = ($context->index_entries_written ?? 0) + 1;
+                }
+                // Show indexing progress so the user knows something is
+                // happening during the (often lengthy) index phase.
+                $n = $context->index_entries_written ?? 0;
+                if ($n > 0) {
+                    $this->show_progress_line("Indexing — " . number_format($n) . " files found");
                 }
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "index");
@@ -7675,12 +7717,14 @@ class ImportClient
                         // The bytes accumulate across chunks and requests.
                         // Include estimated total from db-index when available.
                         $db_bytes_est = (int) ($this->state["db_index"]["bytes"] ?? 0);
-                        $sql_progress = "Downloading SQL: " . $this->format_bytes($sql_bytes_written);
+                        $sql_fraction = ($db_bytes_est > 0)
+                            ? min(1.0, $sql_bytes_written / $db_bytes_est)
+                            : null;
+                        $sql_progress = $this->format_bytes($sql_bytes_written);
                         if ($db_bytes_est > 0) {
-                            $pct = min(100, round(100 * $sql_bytes_written / $db_bytes_est, 1));
-                            $sql_progress .= " ({$pct}%)";
+                            $sql_progress .= " / " . $this->format_bytes($db_bytes_est);
                         }
-                        $this->show_progress_line($sql_progress);
+                        $this->show_progress_line($sql_progress, $sql_fraction);
 
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
@@ -8478,8 +8522,14 @@ class ImportClient
             );
 
             $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
-            $file_progress_message = sprintf("[%d files] %s", $files_done, $this->display_path($path));
-            $this->show_progress_line($file_progress_message);
+            $files_total = $this->download_list_total;
+            $file_fraction = ($files_total !== null && $files_total > 0)
+                ? $files_done / $files_total
+                : null;
+            $file_progress_message = $files_total !== null
+                ? sprintf("%s / %s files", number_format($files_done), number_format($files_total))
+                : sprintf("%s files", number_format($files_done));
+            $this->show_progress_line($file_progress_message, $file_fraction);
             $progress_record = [
                 "type" => "file_progress",
                 "files_done" => $files_done,
@@ -10687,6 +10737,11 @@ class ImportClient
      */
     private function save_state(array $state): void
     {
+        // Keep the spinner alive between curl requests. save_state is
+        // called frequently during streaming operations, so this fills
+        // the gaps where curl's progress callback doesn't fire.
+        $this->tick_spinner();
+
         if ($this->tuner instanceof AdaptiveTuner) {
             $state["tuning"] = [
                 "config" => $this->tuner->get_config(),
