@@ -1027,6 +1027,9 @@ class ImportClient
     /** @var int Spinner frame counter for pull progress. */
     private $spinner_tick = 0;
 
+    /** @var float Last time the spinner was drawn (microtime). */
+    private $spinner_last_draw = 0.0;
+
     /** @var string|null Label of the currently active pull stage (for the spinner line). */
     private $pull_active_label = null;
 
@@ -1330,6 +1333,31 @@ class ImportClient
             // Clear line and write progress
             fwrite($this->progress_fd, "\r\033[K" . $message);
         }
+    }
+
+    /**
+     * Advance the spinner on the current line without changing the message.
+     *
+     * Called by curl's progress callback (~1/sec) so the Braille spinner
+     * stays alive even when no application-level data is being processed.
+     * Rate-limited to 80ms to produce smooth ~12fps animation without
+     * wasting CPU on terminal writes.
+     */
+    private function tick_spinner(): void
+    {
+        if (!$this->quiet_lifecycle || !$this->is_tty || !$this->pull_active_label) {
+            return;
+        }
+        $now = microtime(true);
+        if ($now - $this->spinner_last_draw < 0.08) {
+            return;
+        }
+        $this->spinner_last_draw = $now;
+
+        $frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+        $idx = ($this->spinner_tick++ % 10) * 3;
+        $char = substr($frames, $idx, 3);
+        fwrite($this->progress_fd, "\r\033[K  \033[36m{$char}\033[0m {$this->pull_active_label}");
     }
 
     /**
@@ -9769,6 +9797,12 @@ class ImportClient
             CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_NOPROGRESS => false,
+            CURLOPT_PROGRESSFUNCTION =>
+                function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
+                    $this->tick_spinner();
+                    return 0;
+                },
         ]);
 
         $start = microtime(true);
@@ -9937,6 +9971,15 @@ class ImportClient
             CURLOPT_LOW_SPEED_LIMIT => 1,
             CURLOPT_LOW_SPEED_TIME => 300,
             CURLOPT_ENCODING => "gzip, deflate",
+            // Tick the spinner during transfers. curl calls this roughly
+            // once per second even when no data is flowing, which keeps
+            // the Braille spinner rotating so it looks alive.
+            CURLOPT_NOPROGRESS => false,
+            CURLOPT_PROGRESSFUNCTION =>
+                function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
+                    $this->tick_spinner();
+                    return 0; // 0 = continue, non-zero = abort
+                },
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
                 &$parser,
