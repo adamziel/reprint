@@ -1030,9 +1030,6 @@ class ImportClient
     /** @var int Cumulative count of index entries written (survives retries). */
     private $index_entries_counted = 0;
 
-    /** @var bool When true, don't increment the visible index counter. Used during
-     *  symlink target indexing to avoid inflating the count with shared directories. */
-    private $suppress_index_count = false;
 
     /** @var float Last time the spinner was drawn (microtime). */
     private $spinner_last_draw = 0.0;
@@ -3083,13 +3080,6 @@ class ImportClient
      */
     private function discover_symlink_targets(): void
     {
-        // Freeze the visible index counter. Symlink target directories
-        // (shared WordPress core, plugin versions) can contain hundreds
-        // of thousands of entries that inflate the count far beyond the
-        // site's actual file count. The spinner keeps moving but the
-        // number stays at the site's real file count.
-        $this->suppress_index_count = true;
-
         $roots = $this->get_root_directories_from_preflight();
 
         // Collect all indexed directory real paths for containment checks
@@ -6447,19 +6437,12 @@ class ImportClient
                     if ($bytes === false) {
                         throw new RuntimeException("Failed to write to remote index file (disk full?)");
                     }
-                    if (!$this->suppress_index_count) {
-                        $this->index_entries_counted++;
-                    }
+                    $this->index_entries_counted++;
                 }
-                // Show indexing progress. During symlink target indexing
-                // (suppress_index_count=true), the count stays frozen at
-                // the site's actual file count while the spinner keeps
-                // moving — the extra entries from shared directories
-                // would inflate the number misleadingly.
                 if ($this->index_entries_counted > 0) {
                     $this->show_progress_line(
                         "Scanning remote files — " .
-                        number_format($this->index_entries_counted) . " found"
+                        number_format($this->index_entries_counted) . " scanned"
                     );
                 } else {
                     $this->show_progress_line("Scanning remote files");
