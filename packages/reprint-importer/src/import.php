@@ -4247,17 +4247,21 @@ class ImportClient
         // minutes into a large file download.
 
         // Default --runtime to php-builtin so pull always ends with a
-        // running local server. Users can override with --runtime=nginx-fpm
-        // or --runtime=playground-cli for other environments.
+        // running local server. Users can override with --runtime=nginx-fpm,
+        // --runtime=playground-cli, or --runtime=none to skip runtime
+        // generation entirely.
         if (empty($options['runtime'])) {
             $options['runtime'] = 'php-builtin';
         }
-        $valid_runtimes = ['nginx-fpm', 'php-builtin', 'playground-cli'];
+        $valid_runtimes = ['nginx-fpm', 'php-builtin', 'playground-cli', 'none'];
         if (!in_array($options['runtime'], $valid_runtimes, true)) {
             throw new InvalidArgumentException(
                 "Invalid --runtime value: {$options['runtime']}. " .
                 "Valid runtimes: " . implode(', ', $valid_runtimes)
             );
+        }
+        if ($options['runtime'] === 'none') {
+            unset($options['runtime']);
         }
 
         // Default --target-engine to sqlite for php-builtin and
@@ -11525,7 +11529,7 @@ if (
             'type' => 'value',
             'target' => 'runtime',
             'placeholder' => 'RUNTIME',
-            'help' => 'Target server runtime: nginx-fpm, php-builtin, or playground-cli',
+            'help' => 'Target server runtime: php-builtin, playground-cli, nginx-fpm, or none',
             'commands' => ['pull', 'apply-runtime'],
         ],
         [
