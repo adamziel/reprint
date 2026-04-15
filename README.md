@@ -6,7 +6,9 @@
 
 # Reprint — WordPress Site Migration
 
-Reprint moves a WordPress site from one server to another over HTTPS. It installs a small exporter plugin on the source site, then runs an importer CLI on the target. The importer pulls the entire filesystem and database in streaming chunks, resuming automatically when a request is interrupted by timeouts, memory limits, or network failures. No SSH, no full-site ZIP files, no manual database dumps.
+Reprint moves a WordPress site from one server to another over HTTPS.
+
+It uses a small WordPress plugin on the source site and a CLI importer tool on the target. The importer pulls the entire filesystem and database in streaming chunks, resuming automatically when a request is interrupted by timeouts, memory limits, or network failures. No SSH, no full-site ZIP files, no manual database dumps.
 
 The system is designed for the cheapest shared hosting: PHP 7.4, two PHP workers, 64 MB memory, 30-second execution limits. It budgets its own resource usage to avoid tripping host abuse detectors, backs off adaptively when the server is slow, and recovers gracefully from mid-stream crashes. The result is a portable copy of the site — files, database, and generated runtime configuration — ready to serve on the new host.
 
