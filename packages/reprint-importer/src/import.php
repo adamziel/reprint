@@ -4023,16 +4023,57 @@ class ImportClient
         $this->pull_normalize_url();
         $this->quiet_lifecycle = true;
 
+        // ── Validate options upfront ─────────────────────────────
+        // Catch misconfigurations before the pipeline starts, not 20
+        // minutes into a large file download.
+
         // Default --runtime to php-builtin so pull always ends with a
         // running local server. Users can override with --runtime=nginx-fpm
         // or --runtime=playground-cli for other environments.
         if (empty($options['runtime'])) {
             $options['runtime'] = 'php-builtin';
         }
+        $valid_runtimes = ['nginx-fpm', 'php-builtin', 'playground-cli'];
+        if (!in_array($options['runtime'], $valid_runtimes, true)) {
+            throw new InvalidArgumentException(
+                "Invalid --runtime value: {$options['runtime']}. " .
+                "Valid runtimes: " . implode(', ', $valid_runtimes)
+            );
+        }
 
-        // Default --output-dir to {state-dir}/runtime when --runtime is
-        // provided. This lets users skip the --output-dir flag for the
-        // common case of just wanting to start the site.
+        // Validate --target-engine if provided.
+        if (!empty($options['target_engine'])) {
+            $engine = strtolower($options['target_engine']);
+            if (!in_array($engine, ['mysql', 'sqlite'], true)) {
+                throw new InvalidArgumentException(
+                    "Invalid --target-engine value: {$options['target_engine']}. " .
+                    "Valid engines: mysql, sqlite"
+                );
+            }
+        }
+
+        // MySQL target requires --target-user and --target-db.
+        $has_db_target =
+            !empty($options['target_db']) ||
+            !empty($options['target_engine']) ||
+            !empty($options['target_sqlite_path']) ||
+            !empty($options['target_user']);
+        $engine = strtolower($options['target_engine'] ?? 'mysql');
+        if ($has_db_target && $engine === 'mysql') {
+            if (empty($options['target_user'])) {
+                throw new InvalidArgumentException(
+                    "--target-user is required for MySQL database import."
+                );
+            }
+            if (empty($options['target_db'])) {
+                throw new InvalidArgumentException(
+                    "--target-db is required for MySQL database import."
+                );
+            }
+        }
+
+        // Default --output-dir to {state-dir}/runtime so users don't
+        // need to specify it separately.
         if (empty($options['output_dir'])) {
             $options['output_dir'] = $this->state_dir . '/runtime';
         }
