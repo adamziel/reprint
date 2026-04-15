@@ -1033,6 +1033,12 @@ class ImportClient
     /** @var string|null Label of the currently active pull stage (for the spinner line). */
     private $pull_active_label = null;
 
+    /** @var string|null The last rendered progress line content (without spinner prefix). */
+    private $pull_last_progress = null;
+
+    /** @var float|null The fraction from the last show_progress_line call. */
+    private $pull_last_fraction = null;
+
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
 
@@ -1330,6 +1336,11 @@ class ImportClient
             if ($this->quiet_lifecycle) {
                 $this->spinner_tick++;
                 $this->spinner_last_draw = microtime(true);
+                // Remember the raw content so tick_spinner can redraw
+                // with an updated spinner frame without flickering back
+                // to the bare stage label.
+                $this->pull_last_progress = $message;
+                $this->pull_last_fraction = $fraction;
                 if ($fraction !== null && $fraction >= 0) {
                     $message = $this->render_progress_bar($message, $fraction);
                 } else {
@@ -1386,9 +1397,26 @@ class ImportClient
             return;
         }
         $this->spinner_last_draw = $now;
+        $this->spinner_tick++;
+
+        // If show_progress_line has already rendered content, replay it
+        // with an updated spinner/bar frame. This avoids flickering
+        // between the bare label and the detailed progress message.
+        if ($this->pull_last_progress !== null) {
+            if ($this->pull_last_fraction !== null && $this->pull_last_fraction >= 0) {
+                $line = $this->render_progress_bar($this->pull_last_progress, $this->pull_last_fraction);
+            } else {
+                $frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+                $idx = ($this->spinner_tick % 10) * 3;
+                $char = substr($frames, $idx, 3);
+                $line = "  \033[36m{$char}\033[0m {$this->pull_last_progress}";
+            }
+            fwrite($this->progress_fd, "\r\033[K{$line}");
+            return;
+        }
 
         $frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
-        $idx = ($this->spinner_tick++ % 10) * 3;
+        $idx = ($this->spinner_tick % 10) * 3;
         $char = substr($frames, $idx, 3);
         fwrite($this->progress_fd, "\r\033[K  \033[36m{$char}\033[0m {$this->pull_active_label}");
     }
@@ -3806,6 +3834,8 @@ class ImportClient
         $this->clear_progress_line();
         $label = $this->pull_stage_label($stage);
         $this->pull_active_label = $label;
+        $this->pull_last_progress = null;
+        $this->pull_last_fraction = null;
         $cyan = "\033[36m";
         $r = "\033[0m";
         fwrite($this->progress_fd, "\r\033[K  {$cyan}⠋{$r} {$label}");
@@ -3827,6 +3857,8 @@ class ImportClient
         $extra = $summary ? " {$dim}— {$summary}{$r}" : "";
         fwrite($this->progress_fd, "  {$green}✓{$r} {$label}{$extra}\n");
         $this->pull_active_label = null;
+        $this->pull_last_progress = null;
+        $this->pull_last_fraction = null;
     }
 
     /**
@@ -10977,6 +11009,8 @@ class StreamingContext
     public $saw_completion = false;
     // When true, skip writing the current file (preserve-local mode)
     public $skip_current_file = false;
+    // Index entries written so far (for progress display during file_index)
+    public $index_entries_written = 0;
 }
 
 /**
