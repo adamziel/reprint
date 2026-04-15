@@ -7593,7 +7593,14 @@ class ImportClient
                         }
                         // Show download progress on the TTY progress line.
                         // The bytes accumulate across chunks and requests.
-                        $this->show_progress_line("Downloading SQL: " . $this->format_bytes($sql_bytes_written));
+                        // Include estimated total from db-index when available.
+                        $db_bytes_est = (int) ($this->state["db_index"]["bytes"] ?? 0);
+                        $sql_progress = "Downloading SQL: " . $this->format_bytes($sql_bytes_written);
+                        if ($db_bytes_est > 0) {
+                            $pct = min(100, round(100 * $sql_bytes_written / $db_bytes_est, 1));
+                            $sql_progress .= " ({$pct}%)";
+                        }
+                        $this->show_progress_line($sql_progress);
 
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
@@ -11414,11 +11421,20 @@ if (
         echo "Mirror any WordPress site over HTTP.\n";
         echo "Version " . get_importer_version() . "\n";
         echo "\n";
-        echo "Usage: reprint <command> <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
+        echo "Usage: reprint <command> <remote-url> [options]\n";
         echo "\n";
-        echo "Commands:\n";
+
+        $high = array_filter($command_info, fn($i) => ($i['level'] ?? 'low') === 'high');
+        $low = array_filter($command_info, fn($i) => ($i['level'] ?? 'low') === 'low');
         $max_len = max(array_map('strlen', array_keys($command_info)));
-        foreach ($command_info as $name => $info) {
+
+        echo "Commands:\n";
+        foreach ($high as $name => $info) {
+            echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
+        }
+        echo "\n";
+        echo "Low-level commands (used by pull internally):\n";
+        foreach ($low as $name => $info) {
             echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
         }
         echo "\n";
@@ -11619,8 +11635,12 @@ if (
     //
     // The Options: section itself is generated from $option_defs so that
     // every declared option for a command is guaranteed to appear.
+    // High-level commands are the ones most users will use. Low-level
+    // commands are the building blocks that pull composes internally —
+    // useful for scripting and hosting platform integrations.
     $command_info = [
         "install-exporter" => [
+            "level" => "high",
             "short" => "Show how to install the exporter plugin on your site",
             "description" =>
                 "Prints the download URL for the exporter WordPress plugin that\n" .
@@ -11632,6 +11652,7 @@ if (
             "extra" => null,
         ],
         "pull" => [
+            "level" => "high",
             "short" => "Clone a remote site (preflight + files + database + import)",
             "description" =>
                 "Full site clone in a single command. Composes lower-level commands into\n" .
@@ -11671,6 +11692,7 @@ if (
                 "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n",
         ],
         "preflight" => [
+            "level" => "low",
             "short" => "Probe the remote site and cache its environment",
             "description" =>
                 "Contacts the remote site and collects environment details:\n" .
@@ -11684,6 +11706,7 @@ if (
             "extra" => null,
         ],
         "preflight-assert" => [
+            "level" => "low",
             "short" => "Verify the remote site can be mirrored (exits 0 or 1)",
             "description" =>
                 "Runs the same check as the preflight command, then evaluates\n" .
@@ -11698,6 +11721,7 @@ if (
             "extra" => null,
         ],
         "files-pull" => [
+            "level" => "low",
             "short" => "Pull all files (initial) or only changes (delta)",
             "description" =>
                 "Downloads files from the remote site into --fs-root.\n" .
@@ -11725,6 +11749,7 @@ if (
                 "  .import-audit.log                       Audit log\n",
         ],
         "files-index" => [
+            "level" => "low",
             "short" => "Index all remote files (initial) or detect changes (delta)",
             "description" =>
                 "Streams the full remote directory tree over HTTP and writes each\n" .
@@ -11741,6 +11766,7 @@ if (
             "extra" => null,
         ],
         "files-stats" => [
+            "level" => "low",
             "short" => "Show file counts and sizes from the local index",
             "description" =>
                 "Reads local index files to report (no network calls):\n" .
@@ -11753,6 +11779,7 @@ if (
             "extra" => null,
         ],
         "db-pull" => [
+            "level" => "low",
             "short" => "Pull the database as a SQL dump (index + download)",
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
@@ -11766,6 +11793,7 @@ if (
                 "  mysql   Stream directly into a MySQL connection\n",
         ],
         "db-index" => [
+            "level" => "low",
             "short" => "Pull table metadata from the remote database",
             "description" =>
                 "Fetches table metadata (name, estimated rows, data size) from\n" .
@@ -11776,6 +11804,7 @@ if (
                 "  db-tables.jsonl  One JSON object per table\n",
         ],
         "db-domains" => [
+            "level" => "low",
             "short" => "Extract domains from the pulled SQL dump",
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
@@ -11789,6 +11818,7 @@ if (
             "extra" => null,
         ],
         "db-apply" => [
+            "level" => "low",
             "short" => "Import the SQL dump into a local MySQL or SQLite database",
             "description" =>
                 "Reads db.sql from --state-dir, optionally rewrites URLs, and executes\n" .
@@ -11806,6 +11836,7 @@ if (
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
         "flat-docroot" => [
+            "level" => "low",
             "short" => "Reassemble pulled files into a standard WordPress layout",
             "description" =>
                 "Creates a directory at --flatten-to with symlinks that map the\n" .
@@ -11823,6 +11854,7 @@ if (
             "extra" => null,
         ],
         "apply-runtime" => [
+            "level" => "low",
             "short" => "Generate server config and prepare the site to run locally",
             "description" =>
                 "Generates server configuration (runtime.php, nginx.conf or start.sh)\n" .
