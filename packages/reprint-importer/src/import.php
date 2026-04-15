@@ -2865,6 +2865,16 @@ class ImportClient
             $this->state["stage"] = $stage;
             $this->save_state($this->state);
 
+            // In pull mode, signal the transition from scanning to
+            // downloading so the progress display can show it.
+            if ($has_downloads && $this->quiet_lifecycle) {
+                $total = $this->count_newlines($this->download_list_file);
+                $this->show_progress_line(
+                    "Downloading — 0 / " . number_format($total) . " files",
+                    0.0
+                );
+            }
+
             if (!$has_downloads && file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
                 $this->audit_log(
