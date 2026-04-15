@@ -1030,6 +1030,9 @@ class ImportClient
     /** @var int Cumulative count of index entries written (survives retries). */
     private $index_entries_counted = 0;
 
+    /** @var int High-water mark for files_done — ensures the download progress only grows. */
+    private $files_done_hwm = 0;
+
 
     /** @var float Last time the spinner was drawn (microtime). */
     private $spinner_last_draw = 0.0;
@@ -8571,13 +8574,21 @@ class ImportClient
             );
 
             $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
+            // Never show a number lower than what was previously displayed.
+            // Between retries, files_imported resets to 0 but download_list_done
+            // catches up from the state offset — there's a brief window where
+            // the sum dips before the offset is recalculated.
+            if ($files_done > $this->files_done_hwm) {
+                $this->files_done_hwm = $files_done;
+            }
+            $files_done = $this->files_done_hwm;
             $files_total = $this->download_list_total;
             $file_fraction = ($files_total !== null && $files_total > 0)
                 ? $files_done / $files_total
                 : null;
             $file_progress_message = $files_total !== null
-                ? sprintf("%s / %s files", number_format($files_done), number_format($files_total))
-                : sprintf("%s files", number_format($files_done));
+                ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
+                : sprintf("Downloading — %s files", number_format($files_done));
             $this->show_progress_line($file_progress_message, $file_fraction);
             $progress_record = [
                 "type" => "file_progress",
