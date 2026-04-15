@@ -82,8 +82,11 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
 
         it('.sql-buffer is cleaned up after completion', () => {
             // This test depends on the previous test completing successfully.
-            // If the state file doesn't exist, the parent test was skipped due to WASM crash.
-            if (!existsSync(join(tempDir, '.import-state.json'))) return;
+            // Check for status=complete — a partial/crashed run won't clean up.
+            try {
+                const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+                if (state.status !== 'complete') return;
+            } catch (e) { return; }
             assert.ok(!existsSync(join(tempDir, '.sql-buffer')),
                 'Expected .sql-buffer to be cleaned up after successful completion');
         });

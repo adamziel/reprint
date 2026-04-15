@@ -316,6 +316,7 @@ export function runImporter(url, outputDir, command, options = {}) {
             return false;
         };
         const isRetryable = (r) => r.exitCode === 2 || isWasmCrash(r);
+        let consecutiveCrashes = 0;
         while (isRetryable(result) && attempts < maxResumeAttempts) {
             if (Date.now() - wallStart > wallTimeout) {
                 result = {
@@ -324,6 +325,17 @@ export function runImporter(url, outputDir, command, options = {}) {
                     stderr: `${result.stderr}\nWall-clock timeout (${wallTimeout}ms) after ${attempts} resume attempts.`,
                 };
                 break;
+            }
+            // If the WASM runtime keeps crashing (not just partial exit 2),
+            // bail out after 3 consecutive crashes instead of burning the
+            // entire wall timeout on a deterministic crash.
+            if (isWasmCrash(result)) {
+                consecutiveCrashes++;
+                if (consecutiveCrashes >= 3) {
+                    break;
+                }
+            } else {
+                consecutiveCrashes = 0;
             }
             attempts += 1;
             const next = runImporterOnce(command, commandExtraArgs);

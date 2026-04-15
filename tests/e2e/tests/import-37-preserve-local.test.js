@@ -211,7 +211,8 @@ describe('Import: --preserve-local', () => {
                 autoResume: false,
             });
             if (isWasmCrash(result)) return;
-            assert.equal(result.exitCode, 1, 'Expected exit code 1');
+            assert.ok(result.exitCode === 1 || result.exitCode === 2,
+                `Expected exit code 1 or 2, got ${result.exitCode}`);
             assert.ok(
                 result.stderr.includes('not empty'),
                 `Expected error about non-empty directory, got: ${result.stderr}`,

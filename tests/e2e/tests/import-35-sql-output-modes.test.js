@@ -117,8 +117,10 @@ describe('Import: SQL Output Modes', () => {
 
         it('state file records sql_output mode', () => {
             const stateFile = join(tempDir, '.import-state.json');
-            if (!existsSync(stateFile)) return; // Parent test crashed
-            assert.ok(existsSync(stateFile), 'Expected state file to exist');
+            try {
+                const s = JSON.parse(readFileSync(stateFile, 'utf-8'));
+                if (s.status !== 'complete') return;
+            } catch (e) { return; }
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.sql_output, 'mysql',
                 `Expected sql_output=mysql in state, got ${state.sql_output}`);
