@@ -11639,18 +11639,6 @@ if (
     // commands are the building blocks that pull composes internally —
     // useful for scripting and hosting platform integrations.
     $command_info = [
-        "install-exporter" => [
-            "level" => "high",
-            "short" => "Show how to install the exporter plugin on your site",
-            "description" =>
-                "Prints the download URL for the exporter WordPress plugin that\n" .
-                "matches this version of reprint, and step-by-step installation\n" .
-                "instructions.\n" .
-                "\n" .
-                "The exporter plugin must be installed on the remote site before\n" .
-                "any other reprint command can connect to it.\n",
-            "extra" => null,
-        ],
         "pull" => [
             "level" => "high",
             "short" => "Clone a remote site (preflight + files + database + import)",
@@ -11690,6 +11678,18 @@ if (
                 "    --target-engine=sqlite \\\n" .
                 "    --new-site-url=http://localhost:8881 \\\n" .
                 "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n",
+        ],
+        "install-exporter" => [
+            "level" => "high",
+            "short" => "Show how to install the exporter plugin on your site",
+            "description" =>
+                "Prints the download URL for the exporter WordPress plugin that\n" .
+                "matches this version of reprint, and step-by-step installation\n" .
+                "instructions.\n" .
+                "\n" .
+                "The exporter plugin must be installed on the remote site before\n" .
+                "any other reprint command can connect to it.\n",
+            "extra" => null,
         ],
         "preflight" => [
             "level" => "low",
