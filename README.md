@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/reprint-logo.svg" alt="Reprint" width="400">
+</p>
+
 # Reprint — WordPress Site Migration
 
 ## Composer packages
