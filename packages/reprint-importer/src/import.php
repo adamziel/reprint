@@ -7866,13 +7866,17 @@ class ImportClient
                         }
                         // Show download progress on the TTY progress line.
                         // The bytes accumulate across chunks and requests.
-                        // Include estimated total from db-index when available.
+                        // Include estimated total from db-index when available,
+                        // but only if the estimate is larger than what we've
+                        // already downloaded — INFORMATION_SCHEMA estimates
+                        // can be wildly off (e.g. 7 KB for a 22 MB dump).
                         $db_bytes_est = (int) ($this->state["db_index"]["bytes"] ?? 0);
-                        $sql_fraction = ($db_bytes_est > 0)
-                            ? min(1.0, $sql_bytes_written / $db_bytes_est)
+                        $est_is_useful = $db_bytes_est > $sql_bytes_written;
+                        $sql_fraction = $est_is_useful
+                            ? $sql_bytes_written / $db_bytes_est
                             : null;
                         $sql_progress = $this->format_bytes($sql_bytes_written);
-                        if ($db_bytes_est > 0) {
+                        if ($est_is_useful) {
                             $sql_progress .= " / " . $this->format_bytes($db_bytes_est);
                         }
                         $this->show_progress_line($sql_progress, $sql_fraction);
