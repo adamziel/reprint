@@ -1,6 +1,6 @@
 {
-    "name": "wp-php-toolkit/site-export-plugin",
-    "description": "WordPress plugin wrapper for the streaming exporter package",
+    "name": "wp-php-toolkit/reprint-exporter-plugin",
+    "description": "Reprint Exporter – WordPress plugin wrapper for the streaming exporter package",
     "type": "project",
     "license": "GPL-2.0-or-later",
     "minimum-stability": "dev",

@@ -1,6 +1,6 @@
 <?php
 /**
- * Admin interface for Site Export plugin.
+ * Admin interface for Reprint Exporter plugin.
  *
  * This plugin provides a WordPress admin UI for configuring the export API.
  * The export API is triggered via `?site-export-api` during plugin load,
@@ -58,8 +58,8 @@ class Site_Export_Plugin {
      */
     public function add_admin_menu() {
         add_menu_page(
-            'Site Export',
-            'Site Export',
+            'Reprint Exporter',
+            'Reprint Exporter',
             'manage_options',
             'site-export',
             [$this, 'render_admin_page'],
@@ -68,7 +68,7 @@ class Site_Export_Plugin {
     }
 
     /**
-     * Add "Site Export" link to the admin bar.
+     * Add "Reprint Exporter" link to the admin bar.
      */
     public function add_admin_bar_node($wp_admin_bar) {
         if (!current_user_can('manage_options')) {
@@ -77,9 +77,9 @@ class Site_Export_Plugin {
 
         $wp_admin_bar->add_node([
             'id'    => 'site-export',
-            'title' => 'Site Export',
+            'title' => 'Reprint Exporter',
             'href'  => admin_url('admin.php?page=site-export'),
-            'meta'  => ['title' => 'Site Export'],
+            'meta'  => ['title' => 'Reprint Exporter'],
         ]);
     }
 
@@ -250,7 +250,7 @@ class Site_Export_Plugin {
         </style>
 
         <div class="site-export-wrap">
-            <h1>Site Export</h1>
+            <h1>Reprint Exporter</h1>
             <p class="subtitle">Allow an external tool to download your site's database and files.</p>
 
             <?php settings_errors('site_export'); ?>
