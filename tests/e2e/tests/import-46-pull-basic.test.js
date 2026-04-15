@@ -1,8 +1,8 @@
 /**
  * Test 46: Pull — Happy Path
  *
- * Runs `reprint pull` end-to-end with database import. Verifies that
- * a single pull command downloads files, pulls the SQL dump, applies
+ * Runs `reprint pull` end-to-end with database import and --runtime=none
+ * (no server start). Verifies that a single pull command downloads files, pulls the SQL dump, applies
  * it to a local MySQL database, and that a second pull performs a
  * delta sync without errors.
  */
