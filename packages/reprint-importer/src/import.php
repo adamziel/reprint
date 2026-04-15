@@ -1358,14 +1358,7 @@ class ImportClient
                 }
             }
 
-            $width = $this->get_terminal_width();
-            // Account for ANSI escape sequences when measuring display width.
-            $display_len = strlen(preg_replace('/\033\[[0-9;]*m/', '', $message));
-            if ($display_len > $width) {
-                // Truncate the visible text, keeping escape sequences.
-                $message = substr($message, 0, $width - 3 + (strlen($message) - $display_len)) . "...";
-            }
-
+            $message = $this->truncate_for_terminal($message);
             fwrite($this->progress_fd, "\r\033[K" . $message);
         }
     }
@@ -1418,7 +1411,7 @@ class ImportClient
                 $char = substr($frames, $idx, 3);
                 $line = "  \033[36m{$char}\033[0m {$this->pull_last_progress}";
             }
-            fwrite($this->progress_fd, "\r\033[K{$line}");
+            fwrite($this->progress_fd, "\r\033[K" . $this->truncate_for_terminal($line));
             return;
         }
 
@@ -1476,6 +1469,33 @@ class ImportClient
         }
         $this->terminal_width_cache = $width;
         return $width;
+    }
+
+    /**
+     * Truncate a message to fit the terminal width.
+     *
+     * Strips ANSI escape codes for width measurement, uses mb_strwidth
+     * for correct multi-byte character widths (the progress bar uses
+     * Unicode ━ and ░ which are 3 bytes each but 1 display column), and
+     * uses mb_substr to avoid cutting mid-character.
+     */
+    private function truncate_for_terminal(string $message): string
+    {
+        $width = $this->get_terminal_width();
+        $stripped = preg_replace('/\033\[[0-9;]*m/', '', $message);
+        $display_len = function_exists('mb_strwidth')
+            ? mb_strwidth($stripped, 'UTF-8')
+            : strlen($stripped);
+        if ($display_len <= $width) {
+            return $message;
+        }
+        // How many display columns to trim. Cut from the stripped version
+        // then reconstruct with the ANSI codes dropped — simpler and
+        // reliable since escape codes have zero display width.
+        $cut = function_exists('mb_strimwidth')
+            ? mb_strimwidth($stripped, 0, $width - 3, '...', 'UTF-8')
+            : substr($stripped, 0, $width - 3) . '...';
+        return $cut;
     }
 
     /**
@@ -3156,9 +3176,7 @@ class ImportClient
                                 substr($msg, 0, 200),
                             true,
                         );
-                        if ($this->is_tty && !$this->verbose_mode) {
-                            fwrite($this->progress_fd, "  Skipped (server rejected): {$dir}\n");
-                        }
+                        $this->show_lifecycle_line("  Skipped (server rejected): {$dir}\n");
                         $this->output_progress([
                             "type" => "symlink_follow_rejected",
                             "directory" => $dir,
@@ -3835,7 +3853,7 @@ class ImportClient
      */
     private function pull_print_header(int $step, int $total, string $stage): void
     {
-        if (!$this->is_tty) {
+        if (!$this->is_tty || $this->verbose_mode) {
             return;
         }
         $this->clear_progress_line();
@@ -3857,7 +3875,7 @@ class ImportClient
      */
     private function pull_print_done(int $step, int $total, string $stage, ?string $summary = null): void
     {
-        if (!$this->is_tty) {
+        if (!$this->is_tty || $this->verbose_mode) {
             return;
         }
         $this->clear_progress_line();
@@ -3877,7 +3895,7 @@ class ImportClient
      */
     private function pull_print_skipped(int $step, int $total, string $stage): void
     {
-        if (!$this->is_tty) {
+        if (!$this->is_tty || $this->verbose_mode) {
             return;
         }
         $dim = "\033[2m";
@@ -5106,7 +5124,10 @@ class ImportClient
             "refreshed" => $refreshed,
             "force_replaced" => $forced,
         ];
-        fwrite($this->progress_fd, json_encode($result) . "\n");
+        if (!$this->quiet_lifecycle) {
+            fwrite($this->progress_fd, json_encode($result) . "\n");
+        }
+        $this->output_progress(array_merge(["type" => "flat_docroot_complete"], $result));
     }
 
     /**
