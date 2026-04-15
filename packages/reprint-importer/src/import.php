@@ -3009,9 +3009,7 @@ class ImportClient
                 "FOLLOW SYMLINK | indexing target directory: {$dir}",
                 true,
             );
-            if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "Following symlink target: {$dir}\n");
-            }
+            $this->show_lifecycle_line("Following symlink target: {$dir}\n");
             $this->output_progress([
                 "type" => "symlink_follow",
                 "directory" => $dir,
@@ -4041,7 +4039,18 @@ class ImportClient
             );
         }
 
-        // Validate --target-engine if provided.
+        // Default --target-engine to sqlite for php-builtin and
+        // playground-cli (no MySQL server needed), mysql for nginx-fpm
+        // (assumes a full server stack). The user can always override.
+        if (empty($options['target_engine']) && empty($options['target_user']) && empty($options['target_db'])) {
+            if ($options['runtime'] === 'nginx-fpm') {
+                // nginx-fpm users have a server stack — require explicit DB config
+            } else {
+                $options['target_engine'] = 'sqlite';
+            }
+        }
+
+        // Validate --target-engine.
         if (!empty($options['target_engine'])) {
             $engine = strtolower($options['target_engine']);
             if (!in_array($engine, ['mysql', 'sqlite'], true)) {
@@ -4053,13 +4062,8 @@ class ImportClient
         }
 
         // MySQL target requires --target-user and --target-db.
-        $has_db_target =
-            !empty($options['target_db']) ||
-            !empty($options['target_engine']) ||
-            !empty($options['target_sqlite_path']) ||
-            !empty($options['target_user']);
-        $engine = strtolower($options['target_engine'] ?? 'mysql');
-        if ($has_db_target && $engine === 'mysql') {
+        $engine = strtolower($options['target_engine'] ?? '');
+        if ($engine === 'mysql') {
             if (empty($options['target_user'])) {
                 throw new InvalidArgumentException(
                     "--target-user is required for MySQL database import."
@@ -4528,15 +4532,17 @@ class ImportClient
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
 
-        fwrite(STDERR, "\n");
-        fwrite(STDERR, "Runtime: {$runtime}\n");
-        fwrite(STDERR, "Source host: {$webhost}\n");
-        if ($target_engine !== null) {
-            fwrite(STDERR, "Target database: {$target_engine}\n");
-        }
-        fwrite(STDERR, "\n");
-        foreach ($summary as $line) {
-            fwrite(STDERR, "{$line}\n");
+        if (!$this->quiet_lifecycle) {
+            fwrite(STDERR, "\n");
+            fwrite(STDERR, "Runtime: {$runtime}\n");
+            fwrite(STDERR, "Source host: {$webhost}\n");
+            if ($target_engine !== null) {
+                fwrite(STDERR, "Target database: {$target_engine}\n");
+            }
+            fwrite(STDERR, "\n");
+            foreach ($summary as $line) {
+                fwrite(STDERR, "{$line}\n");
+            }
         }
     }
 
