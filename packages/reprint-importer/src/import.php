@@ -5878,7 +5878,6 @@ class ImportClient
                             $statements_total === null
                                 ? number_format($statements_executed)
                                 : number_format($statements_executed) . " / " . number_format($statements_total),
-                            $pct,
                         );
 
                         $this->output_progress([
