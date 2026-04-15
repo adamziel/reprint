@@ -88,7 +88,7 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.value }}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-          NEXT_DEV="${MAJOR}.$((MINOR + 1)).0-dev"
+          NEXT_DEV="${MAJOR}.${MINOR}.$((PATCH + 1))-dev"
 
           git checkout trunk
           ./bin/stamp-plugin-version.sh "$NEXT_DEV"
