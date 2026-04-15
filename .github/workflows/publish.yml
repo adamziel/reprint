@@ -3,6 +3,9 @@ name: Publish Composer packages
 on:
   push:
     tags: ['v*']
+  workflow_run:
+    workflows: ['Tag Release']
+    types: [completed]
 
 permissions:
   contents: write
@@ -10,6 +13,7 @@ permissions:
 jobs:
   split-packages:
     name: Push subtrees to package repos
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -17,6 +21,24 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Resolve release tag
+        id: release_ref
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="$(git tag --points-at "${{ github.event.workflow_run.head_sha }}" --list 'v*' --sort=-v:refname | head -1)"
+            if [ -z "${TAG}" ]; then
+              echo "::error::No v* tag found for workflow head SHA ${{ github.event.workflow_run.head_sha }}"
+              exit 1
+            fi
+          fi
+
+          git checkout "refs/tags/${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Push package subtrees
         env:
@@ -34,11 +56,11 @@ jobs:
           export GIT_TERMINAL_PROMPT=0
 
           for pkg in reprint-exporter reprint-importer; do
-            split_commit="$(git subtree split --prefix="packages/${pkg}" "${GITHUB_SHA}")"
+            split_commit="$(git subtree split --prefix="packages/${pkg}" HEAD)"
             remote_url="https://github.com/${GH_ORG}/${pkg}.git"
 
             git push "${remote_url}" "${split_commit}:refs/heads/main"
-            git push "${remote_url}" "${split_commit}:refs/tags/${GITHUB_REF_NAME}"
+            git push "${remote_url}" "${split_commit}:refs/tags/${{ steps.release_ref.outputs.tag }}"
           done
 
       - name: Notify Packagist

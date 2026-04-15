@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_run:
+    workflows: ['Tag Release']
+    types: [completed]
 
 permissions:
   contents: write
@@ -10,12 +13,32 @@ permissions:
 jobs:
   release:
     name: Build and publish release artifacts
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: true
+
+      - name: Resolve release tag
+        id: release_ref
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="$(git tag --points-at "${{ github.event.workflow_run.head_sha }}" --list 'v*' --sort=-v:refname | head -1)"
+            if [ -z "${TAG}" ]; then
+              echo "::error::No v* tag found for workflow head SHA ${{ github.event.workflow_run.head_sha }}"
+              exit 1
+            fi
+          fi
+
+          git checkout "refs/tags/${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - uses: shivammathur/setup-php@v2
         with:
@@ -32,7 +55,9 @@ jobs:
         run: ./bin/build-reprint-phar.sh
 
       - name: Stamp plugin version from git tag
-        run: ./bin/stamp-plugin-version.sh "${GITHUB_REF_NAME#v}"
+        env:
+          RELEASE_TAG: ${{ steps.release_ref.outputs.tag }}
+        run: ./bin/stamp-plugin-version.sh "${RELEASE_TAG#v}"
 
       - name: Package reprint-exporter-wp.zip
         run: cd reprint-exporter-wp && zip -r ../reprint-exporter-wp.zip . -x '*/secret.php'
