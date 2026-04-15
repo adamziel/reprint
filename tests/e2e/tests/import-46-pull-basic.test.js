@@ -48,6 +48,7 @@ describe('Import: Pull Basic', { timeout: 180000 }, () => {
         `--target-pass=e2e_password`,
         `--target-db=${importDb}`,
         `--new-site-url=http://localhost:9999`,
+        '--runtime=none',
     ];
 
     it('pull completes successfully', () => {

@@ -56,6 +56,7 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
         `--target-pass=e2e_password`,
         `--target-db=${importDb}`,
         `--new-site-url=http://localhost:9999`,
+        '--runtime=none',
     ];
 
     it('initial pull completes', () => {

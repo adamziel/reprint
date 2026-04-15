@@ -58,6 +58,7 @@ describe('Import: Pull Multi-Request', { timeout: 300000 }, () => {
                 `--target-pass=e2e_password`,
                 `--target-db=${importDb}`,
                 `--new-site-url=http://localhost:9999`,
+                '--runtime=none',
             ],
         });
         pullStdout = result.stdout;
