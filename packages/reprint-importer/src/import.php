@@ -3925,6 +3925,7 @@ class ImportClient
             // this value.
             $this->state['status'] = 'in_progress';
             $this->exit_code = 0;
+            $this->tick_spinner();
         }
     }
 
@@ -6654,6 +6655,7 @@ class ImportClient
                     "local_after" => $local_after,
                 ];
                 $this->save_state($this->state);
+                $this->tick_spinner();
             }
         }
 
@@ -9386,6 +9388,7 @@ class ImportClient
             $this->audit_log("Failed to prepare keyed index file, falling back to PHP sort");
             return false;
         }
+        $lines_read = 0;
         while (($line = fgets($in)) !== false) {
             $line = rtrim($line, "\r\n");
             if ($line === "") {
@@ -9397,6 +9400,9 @@ class ImportClient
             }
             $key = bin2hex($entry["path"]);
             fwrite($out, $key . "\t" . $line . "\n");
+            if (++$lines_read % 500 === 0) {
+                $this->tick_spinner();
+            }
         }
         fclose($in);
         fclose($out);
@@ -9432,6 +9438,7 @@ class ImportClient
         }
 
         $prev_key = null;
+        $lines_stripped = 0;
         while (($line = fgets($sorted_in)) !== false) {
             $pos = strpos($line, "\t");
             if ($pos === false) {
@@ -9449,6 +9456,9 @@ class ImportClient
             }
             $prev_key = $key;
             fwrite($sorted_out, $data);
+            if (++$lines_stripped % 500 === 0) {
+                $this->tick_spinner();
+            }
         }
         fclose($sorted_in);
         fclose($sorted_out);
