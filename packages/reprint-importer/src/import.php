@@ -1361,7 +1361,7 @@ class ImportClient
             // miscalculates width, the terminal clips at the right
             // edge instead of wrapping onto the next line (which would
             // leave ghost text that \r\033[K can't clear).
-            fwrite($this->progress_fd, "\033[?7l\r\033[K" . $message . "\033[?7h");
+            fwrite($this->progress_fd, "\r\033[K" . $message . "");
         }
     }
 
@@ -1414,14 +1414,14 @@ class ImportClient
                 $line = "  \033[36m{$char}\033[0m {$this->pull_last_progress}";
             }
             $line = $this->truncate_for_terminal($line);
-            fwrite($this->progress_fd, "\033[?7l\r\033[K{$line}\033[?7h");
+            fwrite($this->progress_fd, "\r\033[K{$line}");
             return;
         }
 
         $frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
         $idx = ($this->spinner_tick % 10) * 3;
         $char = substr($frames, $idx, 3);
-        fwrite($this->progress_fd, "\033[?7l\r\033[K  \033[36m{$char}\033[0m {$this->pull_active_label}\033[?7h");
+        fwrite($this->progress_fd, "\r\033[K  \033[36m{$char}\033[0m {$this->pull_active_label}");
     }
 
     /**
