@@ -51,6 +51,7 @@ describe('Import: Shared theme symlink remains working', () => {
 
     async function ensureApiReachable() {
         const apiUrl = getSiteUrl(site);
+        const apiPort = Number(new URL(apiUrl).port || 80);
         try {
             await fetch(apiUrl, { method: 'GET' });
             return;
@@ -60,7 +61,7 @@ describe('Import: Shared theme symlink remains working', () => {
         }
 
         const docRoot = getSiteDir(site);
-        fallbackApiServer = spawn('php', ['-S', '127.0.0.1:8112', '-t', docRoot], {
+        fallbackApiServer = spawn('php', ['-S', `127.0.0.1:${apiPort}`, '-t', docRoot], {
             stdio: 'ignore',
         });
 
