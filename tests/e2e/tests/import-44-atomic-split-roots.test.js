@@ -56,32 +56,18 @@ describe('Import: Atomic-style split roots (__wp__ + document root)', () => {
                 writeFileSync(join(siteDir, 'wp-config.php'), '<?php /* stub config */ ?>');
 
                 // index.php loads the exporter directly, bypassing WordPress.
-                // HMAC verification runs before the exporter runtime is loaded.
+                // lib.php's _site_export_handle_api_request() authenticates
+                // via HMAC and dispatches the request — same path as the
+                // WordPress plugin, just without WP bootstrapped.
                 writeFileSync(join(siteDir, 'index.php'), `<?php
 define('ABSPATH', __DIR__ . '/__wp__/');
 define('SITE_EXPORT_PLUGIN_DIR', __DIR__ . '/wp-content/plugins/site-export/');
 define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
-$shared_secret = require SITE_EXPORT_SECRET_FILE;
 if (!function_exists('plugin_dir_path')) {
-    function plugin_dir_path(\$file) { return trailingslashit(dirname(\$file)); }
-}
-if (!function_exists('trailingslashit')) {
-    function trailingslashit(\$s) { return rtrim(\$s, '/') . '/'; }
+    function plugin_dir_path(\$file) { return rtrim(dirname(\$file), '/') . '/'; }
 }
 require_once SITE_EXPORT_PLUGIN_DIR . 'lib.php';
-$runtime = _site_export_load_exporter_runtime();
-if (!$runtime) { http_response_code(500); echo 'No runtime'; exit; }
-require_once $runtime;
-$auth_error = (new Site_Export_HMAC_Server($shared_secret))->verify_globals();
-if ($auth_error !== null) {
-    http_response_code(403);
-    echo $auth_error;
-    exit;
-}
-$server = new Site_Export_HTTP_Server([
-    'default_directory' => __DIR__ . '/__wp__',
-]);
-$server->handle_request();
+_site_export_handle_api_request();
 `);
 
                 // Create site's own wp-content
