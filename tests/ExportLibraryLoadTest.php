@@ -5,12 +5,8 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 
 /**
- * Verifies that packages/reprint-exporter/src/export.php behaves as
- * a library: requiring it does not authenticate requests or terminate
- * the process on its own.
- *
- * Authentication is now the responsibility of the caller (e.g.,
- * reprint-exporter-wp/lib.php runs HMAC before require).
+ * Verifies that requiring export.php does not authenticate requests
+ * or terminate the process — it only registers functions and classes.
  *
  * Tests run in subprocesses because export.php registers shutdown and
  * error handlers at module level.

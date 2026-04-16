@@ -56,9 +56,7 @@ describe('Import: Atomic-style split roots (__wp__ + document root)', () => {
                 writeFileSync(join(siteDir, 'wp-config.php'), '<?php /* stub config */ ?>');
 
                 // index.php loads the exporter directly, bypassing WordPress.
-                // export.php is a library and no longer performs its own
-                // authentication, so we run HMAC verification here using the
-                // shared secret from secret.php before requiring the runtime.
+                // HMAC verification runs before the exporter runtime is loaded.
                 writeFileSync(join(siteDir, 'index.php'), `<?php
 define('ABSPATH', __DIR__ . '/__wp__/');
 define('SITE_EXPORT_PLUGIN_DIR', __DIR__ . '/wp-content/plugins/site-export/');

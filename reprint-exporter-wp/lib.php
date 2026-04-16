@@ -273,9 +273,6 @@ function _site_export_handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    // HMAC verification runs here, before export.php is loaded.
-    // export.php is a library — it trusts that the caller has already
-    // authenticated the request.
     $authenticate = $options['authenticate'] ?? '_site_export_default_authenticate';
     $authenticate();
 

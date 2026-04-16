@@ -573,12 +573,6 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
     }
 }
 
-// This file is a library: it exposes endpoint functions and the
-// Site_Export_HTTP_Server dispatcher. Authentication is the caller's
-// responsibility — reprint-exporter-wp runs HMAC verification in
-// lib.php before requiring this file, and other integrations are
-// expected to do the same before calling any endpoint directly.
-
 require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/class-file-tree-producer.php";
 
