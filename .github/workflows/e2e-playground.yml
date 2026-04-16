@@ -105,8 +105,9 @@ jobs:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
           PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
         working-directory: tests/e2e
-        # WASM PHP takes ~12s per invocation, so bump per-test timeout from 60s to 180s
-        run: npx vitest run --test-timeout=180000
+        # WASM PHP boot takes ~12s and full-site downloads run minutes, so allow
+        # plenty of room. Individual tests still set tighter per-call budgets.
+        run: npx vitest run --test-timeout=600000
 
       - name: Debug logs
         if: always()

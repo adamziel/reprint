@@ -41,7 +41,11 @@ describe('Import: Gzip Corruption', () => {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'db-sync', {
                 secret: getSiteSecret(site),
-                timeout: 90000,
+                // The corruption only fires after the full payload streams,
+                // so under WASM PHP the test must allow time for the entire
+                // ~80MB site download before the bad bytes can be observed.
+                timeout: 300000,
+                wallTimeout: 600000,
             });
             // The importer should either fail with non-zero exit code,
             // or succeed if it managed to parse enough data before the corruption.
@@ -74,7 +78,11 @@ describe('Import: Gzip Corruption', () => {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                timeout: 90000,
+                // The corruption only fires after the full payload streams,
+                // so under WASM PHP the test must allow time for the entire
+                // ~80MB site download before the bad bytes can be observed.
+                timeout: 300000,
+                wallTimeout: 600000,
             });
             // Same as above: must not hang. Either succeeds (partial data OK)
             // or fails with a clear error.

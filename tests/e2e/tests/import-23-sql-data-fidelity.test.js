@@ -88,6 +88,9 @@ CREATE TABLE wp_edge_cases (
     it('db-sync completes', () => {
         const result = runImporter(importUrl(), tempDir, 'db-sync', {
             secret: getSiteSecret(site),
+            // SQL streaming over WASM PHP needs extra time per invocation —
+            // the curl pipeline is slower and the boot overhead adds ~12s on top.
+            timeout: 240000,
         });
         assert.equal(result.exitCode, 0,
             `Expected exit 0, got ${result.exitCode}\n` +
