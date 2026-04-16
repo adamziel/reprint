@@ -54,7 +54,10 @@ describe('Import: Error Messages', () => {
             const output = (result.stdout + result.stderr).toLowerCase();
             assert.ok(
                 output.includes('connect') || output.includes('refused') || output.includes('error') || output.includes('curl') || output.includes('failed'),
-                `Expected connection error message, got: ${result.stdout + result.stderr}`
+                `Expected connection error message, got:\n` +
+                `  exit=${result.exitCode}, signal=${result.signal}, killed=${result.killed}, errorCode=${result.errorCode}\n` +
+                `  stdout (${result.stdout.length} bytes): ${result.stdout}\n` +
+                `  stderr (${result.stderr.length} bytes): ${result.stderr}`
             );
         } finally {
             cleanupTempDir(dir);

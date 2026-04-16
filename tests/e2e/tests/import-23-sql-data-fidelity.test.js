@@ -89,7 +89,11 @@ CREATE TABLE wp_edge_cases (
         const result = runImporter(importUrl(), tempDir, 'db-sync', {
             secret: getSiteSecret(site),
         });
-        assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        assert.equal(result.exitCode, 0,
+            `Expected exit 0, got ${result.exitCode}\n` +
+            `signal: ${result.signal}, killed: ${result.killed}, errorCode: ${result.errorCode}\n` +
+            `stderr (${result.stderr.length} bytes): ${result.stderr}\n` +
+            `stdout (${result.stdout.length} bytes, last 2000): ${result.stdout.slice(-2000)}`);
 
         const sqlFile = join(tempDir, 'db.sql');
         assert.ok(existsSync(sqlFile), 'Expected db.sql to exist');

@@ -254,12 +254,16 @@ export function runImporter(url, outputDir, command, options = {}) {
                 env: { ...process.env },
                 maxBuffer: 50 * 1024 * 1024,
             });
-            return { stdout: result, stderr: '', exitCode: 0 };
+            return { stdout: result, stderr: '', exitCode: 0, signal: null };
         } catch (e) {
+            // Capture all available crash diagnostics
             return {
                 stdout: e.stdout || '',
                 stderr: e.stderr || '',
-                exitCode: e.status || 1,
+                exitCode: e.status === null ? -1 : (e.status || 1),
+                signal: e.signal || null,
+                errorCode: e.code || null,
+                killed: e.killed || false,
             };
         }
     }

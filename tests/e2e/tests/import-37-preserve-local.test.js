@@ -209,7 +209,11 @@ describe('Import: --preserve-local', () => {
                 secret: getSiteSecret(site),
                 autoResume: false,
             });
-            assert.equal(result.exitCode, 1, 'Expected exit code 1');
+            assert.equal(result.exitCode, 1,
+                `Expected exit code 1, got ${result.exitCode}\n` +
+                `signal: ${result.signal}, killed: ${result.killed}, errorCode: ${result.errorCode}\n` +
+                `stdout (${result.stdout.length} bytes): ${result.stdout}\n` +
+                `stderr (${result.stderr.length} bytes): ${result.stderr}`);
             assert.ok(
                 result.stderr.includes('not empty'),
                 `Expected error about non-empty directory, got: ${result.stderr}`,

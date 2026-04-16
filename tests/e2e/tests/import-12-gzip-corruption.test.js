@@ -57,7 +57,10 @@ describe('Import: Gzip Corruption', () => {
                 const output = result.stdout + result.stderr;
                 assert.ok(
                     output.includes('cURL error') || output.includes('error') || output.includes('Error'),
-                    `Expected error message in output, got:\n${output}`
+                    `Expected error message in output, got:\n` +
+                    `  exit=${result.exitCode}, signal=${result.signal}, killed=${result.killed}, errorCode=${result.errorCode}\n` +
+                    `  stdout (${result.stdout.length} bytes, last 2000): ${result.stdout.slice(-2000)}\n` +
+                    `  stderr (${result.stderr.length} bytes): ${result.stderr}`
                 );
             }
         } finally {
@@ -88,7 +91,10 @@ describe('Import: Gzip Corruption', () => {
                 const output = result.stdout + result.stderr;
                 assert.ok(
                     output.includes('cURL error') || output.includes('error') || output.includes('Error'),
-                    `Expected error message in output, got:\n${output}`
+                    `Expected error message in output, got:\n` +
+                    `  exit=${result.exitCode}, signal=${result.signal}, killed=${result.killed}, errorCode=${result.errorCode}\n` +
+                    `  stdout (${result.stdout.length} bytes, last 2000): ${result.stdout.slice(-2000)}\n` +
+                    `  stderr (${result.stderr.length} bytes): ${result.stderr}`
                 );
             }
         } finally {
