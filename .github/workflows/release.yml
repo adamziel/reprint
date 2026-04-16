@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           submodules: true
@@ -76,7 +76,7 @@ jobs:
         run: cd reprint-exporter-wp && zip -r ../reprint-exporter-wp.zip . -x '*/secret.php'
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.release_ref.outputs.tag }}
           files: |
