@@ -17,6 +17,7 @@ const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
 const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
 const DB_PASS = REGISTRY.dbPass;
@@ -247,18 +248,24 @@ export function runImporter(url, outputDir, command, options = {}) {
         }
 
         try {
-            const result = execFileSync('php', args, {
-                timeout: options.timeout || 60000,
+            const result = execFileSync(PHP_BINARY, args, {
+                // WASM PHP startup overhead is ~12s per invocation, so the per-call
+                // budget needs to comfortably cover boot + the actual work.
+                timeout: options.timeout || 120000,
                 encoding: 'utf-8',
                 env: { ...process.env },
                 maxBuffer: 50 * 1024 * 1024,
             });
-            return { stdout: result, stderr: '', exitCode: 0 };
+            return { stdout: result, stderr: '', exitCode: 0, signal: null };
         } catch (e) {
+            // Capture all available crash diagnostics
             return {
                 stdout: e.stdout || '',
                 stderr: e.stderr || '',
-                exitCode: e.status || 1,
+                exitCode: e.status === null ? -1 : (e.status || 1),
+                signal: e.signal || null,
+                errorCode: e.code || null,
+                killed: e.killed || false,
             };
         }
     }
@@ -285,7 +292,9 @@ export function runImporter(url, outputDir, command, options = {}) {
     }
 
     const commandExtraArgs = options.extraArgs || [];
-    const wallTimeout = options.wallTimeout || 120000; // 2 minutes total wall-clock
+    // Wall-clock budget across all resume attempts. Set high enough to cover several
+    // WASM PHP invocations (~12s startup each) plus their actual work.
+    const wallTimeout = options.wallTimeout || 240000;
     const wallStart = Date.now();
     let result = runImporterOnce(command, commandExtraArgs);
     if (
@@ -455,7 +464,7 @@ $stmt = $pdo->query($argv[4]);
 echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC), JSON_UNESCAPED_SLASHES);
 `;
 
-    const output = execFileSync('php', ['-r', script, PROJECT_ROOT, sqlitePath, dbName, sql], {
+    const output = execFileSync(PHP_BINARY, ['-r', script, PROJECT_ROOT, sqlitePath, dbName, sql], {
         encoding: 'utf-8',
         env: { ...process.env },
     });
@@ -745,4 +754,4 @@ export function assertTreesMatch(sourceDir, importedDir, options = {}) {
 }
 
 // Re-export constants
-export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, DB_HOST, DB_USER, DB_PASS };
+export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, PHP_BINARY, DB_HOST, DB_USER, DB_PASS };

@@ -1,4 +1,4 @@
-name: E2E Tests
+name: E2E (Playground CLI PHP)
 
 on:
   push:
@@ -7,11 +7,10 @@ on:
 
 jobs:
   build-phar:
-    if: false  # Temporarily disabled while testing Playground CLI e2e
     name: Build reprint.phar
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
         with:
           submodules: true
 
@@ -26,46 +25,58 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: importer-phar
+          name: importer-phar-playground
           path: reprint.phar
 
-  e2e:
-    if: false  # Temporarily disabled while testing Playground CLI e2e
-    name: E2E (PHP ${{ matrix.php }})
+  e2e-playground:
+    name: E2E (Playground CLI)
     needs: build-phar
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+    timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
         with:
           submodules: true
 
       - uses: actions/download-artifact@v4
         with:
-          name: importer-phar
+          name: importer-phar-playground
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
+      # The export side still needs real PHP-FPM + nginx.
+      # Use PHP 8.2 for the server; the importer will use Playground CLI's PHP 8.0.
       - name: Setup infrastructure
-        run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.php }}"
+        run: tests/e2e/ci/setup-infrastructure.sh "8.2"
 
       - name: Setup test sites
         run: tests/e2e/setup.sh
 
-      - name: Install dependencies
+      - name: Install E2E dependencies
         working-directory: tests/e2e
         run: npm install
+
+      - name: Install Playground CLI
+        run: npm install -g @wp-playground/cli@latest
+
+      - name: Verify Playground CLI PHP works
+        run: |
+          echo "=== Playground CLI version ==="
+          npx @wp-playground/cli --version || echo "no --version flag"
+
+          echo "=== Test PHP execution ==="
+          npx @wp-playground/cli php -- -r "echo 'Hello from Playground PHP ' . PHP_VERSION . PHP_EOL;"
+
+          echo "=== Test PHAR with mount ==="
+          npx @wp-playground/cli php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- "${GITHUB_WORKSPACE}/reprint.phar" --help || echo "EXIT: $?"
 
       - name: Provision basic site and smoke-test API
         env:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
         working-directory: tests/e2e
         run: |
           # Download WP-CLI (normally done by Vitest globalSetup, but we need it here)
@@ -81,22 +92,22 @@ jobs:
           console.log("Basic site provisioned");
           NODESCRIPT
 
-          # Quick smoke test: use the importer CLI to hit the export API.
+          # Quick smoke test: use the Playground CLI PHP to run the importer
           SECRET="test-secret-basic"
           BASE="http://127.0.0.1:8081/?site-export-api"
           DIR="/srv/e2e-sites/basic"
 
-          echo "=== Importer preflight ==="
-          timeout 30 php "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
-
-          echo "=== Importer files-pull ==="
-          timeout 30 php "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+          echo "=== Playground CLI importer preflight ==="
+          timeout 60 "$PHP_BINARY" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
 
       - name: Run E2E tests
         env:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
         working-directory: tests/e2e
-        run: npx vitest run
+        # WASM PHP boot takes ~12s and full-site downloads run minutes, so allow
+        # plenty of room. Individual tests still set tighter per-call budgets.
+        run: npx vitest run --test-timeout=600000
 
       - name: Debug logs
         if: always()
@@ -109,11 +120,3 @@ jobs:
           sudo tail -100 /var/log/nginx/error.log 2>/dev/null || echo "(empty)"
           echo "--- Nginx config test ---"
           sudo nginx -t 2>&1 || true
-          echo "--- PHP-FPM journal ---"
-          sudo journalctl -u "php${{ matrix.php }}-fpm" --no-pager -n 30 2>/dev/null || true
-          echo "--- Nginx journal ---"
-          sudo journalctl -u nginx --no-pager -n 30 2>/dev/null || true
-          echo "--- MariaDB journal ---"
-          sudo journalctl -u mariadb --no-pager -n 30 2>/dev/null || true
-          echo "--- PHP processes ---"
-          ps aux | grep php || true

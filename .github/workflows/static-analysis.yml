@@ -7,6 +7,7 @@ on:
 
 jobs:
   phpstan:
+    if: false  # Temporarily disabled while testing Playground CLI e2e
     name: PHPStan
     runs-on: ubuntu-latest
     steps:

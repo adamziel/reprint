@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir,
+    fsRootDir, PHP_BINARY,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -82,7 +82,7 @@ describe('Import: Playground CLI runtime', () => {
     });
 
     it('apply-runtime generates playground-cli files', () => {
-        execFileSync('php', [
+        execFileSync(PHP_BINARY, [
             IMPORTER_PATH,
             'apply-runtime',
             `--state-dir=${tempDir}`,

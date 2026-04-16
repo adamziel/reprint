@@ -109,7 +109,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             await conn.end();
         });
 
-        it('loads .sql-buffer from disk and logs recovery', () => {
+        it('loads .sql-buffer from disk and logs recovery', { timeout: 300000 }, () => {
             // Run preflight so db-sync can proceed
             runImporter(importUrl(), tempDir, 'preflight', {
                 secret: getSiteSecret(site),

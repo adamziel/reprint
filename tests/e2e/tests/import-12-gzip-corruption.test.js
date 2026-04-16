@@ -41,7 +41,11 @@ describe('Import: Gzip Corruption', () => {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'db-sync', {
                 secret: getSiteSecret(site),
-                timeout: 30000,
+                // The corruption only fires after the full payload streams,
+                // so under WASM PHP the test must allow time for the entire
+                // ~80MB site download before the bad bytes can be observed.
+                timeout: 300000,
+                wallTimeout: 600000,
             });
             // The importer should either fail with non-zero exit code,
             // or succeed if it managed to parse enough data before the corruption.
@@ -57,7 +61,10 @@ describe('Import: Gzip Corruption', () => {
                 const output = result.stdout + result.stderr;
                 assert.ok(
                     output.includes('cURL error') || output.includes('error') || output.includes('Error'),
-                    `Expected error message in output, got:\n${output}`
+                    `Expected error message in output, got:\n` +
+                    `  exit=${result.exitCode}, signal=${result.signal}, killed=${result.killed}, errorCode=${result.errorCode}\n` +
+                    `  stdout (${result.stdout.length} bytes, last 2000): ${result.stdout.slice(-2000)}\n` +
+                    `  stderr (${result.stderr.length} bytes): ${result.stderr}`
                 );
             }
         } finally {
@@ -71,7 +78,11 @@ describe('Import: Gzip Corruption', () => {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                timeout: 30000,
+                // The corruption only fires after the full payload streams,
+                // so under WASM PHP the test must allow time for the entire
+                // ~80MB site download before the bad bytes can be observed.
+                timeout: 300000,
+                wallTimeout: 600000,
             });
             // Same as above: must not hang. Either succeeds (partial data OK)
             // or fails with a clear error.
@@ -88,7 +99,10 @@ describe('Import: Gzip Corruption', () => {
                 const output = result.stdout + result.stderr;
                 assert.ok(
                     output.includes('cURL error') || output.includes('error') || output.includes('Error'),
-                    `Expected error message in output, got:\n${output}`
+                    `Expected error message in output, got:\n` +
+                    `  exit=${result.exitCode}, signal=${result.signal}, killed=${result.killed}, errorCode=${result.errorCode}\n` +
+                    `  stdout (${result.stdout.length} bytes, last 2000): ${result.stdout.slice(-2000)}\n` +
+                    `  stderr (${result.stderr.length} bytes): ${result.stderr}`
                 );
             }
         } finally {

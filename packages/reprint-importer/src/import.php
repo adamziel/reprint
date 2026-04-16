@@ -2443,8 +2443,13 @@ class ImportClient
             );
         }
 
-        $is_empty =
-            !is_dir($this->fs_root) || count(scandir($this->fs_root)) <= 2; // only . and ..
+        // Filter out "." and ".." explicitly: standard PHP scandir() returns them,
+        // but WASM PHP (WordPress Playground) does not, so a `count <= 2` shortcut
+        // would mis-classify directories with one or two real entries as empty.
+        $is_empty = !is_dir($this->fs_root) || count(array_diff(
+            scandir($this->fs_root) ?: [],
+            [".", ".."]
+        )) === 0;
 
         // A local index from a prior completed sync means the next run is a
         // delta: re-index the remote, diff against local, fetch only changes.
