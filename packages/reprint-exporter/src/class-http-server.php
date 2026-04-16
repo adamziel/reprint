@@ -45,6 +45,67 @@ final class Site_Export_HTTP_Server {
     }
 
     /**
+     * Emits CORS headers and terminates OPTIONS preflight requests.
+     *
+     * Must be called BEFORE authentication runs — browsers send
+     * preflight OPTIONS without credentials, so the consumer must not
+     * require auth headers before this check passes.
+     *
+     * A wildcard origin ('*') is safe when authentication happens
+     * out-of-band (e.g., HMAC with a pre-shared secret) — an attacker
+     * without the secret cannot export anything regardless of origin.
+     *
+     * For OPTIONS requests this terminates the process. For all other
+     * methods it just emits the headers and returns so the caller can
+     * continue with authentication and dispatch.
+     *
+     * @param string|true $origin The Access-Control-Allow-Origin value,
+     *     or true as a shorthand for '*'.
+     * @param string $allow_headers The Access-Control-Allow-Headers value.
+     *     Defaults to '*' to permit all headers. Pass a comma-separated
+     *     list to restrict (e.g. 'Content-Type, X-Auth-Signature').
+     * @param array<string, mixed> $server Request server array (defaults to $_SERVER).
+     * @param array<string, callable>|null $io Optional overrides for
+     *     'header' (emitter) and 'exit' (preflight terminator). Used
+     *     only by tests.
+     */
+    public static function handle_cors_headers_and_terminate_on_options(
+        $origin = '*',
+        string $allow_headers = '*',
+        array $server = [],
+        ?array $io = null
+    ): void {
+        if ($origin === true) {
+            $origin = '*';
+        }
+        if (!is_string($origin) || $origin === '') {
+            throw new InvalidArgumentException(
+                'CORS origin must be a non-empty string or true'
+            );
+        }
+
+        $emit_header = ($io['header'] ?? null) ?? static function (string $h): void {
+            header($h);
+        };
+        $terminate = ($io['exit'] ?? null) ?? static function (): void {
+            exit;
+        };
+
+        $emit_header('Access-Control-Allow-Origin: ' . $origin);
+        $emit_header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+        $emit_header('Access-Control-Allow-Headers: ' . $allow_headers);
+
+        $request_server = $server === [] ? $_SERVER : $server;
+        $method = isset($request_server['REQUEST_METHOD']) ? (string) $request_server['REQUEST_METHOD'] : '';
+        if (strtoupper($method) !== 'OPTIONS') {
+            return;
+        }
+
+        $emit_header('Allow: GET, POST, OPTIONS');
+        $terminate();
+    }
+
+    /**
      * @param array<string, mixed> $get
      * @param array<string, mixed> $post
      * @param array<string, mixed> $server
