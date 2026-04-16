@@ -101,6 +101,9 @@
     "symlinked-abspath": {
       "port": 8111
     },
+    "wpcloud-shared-theme-symlink": {
+      "port": 8118
+    },
     "sql-crash": {
       "port": 8113
     },

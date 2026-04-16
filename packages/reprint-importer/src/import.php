@@ -960,6 +960,14 @@ class ImportClient
     private $follow_symlinks = true;
 
     /**
+     * Memoized lookups for "does remote index contain this path or any descendant path?"
+     * keyed by normalized absolute path.
+     *
+     * @var array<string,bool>
+     */
+    private $remote_index_prefix_cache = [];
+
+    /**
      * @var string Controls behavior when the fs root is non-empty at import start.
      *
      * 'error' (default): throw an error if the fs root is non-empty.
@@ -7678,6 +7686,126 @@ class ImportClient
     }
 
     /**
+     * Map an absolute remote symlink target to the local fs-root mirror when possible.
+     *
+     * Example:
+     *
+     * Source site:
+     *
+     *   /srv/source-site/
+     *   `-- wp-content/
+     *       `-- themes/
+     *           `-- indice -> /tmp/e2e-shared-themes/pub/indice
+     *
+     *   /tmp/e2e-shared-themes/pub/indice/
+     *   |-- style.css
+     *   `-- index.php
+     *
+     * Local import state:
+     *
+     *   <state-dir>/fs-root/
+     *   |-- tmp/e2e-shared-themes/pub/indice/
+     *   |   |-- style.css
+     *   |   `-- index.php
+     *   `-- srv/source-site/wp-content/themes/
+     *       `-- indice -> ../../../tmp/e2e-shared-themes/pub/indice
+     *
+     * Without this remap, the recreated link would still point to
+     * /tmp/e2e-shared-themes/pub/indice, which is outside fs-root and rejected
+     * by assert_symlink_target_within_root(). When the absolute target was
+     * already indexed from the source, we instead point the symlink at the
+     * mirrored local copy under fs-root.
+     */
+    private function map_absolute_symlink_target_for_local_mirror(
+        string $path,
+        string $local_path,
+        string $target
+    ): string {
+        if (!str_starts_with($target, "/")) {
+            return $target;
+        }
+
+        $root = $this->get_filesystem_root_path();
+        $normalized_target = normalize_path($target);
+
+        // Already points inside fs-root, keep as-is.
+        if (path_is_within_root($normalized_target, $root)) {
+            return $target;
+        }
+
+        // Only rewrite when symlink-following is enabled and the target path
+        // was actually indexed from the source.
+        if (
+            !$this->follow_symlinks ||
+            !$this->remote_index_contains_path_prefix($normalized_target)
+        ) {
+            return $target;
+        }
+
+        $mapped_absolute = $root . $normalized_target;
+        $mapped_relative = self::compute_relative_path(
+            dirname($local_path),
+            $mapped_absolute
+        );
+
+        $this->audit_log(
+            "SYMLINK TARGET REMAP | {$path}: {$target} -> {$mapped_relative}",
+            false,
+        );
+
+        return $mapped_relative;
+    }
+
+    /**
+     * Checks if the remote index contains $path or any descendant under it.
+     * Runs a memoized O(N) scan of .import-remote-index.jsonl.
+     */
+    private function remote_index_contains_path_prefix(string $path): bool
+    {
+        $path = rtrim(normalize_path($path), "/");
+        if ($path === "") {
+            return false;
+        }
+
+        if (isset($this->remote_index_prefix_cache[$path])) {
+            return $this->remote_index_prefix_cache[$path];
+        }
+
+        if (!file_exists($this->remote_index_file)) {
+            $this->remote_index_prefix_cache[$path] = false;
+            return false;
+        }
+
+        $h = fopen($this->remote_index_file, "r");
+        if (!$h) {
+            $this->remote_index_prefix_cache[$path] = false;
+            return false;
+        }
+
+        $prefix = $path . "/";
+        $found = false;
+        while (($line = fgets($h)) !== false) {
+            try {
+                $entry = $this->parse_index_line($line);
+            } catch (RuntimeException $e) {
+                continue;
+            }
+            if ($entry === null) {
+                continue;
+            }
+            $entry_path = $entry["path"];
+            if ($entry_path === $path || str_starts_with($entry_path, $prefix)) {
+                $found = true;
+                break;
+            }
+        }
+        fclose($h);
+
+        $this->remote_index_prefix_cache[$path] = $found;
+        return $found;
+    }
+
+    /**
      * Return canonical fs root path, creating it if it doesn't exist.
      */
     private function get_filesystem_root_path(): string
@@ -8243,6 +8371,11 @@ class ImportClient
         }
 
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        $target_for_local = $this->map_absolute_symlink_target_for_local_mirror(
+            $path,
+            $local_path,
+            $target,
+        );
 
         // In preserve-local mode, if something already exists at the symlink
         // path, keep it — whether it's a file, directory, or another symlink.
@@ -8266,7 +8399,7 @@ class ImportClient
         try {
             $this->assert_symlink_target_within_root(
                 dirname($local_path),
-                $target,
+                $target_for_local,
                 $root
             );
         } catch (RuntimeException $e) {
@@ -8274,7 +8407,7 @@ class ImportClient
             $this->output_progress([
                 "type" => "symlink_error",
                 "path" => $path,
-                "target" => $target,
+                "target" => $target_for_local,
                 "error" => $e->getMessage(),
                 "message" => "Symlink error: {$path} -> {$target}",
             ]);
@@ -8293,7 +8426,7 @@ class ImportClient
                 $this->output_progress([
                     "type" => "symlink_error",
                     "path" => $path,
-                    "target" => $target,
+                    "target" => $target_for_local,
                     "error" => "Failed to replace existing path",
                     "message" => "Symlink error: {$path} -> {$target}",
                 ]);
@@ -8319,7 +8452,7 @@ class ImportClient
                 $this->output_progress([
                     "type" => "symlink_error",
                     "path" => $path,
-                    "target" => $target,
+                    "target" => $target_for_local,
                     "error" => "Failed to create parent directory",
                     "message" => "Symlink error: {$path} -> {$target}",
                 ]);
@@ -8328,17 +8461,17 @@ class ImportClient
         }
 
         // Create symlink
-        $symlink_result = symlink($target, $local_path);
+        $symlink_result = symlink($target_for_local, $local_path);
         if (true !== $symlink_result || !is_link($local_path)) {
             // Log error and skip this symlink
             $this->audit_log(
-                "Failed to create symlink: {$local_path} -> {$target}",
+                "Failed to create symlink: {$local_path} -> {$target_for_local}",
                 true,
             );
             $this->output_progress([
                 "type" => "symlink_error",
                 "path" => $path,
-                "target" => $target,
+                "target" => $target_for_local,
                 "error" => "Failed to create symlink",
                 "message" => "Symlink error: {$path} -> {$target}",
             ]);
@@ -8350,7 +8483,7 @@ class ImportClient
             @touch($local_path, $ctime);
         }
 
-        $this->audit_log("Symlink: {$path} -> {$target}", false);
+        $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
 
         if ($ctime > 0) {
             $this->upsert_index_entry($path, $ctime, 0, "link");
@@ -8359,8 +8492,8 @@ class ImportClient
         $this->output_progress([
             "type" => "symlink",
             "path" => $path,
-            "target" => $target,
-            "message" => "Symlink: {$path} -> {$target}",
+            "target" => $target_for_local,
+            "message" => "Symlink: {$path} -> {$target_for_local}",
         ]);
     }
 
