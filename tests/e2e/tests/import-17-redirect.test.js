@@ -42,7 +42,7 @@ describe('Import: 301 Redirect', () => {
             const url = `${getSiteUrl('redirect-301')}&directory=/srv/e2e-sites/basic`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret('redirect-301'),
-                timeout: 15000,
+                timeout: 60000,
             });
             // The importer should fail because it doesn't follow redirects
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for redirect');
@@ -65,7 +65,7 @@ describe('Import: 301 Redirect', () => {
             const url = `${getSiteUrl('redirect-301')}&directory=/srv/e2e-sites/basic`;
             const result = runImporter(url, tempDir, 'db-sync', {
                 secret: getSiteSecret('redirect-301'),
-                timeout: 15000,
+                timeout: 60000,
             });
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for redirect');
             const output = result.stdout + result.stderr;

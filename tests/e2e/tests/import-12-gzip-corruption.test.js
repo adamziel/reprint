@@ -41,7 +41,7 @@ describe('Import: Gzip Corruption', () => {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'db-sync', {
                 secret: getSiteSecret(site),
-                timeout: 30000,
+                timeout: 90000,
             });
             // The importer should either fail with non-zero exit code,
             // or succeed if it managed to parse enough data before the corruption.
@@ -74,7 +74,7 @@ describe('Import: Gzip Corruption', () => {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
             const result = runImporter(url, tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
-                timeout: 30000,
+                timeout: 90000,
             });
             // Same as above: must not hang. Either succeeds (partial data OK)
             // or fails with a clear error.

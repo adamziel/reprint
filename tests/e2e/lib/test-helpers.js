@@ -249,7 +249,9 @@ export function runImporter(url, outputDir, command, options = {}) {
 
         try {
             const result = execFileSync(PHP_BINARY, args, {
-                timeout: options.timeout || 60000,
+                // WASM PHP startup overhead is ~12s per invocation, so the per-call
+                // budget needs to comfortably cover boot + the actual work.
+                timeout: options.timeout || 120000,
                 encoding: 'utf-8',
                 env: { ...process.env },
                 maxBuffer: 50 * 1024 * 1024,
@@ -290,7 +292,9 @@ export function runImporter(url, outputDir, command, options = {}) {
     }
 
     const commandExtraArgs = options.extraArgs || [];
-    const wallTimeout = options.wallTimeout || 120000; // 2 minutes total wall-clock
+    // Wall-clock budget across all resume attempts. Set high enough to cover several
+    // WASM PHP invocations (~12s startup each) plus their actual work.
+    const wallTimeout = options.wallTimeout || 240000;
     const wallStart = Date.now();
     let result = runImporterOnce(command, commandExtraArgs);
     if (
