@@ -208,14 +208,11 @@ describe('Import: --preserve-local', () => {
             const result = runImporter(importUrl(), tempDir, 'files-sync', {
                 secret: getSiteSecret(site),
                 autoResume: false,
-                timeout: 30000,
-                wallTimeout: 30000,
             });
-            assert.notEqual(result.exitCode, 0, 'Expected non-zero exit for non-empty directory');
-            const output = result.stdout + result.stderr;
+            assert.equal(result.exitCode, 1, 'Expected exit code 1');
             assert.ok(
-                output.includes('not empty') || output.includes('non-empty') || output.includes('RuntimeError') || output.includes('fetch failed'),
-                `Expected error about non-empty directory, got: ${output}`,
+                result.stderr.includes('not empty'),
+                `Expected error about non-empty directory, got: ${result.stderr}`,
             );
         });
     });

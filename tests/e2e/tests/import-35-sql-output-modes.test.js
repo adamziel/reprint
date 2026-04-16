@@ -97,7 +97,6 @@ describe('Import: SQL Output Modes', () => {
                         '--mysql-user=e2e_admin',
                         '--mysql-password=e2e_password',
                     ],
-                    wallTimeout: 150000, // Must fit within vitest's 180s test timeout
                 },
             );
             assert.equal(result.exitCode, 0,
@@ -116,10 +115,7 @@ describe('Import: SQL Output Modes', () => {
 
         it('state file records sql_output mode', () => {
             const stateFile = join(tempDir, '.import-state.json');
-            try {
-                const s = JSON.parse(readFileSync(stateFile, 'utf-8'));
-                if (s.status !== 'complete') return;
-            } catch (e) { return; }
+            assert.ok(existsSync(stateFile), 'Expected state file to exist');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.sql_output, 'mysql',
                 `Expected sql_output=mysql in state, got ${state.sql_output}`);

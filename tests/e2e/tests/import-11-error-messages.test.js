@@ -53,7 +53,7 @@ describe('Import: Error Messages', () => {
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for unreachable server');
             const output = (result.stdout + result.stderr).toLowerCase();
             assert.ok(
-                output.includes('connect') || output.includes('refused') || output.includes('error') || output.includes('curl') || output.includes('failed') || output.includes('unreachable'),
+                output.includes('connect') || output.includes('refused') || output.includes('error') || output.includes('curl') || output.includes('failed'),
                 `Expected connection error message, got: ${result.stdout + result.stderr}`
             );
         } finally {

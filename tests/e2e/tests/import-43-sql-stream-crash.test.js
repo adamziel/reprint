@@ -164,10 +164,6 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
         });
 
         it('database matches source after recovery', async () => {
-            try {
-                const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-                if (state.status !== 'complete') return;
-            } catch (e) { return; }
             const comparison = await compareDatabases(getDbName(site), importDb);
             assert.ok(comparison.match,
                 `Database mismatch after crash recovery: ` +
@@ -176,10 +172,6 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
         });
 
         it('.sql-buffer is cleaned up after completion', () => {
-            try {
-                const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-                if (state.status !== 'complete') return;
-            } catch (e) { return; }
             assert.ok(!existsSync(join(tempDir, '.sql-buffer')),
                 'Expected .sql-buffer to be cleaned up after successful completion');
         });

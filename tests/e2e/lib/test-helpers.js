@@ -18,10 +18,6 @@ const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
-// WASM PHP's curl can crash with "RuntimeError: unreachable" during gzip
-// decompression. Tests use this flag to accept WASM crashes as a valid
-// alternative to the expected PHP-level error handling.
-const IS_WASM_PHP = PHP_BINARY !== 'php';
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
 const DB_PASS = REGISTRY.dbPass;
@@ -253,7 +249,7 @@ export function runImporter(url, outputDir, command, options = {}) {
 
         try {
             const result = execFileSync(PHP_BINARY, args, {
-                timeout: options.timeout || (PHP_BINARY === 'php' ? 60000 : 120000),
+                timeout: options.timeout || 60000,
                 encoding: 'utf-8',
                 env: { ...process.env },
                 maxBuffer: 50 * 1024 * 1024,
@@ -290,9 +286,7 @@ export function runImporter(url, outputDir, command, options = {}) {
     }
 
     const commandExtraArgs = options.extraArgs || [];
-    // WASM PHP (Playground CLI) takes ~12s per invocation, so allow more time
-    const defaultWallTimeout = PHP_BINARY === 'php' ? 120000 : 300000;
-    const wallTimeout = options.wallTimeout || defaultWallTimeout;
+    const wallTimeout = options.wallTimeout || 120000; // 2 minutes total wall-clock
     const wallStart = Date.now();
     let result = runImporterOnce(command, commandExtraArgs);
     if (
@@ -301,35 +295,13 @@ export function runImporter(url, outputDir, command, options = {}) {
         command !== 'preflight-assert'
     ) {
         let attempts = 0;
-        // WASM PHP's curl occasionally crashes in several ways:
-        // - "Error: fetch failed" or "RuntimeError: unreachable" in output
-        // - Silent crash: exit code 1 with no PHP error JSON in output
-        //   (our PHP code always emits {"error":...} on failure, so a missing
-        //   error field means the WASM runtime died before PHP could report)
-        // Treat all of these as retryable — the next invocation usually succeeds.
-        const isWasmCrash = (r) => {
-            if (!IS_WASM_PHP || r.exitCode !== 1) return false;
-            const output = r.stdout + r.stderr;
-            if (output.includes('fetch failed') || output.includes('RuntimeError: unreachable')) return true;
-            // Silent crash: no PHP-level error JSON means WASM died mid-execution
-            if (!output.includes('"error"')) return true;
-            return false;
-        };
-        const isRetryable = (r) => r.exitCode === 2 || isWasmCrash(r);
-        let consecutiveCrashes = 0;
-        while (isRetryable(result) && attempts < maxResumeAttempts) {
+        while (result.exitCode === 2 && attempts < maxResumeAttempts) {
             if (Date.now() - wallStart > wallTimeout) {
                 result = {
                     ...result,
                     exitCode: 1,
                     stderr: `${result.stderr}\nWall-clock timeout (${wallTimeout}ms) after ${attempts} resume attempts.`,
                 };
-                break;
-            }
-            // If the WASM runtime crashes, bail out immediately.
-            // Retrying is pointless — the crash is deterministic for these
-            // code paths, and each attempt takes ~40s of WASM startup.
-            if (isWasmCrash(result)) {
                 break;
             }
             attempts += 1;
@@ -773,37 +745,5 @@ export function assertTreesMatch(sourceDir, importedDir, options = {}) {
     assert.equal(problems.length, 0, `Trees differ: ${problems.join('; ')}`);
 }
 
-/**
- * Detect if an importer result is a WASM runtime crash (not a PHP error).
- *
- * WASM PHP's curl can crash with several signatures:
- * - "RuntimeError: unreachable" (OOB memory access in zlib)
- * - "Error: fetch failed" (Node-level networking crash)
- * - Silent crash: exit code 1 with no PHP error JSON
- *
- * When detected, dumps full crash context to stderr for diagnosis.
- */
-export function isWasmCrash(result) {
-    if (!IS_WASM_PHP || result.exitCode === 0) return false;
-
-    const output = result.stdout + result.stderr;
-    const isKnownCrash =
-        output.includes('RuntimeError: unreachable') ||
-        output.includes('fetch failed') ||
-        (result.exitCode === 1 && !output.includes('"error"')); // Silent crash — no PHP error JSON
-
-    if (isKnownCrash) {
-        // Dump full crash context for upstream debugging
-        console.error('\n=== WASM PHP CRASH DETECTED ===');
-        console.error('Exit code:', result.exitCode);
-        console.error('Stdout:', result.stdout.slice(0, 2000));
-        console.error('Stderr:', result.stderr.slice(0, 2000));
-        console.error('Stack:', new Error().stack);
-        console.error('=== END WASM CRASH ===\n');
-    }
-
-    return isKnownCrash;
-}
-
 // Re-export constants
-export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, PHP_BINARY, IS_WASM_PHP, isWasmCrash, DB_HOST, DB_USER, DB_PASS };
+export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, PHP_BINARY, DB_HOST, DB_USER, DB_PASS };
