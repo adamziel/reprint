@@ -109,6 +109,12 @@
     },
     "atomic-split-roots": {
       "port": 8115
+    },
+    "runtime-download": {
+      "port": 8116
+    },
+    "siteground-plugins": {
+      "port": 8117
     }
   }
 }
