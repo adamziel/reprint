@@ -960,13 +960,8 @@ class ImportClient
     private $follow_symlinks = true;
 
     /**
-     * Memoized lookups for "does remote index contain this path or a child path?"
+     * Memoized lookups for "does remote index contain this path or any descendant path?"
      * keyed by normalized absolute path.
-     *
-     * Cost model:
-     * - First lookup for a unique path: O(N) time to scan .import-remote-index.jsonl
-     * - Repeated lookup for the same path: O(1) time
-     * - Extra memory: O(U), where U is the number of distinct queried prefixes
      *
      * @var array<string,bool>
      */
@@ -7691,74 +7686,6 @@ class ImportClient
     }
 
     /**
-     * Return true if the remote index contains $path or any entry under it.
-     *
-     * This is used when rebuilding a symlink whose original target was an
-     * absolute path outside fs-root. If that absolute target was indexed from
-     * the source (for example via --follow-symlinks), we know the importer has
-     * a local mirror of that subtree and can safely relink to the mirror.
-     *
-     * Cost model:
-     * - Cache miss: O(N) time, where N is the number of lines in
-     *   .import-remote-index.jsonl
-     * - Cache hit: O(1) time
-     * - Additional memory across the import: O(U), where U is the number of
-     *   distinct normalized prefixes checked here
-     *
-     * Practical cost is low because this helper only runs on the uncommon
-     * absolute-symlink remap path, not for every imported file.
-     *
-     * We intentionally pay this lazily because the remap path is uncommon.
-     * Building a full prefix index up front would turn lookups into O(1), but
-     * would add eager O(N) preprocessing and larger resident memory for every
-     * import, including imports that never need symlink-target remapping.
-     */
-    private function remote_index_contains_path_prefix(string $path): bool
-    {
-        $path = rtrim(normalize_path($path), "/");
-        if ($path === "") {
-            return false;
-        }
-
-        if (isset($this->remote_index_prefix_cache[$path])) {
-            return $this->remote_index_prefix_cache[$path];
-        }
-
-        if (!file_exists($this->remote_index_file)) {
-            $this->remote_index_prefix_cache[$path] = false;
-            return false;
-        }
-
-        $h = fopen($this->remote_index_file, "r");
-        if (!$h) {
-            $this->remote_index_prefix_cache[$path] = false;
-            return false;
-        }
-
-        $prefix = $path . "/";
-        $found = false;
-        while (($line = fgets($h)) !== false) {
-            try {
-                $entry = $this->parse_index_line($line);
-            } catch (RuntimeException $e) {
-                continue;
-            }
-            if ($entry === null) {
-                continue;
-            }
-            $entry_path = $entry["path"];
-            if ($entry_path === $path || str_starts_with($entry_path, $prefix)) {
-                $found = true;
-                break;
-            }
-        }
-        fclose($h);
-
-        $this->remote_index_prefix_cache[$path] = $found;
-        return $found;
-    }
-
-    /**
      * Map an absolute remote symlink target to the local fs-root mirror when possible.
      *
      * Example:
@@ -7827,6 +7754,55 @@ class ImportClient
         );
 
         return $mapped_relative;
+    }
+
+    /**
+     * Checks if the remote index contains $path or any descendant under it.
+     * Runs a memoized O(N) scan of .import-remote-index.jsonl.
+     */
+    private function remote_index_contains_path_prefix(string $path): bool
+    {
+        $path = rtrim(normalize_path($path), "/");
+        if ($path === "") {
+            return false;
+        }
+
+        if (isset($this->remote_index_prefix_cache[$path])) {
+            return $this->remote_index_prefix_cache[$path];
+        }
+
+        if (!file_exists($this->remote_index_file)) {
+            $this->remote_index_prefix_cache[$path] = false;
+            return false;
+        }
+
+        $h = fopen($this->remote_index_file, "r");
+        if (!$h) {
+            $this->remote_index_prefix_cache[$path] = false;
+            return false;
+        }
+
+        $prefix = $path . "/";
+        $found = false;
+        while (($line = fgets($h)) !== false) {
+            try {
+                $entry = $this->parse_index_line($line);
+            } catch (RuntimeException $e) {
+                continue;
+            }
+            if ($entry === null) {
+                continue;
+            }
+            $entry_path = $entry["path"];
+            if ($entry_path === $path || str_starts_with($entry_path, $prefix)) {
+                $found = true;
+                break;
+            }
+        }
+        fclose($h);
+
+        $this->remote_index_prefix_cache[$path] = $found;
+        return $found;
     }
 
     /**
