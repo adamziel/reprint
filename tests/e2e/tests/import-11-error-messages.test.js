@@ -48,7 +48,11 @@ describe('Import: Error Messages', () => {
         try {
             const result = runImporter(url, dir, 'files-sync', {
                 secret: 'any-secret',
-                timeout: 15000,
+                // runImporter auto-runs preflight first; under WASM PHP each
+                // invocation needs ~12s of boot before curl even attempts the
+                // connection, so the budget has to fit two boots plus the
+                // refused-connection round trip.
+                timeout: 90000,
             });
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for unreachable server');
             const output = (result.stdout + result.stderr).toLowerCase();
