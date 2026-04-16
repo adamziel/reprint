@@ -1815,9 +1815,7 @@ class ImportClient
                 break;
         }
 
-        if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "State cleared for {$command}.\n");
-        }
+        $this->progress->show_lifecycle_line("State cleared for {$command}.\n");
 
         $this->output_progress(["status" => "aborted", "message" => "State cleared for {$command}."]);
     }
@@ -2837,9 +2835,7 @@ class ImportClient
             $this->state["stage"] = "index";
             $this->save_state($this->state);
             $this->audit_log("START files-index", true);
-            if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "Starting files-index\n");
-            }
+            $this->progress->show_lifecycle_line("Starting files-index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
@@ -2855,9 +2851,7 @@ class ImportClient
                 ),
                 true,
             );
-            if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "Resuming files-index\n");
-            }
+            $this->progress->show_lifecycle_line("Resuming files-index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -2926,11 +2920,9 @@ class ImportClient
             true,
         );
 
-        if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "files-index complete: {$count} entries indexed\n");
-            fwrite($this->progress_fd, "Remote index: {$this->remote_index_file}\n");
-            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
-        }
+        $this->progress->show_lifecycle_line("files-index complete: {$count} entries indexed\n");
+        $this->progress->show_lifecycle_line("Remote index: {$this->remote_index_file}\n");
+        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
@@ -5305,9 +5297,7 @@ class ImportClient
             $this->save_state($this->state);
 
             $this->audit_log("START db-index", true);
-            if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "Starting db-index\n");
-            }
+            $this->progress->show_lifecycle_line("Starting db-index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
@@ -5322,9 +5312,7 @@ class ImportClient
                 ),
                 true,
             );
-            if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "Resuming db-index\n");
-            }
+            $this->progress->show_lifecycle_line("Resuming db-index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -5347,11 +5335,9 @@ class ImportClient
             true,
         );
 
-        if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "db-index complete: {$tables} tables\n");
-            fwrite($this->progress_fd, "Table stats: {$tables_file}\n");
-            fwrite($this->progress_fd, "Audit log: {$this->audit_log}\n");
-        }
+        $this->progress->show_lifecycle_line("db-index complete: {$tables} tables\n");
+        $this->progress->show_lifecycle_line("Table stats: {$tables_file}\n");
+        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
@@ -10221,12 +10207,10 @@ class ImportClient
             true,
         );
 
-        if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "\nInterrupted - saving state...\n");
-            fwrite($this->progress_fd, "  Command: {$current_command}\n");
-            fwrite($this->progress_fd, "  Total files indexed: {$indexed}\n");
-            fwrite($this->progress_fd, "  Files completed in this run: {$files_imported}\n");
-        }
+        $this->progress->show_lifecycle_line("\nInterrupted - saving state...\n");
+        $this->progress->show_lifecycle_line("  Command: {$current_command}\n");
+        $this->progress->show_lifecycle_line("  Total files indexed: {$indexed}\n");
+        $this->progress->show_lifecycle_line("  Files completed in this run: {$files_imported}\n");
         $this->output_progress([
             "type" => "interrupt",
             "command" => $current_command,
@@ -10238,9 +10222,7 @@ class ImportClient
         // Save current state (with timeout protection)
         try {
             $this->save_state($this->state);
-            if ($this->is_tty && !$this->verbose_mode) {
-                fwrite($this->progress_fd, "✓ State saved successfully\n");
-            }
+            $this->progress->show_lifecycle_line("✓ State saved successfully\n");
             $this->output_progress([
                 "type" => "state_saved",
                 "message" => "State saved successfully",
@@ -10249,9 +10231,7 @@ class ImportClient
             fwrite($this->progress_fd, "Warning: Failed to save state: " . $e->getMessage() . "\n");
         }
 
-        if ($this->is_tty && !$this->verbose_mode) {
-            fwrite($this->progress_fd, "Exiting...\n");
-        }
+        $this->progress->show_lifecycle_line("Exiting...\n");
 
         // CRITICAL: Use SIGKILL for immediate termination
         // Regular exit() hangs because PHP's shutdown sequence tries to
