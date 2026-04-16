@@ -223,16 +223,15 @@ function _site_export_handle_api_request(array $options = []): void {
         ob_end_clean();
     }
 
-    // Allow CORS requests for WordPress Playground integration.
-    header('Access-Control-Allow-Origin: *');
-    header('Access-Control-Allow-Credentials: true');
-    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-    header('Access-Control-Allow-Headers: *');
-
-    if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-        header("Allow: GET, POST, OPTIONS");
-        exit;
+    // Emit CORS headers and short-circuit OPTIONS preflight before
+    // authentication runs — browsers send preflight OPTIONS without
+    // credentials, so we must not require auth before CORS passes.
+    // The class is loaded by the Composer autoloader on demand, but
+    // load it eagerly in case the autoloader hasn't been required yet.
+    if (!class_exists('Site_Export_HTTP_Server')) {
+        _site_export_load_exporter_runtime();
     }
+    Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options('*');
 
     // Buffer output so stray warnings don't corrupt the JSON response.
     ob_start();
