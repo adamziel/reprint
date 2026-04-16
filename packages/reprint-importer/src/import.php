@@ -963,6 +963,11 @@ class ImportClient
      * Memoized lookups for "does remote index contain this path or a child path?"
      * keyed by normalized absolute path.
      *
+     * Cost model:
+     * - First lookup for a unique path: O(N) time to scan .import-remote-index.jsonl
+     * - Repeated lookup for the same path: O(1) time
+     * - Extra memory: O(U), where U is the number of distinct queried prefixes
+     *
      * @var array<string,bool>
      */
     private $remote_index_prefix_cache = [];
@@ -7688,9 +7693,25 @@ class ImportClient
     /**
      * Return true if the remote index contains $path or any entry under it.
      *
-     * Used when recreating symlinks with absolute targets: if a target path
-     * was indexed (e.g. discovered via --follow-symlinks), we can map it to
-     * its local mirror under fs-root and keep the symlink working locally.
+     * This is used when rebuilding a symlink whose original target was an
+     * absolute path outside fs-root. If that absolute target was indexed from
+     * the source (for example via --follow-symlinks), we know the importer has
+     * a local mirror of that subtree and can safely relink to the mirror.
+     *
+     * Cost model:
+     * - Cache miss: O(N) time, where N is the number of lines in
+     *   .import-remote-index.jsonl
+     * - Cache hit: O(1) time
+     * - Additional memory across the import: O(U), where U is the number of
+     *   distinct normalized prefixes checked here
+     *
+     * Practical cost is low because this helper only runs on the uncommon
+     * absolute-symlink remap path, not for every imported file.
+     *
+     * We intentionally pay this lazily because the remap path is uncommon.
+     * Building a full prefix index up front would turn lookups into O(1), but
+     * would add eager O(N) preprocessing and larger resident memory for every
+     * import, including imports that never need symlink-target remapping.
      */
     private function remote_index_contains_path_prefix(string $path): bool
     {
@@ -7740,10 +7761,33 @@ class ImportClient
     /**
      * Map an absolute remote symlink target to the local fs-root mirror when possible.
      *
-     * For followed external directories (e.g. /tmp/shared-theme), file contents are
-     * downloaded under fs-root/tmp/shared-theme/..., but the original absolute target
-     * would point outside fs-root and fail validation. When the target was indexed,
-     * rewrite it to a relative symlink into the mirrored local path.
+     * Example:
+     *
+     * Source site:
+     *
+     *   /srv/source-site/
+     *   `-- wp-content/
+     *       `-- themes/
+     *           `-- indice -> /tmp/e2e-shared-themes/pub/indice
+     *
+     *   /tmp/e2e-shared-themes/pub/indice/
+     *   |-- style.css
+     *   `-- index.php
+     *
+     * Local import state:
+     *
+     *   <state-dir>/fs-root/
+     *   |-- tmp/e2e-shared-themes/pub/indice/
+     *   |   |-- style.css
+     *   |   `-- index.php
+     *   `-- srv/source-site/wp-content/themes/
+     *       `-- indice -> ../../../tmp/e2e-shared-themes/pub/indice
+     *
+     * Without this remap, the recreated link would still point to
+     * /tmp/e2e-shared-themes/pub/indice, which is outside fs-root and rejected
+     * by assert_symlink_target_within_root(). When the absolute target was
+     * already indexed from the source, we instead point the symlink at the
+     * mirrored local copy under fs-root.
      */
     private function map_absolute_symlink_target_for_local_mirror(
         string $path,
