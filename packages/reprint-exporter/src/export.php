@@ -520,10 +520,6 @@ register_shutdown_function(function () {
     }
 });
 
-if (file_exists(__DIR__ . "/secrets.php")) {
-    require_once __DIR__ . "/secrets.php";
-}
-
 // ============================================================================
 // E2E Test Hook System (only active when SITE_EXPORT_TEST_MODE env var is set)
 // We don't want anyone to interfere with the export process, which is why those
@@ -575,17 +571,6 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
             call_user_func_array($name, $args);
         }
     }
-}
-
-$secret_key_input = $_GET["SECRET_KEY"] ?? null;
-if (
-    !defined("SECRET_KEY") ||
-    !is_string($secret_key_input) ||
-    !hash_equals(SECRET_KEY, $secret_key_input)
-) {
-    http_response_code(403);
-    error_log("Invalid secret key");
-    die("Invalid secret key");
 }
 
 require_once __DIR__ . "/class-mysql-dump-producer.php";

@@ -118,6 +118,9 @@
     },
     "siteground-plugins": {
       "port": 8117
+    },
+    "plugin-auth": {
+      "port": 8119
     }
   }
 }

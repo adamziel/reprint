@@ -99,8 +99,6 @@ final class FileIndexDedupTest extends TestCase
                 <<<'PHP'
 <?php
 declare(strict_types=1);
-define('SECRET_KEY', 'test-secret');
-$_GET['SECRET_KEY'] = 'test-secret';
 require_once %s;
 $config = json_decode(file_get_contents(%s), true, 512, JSON_THROW_ON_ERROR);
 $budget = new ResourceBudget(microtime(true), 10, 128 * 1024 * 1024, 0.9);
