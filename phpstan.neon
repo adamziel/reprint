@@ -12,7 +12,6 @@ parameters:
         - reprint-exporter-wp
     excludePaths:
         analyseAndScan:
-            - packages/reprint-exporter/src/secrets.php
             - packages/reprint-exporter/src/class-sqlite-driver-pdo.php
             - reprint-exporter-wp/wordpress/
             - reprint-exporter-wp/index.php

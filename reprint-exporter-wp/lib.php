@@ -273,13 +273,11 @@ function _site_export_handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
+    // HMAC verification runs here, before export.php is loaded.
+    // export.php is a library — it trusts that the caller has already
+    // authenticated the request.
     $authenticate = $options['authenticate'] ?? '_site_export_default_authenticate';
     $authenticate();
-
-    // export.php has its own SECRET_KEY guard — satisfy it since we already
-    // verified the request via HMAC above.
-    define('SECRET_KEY', 'hmac_authenticated');
-    $_GET['SECRET_KEY'] = SECRET_KEY;
 
     $export_runtime = _site_export_load_exporter_runtime();
     if ($export_runtime === null) {

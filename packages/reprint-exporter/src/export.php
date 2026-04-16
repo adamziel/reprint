@@ -520,10 +520,6 @@ register_shutdown_function(function () {
     }
 });
 
-if (file_exists(__DIR__ . "/secrets.php")) {
-    require_once __DIR__ . "/secrets.php";
-}
-
 // ============================================================================
 // E2E Test Hook System (only active when SITE_EXPORT_TEST_MODE env var is set)
 // We don't want anyone to interfere with the export process, which is why those
@@ -577,16 +573,11 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
     }
 }
 
-$secret_key_input = $_GET["SECRET_KEY"] ?? null;
-if (
-    !defined("SECRET_KEY") ||
-    !is_string($secret_key_input) ||
-    !hash_equals(SECRET_KEY, $secret_key_input)
-) {
-    http_response_code(403);
-    error_log("Invalid secret key");
-    die("Invalid secret key");
-}
+// This file is a library: it exposes endpoint functions and the
+// Site_Export_HTTP_Server dispatcher. Authentication is the caller's
+// responsibility — reprint-exporter-wp runs HMAC verification in
+// lib.php before requiring this file, and other integrations are
+// expected to do the same before calling any endpoint directly.
 
 require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/class-file-tree-producer.php";
