@@ -106,6 +106,34 @@ final class Site_Export_HTTP_Server {
     }
 
     /**
+     * One-call convenience entry point: loads export.php, constructs
+     * the server, and dispatches the current request.
+     *
+     * Equivalent to:
+     *
+     *     require_once __DIR__ . '/export.php';
+     *     $server = new Site_Export_HTTP_Server($options);
+     *     $server->handle_request();
+     *
+     * export.php is only required once. Callers that need to run CORS
+     * or their own authentication must do that before calling this method.
+     *
+     * @param array<string, mixed> $options Forwarded to the constructor.
+     */
+    public static function serve(array $options = []): void {
+        // endpoint_preflight is defined by export.php — use it as a
+        // cheap sentinel to detect whether the runtime is already
+        // loaded. require_once would be safe either way, but this
+        // avoids re-running the stat() on hot paths.
+        if (!function_exists('endpoint_preflight')) {
+            require_once __DIR__ . '/export.php';
+        }
+
+        $server = new self($options);
+        $server->handle_request();
+    }
+
+    /**
      * @param array<string, mixed> $get
      * @param array<string, mixed> $post
      * @param array<string, mixed> $server

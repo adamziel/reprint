@@ -275,22 +275,21 @@ function _site_export_handle_api_request(array $options = []): void {
     $authenticate = $options['authenticate'] ?? '_site_export_default_authenticate';
     $authenticate();
 
-    $export_runtime = _site_export_load_exporter_runtime();
-    if ($export_runtime === null) {
+    // Ensure the Composer autoloader is loaded so Site_Export_HTTP_Server
+    // is resolvable. The class itself will require export.php on demand
+    // via serve() below.
+    if (_site_export_load_exporter_runtime() === null) {
         _site_export_error(
             500,
             'Reprint Exporter runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.'
         );
     }
 
-    require_once $export_runtime;
-
     // -- Dispatch --
     try {
-        $server = new Site_Export_HTTP_Server([
+        Site_Export_HTTP_Server::serve([
             'default_directory' => ABSPATH,
         ]);
-        $server->handle_request();
     } catch (Exception $e) {
         if (!headers_sent()) {
             http_response_code(400);
