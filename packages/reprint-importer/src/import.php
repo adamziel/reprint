@@ -107,17 +107,9 @@ function resolve_sqlite_integration_path(string $suffix = ''): string
 }
 
 /**
- * Register a user-defined SQL function on a SQLite PDO.
- *
- * Bridges two PHP versions: `Pdo\Sqlite::createFunction()` on 8.4+ (the
- * `sqliteCreateFunction` alias is deprecated in 8.5) and the legacy
- * `PDO::sqliteCreateFunction()` on older PHP. `WP_SQLite_Connection`
- * constructs a `Pdo\Sqlite` subclass on 8.4+, so the `instanceof` check
- * routes there whenever the runtime supports the modern API.
- *
- * Kept as a free function (not a method) so both the importer and its
- * tests call the same code path — there was previously a copy of this
- * branching inside every test that registers FROM_BASE64.
+ * Register a user-defined SQL function on a SQLite PDO. Routes to
+ * Pdo\Sqlite::createFunction() on 8.4+; the legacy
+ * PDO::sqliteCreateFunction() alias is deprecated in 8.5.
  */
 function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, int $num_args = 1): void
 {
@@ -4608,12 +4600,9 @@ class ImportClient
             );
         }
 
-        // Register MySQL-compatible FROM_BASE64() and TO_BASE64() functions
-        // on the underlying SQLite connection. The SQL dumps produced by
-        // MySQLDumpProducer encode all values as FROM_BASE64('...'), so
-        // SQLite needs these functions to decode them during import.
-        // deactivate_host_plugins() also depends on FROM_BASE64 being
-        // registered here — see its docblock.
+        // SQL dumps from MySQLDumpProducer encode every value as
+        // FROM_BASE64('...'), and deactivate_host_plugins() reuses the same
+        // encoding for its UPDATE — so the SQLite connection needs both.
         $sqlite_pdo = $pdo->get_connection()->get_pdo();
         register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
             if ($data === null) {
@@ -5104,15 +5093,11 @@ class ImportClient
      *
      * Looks at the detected webhost's paths_to_remove for entries under
      * wp-content/plugins/ and removes matching basenames from the
-     * active_plugins option. This runs at the end of db-apply while the
-     * PDO connection is still open.
+     * active_plugins option. Runs at the end of db-apply while the PDO
+     * connection is still open.
      *
-     * Precondition: `$pdo` must support `FROM_BASE64()` — native on MySQL
-     * 5.6+, or registered on the SQLite connection by
-     * create_sqlite_target_pdo(). The UPDATE encodes the new serialized
-     * value via FROM_BASE64 so the payload can't carry characters special
-     * to a SQL literal. New callers that don't go through the db-apply
-     * target-PDO factory must register FROM_BASE64 before calling this.
+     * Requires `$pdo` to support `FROM_BASE64()` — native on MySQL 5.6+,
+     * registered on SQLite by create_sqlite_target_pdo().
      *
      * @return string[]  Plugin basenames actually removed.
      */
@@ -5138,15 +5123,9 @@ class ImportClient
         // Quote the table name to prevent SQL injection from a crafted prefix.
         $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
 
-        // Use query()/exec() instead of prepare()/execute(): the SQLite target's
-        // WP_PDO_MySQL_On_SQLite wrapper overrides query()/exec() but not
-        // prepare(), and it doesn't call parent::__construct(), so calling
-        // prepare() dispatches to the real PDO::prepare on an uninitialized
-        // native PDO and throws "object is uninitialized". query()/exec() are
-        // universally safe across real PDO and the wrapper.
-        // The PDO is configured with ERRMODE_EXCEPTION in every db-apply
-        // code path, so query() throws on failure instead of returning
-        // false — no defensive check needed.
+        // Stick to query()/exec() — WP_PDO_MySQL_On_SQLite overrides those
+        // but not prepare(), and prepare() throws "object is uninitialized"
+        // on the wrapper.
         $row = $pdo->query(
             "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
         )->fetch(PDO::FETCH_ASSOC);
@@ -5186,15 +5165,10 @@ class ImportClient
             return [];
         }
 
-        $new_value = serialize(array_values($retained_plugins));
-        // Encode the serialized value as base64 and decode it in the query
-        // via FROM_BASE64(). FROM_BASE64 is native to MySQL 5.6+ and is
-        // registered on the SQLite target PDO by create_sqlite_target_pdo()
-        // for the dump replay, so it is universally available in db-apply.
-        // Base64 output is [A-Za-z0-9+/=], which is trivially safe to embed
-        // in a SQL literal — no string escaping required and no room for
-        // injection via plugin basenames or future callers of this method.
-        $encoded_value = base64_encode($new_value);
+        // FROM_BASE64 carries the new value into SQL — base64 is
+        // [A-Za-z0-9+/=], so the literal can't carry SQL-special characters
+        // regardless of what a plugin basename contains.
+        $encoded_value = base64_encode(serialize(array_values($retained_plugins)));
         $pdo->exec(
             "UPDATE {$options_table} SET option_value = FROM_BASE64('{$encoded_value}') WHERE option_name = 'active_plugins'"
         );

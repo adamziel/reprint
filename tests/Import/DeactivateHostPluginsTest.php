@@ -9,16 +9,9 @@ use PDOException;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Verify that ImportClient::deactivate_host_plugins() correctly rewrites
- * the active_plugins option on both MySQL and SQLite targets.
- *
- * Regression: Studio runs db-apply against a SQLite target using the
- * WP_PDO_MySQL_On_SQLite wrapper. The wrapper doesn't call the native
- * PDO constructor and doesn't override prepare(), so dispatching
- * prepare() used to throw "WP_PDO_MySQL_On_SQLite object is
- * uninitialized" on the SiteGround code path (where paths_to_remove
- * contains wp-content/plugins/ entries). The method must now work on
- * both engines using only the universally-safe PDO surface.
+ * Verify deactivate_host_plugins() rewrites active_plugins identically on
+ * MySQL and SQLite targets. Regression: prepare() used to throw "object
+ * is uninitialized" against the WP_PDO_MySQL_On_SQLite wrapper.
  */
 class DeactivateHostPluginsTest extends TestCase
 {
@@ -257,11 +250,8 @@ class DeactivateHostPluginsTest extends TestCase
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ]);
 
-        // Match the production SQLite target: create_sqlite_target_pdo() in
-        // import.php registers FROM_BASE64() on the underlying SQLite PDO so
-        // that both the dump replay and deactivate_host_plugins() can rely
-        // on it. Register the same function here so this test exercises the
-        // real code path.
+        // Mirror create_sqlite_target_pdo() — deactivate_host_plugins()
+        // requires FROM_BASE64 on the SQLite connection.
         \register_sqlite_function($pdo->get_connection()->get_pdo(), 'FROM_BASE64', function ($data) {
             return $data === null ? null : base64_decode($data);
         });
