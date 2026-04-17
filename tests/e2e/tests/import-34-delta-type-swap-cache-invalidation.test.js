@@ -69,7 +69,7 @@ describe('Import: Delta type swaps cache invalidation', () => {
     }
 
     function importUrl() {
-        return `http://127.0.0.1:${port}/?site-export-api&directory=${getSiteDir(site)}`;
+        return `http://127.0.0.1:${port}/?reprint-api&directory=${getSiteDir(site)}`;
     }
 
     function setupInitialRemoteLayout() {

@@ -11269,7 +11269,7 @@ if (
                 "interrupted, re-run the same command to resume from where it left off.\n" .
                 "Running pull again after completion performs a delta sync.\n" .
                 "\n" .
-                "The ?site-export-api query parameter is added automatically if missing,\n" .
+                "The ?reprint-api query parameter is added automatically if missing,\n" .
                 "so you can pass just the site URL.\n",
             "extra" =>
                 "Examples:\n" .

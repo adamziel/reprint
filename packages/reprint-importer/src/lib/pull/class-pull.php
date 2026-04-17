@@ -291,15 +291,16 @@ class Pull
     }
 
     /**
-     * Append ?site-export-api to bare site URLs so users can pass
-     * https://example.com instead of https://example.com/?site-export-api.
+     * Append ?reprint-api to bare site URLs so users can pass
+     * https://example.com instead of https://example.com/?reprint-api.
+     * Also accepts the legacy ?site-export-api parameter.
      */
     private function normalize_url(): void
     {
         $url = $this->client->remote_url;
-        if (strpos($url, 'site-export-api') === false) {
+        if (strpos($url, 'reprint-api') === false && strpos($url, 'site-export-api') === false) {
             $separator = strpos($url, '?') === false ? '?' : '&';
-            $this->client->remote_url = $url . $separator . 'site-export-api';
+            $this->client->remote_url = $url . $separator . 'reprint-api';
         }
     }
 

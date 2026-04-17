@@ -12,9 +12,9 @@ Many shared hosts (SiteGround, GoDaddy, etc.) block direct PHP execution inside 
 
 The plugin file (`index.php`) is `include`'d by WordPress during its plugin loading loop — this happens *before* the `plugins_loaded` hook fires, making it the earliest interception point available to a regular plugin.
 
-When a request arrives at `https://example.com/?site-export-api`, the plugin:
+When a request arrives at `https://example.com/?reprint-api` (or legacy `?site-export-api`), the plugin:
 
-1. Detects `$_GET['site-export-api']` during plugin file load
+1. Detects `$_GET['reprint-api']` (or legacy `$_GET['site-export-api']`) during plugin file load
 2. Reverts WordPress error display settings (`display_errors`, `html_errors`) that `wp_debug_mode()` may have turned on
 3. Clears any output buffering WordPress started
 4. Sets up error handlers, HMAC auth, and runs the export endpoint
