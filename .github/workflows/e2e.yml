@@ -7,7 +7,6 @@ on:
 
 jobs:
   build-phar:
-    if: false  # Temporarily disabled while testing Playground CLI e2e
     name: Build reprint.phar
     runs-on: ubuntu-latest
     steps:
@@ -30,7 +29,6 @@ jobs:
           path: reprint.phar
 
   e2e:
-    if: false  # Temporarily disabled while testing Playground CLI e2e
     name: E2E (PHP ${{ matrix.php }})
     needs: build-phar
     runs-on: ubuntu-22.04
