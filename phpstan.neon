@@ -4,7 +4,6 @@ includes:
 parameters:
     bootstrapFiles:
         - phpstan-bootstrap.php
-    stubFiles:
         - phpstan-stubs.php
     phpVersion: 70400
     level: 5
