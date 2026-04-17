@@ -262,15 +262,9 @@ class DeactivateHostPluginsTest extends TestCase
         // that both the dump replay and deactivate_host_plugins() can rely
         // on it. Register the same function here so this test exercises the
         // real code path.
-        $sqlitePdo = $pdo->get_connection()->get_pdo();
-        $fromBase64 = function ($data) {
+        \register_sqlite_function($pdo->get_connection()->get_pdo(), 'FROM_BASE64', function ($data) {
             return $data === null ? null : base64_decode($data);
-        };
-        if (method_exists($sqlitePdo, 'createFunction')) {
-            $sqlitePdo->createFunction('FROM_BASE64', $fromBase64, 1);
-        } else {
-            $sqlitePdo->sqliteCreateFunction('FROM_BASE64', $fromBase64, 1);
-        }
+        });
         return $pdo;
     }
 

@@ -106,6 +106,28 @@ function resolve_sqlite_integration_path(string $suffix = ''): string
     );
 }
 
+/**
+ * Register a user-defined SQL function on a SQLite PDO.
+ *
+ * Bridges two PHP versions: `Pdo\Sqlite::createFunction()` on 8.4+ (the
+ * `sqliteCreateFunction` alias is deprecated in 8.5) and the legacy
+ * `PDO::sqliteCreateFunction()` on older PHP. `WP_SQLite_Connection`
+ * constructs a `Pdo\Sqlite` subclass on 8.4+, so the `instanceof` check
+ * routes there whenever the runtime supports the modern API.
+ *
+ * Kept as a free function (not a method) so both the importer and its
+ * tests call the same code path — there was previously a copy of this
+ * branching inside every test that registers FROM_BASE64.
+ */
+function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, int $num_args = 1): void
+{
+    if ($sqlite_pdo instanceof PDO\SQLite) {
+        $sqlite_pdo->createFunction($name, $fn, $num_args);
+    } else {
+        $sqlite_pdo->sqliteCreateFunction($name, $fn, $num_args);
+    }
+}
+
 
 /**
  * Streaming multipart parser.
@@ -4590,19 +4612,16 @@ class ImportClient
         // on the underlying SQLite connection. The SQL dumps produced by
         // MySQLDumpProducer encode all values as FROM_BASE64('...'), so
         // SQLite needs these functions to decode them during import.
-        //
-        // Prefer Pdo\Sqlite::createFunction() when available (PHP 8.4+): the
-        // legacy PDO::sqliteCreateFunction() is deprecated in PHP 8.5. On
-        // PHP 8.4+ WP_SQLite_Connection already constructs a Pdo\Sqlite
-        // subclass instance, so createFunction() is available there.
+        // deactivate_host_plugins() also depends on FROM_BASE64 being
+        // registered here — see its docblock.
         $sqlite_pdo = $pdo->get_connection()->get_pdo();
-        $this->register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
+        register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
             if ($data === null) {
                 return null;
             }
             return base64_decode($data);
         });
-        $this->register_sqlite_function($sqlite_pdo, 'TO_BASE64', function ($data) {
+        register_sqlite_function($sqlite_pdo, 'TO_BASE64', function ($data) {
             if ($data === null) {
                 return null;
             }
@@ -4610,15 +4629,6 @@ class ImportClient
         });
 
         return $pdo;
-    }
-
-    private function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn): void
-    {
-        if (method_exists($sqlite_pdo, 'createFunction')) {
-            $sqlite_pdo->createFunction($name, $fn, 1);
-        } else {
-            $sqlite_pdo->sqliteCreateFunction($name, $fn, 1);
-        }
     }
 
     private function create_target_db_apply_connection(array $options): array
@@ -5097,6 +5107,13 @@ class ImportClient
      * active_plugins option. This runs at the end of db-apply while the
      * PDO connection is still open.
      *
+     * Precondition: `$pdo` must support `FROM_BASE64()` — native on MySQL
+     * 5.6+, or registered on the SQLite connection by
+     * create_sqlite_target_pdo(). The UPDATE encodes the new serialized
+     * value via FROM_BASE64 so the payload can't carry characters special
+     * to a SQL literal. New callers that don't go through the db-apply
+     * target-PDO factory must register FROM_BASE64 before calling this.
+     *
      * @return string[]  Plugin basenames actually removed.
      */
     private function deactivate_host_plugins(PDO $pdo): array
@@ -5127,10 +5144,12 @@ class ImportClient
         // prepare() dispatches to the real PDO::prepare on an uninitialized
         // native PDO and throws "object is uninitialized". query()/exec() are
         // universally safe across real PDO and the wrapper.
-        $stmt = $pdo->query(
+        // The PDO is configured with ERRMODE_EXCEPTION in every db-apply
+        // code path, so query() throws on failure instead of returning
+        // false — no defensive check needed.
+        $row = $pdo->query(
             "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
-        );
-        $row = $stmt ? $stmt->fetch(PDO::FETCH_ASSOC) : null;
+        )->fetch(PDO::FETCH_ASSOC);
         if (!$row || !isset($row['option_value'])) {
             return [];
         }
