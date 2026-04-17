@@ -145,7 +145,7 @@ class NewSiteUrlSqliteTest extends TestCase
     {
         $oldUrl = 'https://old-site.example.com';
         $newUrl = 'https://brand-new.example.com';
-        $exportUrl = 'https://old-site.example.com/?site-export-api';
+        $exportUrl = 'https://old-site.example.com/?reprint-api';
         $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
 
         // Prepare db.sql
@@ -205,7 +205,7 @@ class NewSiteUrlSqliteTest extends TestCase
         $httpsUrl = 'https://old-site.example.com';
         $httpUrl  = 'http://old-site.example.com';
         $newUrl   = 'https://new-site.example.com';
-        $exportUrl = 'http://old-site.example.com/?site-export-api';
+        $exportUrl = 'http://old-site.example.com/?reprint-api';
         $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
 
         // Build dump with HTTPS siteurl — note that the export URL uses HTTP
@@ -252,7 +252,7 @@ class NewSiteUrlSqliteTest extends TestCase
     {
         $oldUrl = 'https://old-site.example.com';
         $newUrl = 'https://new-site.example.com';
-        $exportUrl = 'https://old-site.example.com/?site-export-api';
+        $exportUrl = 'https://old-site.example.com/?reprint-api';
         $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
 
         // Build a dump with a post that references the old URL in content
