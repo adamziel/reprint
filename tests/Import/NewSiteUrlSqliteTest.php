@@ -131,9 +131,9 @@ class NewSiteUrlSqliteTest extends TestCase
         ]);
 
         $sqlite_pdo = $pdo->get_connection()->get_pdo();
-        $sqlite_pdo->sqliteCreateFunction('FROM_BASE64', function ($data) {
+        \register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
             return $data === null ? null : base64_decode($data);
-        }, 1);
+        });
 
         return $pdo->query($sql)->fetchAll();
     }

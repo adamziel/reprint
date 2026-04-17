@@ -106,6 +106,20 @@ function resolve_sqlite_integration_path(string $suffix = ''): string
     );
 }
 
+/**
+ * Register a user-defined SQL function on a SQLite PDO. Routes to
+ * Pdo\Sqlite::createFunction() on 8.4+; the legacy
+ * PDO::sqliteCreateFunction() alias is deprecated in 8.5.
+ */
+function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, int $num_args = 1): void
+{
+    if ($sqlite_pdo instanceof PDO\SQLite) {
+        $sqlite_pdo->createFunction($name, $fn, $num_args);
+    } else {
+        $sqlite_pdo->sqliteCreateFunction($name, $fn, $num_args);
+    }
+}
+
 
 /**
  * Streaming multipart parser.
@@ -4586,23 +4600,22 @@ class ImportClient
             );
         }
 
-        // Register MySQL-compatible FROM_BASE64() and TO_BASE64() functions
-        // on the underlying SQLite connection. The SQL dumps produced by
-        // MySQLDumpProducer encode all values as FROM_BASE64('...'), so
-        // SQLite needs these functions to decode them during import.
+        // SQL dumps from MySQLDumpProducer encode every value as
+        // FROM_BASE64('...'), and deactivate_host_plugins() reuses the same
+        // encoding for its UPDATE — so the SQLite connection needs both.
         $sqlite_pdo = $pdo->get_connection()->get_pdo();
-        $sqlite_pdo->sqliteCreateFunction('FROM_BASE64', function ($data) {
+        register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
             if ($data === null) {
                 return null;
             }
             return base64_decode($data);
-        }, 1);
-        $sqlite_pdo->sqliteCreateFunction('TO_BASE64', function ($data) {
+        });
+        register_sqlite_function($sqlite_pdo, 'TO_BASE64', function ($data) {
             if ($data === null) {
                 return null;
             }
             return base64_encode($data);
-        }, 1);
+        });
 
         return $pdo;
     }
@@ -5080,8 +5093,11 @@ class ImportClient
      *
      * Looks at the detected webhost's paths_to_remove for entries under
      * wp-content/plugins/ and removes matching basenames from the
-     * active_plugins option. This runs at the end of db-apply while the
-     * PDO connection is still open.
+     * active_plugins option. Runs at the end of db-apply while the PDO
+     * connection is still open.
+     *
+     * Requires `$pdo` to support `FROM_BASE64()` — native on MySQL 5.6+,
+     * registered on SQLite by create_sqlite_target_pdo().
      *
      * @return string[]  Plugin basenames actually removed.
      */
@@ -5107,11 +5123,12 @@ class ImportClient
         // Quote the table name to prevent SQL injection from a crafted prefix.
         $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
 
-        $stmt = $pdo->prepare(
+        // Stick to query()/exec() — WP_PDO_MySQL_On_SQLite overrides those
+        // but not prepare(), and prepare() throws "object is uninitialized"
+        // on the wrapper.
+        $row = $pdo->query(
             "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
-        );
-        $stmt->execute();
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        )->fetch(PDO::FETCH_ASSOC);
         if (!$row || !isset($row['option_value'])) {
             return [];
         }
@@ -5148,11 +5165,13 @@ class ImportClient
             return [];
         }
 
-        $new_value = serialize(array_values($retained_plugins));
-        $stmt = $pdo->prepare(
-            "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
+        // FROM_BASE64 carries the new value into SQL — base64 is
+        // [A-Za-z0-9+/=], so the literal can't carry SQL-special characters
+        // regardless of what a plugin basename contains.
+        $encoded_value = base64_encode(serialize(array_values($retained_plugins)));
+        $pdo->exec(
+            "UPDATE {$options_table} SET option_value = FROM_BASE64('{$encoded_value}') WHERE option_name = 'active_plugins'"
         );
-        $stmt->execute([$new_value]);
         // The SQL dump runs with AUTOCOMMIT=0 and issues a final COMMIT,
         // but autocommit stays off. Our UPDATE needs an explicit COMMIT.
         $pdo->exec('COMMIT');
