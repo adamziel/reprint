@@ -81,7 +81,7 @@ jobs:
 
           # Quick smoke test: use the importer CLI to hit the export API.
           SECRET="test-secret-basic"
-          BASE="http://127.0.0.1:8081/?site-export-api"
+          BASE="http://127.0.0.1:8081/?reprint-api"
           DIR="/srv/e2e-sites/basic"
 
           echo "=== Importer preflight ==="

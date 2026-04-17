@@ -24,14 +24,14 @@
  * $client = new Site_Export_HMAC_Client($secret);
  *
  * // For GET requests:
- * $ch = curl_init('https://example.com/site-export-api/?endpoint=file_index&directory=/var/www/html');
+ * $ch = curl_init('https://example.com/?reprint-api&endpoint=file_index&directory=/var/www/html');
  * $client->sign_curl_request($ch, '');
  * curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
  * $response = curl_exec($ch);
  *
  * // For POST requests with JSON body:
  * $body = json_encode(['paths' => ['/wp-content/uploads/image.jpg']]);
- * $ch = curl_init('https://example.com/site-export-api/?endpoint=file_fetch');
+ * $ch = curl_init('https://example.com/?reprint-api&endpoint=file_fetch');
  * $client->sign_curl_request($ch, $body);
  * curl_setopt($ch, CURLOPT_POST, true);
  * curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
