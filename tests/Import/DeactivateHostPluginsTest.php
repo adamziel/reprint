@@ -252,10 +252,26 @@ class DeactivateHostPluginsTest extends TestCase
 
         $dbPath = $this->tempDir . '/target.sqlite';
         $dsn = "mysql-on-sqlite:path={$dbPath};dbname=test_db";
-        return new \WP_PDO_MySQL_On_SQLite($dsn, null, null, [
+        $pdo = new \WP_PDO_MySQL_On_SQLite($dsn, null, null, [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ]);
+
+        // Match the production SQLite target: create_sqlite_target_pdo() in
+        // import.php registers FROM_BASE64() on the underlying SQLite PDO so
+        // that both the dump replay and deactivate_host_plugins() can rely
+        // on it. Register the same function here so this test exercises the
+        // real code path.
+        $sqlitePdo = $pdo->get_connection()->get_pdo();
+        $fromBase64 = function ($data) {
+            return $data === null ? null : base64_decode($data);
+        };
+        if (method_exists($sqlitePdo, 'createFunction')) {
+            $sqlitePdo->createFunction('FROM_BASE64', $fromBase64, 1);
+        } else {
+            $sqlitePdo->sqliteCreateFunction('FROM_BASE64', $fromBase64, 1);
+        }
+        return $pdo;
     }
 
     private function createWpOptionsTable(PDO $pdo, string $prefix = 'wp_'): void

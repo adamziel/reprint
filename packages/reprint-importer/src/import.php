@@ -5168,13 +5168,16 @@ class ImportClient
         }
 
         $new_value = serialize(array_values($retained_plugins));
-        // ANSI-style single-quote doubling is accepted by both MySQL (regardless
-        // of SQL_MODE) and SQLite. PHP-serialized basenames of active plugins
-        // don't contain backslashes or control bytes, so single-quote escaping
-        // alone is safe.
-        $quoted_value = "'" . str_replace("'", "''", $new_value) . "'";
+        // Encode the serialized value as base64 and decode it in the query
+        // via FROM_BASE64(). FROM_BASE64 is native to MySQL 5.6+ and is
+        // registered on the SQLite target PDO by create_sqlite_target_pdo()
+        // for the dump replay, so it is universally available in db-apply.
+        // Base64 output is [A-Za-z0-9+/=], which is trivially safe to embed
+        // in a SQL literal — no string escaping required and no room for
+        // injection via plugin basenames or future callers of this method.
+        $encoded_value = base64_encode($new_value);
         $pdo->exec(
-            "UPDATE {$options_table} SET option_value = {$quoted_value} WHERE option_name = 'active_plugins'"
+            "UPDATE {$options_table} SET option_value = FROM_BASE64('{$encoded_value}') WHERE option_name = 'active_plugins'"
         );
         // The SQL dump runs with AUTOCOMMIT=0 and issues a final COMMIT,
         // but autocommit stays off. Our UPDATE needs an explicit COMMIT.
