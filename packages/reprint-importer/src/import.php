@@ -4590,21 +4590,35 @@ class ImportClient
         // on the underlying SQLite connection. The SQL dumps produced by
         // MySQLDumpProducer encode all values as FROM_BASE64('...'), so
         // SQLite needs these functions to decode them during import.
+        //
+        // Prefer Pdo\Sqlite::createFunction() when available (PHP 8.4+): the
+        // legacy PDO::sqliteCreateFunction() is deprecated in PHP 8.5. On
+        // PHP 8.4+ WP_SQLite_Connection already constructs a Pdo\Sqlite
+        // subclass instance, so createFunction() is available there.
         $sqlite_pdo = $pdo->get_connection()->get_pdo();
-        $sqlite_pdo->sqliteCreateFunction('FROM_BASE64', function ($data) {
+        $this->register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
             if ($data === null) {
                 return null;
             }
             return base64_decode($data);
-        }, 1);
-        $sqlite_pdo->sqliteCreateFunction('TO_BASE64', function ($data) {
+        });
+        $this->register_sqlite_function($sqlite_pdo, 'TO_BASE64', function ($data) {
             if ($data === null) {
                 return null;
             }
             return base64_encode($data);
-        }, 1);
+        });
 
         return $pdo;
+    }
+
+    private function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn): void
+    {
+        if (method_exists($sqlite_pdo, 'createFunction')) {
+            $sqlite_pdo->createFunction($name, $fn, 1);
+        } else {
+            $sqlite_pdo->sqliteCreateFunction($name, $fn, 1);
+        }
     }
 
     private function create_target_db_apply_connection(array $options): array
@@ -5107,11 +5121,16 @@ class ImportClient
         // Quote the table name to prevent SQL injection from a crafted prefix.
         $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
 
-        $stmt = $pdo->prepare(
+        // Use query()/exec() instead of prepare()/execute(): the SQLite target's
+        // WP_PDO_MySQL_On_SQLite wrapper overrides query()/exec() but not
+        // prepare(), and it doesn't call parent::__construct(), so calling
+        // prepare() dispatches to the real PDO::prepare on an uninitialized
+        // native PDO and throws "object is uninitialized". query()/exec() are
+        // universally safe across real PDO and the wrapper.
+        $stmt = $pdo->query(
             "SELECT option_value FROM {$options_table} WHERE option_name = 'active_plugins'"
         );
-        $stmt->execute();
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $row = $stmt ? $stmt->fetch(PDO::FETCH_ASSOC) : null;
         if (!$row || !isset($row['option_value'])) {
             return [];
         }
@@ -5149,10 +5168,14 @@ class ImportClient
         }
 
         $new_value = serialize(array_values($retained_plugins));
-        $stmt = $pdo->prepare(
-            "UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'"
+        // ANSI-style single-quote doubling is accepted by both MySQL (regardless
+        // of SQL_MODE) and SQLite. PHP-serialized basenames of active plugins
+        // don't contain backslashes or control bytes, so single-quote escaping
+        // alone is safe.
+        $quoted_value = "'" . str_replace("'", "''", $new_value) . "'";
+        $pdo->exec(
+            "UPDATE {$options_table} SET option_value = {$quoted_value} WHERE option_name = 'active_plugins'"
         );
-        $stmt->execute([$new_value]);
         // The SQL dump runs with AUTOCOMMIT=0 and issues a final COMMIT,
         // but autocommit stays off. Our UPDATE needs an explicit COMMIT.
         $pdo->exec('COMMIT');

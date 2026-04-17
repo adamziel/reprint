@@ -131,9 +131,16 @@ class NewSiteUrlSqliteTest extends TestCase
         ]);
 
         $sqlite_pdo = $pdo->get_connection()->get_pdo();
-        $sqlite_pdo->sqliteCreateFunction('FROM_BASE64', function ($data) {
+        $from_base64 = function ($data) {
             return $data === null ? null : base64_decode($data);
-        }, 1);
+        };
+        // Prefer Pdo\Sqlite::createFunction() (PHP 8.4+) — sqliteCreateFunction
+        // is deprecated in PHP 8.5.
+        if (method_exists($sqlite_pdo, 'createFunction')) {
+            $sqlite_pdo->createFunction('FROM_BASE64', $from_base64, 1);
+        } else {
+            $sqlite_pdo->sqliteCreateFunction('FROM_BASE64', $from_base64, 1);
+        }
 
         return $pdo->query($sql)->fetchAll();
     }
