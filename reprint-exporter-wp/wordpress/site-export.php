@@ -3,7 +3,8 @@
  * Admin interface for Reprint Exporter plugin.
  *
  * This plugin provides a WordPress admin UI for configuring the export API.
- * The export API is triggered via `?site-export-api` during plugin load,
+ * The export API is triggered via `?reprint-api` (or the legacy
+ * `?site-export-api` alias) during plugin load,
  * before WordPress finishes booting. It reads the secret from a site option,
  * with secret.php supported only as an override when present.
  *
@@ -123,7 +124,7 @@ class Site_Export_Plugin {
 
         $stored_secret = _site_export_get_option_secret();
         $effective_secret = _site_export_get_shared_secret() ?? '';
-        $api_url = home_url('?site-export-api');
+        $api_url = home_url('?reprint-api');
         $is_configured = $effective_secret !== '';
         $has_file_override = _site_export_has_secret_file();
 

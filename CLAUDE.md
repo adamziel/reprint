@@ -170,7 +170,7 @@ During the file fetch phase, progress and heartbeat records include `files_done`
   - src/lib/url-rewrite/: URL rewriting for db-apply
   - src/lib/mysql-query-stream/: MySQL query stream parser for direct streaming
 - reprint-exporter-wp/: Self-contained WordPress plugin distribution directory
-  - index.php: WordPress plugin entry point — intercepts `?site-export-api` requests during plugin load, requires lib.php
+  - index.php: WordPress plugin entry point — intercepts `?reprint-api` requests (and the legacy `?site-export-api` alias) during plugin load, requires lib.php
   - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
   - wordpress/: WordPress admin UI (site-export.php)
 - importer/: Thin compatibility wrapper that loads the importer package entry point

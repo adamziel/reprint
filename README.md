@@ -63,7 +63,7 @@ The migration process has a few steps:
 All commands below use the same base invocation. We'll use `$URL` and `$DIR` as shorthand:
 
 ```bash
-URL="https://example.com/?site-export-api"
+URL="https://example.com/?reprint-api"
 STATE_DIR="./local-directory-where-the-migration-state-will-be-tracked"
 FS_ROOT="./local-directory-where-the-remote-site-files-will-be-recreated"
 SECRET="your-shared-secret"

@@ -14,7 +14,11 @@ require_once __DIR__ . '/lib.php';
 // Intercept export API requests as early as possible.
 // WordPress loads plugin files before firing `plugins_loaded`,
 // so this runs before almost anything else in the WordPress stack.
-if (isset($_GET['site-export-api'])) {
+//
+// `?site-export-api` is the legacy query parameter kept for backwards
+// compatibility with clients pinned to earlier plugin versions.
+// New integrations should use `?reprint-api`.
+if (isset($_GET['reprint-api']) || isset($_GET['site-export-api'])) {
     _site_export_handle_api_request();
     exit;
 }
