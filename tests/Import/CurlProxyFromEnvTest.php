@@ -4,7 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/curl-proxy.php';
+require_once __DIR__ . '/../../importer/import.php';
 
 /**
  * Spawns a minimal HTTP forward proxy on an ephemeral port and confirms
