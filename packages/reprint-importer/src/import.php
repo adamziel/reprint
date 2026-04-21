@@ -43,6 +43,9 @@ require_once __DIR__ . '/lib/target-runtime/load.php';
 // External merge sort for large index files when exec() is unavailable
 require_once __DIR__ . '/lib/external-merge-sort.php';
 
+// ALL_PROXY → CURLOPT_PROXY helper, shared by every outgoing curl call.
+require_once __DIR__ . '/lib/curl-proxy.php';
+
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
@@ -9174,6 +9177,7 @@ class ImportClient
         $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
 
         $ch = curl_init($url);
+        reprint_apply_curl_proxy_from_env($ch);
 
         $headers = [
             ...$this->get_base_headers("application/json"),
@@ -9288,6 +9292,7 @@ class ImportClient
         $this->audit_log(implode(" | ", $log_parts), false);
 
         $ch = curl_init($url);
+        reprint_apply_curl_proxy_from_env($ch);
 
         $parser = null;
         $current_chunk = null;
