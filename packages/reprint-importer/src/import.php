@@ -47,6 +47,28 @@ require_once __DIR__ . '/lib/external-merge-sort.php';
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
 /**
+ * If the ALL_PROXY environment variable is set, apply it to the cURL
+ * handle via CURLOPT_PROXY.
+ *
+ * libcurl does inspect ALL_PROXY on its own, but only when curl is
+ * built against a libc that exports the env var and when no one has
+ * unset it in the PHP process. Some SAPIs and managed runtimes strip
+ * the environment before PHP starts, so setting CURLOPT_PROXY
+ * explicitly makes the behavior deterministic across hosts.
+ *
+ * Empty values are ignored — an explicit empty ALL_PROXY is the
+ * shell idiom for "no proxy".
+ */
+function reprint_apply_curl_proxy_from_env($ch): ?string {
+    $proxy = getenv('ALL_PROXY');
+    if (!is_string($proxy) || $proxy === '') {
+        return null;
+    }
+    curl_setopt($ch, CURLOPT_PROXY, $proxy);
+    return $proxy;
+}
+
+/**
  * The wire-protocol version this importer speaks.
  *
  * Both the export plugin (server) and the importer (client) are deployed
@@ -9174,6 +9196,7 @@ class ImportClient
         $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
 
         $ch = curl_init($url);
+        reprint_apply_curl_proxy_from_env($ch);
 
         $headers = [
             ...$this->get_base_headers("application/json"),
@@ -9288,6 +9311,7 @@ class ImportClient
         $this->audit_log(implode(" | ", $log_parts), false);
 
         $ch = curl_init($url);
+        reprint_apply_curl_proxy_from_env($ch);
 
         $parser = null;
         $current_chunk = null;

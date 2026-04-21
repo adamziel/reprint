@@ -112,6 +112,14 @@ function remote_upload_proxy_code(): string
 		return;
 	}
 
+	// Respect ALL_PROXY for environments that route egress through an
+	// outbound proxy. libcurl sometimes picks this up on its own, but
+	// some SAPIs strip env vars before PHP starts — set it explicitly.
+	$all_proxy = getenv('ALL_PROXY');
+	if (is_string($all_proxy) && $all_proxy !== '') {
+		curl_setopt($curl, CURLOPT_PROXY, $all_proxy);
+	}
+
 	curl_setopt($curl, CURLOPT_CUSTOMREQUEST, $method);
 	curl_setopt($curl, CURLOPT_FAILONERROR, false);
 	curl_setopt($curl, CURLOPT_FOLLOWLOCATION, false);
