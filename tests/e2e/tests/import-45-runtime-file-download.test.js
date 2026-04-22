@@ -55,11 +55,37 @@ describe('Import: Runtime file download', () => {
 
         tempDir = createTempDir('e2e-runtime-download');
 
-        preflightResult = runImporter(importUrlWithDirectory(), tempDir, 'preflight', {
-            secret: getSiteSecret(site),
-        });
-        assert.equal(preflightResult.exitCode, 0,
-            `Expected exit 0\nstderr: ${preflightResult.stderr}\nstdout: ${preflightResult.stdout}`);
+        // PHP-FPM can briefly miss a freshly-written .user.ini when a worker
+        // has a stale realpath/stat cache for the site directory (e.g. from
+        // a parent-directory lookup that predates this site's creation).
+        // The pool sets user_ini.cache_ttl=0 and realpath_cache_ttl=0, but
+        // caches survive until the current request ends, so retry preflight
+        // a few times until auto_prepend_file shows up. Each preflight wipes
+        // tempDir state, so retries are safe.
+        const maxAttempts = 5;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            preflightResult = runImporter(importUrlWithDirectory(), tempDir, 'preflight', {
+                secret: getSiteSecret(site),
+            });
+            assert.equal(preflightResult.exitCode, 0,
+                `Expected exit 0\nstderr: ${preflightResult.stderr}\nstdout: ${preflightResult.stdout}`);
+
+            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            const prepend = state.preflight?.data?.runtime?.ini_get_all?.auto_prepend_file ?? '';
+            if (prepend.includes('scripts/env.php')) {
+                break;
+            }
+            if (attempt === maxAttempts) {
+                break;
+            }
+            // Touch .user.ini so any worker that cached a missing-file stat
+            // re-checks on the next request, then brief pause for FPM workers
+            // to cycle.
+            try {
+                execSync(`sudo touch ${JSON.stringify(join(siteDir, '.user.ini'))}`);
+            } catch {}
+            await new Promise((r) => setTimeout(r, 500));
+        }
     });
 
     afterAll(() => {
