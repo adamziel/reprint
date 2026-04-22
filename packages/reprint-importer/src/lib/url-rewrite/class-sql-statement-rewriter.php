@@ -82,6 +82,11 @@ class SqlStatementRewriter
     /**
      * Rewrite URLs in a SQL statement.
      *
+     * NOTE: base64-encoded values that do not contain the string "http" are
+     * skipped entirely — column resolution and the StructuredDataUrlRewriter
+     * pipeline are never run for them. This means URLs stored in base64
+     * without an http/https scheme will not be rewritten.
+     *
      * @param string $sql The SQL statement.
      * @return string The modified SQL statement.
      */
@@ -100,6 +105,16 @@ class SqlStatementRewriter
         $scanner = new Base64ValueScanner($sql);
         while ($scanner->next_value()) {
             $value = $scanner->get_value();
+
+            // Skip values that can't contain a URL we'd rewrite. Every
+            // rewritable domain starts with http:// or https://, so a value
+            // without "http" anywhere in it has nothing for us to do. This
+            // avoids the column-map lookup and the full StructuredDataUrlRewriter
+            // pipeline (HTML parse, block markup, PHP/JSON recursion) per value.
+            // See https://github.com/adamziel/reprint/pull/152
+            if (strpos($value, 'http') === false) {
+                continue;
+            }
 
             // Determine content type hint for this column
             $content_type = null;
