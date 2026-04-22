@@ -82,6 +82,11 @@ class SqlStatementRewriter
     /**
      * Rewrite URLs in a SQL statement.
      *
+     * NOTE: base64-encoded values that do not contain the string "http" are
+     * skipped entirely — column resolution and the StructuredDataUrlRewriter
+     * pipeline are never run for them. This means URLs stored in base64
+     * without an http/https scheme will not be rewritten.
+     *
      * @param string $sql The SQL statement.
      * @return string The modified SQL statement.
      */
