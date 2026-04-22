@@ -78,6 +78,10 @@ class DomainCollector
             return [];
         }
 
+        if (strpos($value, 'http') === false) {
+            return [];
+        }
+
         $before = count($this->domains);
 
         // Serialized PHP: the parser validates the entire structure in
