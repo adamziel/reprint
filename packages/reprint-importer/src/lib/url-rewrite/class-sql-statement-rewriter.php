@@ -101,6 +101,15 @@ class SqlStatementRewriter
         while ($scanner->next_value()) {
             $value = $scanner->get_value();
 
+            // Skip values that can't contain a URL we'd rewrite. Every
+            // rewritable domain starts with http:// or https://, so a value
+            // without "http" anywhere in it has nothing for us to do. This
+            // avoids the column-map lookup and the full StructuredDataUrlRewriter
+            // pipeline (HTML parse, block markup, PHP/JSON recursion) per value.
+            if (strpos($value, 'http') === false) {
+                continue;
+            }
+
             // Determine content type hint for this column
             $content_type = null;
             if ($parsed !== null) {
