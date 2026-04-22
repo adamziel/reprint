@@ -4204,6 +4204,32 @@ class ImportClient
             );
         }
 
+        // Phase 1c: Symlink wp-config.php from ABSPATH's parent directory.
+        // WordPress allows wp-config.php one directory above ABSPATH —
+        // wp-load.php checks dirname(ABSPATH) as a fallback. On WP Cloud
+        // the typical layout is /srv/htdocs/wp-config.php with ABSPATH at
+        // /srv/htdocs/wordpress/, so Phase 1's ABSPATH scan won't find it.
+        $wp_config_in_flatten = $flatten_to . "/wp-config.php";
+        if (!file_exists($wp_config_in_flatten)) {
+            $parent_of_abspath = dirname($abspath);
+            $local_parent_wp_config = $this->fs_root . $parent_of_abspath . "/wp-config.php";
+            if (file_exists($local_parent_wp_config)) {
+                $this->flatten_place_symlink(
+                    $local_parent_wp_config,
+                    $wp_config_in_flatten,
+                    $force,
+                    $created,
+                    $refreshed,
+                    $forced,
+                );
+                $this->audit_log(
+                    "FLAT-DOCUMENT-ROOT | Symlinked wp-config.php from ABSPATH parent: " .
+                        "{$parent_of_abspath}/wp-config.php",
+                );
+            }
+        }
+
+
         // Phase 2: Handle wp-content when it's outside ABSPATH
         if ($need_exploded_content && $local_content_dir !== null) {
             // wp-content must be a real directory because some sub-components
