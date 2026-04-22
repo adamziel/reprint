@@ -111,6 +111,7 @@ class SqlStatementRewriter
             // without "http" anywhere in it has nothing for us to do. This
             // avoids the column-map lookup and the full StructuredDataUrlRewriter
             // pipeline (HTML parse, block markup, PHP/JSON recursion) per value.
+            // See https://github.com/adamziel/reprint/pull/152
             if (strpos($value, 'http') === false) {
                 continue;
             }
