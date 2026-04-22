@@ -48,6 +48,8 @@ php_admin_value[error_reporting] = E_ALL
 php_admin_value[display_errors] = Off
 php_admin_value[log_errors] = On
 php_admin_value[error_log] = /tmp/php-e2e-errors.log
+php_admin_value[user_ini.cache_ttl] = 0
+php_admin_value[realpath_cache_ttl] = 0
 env[SITE_EXPORT_TEST_MODE] = 1
 EOF
 rm -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
