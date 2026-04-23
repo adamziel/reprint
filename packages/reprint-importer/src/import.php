@@ -1274,6 +1274,20 @@ class ImportClient
             filesize($this->skipped_download_list_file) > 0;
     }
 
+    /** Override the active filter without persisting it to state. */
+    public function set_filter_mode(string $filter): void
+    {
+        $this->filter = $filter;
+    }
+
+    /** True when a completed pull still has deferred files pending. */
+    public function pull_has_skipped_files_pending(): bool
+    {
+        return
+            !empty($this->state['pull']['skipped_pending']) &&
+            ($this->state['pull']['files_filter'] ?? null) === 'essential-files';
+    }
+
     /**
      * Log the executed command and full argv to the audit log.
      * Called from the CLI entry point before run() so the invocation
@@ -2504,22 +2518,9 @@ class ImportClient
                             "Run files-pull with --filter=essential-files first.",
                     );
                 }
-                $this->audit_log(
+                $this->resume_skipped_file_downloads(
                     "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
-                    true,
                 );
-                $this->progress->show_lifecycle_line("Downloading previously skipped files\n");
-                $this->output_progress([
-                    "type" => "lifecycle",
-                    "event" => "starting",
-                    "command" => "files-pull",
-                    "stage" => "fetch-skipped",
-                    "message" => "Downloading previously skipped files",
-                ], true);
-                $this->state["status"] = "in_progress";
-                $this->state["stage"] = "fetch-skipped";
-                $this->save_state($this->state);
-                $this->run_files_sync_pipeline();
                 return;
             }
 
@@ -2548,6 +2549,22 @@ class ImportClient
                 "has_skipped" => $has_skipped,
                 "message" => "files-pull already complete: {$index_size} files indexed",
             ], true);
+            return;
+        }
+
+        if (
+            $this->filter === "skipped-earlier" &&
+            $this->pull_has_skipped_files_pending()
+        ) {
+            if (!$this->has_skipped_files_pending()) {
+                throw new RuntimeException(
+                    "--filter=skipped-earlier was requested but the skipped file list is missing. " .
+                        "Run pull --filter=essential-files again or use --abort to start over.",
+                );
+            }
+            $this->resume_skipped_file_downloads(
+                "FETCH SKIPPED | pull completed with deferred files — downloading them now",
+            );
             return;
         }
 
@@ -2879,6 +2896,24 @@ class ImportClient
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
+    }
+
+    private function resume_skipped_file_downloads(string $audit_message): void
+    {
+        $this->audit_log($audit_message, true);
+        $this->progress->show_lifecycle_line("Downloading previously skipped files\n");
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "starting",
+            "command" => "files-pull",
+            "stage" => "fetch-skipped",
+            "message" => "Downloading previously skipped files",
+        ], true);
+        $this->state["command"] = "files-pull";
+        $this->state["status"] = "in_progress";
+        $this->state["stage"] = "fetch-skipped";
+        $this->save_state($this->state);
+        $this->run_files_sync_pipeline();
     }
 
     /**
@@ -10751,6 +10786,13 @@ if (
             'commands' => ['pull', 'files-pull'],
         ],
         [
+            'name' => 'fetch-skipped',
+            'type' => 'flag',
+            'target' => 'fetch_skipped',
+            'help' => 'Download only files deferred by a prior pull --filter=essential-files',
+            'commands' => ['pull'],
+        ],
+        [
             'name' => 'extra-directory',
             'type' => 'value',
             'target' => 'extra_directory',
@@ -11391,6 +11433,11 @@ if (
                 "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --filter=essential-files --target-engine=sqlite --runtime=none\n" .
+                "\n" .
+                "  # Later, download the deferred file tail into the same mirror:\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --fetch-skipped\n" .
                 "\n" .
                 "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
                 "  reprint pull https://example.com \\\n" .

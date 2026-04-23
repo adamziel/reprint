@@ -35,6 +35,10 @@ class Pull
      */
     public function stages(array $options): array
     {
+        if (!empty($options['fetch_skipped'])) {
+            return ['files-pull'];
+        }
+
         $stages = ['preflight', 'files-pull', 'db-pull'];
         $has_db_target =
             !empty($options['target_db']) ||
@@ -82,6 +86,9 @@ class Pull
         $this->progress->enable_quiet_lifecycle();
 
         $options = $this->validate_and_default_options($options);
+        if (!empty($options['fetch_skipped'])) {
+            $this->client->set_filter_mode('skipped-earlier');
+        }
 
         $stages = $this->stages($options);
         $total = count($stages);
@@ -89,7 +96,7 @@ class Pull
         $completed_stage = $state['pull']['stage'] ?? null;
 
         // If the prior pull completed, prepare for a delta re-pull.
-        if ($completed_stage === 'complete') {
+        if ($completed_stage === 'complete' && empty($options['fetch_skipped'])) {
             $this->prepare_repull();
             $completed_stage = null;
         }
@@ -189,10 +196,14 @@ class Pull
                 $this->run_until_complete(function () {
                     $this->client->run_files_sync();
                 });
+                $pull_filter = $options['filter'];
+                if (!empty($options['fetch_skipped'])) {
+                    $pull_filter = $this->client->state['pull']['files_filter'] ?? 'essential-files';
+                }
                 $skipped_pending =
-                    $options['filter'] === 'essential-files' &&
+                    $pull_filter === 'essential-files' &&
                     $this->client->has_skipped_files_pending();
-                $this->client->set_pull_files_state($options['filter'], $skipped_pending);
+                $this->client->set_pull_files_state($pull_filter, $skipped_pending);
                 $count = $this->client->index_count();
                 $summary = $count > 0 ? number_format($count) . " files" : null;
                 if ($skipped_pending) {
@@ -297,13 +308,48 @@ class Pull
             $options['output_dir'] = $this->client->state_dir . '/runtime';
         }
 
-        if (!isset($options['filter'])) {
+        if (!empty($options['fetch_skipped'])) {
+            if (isset($options['filter'])) {
+                throw new InvalidArgumentException(
+                    "--fetch-skipped cannot be combined with --filter. " .
+                    "Run either pull --filter=essential-files or pull --fetch-skipped."
+                );
+            }
+            if (!$this->client->pull_has_skipped_files_pending()) {
+                throw new RuntimeException(
+                    "--fetch-skipped was requested but there are no deferred files pending. " .
+                    "Run pull --filter=essential-files first.",
+                );
+            }
+
+            $command = $this->client->state['command'] ?? null;
+            $stage = $this->client->state['stage'] ?? null;
+            $status = $this->client->state['status'] ?? null;
+            $is_fetch_skipped_resume =
+                $command === 'files-pull' &&
+                $stage === 'fetch-skipped' &&
+                $status !== 'complete';
+            if (
+                !$is_fetch_skipped_resume &&
+                ($this->client->state['pull']['stage'] ?? null) !== 'complete'
+            ) {
+                throw new RuntimeException(
+                    "--fetch-skipped was requested before the prior pull finished. " .
+                    "Re-run the original pull command to complete the main sync first.",
+                );
+            }
+
+            $options['filter'] = 'skipped-earlier';
+        } elseif (!isset($options['filter'])) {
             $options['filter'] = $this->client->state['filter'] ?? 'none';
         }
-        if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
+        $valid_pull_filters = !empty($options['fetch_skipped'])
+            ? ['skipped-earlier']
+            : ['none', 'essential-files'];
+        if (!in_array($options['filter'], $valid_pull_filters, true)) {
             throw new InvalidArgumentException(
                 "Invalid --filter value for pull: {$options['filter']}. " .
-                "Valid values: none, essential-files"
+                "Valid values: " . implode(', ', $valid_pull_filters)
             );
         }
 
