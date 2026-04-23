@@ -189,8 +189,18 @@ class Pull
                 $this->run_until_complete(function () {
                     $this->client->run_files_sync();
                 });
+                $skipped_pending =
+                    $options['filter'] === 'essential-files' &&
+                    $this->client->has_skipped_files_pending();
+                $this->client->set_pull_files_state($options['filter'], $skipped_pending);
                 $count = $this->client->index_count();
-                $this->print_done($stage, $count > 0 ? number_format($count) . " files" : null);
+                $summary = $count > 0 ? number_format($count) . " files" : null;
+                if ($skipped_pending) {
+                    $summary = $summary !== null
+                        ? $summary . ", deferred files pending"
+                        : "deferred files pending";
+                }
+                $this->print_done($stage, $summary);
                 break;
 
             case 'db-pull':
@@ -287,6 +297,16 @@ class Pull
             $options['output_dir'] = $this->client->state_dir . '/runtime';
         }
 
+        if (!isset($options['filter'])) {
+            $options['filter'] = $this->client->state['filter'] ?? 'none';
+        }
+        if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
+            throw new InvalidArgumentException(
+                "Invalid --filter value for pull: {$options['filter']}. " .
+                "Valid values: none, essential-files"
+            );
+        }
+
         return $options;
     }
 
@@ -316,6 +336,8 @@ class Pull
         $defaults = $this->client->default_state();
         $this->client->mutate_state(function (array $state) use ($defaults) {
             $state['pull']['stage'] = null;
+            $state['pull']['files_filter'] = null;
+            $state['pull']['skipped_pending'] = false;
             $state['command'] = null;
             $state['status'] = null;
             $state['cursor'] = null;
@@ -537,6 +559,11 @@ class Pull
         $this->progress->print_line(
             "\n{$green}{$bold}Done.{$r} {$dim}Files in {$fs_root}{$r}\n"
         );
+        if (!empty($this->client->state['pull']['skipped_pending'])) {
+            $this->progress->print_line(
+                "{$dim}Deferred files remain. The skipped download list was preserved on disk for a follow-up sync.{$r}\n"
+            );
+        }
     }
 
     private function report_failure(string $stage, array $stages, int $i, \Exception $e): void

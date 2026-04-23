@@ -1258,6 +1258,22 @@ class ImportClient
         $this->save_state($this->state);
     }
 
+    /** Record the pull's file filter and whether deferred files remain. */
+    public function set_pull_files_state(string $filter, bool $skipped_pending): void
+    {
+        $this->state['pull']['files_filter'] = $filter;
+        $this->state['pull']['skipped_pending'] = $skipped_pending;
+        $this->save_state($this->state);
+    }
+
+    /** True when the skipped-download list exists and still has entries. */
+    public function has_skipped_files_pending(): bool
+    {
+        return
+            file_exists($this->skipped_download_list_file) &&
+            filesize($this->skipped_download_list_file) > 0;
+    }
+
     /**
      * Log the executed command and full argv to the audit log.
      * Called from the CLI entry point before run() so the invocation
@@ -1485,8 +1501,17 @@ class ImportClient
         // start fresh (--abort) or finish the current sync before switching.
         // The one valid transition is: essential-files (complete) → skipped-earlier.
         if (isset($options["filter"])) {
-            $prev = $this->state["filter"] ?? null;
             $next = $options["filter"];
+            if (
+                $command === "pull" &&
+                !in_array($next, ["none", "essential-files"], true)
+            ) {
+                throw new InvalidArgumentException(
+                    "Invalid --filter value for pull: {$next}. " .
+                        "Valid values: none, essential-files",
+                );
+            }
+            $prev = $this->state["filter"] ?? null;
             $status = $this->state["status"] ?? null;
             $is_mid_flight = $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
             if ($is_mid_flight) {
@@ -9929,6 +9954,8 @@ class ImportClient
             // "stage" is the last completed stage name, or "complete".
             "pull" => [
                 "stage" => null,
+                "files_filter" => null,
+                "skipped_pending" => false,
             ],
         ];
     }
@@ -10720,8 +10747,8 @@ if (
             'target' => 'filter',
             'placeholder' => 'MODE',
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
-            'help' => 'Filter which files to download (none|essential-files|skipped-earlier)',
-            'commands' => ['files-pull'],
+            'help' => 'Filter which files to download (pull: none|essential-files; files-pull also supports skipped-earlier)',
+            'commands' => ['pull', 'files-pull'],
         ],
         [
             'name' => 'extra-directory',
@@ -11343,6 +11370,9 @@ if (
                 "interrupted, re-run the same command to resume from where it left off.\n" .
                 "Running pull again after completion performs a delta sync.\n" .
                 "\n" .
+                "Use --filter=essential-files to defer uploads and other large wp-content\n" .
+                "entries while still completing the rest of the pull.\n" .
+                "\n" .
                 "The ?site-export-api query parameter is added automatically if missing,\n" .
                 "so you can pass just the site URL.\n",
             "extra" =>
@@ -11356,6 +11386,11 @@ if (
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-user=root --target-db=wp_local \\\n" .
                 "    --new-site-url=http://localhost:8881\n" .
+                "\n" .
+                "  # Complete the main pull now, defer the heavier file tail:\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --filter=essential-files --target-engine=sqlite --runtime=none\n" .
                 "\n" .
                 "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
                 "  reprint pull https://example.com \\\n" .
