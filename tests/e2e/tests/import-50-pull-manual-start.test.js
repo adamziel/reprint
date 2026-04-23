@@ -1,7 +1,7 @@
 /**
- * Test 50: Pull manual start mode
+ * Test 50: Pull start-runtime none
  *
- * Verifies that `pull --runtime=playground-cli --start=manual` completes
+ * Verifies that `pull --runtime=playground-cli --start-runtime=none` completes
  * the full clone and runtime generation without entering the blocking
  * server startup stage.
  */
@@ -15,7 +15,7 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-describe('Import: Pull manual start mode', { timeout: 180000 }, () => {
+describe('Import: Pull start-runtime none', { timeout: 180000 }, () => {
     const site = 'basic';
     const runtimePort = 9490;
     let tempDir;
@@ -35,7 +35,7 @@ describe('Import: Pull manual start mode', { timeout: 180000 }, () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('pull exits after runtime generation when start is manual', () => {
+    it('pull exits after runtime generation when start-runtime is none', () => {
         const result = runImporter(importUrl(), tempDir, 'pull', {
             secret: getSiteSecret(site),
             skipPreflight: true,
@@ -43,7 +43,7 @@ describe('Import: Pull manual start mode', { timeout: 180000 }, () => {
             wallTimeout: 180000,
             extraArgs: [
                 '--runtime=playground-cli',
-                '--start=manual',
+                '--start-runtime=none',
                 '--target-engine=sqlite',
                 '--new-site-url',
                 `http://127.0.0.1:${runtimePort}`,
@@ -54,9 +54,9 @@ describe('Import: Pull manual start mode', { timeout: 180000 }, () => {
         assert.equal(result.exitCode, 0,
             `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         assert.ok(!result.stdout.includes('Press Ctrl-C to stop.'),
-            'pull should not enter the blocking start stage in manual mode');
+            'pull should not enter the blocking start stage when start-runtime is none');
         assert.ok(!result.stdout.includes('Ready at http://'),
-            'pull should not print the server-ready banner in manual mode');
+            'pull should not print the server-ready banner when start-runtime is none');
     });
 
     it('marks the pull complete and generates playground runtime files', () => {

@@ -58,7 +58,7 @@ class PullStartModeTest extends TestCase
     /**
      * @dataProvider stageProvider
      */
-    public function testStagesHonorStartMode(array $options, bool $expectsStart): void
+    public function testStagesHonorStartRuntimeSelection(array $options, bool $expectsStart): void
     {
         $stages = $this->makePull()->stages($options);
 
@@ -80,13 +80,17 @@ class PullStartModeTest extends TestCase
                 ['runtime' => 'playground-cli'],
                 true,
             ],
-            'manual start skips php-builtin start stage' => [
-                ['runtime' => 'php-builtin', 'start' => 'manual'],
+            'start-runtime=none skips php-builtin start stage' => [
+                ['runtime' => 'php-builtin', 'start_runtime' => 'none'],
                 false,
             ],
-            'manual start skips playground-cli start stage' => [
-                ['runtime' => 'playground-cli', 'start' => 'manual'],
+            'start-runtime=none skips playground-cli start stage' => [
+                ['runtime' => 'playground-cli', 'start_runtime' => 'none'],
                 false,
+            ],
+            'explicit playground-cli start is supported' => [
+                ['runtime' => 'playground-cli', 'start_runtime' => 'playground-cli'],
+                true,
             ],
             'nginx-fpm never adds start stage' => [
                 ['runtime' => 'nginx-fpm'],
@@ -95,15 +99,62 @@ class PullStartModeTest extends TestCase
         ];
     }
 
-    public function testInvalidStartModeIsRejectedBeforeNetworkIO(): void
+    public function testStartRuntimeCanSelectRuntimeWhenRuntimeIsOmitted(): void
+    {
+        $pull = $this->makePull();
+        $reflection = new \ReflectionClass($pull);
+        $method = $reflection->getMethod('validate_and_default_options');
+        $method->setAccessible(true);
+
+        $options = $method->invoke($pull, [
+            'start_runtime' => 'playground-cli',
+        ]);
+
+        $this->assertSame('playground-cli', $options['runtime']);
+        $this->assertSame('playground-cli', $options['start_runtime']);
+    }
+
+    public function testInvalidStartRuntimeValueIsRejectedBeforeNetworkIO(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('Invalid --start value: later. Valid start modes: auto, manual');
+        $this->expectExceptionMessage(
+            'Invalid --start-runtime value: later. Valid start runtimes: nginx-fpm, php-builtin, playground-cli, none'
+        );
 
         $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
         $client->run([
             'command' => 'pull',
-            'start' => 'later',
+            'start_runtime' => 'later',
+        ]);
+    }
+
+    public function testUnsupportedStartRuntimeIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'Starting runtime nginx-fpm is not supported yet. Supported start runtimes: php-builtin, playground-cli, none'
+        );
+
+        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client->run([
+            'command' => 'pull',
+            'runtime' => 'nginx-fpm',
+            'start_runtime' => 'nginx-fpm',
+        ]);
+    }
+
+    public function testMismatchedStartRuntimeIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            '--start-runtime=playground-cli requires matching --runtime=playground-cli, or omit --runtime to use playground-cli for both.'
+        );
+
+        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client->run([
+            'command' => 'pull',
+            'runtime' => 'php-builtin',
+            'start_runtime' => 'playground-cli',
         ]);
     }
 }

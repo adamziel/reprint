@@ -10893,12 +10893,12 @@ if (
             'commands' => ['pull', 'apply-runtime'],
         ],
         [
-            'name' => 'start',
+            'name' => 'start-runtime',
             'type' => 'value',
-            'target' => 'start',
-            'placeholder' => 'MODE',
-            'valid_values' => ['auto', 'manual'],
-            'help' => 'Whether pull should launch the generated runtime (auto|manual)',
+            'target' => 'start_runtime',
+            'placeholder' => 'RUNTIME',
+            'valid_values' => ['nginx-fpm', 'php-builtin', 'playground-cli', 'none'],
+            'help' => 'Runtime to launch after pull (php-builtin|playground-cli|nginx-fpm|none)',
             'commands' => ['pull'],
         ],
         [
@@ -11346,7 +11346,7 @@ if (
                 "  4. Import    — apply SQL to a local database (if --target-db)\n" .
                 "  5. Flatten   — reassemble into standard WP layout (if --flatten-to)\n" .
                 "  6. Runtime   — generate server config (default: php-builtin)\n" .
-                "  7. Start     — launch the local server when supported (unless --start=manual)\n" .
+                "  7. Start     — launch the selected runtime when supported\n" .
                 "\n" .
                 "Each step retries automatically on server timeouts. If the process is\n" .
                 "interrupted, re-run the same command to resume from where it left off.\n" .
@@ -11376,7 +11376,7 @@ if (
                 "  # Prepare a Playground runtime but let another process start it:\n" .
                 "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
-                "    --runtime=playground-cli --start=manual --output-dir=./runtime\n",
+                "    --runtime=playground-cli --start-runtime=none --output-dir=./runtime\n",
         ],
         "install-exporter" => [
             "level" => "high",
