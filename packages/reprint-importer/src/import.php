@@ -46,6 +46,9 @@ require_once __DIR__ . '/lib/external-merge-sort.php';
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
+// Pull command — orchestrates the lower-level commands into a pipeline
+require_once __DIR__ . '/lib/pull/class-pull.php';
+
 /**
  * If the ALL_PROXY environment variable is set, apply it to the cURL
  * handle via CURLOPT_PROXY.
@@ -882,13 +885,13 @@ class ImportClient
     private const MAX_CONSECUTIVE_TIMEOUTS = 3;
 
     /** @var string Export server URL. */
-    private $remote_url;
+    public $remote_url;
 
     /** @var string Directory for import state files (.import-state.json, db.sql, etc.). */
-    private $state_dir;
+    public $state_dir;
 
     /** @var string Directory where downloaded site files are written (no filesystem-root/ wrapper). */
-    private $fs_root;
+    public $fs_root;
 
     /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
@@ -963,9 +966,6 @@ class ImportClient
     /** @var bool Whether stdout is a TTY (enables interactive progress display). */
     private $is_tty;
 
-    /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
-    private TerminalProgress $progress;
-
     /** @var int Running count of files imported in the current invocation. */
     private $files_imported = 0;
 
@@ -985,7 +985,7 @@ class ImportClient
      * max_allowed_packet, db_index, file_index.
      * @var array|null
      */
-    private $state;
+    public $state;
 
     /** @var int Chunks processed since last state save — triggers periodic persistence. */
     private $chunks_since_save = 0;
@@ -1000,14 +1000,6 @@ class ImportClient
      * across invocations.
      */
     private $follow_symlinks = true;
-
-    /**
-     * Memoized lookups for "does remote index contain this path or any descendant path?"
-     * keyed by normalized absolute path.
-     *
-     * @var array<string,bool>
-     */
-    private $remote_index_prefix_cache = [];
 
     /**
      * @var string Controls behavior when the fs root is non-empty at import start.
@@ -1065,6 +1057,23 @@ class ImportClient
 
     /** @var string|null Machine-readable error code from the last diagnose_http_error() call. */
     public $last_error_code = null;
+
+    /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
+    private TerminalProgress $progress;
+
+    /** @var Pull Orchestrates the pull command pipeline. */
+    private Pull $pull;
+
+    /** @var int Cumulative count of index entries written (survives retries). */
+    private $index_entries_counted = 0;
+
+    /**
+     * Memoized lookups for "does remote index contain this path or any descendant path?"
+     * keyed by normalized absolute path.
+     *
+     * @var array<string,bool>
+     */
+    private $remote_index_prefix_cache = [];
 
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
@@ -1126,6 +1135,7 @@ class ImportClient
         $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
         $this->progress_fd = STDOUT;
         $this->progress = new TerminalProgress($this->is_tty, $this->progress_fd);
+        $this->pull = new Pull($this, $this->progress);
 
         // Register signal handlers for graceful shutdown
         if (function_exists("pcntl_signal")) {
@@ -1153,7 +1163,7 @@ class ImportClient
     /**
      * Return current index size.
      */
-    private function index_count(): int
+    public function index_count(): int
     {
         if (!is_file($this->index_file)) {
             return 0;
@@ -1209,7 +1219,7 @@ class ImportClient
      * @param string $message Message to log
      * @param bool $to_console Whether to also output to console (respects verbose mode)
      */
-    private function audit_log(string $message, bool $to_console = true): void
+    public function audit_log(string $message, bool $to_console = true): void
     {
         $timestamp = date("Y-m-d H:i:s");
         $log_line = "[{$timestamp}] {$message}\n";
@@ -1221,6 +1231,31 @@ class ImportClient
         if ($to_console && $this->verbose_mode) {
             fwrite($this->progress_fd, $log_line);
         }
+    }
+
+    /**
+     * Apply a mutation to the state and persist it. Used by orchestrator
+     * commands (Pull) that need to update multiple fields atomically.
+     */
+    public function mutate_state(callable $mutator): void
+    {
+        $this->state = $mutator($this->state);
+        $this->save_state($this->state);
+    }
+
+    /** Mark a pull pipeline stage as completed in state. */
+    public function mark_pull_stage_complete(string $stage): void
+    {
+        $this->state['pull']['stage'] = $stage;
+        $this->save_state($this->state);
+    }
+
+    /** Mark the pull pipeline as fully complete in state. */
+    public function mark_pull_complete(): void
+    {
+        $this->state['pull']['stage'] = 'complete';
+        $this->state['status'] = 'complete';
+        $this->save_state($this->state);
     }
 
     /**
@@ -1394,12 +1429,13 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Command is required. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
             );
         }
 
         if (
             !in_array($command, [
+                "pull",
                 "files-pull",
                 "files-index",
                 "db-pull",
@@ -1414,7 +1450,7 @@ class ImportClient
             ])
         ) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Invalid command: {$command}. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
             );
         }
 
@@ -1560,6 +1596,27 @@ class ImportClient
                 );
             }
             $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
+        }
+
+        // pull orchestrates the full pipeline (preflight → files → db → apply)
+        // internally, so it must run before the normal command dispatch.
+        if ($command === "pull") {
+            if ($abort) {
+                $this->pull->abort();
+                return;
+            }
+            try {
+                $this->pull->run($options);
+            } catch (\Exception $e) {
+                $this->output_progress([
+                    "status" => "error",
+                    "error" => $e->getMessage(),
+                    "message" => "Error: " . $e->getMessage(),
+                ]);
+                $this->write_status_file($e->getMessage());
+                throw $e;
+            }
+            return;
         }
 
         // preflight and preflight-assert run the preflight themselves and
@@ -1833,7 +1890,7 @@ class ImportClient
     /**
      * Run a cheap preflight check to record exporter environment details.
      */
-    private function run_preflight(): void
+    public function run_preflight(): void
     {
         $url = $this->build_url("preflight", null, []);
         $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
@@ -2392,7 +2449,7 @@ class ImportClient
      *
      * Both modes share the same pipeline: index → diff → fetch.
      */
-    private function run_files_sync(): void
+    public function run_files_sync(): void
     {
         $state_command = $this->state["command"] ?? null;
         $current_status =
@@ -2495,7 +2552,10 @@ class ImportClient
 
         // Resuming an in-progress sync
         if ($has_progress) {
-            $this->files_imported = 0;
+            // Don't reset files_imported here — it counts files within
+            // the current batch and is only reset when a batch completes
+            // (in download_files_from_list). Resetting it on entry would
+            // cause the progress counter to dip between pull retries.
             $index_size = $this->index_count();
 
 
@@ -2683,6 +2743,23 @@ class ImportClient
             }
             $this->state["stage"] = $stage;
             $this->save_state($this->state);
+
+            // In pull mode, finalize the scanning line with a checkmark
+            // and start the download progress on a fresh line.
+            if ($has_downloads && $this->progress->is_quiet_lifecycle()) {
+                $green = "\033[32m";
+                $dim = "\033[2m";
+                $r = "\033[0m";
+                $scanned = number_format($this->index_entries_counted);
+                $this->progress->clear_progress_line();
+                $this->progress->print_line("  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
+                $total = $this->count_newlines($this->download_list_file);
+                $this->progress->set_active_label(null);
+                $this->progress->show_progress_line(
+                    "Downloading — 0 / " . number_format($total) . " files",
+                    0.0
+                );
+            }
 
             if (!$has_downloads && file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
@@ -3256,7 +3333,7 @@ class ImportClient
      * - If db.sql missing but state says complete: warn and require --abort flag
      * - Otherwise: error
      */
-    private function run_db_sync(): void
+    public function run_db_sync(): void
     {
         $state_command = $this->state["command"] ?? null;
         $sql_file = $this->state_dir . "/db.sql";
@@ -3605,6 +3682,24 @@ class ImportClient
         echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
     }
 
+
+    /**
+     * Format a byte count into a human-readable string.
+     */
+    private function format_bytes(int $bytes): string
+    {
+        if ($bytes >= 1073741824) {
+            return sprintf("%.1f GB", $bytes / 1073741824);
+        }
+        if ($bytes >= 1048576) {
+            return sprintf("%.1f MB", $bytes / 1048576);
+        }
+        if ($bytes >= 1024) {
+            return sprintf("%.1f KB", $bytes / 1024);
+        }
+        return "{$bytes} B";
+    }
+
     /**
      * Generate runtime configuration for the imported site.
      *
@@ -3622,7 +3717,7 @@ class ImportClient
      * pass the flattened directory as --fs-root directly and the prefix
      * is not applied.
      */
-    private function run_apply_runtime(array $options): void
+    public function run_apply_runtime(array $options): void
     {
         $runtime = $options["runtime"] ?? null;
         if (empty($runtime)) {
@@ -3867,15 +3962,17 @@ class ImportClient
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
 
-        fwrite(STDERR, "\n");
-        fwrite(STDERR, "Runtime: {$runtime}\n");
-        fwrite(STDERR, "Source host: {$webhost}\n");
-        if ($target_engine !== null) {
-            fwrite(STDERR, "Target database: {$target_engine}\n");
-        }
-        fwrite(STDERR, "\n");
-        foreach ($summary as $line) {
-            fwrite(STDERR, "{$line}\n");
+        if (!$this->progress->is_quiet_lifecycle()) {
+            fwrite(STDERR, "\n");
+            fwrite(STDERR, "Runtime: {$runtime}\n");
+            fwrite(STDERR, "Source host: {$webhost}\n");
+            if ($target_engine !== null) {
+                fwrite(STDERR, "Target database: {$target_engine}\n");
+            }
+            fwrite(STDERR, "\n");
+            foreach ($summary as $line) {
+                fwrite(STDERR, "{$line}\n");
+            }
         }
     }
 
@@ -3987,7 +4084,7 @@ class ImportClient
      * If a path that should be a symlink is a regular file/directory,
      * the command stops with an error unless --force is specified.
      */
-    private function run_flat_document_root(array $options): void
+    public function run_flat_document_root(array $options): void
     {
         $flatten_to = $options["flatten_to"] ?? null;
         if (empty($flatten_to)) {
@@ -4355,7 +4452,10 @@ class ImportClient
             "refreshed" => $refreshed,
             "force_replaced" => $forced,
         ];
-        fwrite($this->progress_fd, json_encode($result) . "\n");
+        if (!$this->progress->is_quiet_lifecycle()) {
+            fwrite($this->progress_fd, json_encode($result) . "\n");
+        }
+        $this->output_progress(array_merge(["type" => "flat_docroot_complete"], $result));
     }
 
     /**
@@ -4682,7 +4782,6 @@ class ImportClient
             $target_db = $options["target_db"] ?? "sqlite_database";
 
             if (!$target_path) {
-                fwrite(STDERR, "[db-apply] No --target-sqlite-path specified");
                 $content_dir = rtrim(
                     $this->state["preflight"]["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
                     "/",
@@ -4693,7 +4792,8 @@ class ImportClient
                     );
                 }
                 $target_path = $this->get_filesystem_root_path() . $content_dir . '/database/.ht.sqlite';
-                fwrite(STDERR, "[db-apply] No --target-sqlite-path specified, defaulting to: $target_path\n");
+                $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
+                $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
             }
 
             // Persist target database configuration for apply-runtime.
@@ -4758,7 +4858,7 @@ class ImportClient
         ];
     }
 
-    private function run_db_apply(array $options): void
+    public function run_db_apply(array $options): void
     {
         $sql_file = $this->state_dir . "/db.sql";
         if (!file_exists($sql_file)) {
@@ -5009,14 +5109,16 @@ class ImportClient
                         $stmts_since_save = 0;
 
                         // Progress output
-                        $pct = $sql_file_size > 0
-                            ? round(100 * $total_bytes_read / $sql_file_size, 1)
-                            : 0;
+                        $apply_fraction = $sql_file_size > 0
+                            ? $total_bytes_read / $sql_file_size
+                            : null;
+                        $pct = $apply_fraction !== null ? round($apply_fraction * 100, 1) : 0;
 
                         $progress_message = sprintf(
-                            "db-apply: %s statements (%.1f%%)",
-                            $statements_total === null ? $statements_executed : "{$statements_executed} / {$statements_total}",
-                            $pct,
+                            "%s statements",
+                            $statements_total === null
+                                ? number_format($statements_executed)
+                                : number_format($statements_executed) . " / " . number_format($statements_total),
                         );
 
                         $this->output_progress([
@@ -5029,7 +5131,7 @@ class ImportClient
                             "message" => $progress_message,
                         ]);
 
-                        $this->progress->show_progress_line($progress_message);
+                        $this->progress->show_progress_line($progress_message, $apply_fraction);
                     }
                 }
             }
@@ -5127,8 +5229,10 @@ class ImportClient
                     "message" => "db-apply complete ({$statements_executed} statements executed)",
                 ]);
 
-                // Clear the progress line before printing the final message
-                $this->progress->clear_progress_line();
+                if (!$this->progress->is_quiet_lifecycle()) {
+                    // Clear the progress line before printing the final message
+                    $this->progress->clear_progress_line();
+                }
                 $this->progress->show_lifecycle_line("db-apply complete ({$statements_executed} statements executed)\n");
             }
         } finally {
@@ -5560,6 +5664,11 @@ class ImportClient
         }
 
         $mode = file_exists($this->remote_index_file) ? "a" : "w";
+        // Initialize the index counter from the existing file so resume
+        // shows a monotonically increasing count.
+        if ($mode === "a" && $this->index_entries_counted === 0) {
+            $this->index_entries_counted = $this->count_newlines($this->remote_index_file);
+        }
         if ($mode === "w") {
             $this->audit_log(
                 "FILE CREATE | {$this->remote_index_file} | downloading fresh remote index",
@@ -5683,7 +5792,15 @@ class ImportClient
                     if ($bytes === false) {
                         throw new RuntimeException("Failed to write to remote index file (disk full?)");
                     }
-
+                    $this->index_entries_counted++;
+                }
+                if ($this->index_entries_counted > 0) {
+                    $this->progress->show_progress_line(
+                        "Scanning remote files — " .
+                        number_format($this->index_entries_counted) . " scanned"
+                    );
+                } else {
+                    $this->progress->show_progress_line("Scanning remote files");
                 }
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "index");
@@ -5892,6 +6009,7 @@ class ImportClient
                     "local_after" => $local_after,
                 ];
                 $this->save_state($this->state);
+                $this->progress->tick_spinner();
             }
         }
 
@@ -6029,10 +6147,14 @@ class ImportClient
             $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
         }
 
-        // Advance the done counter by the known batch size.
+        // Advance the done counter by the known batch size and reset
+        // the per-batch file counter. files_imported counted files within
+        // this batch; now that the batch is complete, those files are
+        // accounted for in download_list_done.
         if ($this->download_list_done !== null) {
             $this->download_list_done += $batch_entries;
         }
+        $this->files_imported = 0;
 
         $this->state[$state_key] = [
             "offset" => $next_offset,
@@ -6994,6 +7116,23 @@ class ImportClient
                                 $sql_statements_counted,
                             );
                         }
+                        // Show download progress on the TTY progress line.
+                        // The bytes accumulate across chunks and requests.
+                        // Include estimated total from db-index when available,
+                        // but only if the estimate is larger than what we've
+                        // already downloaded — INFORMATION_SCHEMA estimates
+                        // can be wildly off (e.g. 7 KB for a 22 MB dump).
+                        $db_bytes_est = (int) ($this->state["db_index"]["bytes"] ?? 0);
+                        $est_is_useful = $db_bytes_est > $sql_bytes_written;
+                        $sql_fraction = $est_is_useful
+                            ? $sql_bytes_written / $db_bytes_est
+                            : null;
+                        $sql_progress = $this->format_bytes($sql_bytes_written);
+                        if ($est_is_useful) {
+                            $sql_progress .= " / " . $this->format_bytes($db_bytes_est);
+                        }
+                        $this->progress->show_progress_line($sql_progress, $sql_fraction);
+
                     } elseif ($chunk_type === "progress") {
                         $this->handle_progress($chunk, "sql");
                     } elseif ($chunk_type === "completion") {
@@ -7692,13 +7831,12 @@ class ImportClient
      *   |-- tmp/e2e-shared-themes/pub/indice/
      *   |   |-- style.css
      *   |   `-- index.php
-     *   `-- srv/source-site/wp-content/themes/
-     *       `-- indice -> ../../../tmp/e2e-shared-themes/pub/indice
+     *   `-- srv/source-site/
+     *       `-- wp-content/themes/
      *
-     * Without this remap, the recreated link would still point to
-     * /tmp/e2e-shared-themes/pub/indice, which is outside fs-root and rejected
-     * by assert_symlink_target_within_root(). When the absolute target was
-     * already indexed from the source, we instead point the symlink at the
+     * Without this mapping, the symlink would point at /tmp/e2e-shared-themes/pub/indice
+     * (which does not exist on the local machine, or worse, exists with unrelated content).
+     * With this mapping, the symlink is rewritten to a relative path that resolves to the
      * mirrored local copy under fs-root.
      */
     private function map_absolute_symlink_target_for_local_mirror(
@@ -7910,8 +8048,14 @@ class ImportClient
             );
 
             $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
-            $file_progress_message = sprintf("[%d files] %s", $files_done, $this->display_path($path));
-            $this->progress->show_progress_line($file_progress_message);
+            $files_total = $this->download_list_total;
+            $file_fraction = ($files_total !== null && $files_total > 0)
+                ? $files_done / $files_total
+                : null;
+            $file_progress_message = $files_total !== null
+                ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
+                : sprintf("Downloading — %s files", number_format($files_done));
+            $this->progress->show_progress_line($file_progress_message, $file_fraction);
             $progress_record = [
                 "type" => "file_progress",
                 "files_done" => $files_done,
@@ -8478,7 +8622,7 @@ class ImportClient
             "type" => "symlink",
             "path" => $path,
             "target" => $target_for_local,
-            "message" => "Symlink: {$path} -> {$target_for_local}",
+            "message" => "Symlink: {$path} -> {$target}",
         ]);
     }
 
@@ -8730,6 +8874,7 @@ class ImportClient
             $this->audit_log("Failed to prepare keyed index file, falling back to PHP sort");
             return false;
         }
+        $lines_read = 0;
         while (($line = fgets($in)) !== false) {
             $line = rtrim($line, "\r\n");
             if ($line === "") {
@@ -8741,6 +8886,9 @@ class ImportClient
             }
             $key = bin2hex($entry["path"]);
             fwrite($out, $key . "\t" . $line . "\n");
+            if (++$lines_read % 500 === 0) {
+                $this->progress->tick_spinner();
+            }
         }
         fclose($in);
         fclose($out);
@@ -8776,6 +8924,7 @@ class ImportClient
         }
 
         $prev_key = null;
+        $lines_stripped = 0;
         while (($line = fgets($sorted_in)) !== false) {
             $pos = strpos($line, "\t");
             if ($pos === false) {
@@ -8793,6 +8942,9 @@ class ImportClient
             }
             $prev_key = $key;
             fwrite($sorted_out, $data);
+            if (++$lines_stripped % 500 === 0) {
+                $this->progress->tick_spinner();
+            }
         }
         fclose($sorted_in);
         fclose($sorted_out);
@@ -9235,6 +9387,12 @@ class ImportClient
             CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_NOPROGRESS => false,
+            CURLOPT_PROGRESSFUNCTION =>
+                function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
+                    $this->progress->tick_spinner();
+                    return 0;
+                },
         ]);
 
         $start = microtime(true);
@@ -9404,6 +9562,15 @@ class ImportClient
             CURLOPT_LOW_SPEED_LIMIT => 1,
             CURLOPT_LOW_SPEED_TIME => 300,
             CURLOPT_ENCODING => "gzip, deflate",
+            // Tick the spinner during transfers. curl calls this roughly
+            // once per second even when no data is flowing, which keeps
+            // the Braille spinner rotating so it looks alive.
+            CURLOPT_NOPROGRESS => false,
+            CURLOPT_PROGRESSFUNCTION =>
+                function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
+                    $this->progress->tick_spinner();
+                    return 0; // 0 = continue, non-zero = abort
+                },
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
                 &$parser,
@@ -9663,6 +9830,7 @@ class ImportClient
         $follow = $this->state["follow_symlinks"] ?? false;
         $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
+        $pull = $this->state["pull"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
         $this->state["version"] = $version;
@@ -9670,9 +9838,12 @@ class ImportClient
         $this->state["follow_symlinks"] = $follow;
         $this->state["fs_root_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
+        if ($pull !== null) {
+            $this->state["pull"] = $pull;
+        }
     }
 
-    private function default_state(): array
+    public function default_state(): array
     {
         return [
             "command" => null,
@@ -9753,6 +9924,12 @@ class ImportClient
                 "config" => [],
                 "state" => [],
             ],
+            // Pull pipeline state — tracks progress through the composite
+            // preflight → files-pull → db-pull → db-apply → ... pipeline.
+            // "stage" is the last completed stage name, or "complete".
+            "pull" => [
+                "stage" => null,
+            ],
         ];
     }
 
@@ -9808,6 +9985,12 @@ class ImportClient
         }
         $apply = array_intersect_key($apply, $defaults["apply"]);
         $state["apply"] = array_merge($defaults["apply"], $apply);
+        $pull = $state["pull"] ?? [];
+        if (!is_array($pull)) {
+            $pull = [];
+        }
+        $pull = array_intersect_key($pull, $defaults["pull"]);
+        $state["pull"] = array_merge($defaults["pull"], $pull);
         return $state;
     }
 
@@ -10095,6 +10278,11 @@ class ImportClient
      */
     private function save_state(array $state): void
     {
+        // Keep the spinner alive between curl requests. save_state is
+        // called frequently during streaming operations, so this fills
+        // the gaps where curl's progress callback doesn't fire.
+        $this->progress->tick_spinner();
+
         if ($this->tuner instanceof AdaptiveTuner) {
             $state["tuning"] = [
                 "config" => $this->tuner->get_config(),
@@ -10146,7 +10334,7 @@ class ImportClient
      * position. Written atomically via temp file + rename so readers
      * never see a partial write.
      */
-    private function write_status_file(?string $error = null): void
+    public function write_status_file(?string $error = null): void
     {
         $state = $this->state ?? [];
         $command = $state["command"] ?? null;
@@ -10271,7 +10459,7 @@ class ImportClient
      * @param array $data Progress data to output
      * @param bool $force Force output regardless of throttle
      */
-    private function output_progress(array $data, bool $force = false): void
+    public function output_progress(array $data, bool $force = false): void
     {
         // In TTY non-verbose mode, suppress JSON output (use show_progress_line instead)
         if ($this->is_tty && !$this->verbose_mode) {
@@ -10441,7 +10629,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'abort',
@@ -10449,7 +10637,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
+            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
         ],
         [
             'name' => 'verbose',
@@ -10458,7 +10646,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -10467,7 +10655,7 @@ if (
             'flag_value' => false,
             'help' => 'Do not follow symlinks pointing outside root directories',
             'help_section' => 'global',
-            'commands' => ['files-pull'],
+            'commands' => ['pull', 'files-pull'],
         ],
         [
             'name' => 'follow-symlinks',
@@ -10484,7 +10672,7 @@ if (
             'placeholder' => 'MODE',
             'help' => 'What to do when fs root is non-empty (error|preserve-local)',
             'help_section' => 'global',
-            'commands' => ['files-pull'],
+            'commands' => ['pull', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
         ],
         [
@@ -10610,7 +10798,7 @@ if (
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
             'help' => 'Target database engine: mysql (default) or sqlite',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-host',
@@ -10618,7 +10806,7 @@ if (
             'target' => 'target_host',
             'placeholder' => 'HOST',
             'help' => 'Target MySQL host (default: 127.0.0.1)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-port',
@@ -10627,7 +10815,7 @@ if (
             'placeholder' => 'PORT',
             'cast' => 'int',
             'help' => 'Target MySQL port (default: 3306)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-user',
@@ -10635,7 +10823,7 @@ if (
             'target' => 'target_user',
             'placeholder' => 'USER',
             'help' => 'Target MySQL user (required for mysql)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-pass',
@@ -10643,7 +10831,7 @@ if (
             'target' => 'target_pass',
             'placeholder' => 'PASS',
             'help' => 'Target MySQL password',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-db',
@@ -10651,7 +10839,7 @@ if (
             'target' => 'target_db',
             'placeholder' => 'NAME',
             'help' => 'Target DB name (required for mysql, optional for sqlite)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'target-sqlite-path',
@@ -10659,7 +10847,7 @@ if (
             'target' => 'target_sqlite_path',
             'placeholder' => 'PATH',
             'help' => 'Target SQLite database file (default: <wp-content>/database/.ht.sqlite)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'rewrite-url',
@@ -10667,7 +10855,7 @@ if (
             'target' => 'rewrite_url',
             'pair_args' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
         [
             'name' => 'new-site-url',
@@ -10675,7 +10863,7 @@ if (
             'target' => 'new_site_url',
             'placeholder' => 'URL',
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
-            'commands' => ['db-apply'],
+            'commands' => ['pull', 'db-apply'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
@@ -10684,15 +10872,15 @@ if (
             'type' => 'value',
             'target' => 'flatten_to',
             'placeholder' => 'PATH',
-            'help' => 'Target directory for the flattened layout (required)',
-            'commands' => ['flat-docroot'],
+            'help' => 'Target directory for the flattened layout',
+            'commands' => ['pull', 'flat-docroot'],
         ],
         [
             'name' => 'force',
             'type' => 'flag',
             'target' => 'force',
             'help' => 'Remove conflicting non-symlink files and replace with symlinks',
-            'commands' => ['flat-docroot'],
+            'commands' => ['pull', 'flat-docroot'],
         ],
 
         // ── apply-runtime options ────────────────────────────────
@@ -10701,16 +10889,16 @@ if (
             'type' => 'value',
             'target' => 'runtime',
             'placeholder' => 'RUNTIME',
-            'help' => 'Target server runtime: nginx-fpm, php-builtin, or playground-cli (required)',
-            'commands' => ['apply-runtime'],
+            'help' => 'Target server runtime: php-builtin, playground-cli, nginx-fpm, or none',
+            'commands' => ['pull', 'apply-runtime'],
         ],
         [
             'name' => 'output-dir',
             'type' => 'value',
             'target' => 'output_dir',
             'placeholder' => 'DIR',
-            'help' => 'Directory for generated runtime files (required)',
-            'commands' => ['apply-runtime'],
+            'help' => 'Directory for generated runtime files',
+            'commands' => ['pull', 'apply-runtime'],
         ],
         [
             'name' => 'flat-document-root',
@@ -10918,11 +11106,20 @@ if (
         echo "Mirror any WordPress site over HTTP.\n";
         echo "Version " . get_importer_version() . "\n";
         echo "\n";
-        echo "Usage: reprint <command> <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
+        echo "Usage: reprint <command> <remote-url> [options]\n";
         echo "\n";
-        echo "Commands:\n";
+
+        $high = array_filter($command_info, fn($i) => ($i['level'] ?? 'low') === 'high');
+        $low = array_filter($command_info, fn($i) => ($i['level'] ?? 'low') === 'low');
         $max_len = max(array_map('strlen', array_keys($command_info)));
-        foreach ($command_info as $name => $info) {
+
+        echo "Commands:\n";
+        foreach ($high as $name => $info) {
+            echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
+        }
+        echo "\n";
+        echo "Low-level commands (used by pull internally):\n";
+        foreach ($low as $name => $info) {
             echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
         }
         echo "\n";
@@ -11123,8 +11320,52 @@ if (
     //
     // The Options: section itself is generated from $option_defs so that
     // every declared option for a command is guaranteed to appear.
+    // High-level commands are the ones most users will use. Low-level
+    // commands are the building blocks that pull composes internally —
+    // useful for scripting and hosting platform integrations.
     $command_info = [
+        "pull" => [
+            "level" => "high",
+            "short" => "Clone a remote site (preflight + files + database + import)",
+            "description" =>
+                "Full site clone in a single command. Composes lower-level commands into\n" .
+                "a resumable pipeline:\n" .
+                "\n" .
+                "  1. Preflight — probe the remote site environment\n" .
+                "  2. Files     — download all remote files into --fs-root\n" .
+                "  3. Database  — download the SQL dump\n" .
+                "  4. Import    — apply SQL to a local database (if --target-db)\n" .
+                "  5. Flatten   — reassemble into standard WP layout (if --flatten-to)\n" .
+                "  6. Runtime   — generate server config (default: php-builtin)\n" .
+                "  7. Start     — launch the local server (php-builtin only)\n" .
+                "\n" .
+                "Each step retries automatically on server timeouts. If the process is\n" .
+                "interrupted, re-run the same command to resume from where it left off.\n" .
+                "Running pull again after completion performs a delta sync.\n" .
+                "\n" .
+                "The ?site-export-api query parameter is added automatically if missing,\n" .
+                "so you can pass just the site URL.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  # Download files and database (no import):\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
+                "\n" .
+                "  # Full clone with MySQL import and URL rewriting:\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --target-user=root --target-db=wp_local \\\n" .
+                "    --new-site-url=http://localhost:8881\n" .
+                "\n" .
+                "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --target-engine=sqlite \\\n" .
+                "    --new-site-url=http://localhost:8881 \\\n" .
+                "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n",
+        ],
         "install-exporter" => [
+            "level" => "high",
             "short" => "Show how to install the exporter plugin on your site",
             "description" =>
                 "Prints the download URL for the exporter WordPress plugin that\n" .
@@ -11136,6 +11377,7 @@ if (
             "extra" => null,
         ],
         "preflight" => [
+            "level" => "low",
             "short" => "Probe the remote site and cache its environment",
             "description" =>
                 "Contacts the remote site and collects environment details:\n" .
@@ -11149,6 +11391,7 @@ if (
             "extra" => null,
         ],
         "preflight-assert" => [
+            "level" => "low",
             "short" => "Verify the remote site can be mirrored (exits 0 or 1)",
             "description" =>
                 "Runs the same check as the preflight command, then evaluates\n" .
@@ -11163,6 +11406,7 @@ if (
             "extra" => null,
         ],
         "files-pull" => [
+            "level" => "low",
             "short" => "Pull all files (initial) or only changes (delta)",
             "description" =>
                 "Downloads files from the remote site into --fs-root.\n" .
@@ -11190,6 +11434,7 @@ if (
                 "  .import-audit.log                       Audit log\n",
         ],
         "files-index" => [
+            "level" => "low",
             "short" => "Index all remote files (initial) or detect changes (delta)",
             "description" =>
                 "Streams the full remote directory tree over HTTP and writes each\n" .
@@ -11206,6 +11451,7 @@ if (
             "extra" => null,
         ],
         "files-stats" => [
+            "level" => "low",
             "short" => "Show file counts and sizes from the local index",
             "description" =>
                 "Reads local index files to report (no network calls):\n" .
@@ -11218,6 +11464,7 @@ if (
             "extra" => null,
         ],
         "db-pull" => [
+            "level" => "low",
             "short" => "Pull the database as a SQL dump (index + download)",
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
@@ -11231,6 +11478,7 @@ if (
                 "  mysql   Stream directly into a MySQL connection\n",
         ],
         "db-index" => [
+            "level" => "low",
             "short" => "Pull table metadata from the remote database",
             "description" =>
                 "Fetches table metadata (name, estimated rows, data size) from\n" .
@@ -11241,6 +11489,7 @@ if (
                 "  db-tables.jsonl  One JSON object per table\n",
         ],
         "db-domains" => [
+            "level" => "low",
             "short" => "Extract domains from the pulled SQL dump",
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
@@ -11254,6 +11503,7 @@ if (
             "extra" => null,
         ],
         "db-apply" => [
+            "level" => "low",
             "short" => "Import the SQL dump into a local MySQL or SQLite database",
             "description" =>
                 "Reads db.sql from --state-dir, optionally rewrites URLs, and executes\n" .
@@ -11271,6 +11521,7 @@ if (
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
         "flat-docroot" => [
+            "level" => "low",
             "short" => "Reassemble pulled files into a standard WordPress layout",
             "description" =>
                 "Creates a directory at --flatten-to with symlinks that map the\n" .
@@ -11288,6 +11539,7 @@ if (
             "extra" => null,
         ],
         "apply-runtime" => [
+            "level" => "low",
             "short" => "Generate server config and prepare the site to run locally",
             "description" =>
                 "Generates server configuration (runtime.php, nginx.conf or start.sh)\n" .
