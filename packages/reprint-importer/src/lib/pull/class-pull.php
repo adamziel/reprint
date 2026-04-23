@@ -31,7 +31,8 @@ class Pull
      * Always: preflight → files-pull → db-pull.
      * Adds db-apply when a database target is configured, flat-docroot
      * when --flatten-to is set, apply-runtime when --runtime is set,
-     * and start when the runtime can be launched in-process.
+     * and start when the runtime can be launched in-process and
+     * --start=manual was not requested.
      */
     public function stages(array $options): array
     {
@@ -51,7 +52,10 @@ class Pull
             $stages[] = 'apply-runtime';
             // php-builtin and playground-cli both generate a start.sh
             // that can be launched directly from the CLI.
-            if (in_array($options['runtime'], ['php-builtin', 'playground-cli'], true)) {
+            if (
+                ($options['start'] ?? 'auto') !== 'manual' &&
+                in_array($options['runtime'], ['php-builtin', 'playground-cli'], true)
+            ) {
                 $stages[] = 'start';
             }
         }
@@ -248,6 +252,17 @@ class Pull
         }
         if ($options['runtime'] === 'none') {
             unset($options['runtime']);
+        }
+
+        if (empty($options['start'])) {
+            $options['start'] = 'auto';
+        }
+        $valid_start_modes = ['auto', 'manual'];
+        if (!in_array($options['start'], $valid_start_modes, true)) {
+            throw new InvalidArgumentException(
+                "Invalid --start value: {$options['start']}. " .
+                "Valid start modes: " . implode(', ', $valid_start_modes)
+            );
         }
 
         // Default --target-engine to sqlite for php-builtin and

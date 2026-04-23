@@ -10893,6 +10893,15 @@ if (
             'commands' => ['pull', 'apply-runtime'],
         ],
         [
+            'name' => 'start',
+            'type' => 'value',
+            'target' => 'start',
+            'placeholder' => 'MODE',
+            'valid_values' => ['auto', 'manual'],
+            'help' => 'Whether pull should launch the generated runtime (auto|manual)',
+            'commands' => ['pull'],
+        ],
+        [
             'name' => 'output-dir',
             'type' => 'value',
             'target' => 'output_dir',
@@ -11337,7 +11346,7 @@ if (
                 "  4. Import    — apply SQL to a local database (if --target-db)\n" .
                 "  5. Flatten   — reassemble into standard WP layout (if --flatten-to)\n" .
                 "  6. Runtime   — generate server config (default: php-builtin)\n" .
-                "  7. Start     — launch the local server (php-builtin only)\n" .
+                "  7. Start     — launch the local server when supported (unless --start=manual)\n" .
                 "\n" .
                 "Each step retries automatically on server timeouts. If the process is\n" .
                 "interrupted, re-run the same command to resume from where it left off.\n" .
@@ -11362,7 +11371,12 @@ if (
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite \\\n" .
                 "    --new-site-url=http://localhost:8881 \\\n" .
-                "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n",
+                "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n" .
+                "\n" .
+                "  # Prepare a Playground runtime but let another process start it:\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --runtime=playground-cli --start=manual --output-dir=./runtime\n",
         ],
         "install-exporter" => [
             "level" => "high",
