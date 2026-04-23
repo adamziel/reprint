@@ -63,30 +63,30 @@ class PullFetchSkippedStateTest extends TestCase
         return new \Pull($client, new \TerminalProgress(false, STDOUT));
     }
 
-    public function testFetchSkippedOnlyRunsFilesPullStage(): void
+    public function testSkippedEarlierOnlyRunsFilesPullStage(): void
     {
         $this->assertSame(
             ['files-pull'],
-            $this->makePull()->stages(['fetch_skipped' => true]),
+            $this->makePull()->stages(['filter' => 'skipped-earlier']),
         );
     }
 
-    public function testFetchSkippedRequiresDeferredFilesState(): void
+    public function testSkippedEarlierRequiresDeferredFilesState(): void
     {
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage(
-            '--fetch-skipped was requested but there are no deferred files pending. ' .
+            'pull --filter=skipped-earlier was requested but there are no deferred files pending. ' .
             'Run pull --filter=essential-files first.'
         );
 
         $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
         $client->run([
             'command' => 'pull',
-            'fetch_skipped' => true,
+            'filter' => 'skipped-earlier',
         ]);
     }
 
-    public function testFetchSkippedRejectsIncompletePrimaryPull(): void
+    public function testSkippedEarlierRejectsIncompletePrimaryPull(): void
     {
         $this->writeState([
             'pull' => [
@@ -98,20 +98,21 @@ class PullFetchSkippedStateTest extends TestCase
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage(
-            '--fetch-skipped was requested before the prior pull finished. ' .
+            'pull --filter=skipped-earlier was requested before the prior pull finished. ' .
             'Re-run the original pull command to complete the main sync first.'
         );
 
         $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
         $client->run([
             'command' => 'pull',
-            'fetch_skipped' => true,
+            'filter' => 'skipped-earlier',
         ]);
     }
 
-    public function testFetchSkippedRejectsExplicitFilterCombination(): void
+    public function testPullDoesNotPersistSkippedEarlierAsDefaultFilter(): void
     {
         $this->writeState([
+            'filter' => 'essential-files',
             'pull' => [
                 'stage' => 'complete',
                 'files_filter' => 'essential-files',
@@ -119,17 +120,22 @@ class PullFetchSkippedStateTest extends TestCase
             ],
         ]);
 
-        $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage(
-            '--fetch-skipped cannot be combined with --filter. ' .
-            'Run either pull --filter=essential-files or pull --fetch-skipped.'
+        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        try {
+            $client->run([
+                'command' => 'pull',
+                'filter' => 'skipped-earlier',
+            ]);
+        } catch (\Exception $e) {
+            // Expected: fake host, missing skipped list, etc. The key
+            // assertion is that the persisted default filter stays intact.
+        }
+
+        $state = json_decode(
+            file_get_contents($this->stateDir . '/.import-state.json'),
+            true,
         );
 
-        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
-        $client->run([
-            'command' => 'pull',
-            'fetch_skipped' => true,
-            'filter' => 'essential-files',
-        ]);
+        $this->assertSame('essential-files', $state['filter']);
     }
 }

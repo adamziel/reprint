@@ -35,7 +35,7 @@ class Pull
      */
     public function stages(array $options): array
     {
-        if (!empty($options['fetch_skipped'])) {
+        if ($this->is_skipped_earlier_pull($options)) {
             return ['files-pull'];
         }
 
@@ -86,9 +86,6 @@ class Pull
         $this->progress->enable_quiet_lifecycle();
 
         $options = $this->validate_and_default_options($options);
-        if (!empty($options['fetch_skipped'])) {
-            $this->client->set_filter_mode('skipped-earlier');
-        }
 
         $stages = $this->stages($options);
         $total = count($stages);
@@ -96,7 +93,7 @@ class Pull
         $completed_stage = $state['pull']['stage'] ?? null;
 
         // If the prior pull completed, prepare for a delta re-pull.
-        if ($completed_stage === 'complete' && empty($options['fetch_skipped'])) {
+        if ($completed_stage === 'complete' && !$this->is_skipped_earlier_pull($options)) {
             $this->prepare_repull();
             $completed_stage = null;
         }
@@ -197,7 +194,7 @@ class Pull
                     $this->client->run_files_sync();
                 });
                 $pull_filter = $options['filter'];
-                if (!empty($options['fetch_skipped'])) {
+                if ($this->is_skipped_earlier_pull($options)) {
                     $pull_filter = $this->client->state['pull']['files_filter'] ?? 'essential-files';
                 }
                 $skipped_pending =
@@ -308,16 +305,20 @@ class Pull
             $options['output_dir'] = $this->client->state_dir . '/runtime';
         }
 
-        if (!empty($options['fetch_skipped'])) {
-            if (isset($options['filter'])) {
-                throw new InvalidArgumentException(
-                    "--fetch-skipped cannot be combined with --filter. " .
-                    "Run either pull --filter=essential-files or pull --fetch-skipped."
-                );
-            }
+        if (!isset($options['filter'])) {
+            $options['filter'] = $this->client->state['filter'] ?? 'none';
+        }
+        $valid_pull_filters = ['none', 'essential-files', 'skipped-earlier'];
+        if (!in_array($options['filter'], $valid_pull_filters, true)) {
+            throw new InvalidArgumentException(
+                "Invalid --filter value for pull: {$options['filter']}. " .
+                "Valid values: " . implode(', ', $valid_pull_filters)
+            );
+        }
+        if ($this->is_skipped_earlier_pull($options)) {
             if (!$this->client->pull_has_skipped_files_pending()) {
                 throw new RuntimeException(
-                    "--fetch-skipped was requested but there are no deferred files pending. " .
+                    "pull --filter=skipped-earlier was requested but there are no deferred files pending. " .
                     "Run pull --filter=essential-files first.",
                 );
             }
@@ -334,26 +335,18 @@ class Pull
                 ($this->client->state['pull']['stage'] ?? null) !== 'complete'
             ) {
                 throw new RuntimeException(
-                    "--fetch-skipped was requested before the prior pull finished. " .
+                    "pull --filter=skipped-earlier was requested before the prior pull finished. " .
                     "Re-run the original pull command to complete the main sync first.",
                 );
             }
-
-            $options['filter'] = 'skipped-earlier';
-        } elseif (!isset($options['filter'])) {
-            $options['filter'] = $this->client->state['filter'] ?? 'none';
-        }
-        $valid_pull_filters = !empty($options['fetch_skipped'])
-            ? ['skipped-earlier']
-            : ['none', 'essential-files'];
-        if (!in_array($options['filter'], $valid_pull_filters, true)) {
-            throw new InvalidArgumentException(
-                "Invalid --filter value for pull: {$options['filter']}. " .
-                "Valid values: " . implode(', ', $valid_pull_filters)
-            );
         }
 
         return $options;
+    }
+
+    private function is_skipped_earlier_pull(array $options): bool
+    {
+        return ($options['filter'] ?? null) === 'skipped-earlier';
     }
 
     /**

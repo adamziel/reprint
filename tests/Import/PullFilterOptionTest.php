@@ -156,7 +156,7 @@ class PullFilterOptionTest extends TestCase
         );
     }
 
-    public function testPullRejectsSkippedEarlierFilterBeforePersistingIt(): void
+    public function testPullSkippedEarlierRequiresDeferredStateWithoutPersistingIt(): void
     {
         $client = $this->makeClient(false);
 
@@ -167,17 +167,20 @@ class PullFilterOptionTest extends TestCase
                 "filter" => "skipped-earlier",
                 "runtime" => "none",
             ]);
-            $this->fail('Expected pull --filter=skipped-earlier to be rejected');
-        } catch (\InvalidArgumentException $e) {
+            $this->fail('Expected pull --filter=skipped-earlier to require deferred pull state');
+        } catch (\RuntimeException $e) {
             $this->assertStringContainsString(
-                'Invalid --filter value for pull',
+                'pull --filter=skipped-earlier was requested but there are no deferred files pending',
                 $e->getMessage(),
             );
         } finally {
             ob_end_clean();
         }
 
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+        if (file_exists($this->stateDir . '/.import-state.json')) {
+            $state = $this->readState();
+            $this->assertNotSame('skipped-earlier', $state["filter"] ?? null);
+        }
     }
 
     public function testPullWithEssentialFilesPersistsDeferredFilesState(): void

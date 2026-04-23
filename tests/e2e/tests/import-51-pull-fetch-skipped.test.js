@@ -1,8 +1,8 @@
 /**
- * Test 51: Pull fetch-skipped continuation
+ * Test 51: Pull skipped-earlier continuation
  *
  * Verifies that a pull completed with `--filter=essential-files` can later
- * fetch the deferred file tail with `pull --fetch-skipped`.
+ * fetch the deferred file tail with `pull --filter=skipped-earlier`.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -20,13 +20,13 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-describe('Import: Pull fetch-skipped continuation', { timeout: 240000 }, () => {
+describe('Import: Pull skipped-earlier continuation', { timeout: 240000 }, () => {
     const site = 'basic';
     let tempDir;
 
     beforeAll(async () => {
         await ensureSite(site);
-        tempDir = createTempDir('e2e-pull-fetch-skipped');
+        tempDir = createTempDir('e2e-pull-skipped-earlier');
     });
 
     afterAll(() => {
@@ -62,13 +62,13 @@ describe('Import: Pull fetch-skipped continuation', { timeout: 240000 }, () => {
             'expected the skipped download list to be preserved on disk');
     });
 
-    it('pull --fetch-skipped downloads the deferred files and clears the pending flag', () => {
+    it('pull --filter=skipped-earlier downloads the deferred files and clears the pending flag', () => {
         const result = runImporter(importUrl(), tempDir, 'pull', {
             secret: getSiteSecret(site),
             skipPreflight: true,
             timeout: 120000,
             wallTimeout: 180000,
-            extraArgs: ['--fetch-skipped'],
+            extraArgs: ['--filter=skipped-earlier'],
         });
 
         assert.equal(result.exitCode, 0,
@@ -79,7 +79,7 @@ describe('Import: Pull fetch-skipped continuation', { timeout: 240000 }, () => {
         assert.equal(state.pull.files_filter, 'essential-files');
         assert.equal(state.pull.skipped_pending, false);
         assert.ok(!existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
-            'expected the skipped download list to be cleared after fetch-skipped');
+            'expected the skipped download list to be cleared after skipped-earlier');
 
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         assertTreesMatch(getSiteDir(site), importedRoot);

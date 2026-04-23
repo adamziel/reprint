@@ -1518,11 +1518,11 @@ class ImportClient
             $next = $options["filter"];
             if (
                 $command === "pull" &&
-                !in_array($next, ["none", "essential-files"], true)
+                !in_array($next, ["none", "essential-files", "skipped-earlier"], true)
             ) {
                 throw new InvalidArgumentException(
                     "Invalid --filter value for pull: {$next}. " .
-                        "Valid values: none, essential-files",
+                        "Valid values: none, essential-files, skipped-earlier",
                 );
             }
             $prev = $this->state["filter"] ?? null;
@@ -1535,8 +1535,11 @@ class ImportClient
                 );
             }
             $this->filter = $next;
-            $this->state["filter"] = $this->filter;
-            $this->save_state($this->state);
+            $persist_filter = !($command === "pull" && $next === "skipped-earlier");
+            if ($persist_filter) {
+                $this->state["filter"] = $this->filter;
+                $this->save_state($this->state);
+            }
         } elseif (isset($this->state["filter"])) {
             $this->filter = $this->state["filter"];
         }
@@ -10782,15 +10785,8 @@ if (
             'target' => 'filter',
             'placeholder' => 'MODE',
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
-            'help' => 'Filter which files to download (pull: none|essential-files; files-pull also supports skipped-earlier)',
+            'help' => 'Filter which files to download (none|essential-files|skipped-earlier)',
             'commands' => ['pull', 'files-pull'],
-        ],
-        [
-            'name' => 'fetch-skipped',
-            'type' => 'flag',
-            'target' => 'fetch_skipped',
-            'help' => 'Download only files deferred by a prior pull --filter=essential-files',
-            'commands' => ['pull'],
         ],
         [
             'name' => 'extra-directory',
@@ -11413,7 +11409,8 @@ if (
                 "Running pull again after completion performs a delta sync.\n" .
                 "\n" .
                 "Use --filter=essential-files to defer uploads and other large wp-content\n" .
-                "entries while still completing the rest of the pull.\n" .
+                "entries while still completing the rest of the pull. Later, use\n" .
+                "--filter=skipped-earlier to download only that deferred file tail.\n" .
                 "\n" .
                 "The ?site-export-api query parameter is added automatically if missing,\n" .
                 "so you can pass just the site URL.\n",
@@ -11437,7 +11434,7 @@ if (
                 "  # Later, download the deferred file tail into the same mirror:\n" .
                 "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
-                "    --fetch-skipped\n" .
+                "    --filter=skipped-earlier\n" .
                 "\n" .
                 "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
                 "  reprint pull https://example.com \\\n" .
