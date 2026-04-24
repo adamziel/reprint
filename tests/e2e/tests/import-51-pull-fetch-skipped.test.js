@@ -82,6 +82,10 @@ describe('Import: Pull skipped-earlier continuation', { timeout: 240000 }, () =>
             'expected the skipped download list to be cleared after skipped-earlier');
 
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
-        assertTreesMatch(getSiteDir(site), importedRoot);
+        assert.ok(existsSync(join(importedRoot, 'wp-content', 'database', '.ht.sqlite')),
+            'expected the local SQLite database file to be preserved');
+        assertTreesMatch(getSiteDir(site), importedRoot, {
+            exclude: ['wp-content/database/.ht.sqlite'],
+        });
     });
 });
