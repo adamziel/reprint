@@ -32,14 +32,16 @@ class StructuredDataUrlRewriter
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
 
-    /** @var array<string, string> URL mapping: source_url => target_url */
-    private array $url_mapping;
-
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
 
     /**
-     * Pre-parsed url_mapping: each entry is ['from_url' => WPURL, 'to_url' => WPURL].
+     * Pre-parsed url_mapping: each entry is
+     *   [ 'from_url' => <parsed URL>, 'to_url' => <parsed URL> ]
+     * where <parsed URL> is whatever WPURL::parse() returns (declared as
+     * mixed here because is_child_url_of() and WPURL::replace_base_url()
+     * both accept either a string or the parsed object form — we pass the
+     * object form for performance).
      *
      * Parsing is pure, deterministic work that used to happen inside
      * rewrite_urls() on every leaf-value call. With N mappings and L leaves
@@ -48,7 +50,7 @@ class StructuredDataUrlRewriter
      * under WASM PHP. Hoisting it into the constructor collapses it to 2·N,
      * which is effectively free.
      *
-     * @var array<int, array{from_url: object, to_url: object}>
+     * @var array<int, array{from_url: mixed, to_url: mixed}>
      */
     private array $parsed_mapping;
 
@@ -60,8 +62,6 @@ class StructuredDataUrlRewriter
      */
     public function __construct(array $url_mapping)
     {
-        $this->url_mapping = $url_mapping;
-
         // Extract unique source domains for the quick-reject check.
         $domains = [];
         foreach (array_keys($url_mapping) as $from_url) {
