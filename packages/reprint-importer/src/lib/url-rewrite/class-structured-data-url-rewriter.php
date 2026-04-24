@@ -32,19 +32,36 @@ class StructuredDataUrlRewriter
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
 
-    /** @var array<string, string> URL mapping: source_url => target_url */
-    private array $url_mapping;
-
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
+
+    /**
+     * Pre-parsed url_mapping: each entry is
+     *   [ 'from_url' => <parsed URL>, 'to_url' => <parsed URL> ]
+     * where <parsed URL> is whatever WPURL::parse() returns (declared as
+     * mixed here because is_child_url_of() and WPURL::replace_base_url()
+     * both accept either a string or the parsed object form — we pass the
+     * object form for performance).
+     *
+     * Parsing is pure, deterministic work that used to happen inside
+     * rewrite_urls() on every leaf-value call. With N mappings and L leaves
+     * that's 2·N·L WPURL::parse() invocations. On a wp.com-shaped dump
+     * (N=120, L≈28k) that single loop dominated 94 % of db-apply wall time
+     * under WASM PHP. Hoisting it into the constructor collapses it to 2·N,
+     * which is effectively free.
+     *
+     * @var array<int, array{from_url: mixed, to_url: mixed}>
+     */
+    private array $parsed_mapping;
+
+    /** @var string Default base_url used by the URL processors (first from-url). */
+    private string $base_url;
 
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
      */
     public function __construct(array $url_mapping)
     {
-        $this->url_mapping = $url_mapping;
-
         // Extract unique source domains for the quick-reject check.
         $domains = [];
         foreach (array_keys($url_mapping) as $from_url) {
@@ -54,6 +71,22 @@ class StructuredDataUrlRewriter
             }
         }
         $this->source_domains = array_keys($domains);
+
+        // Parse the mapping once. Each WPURL::parse() does non-trivial work
+        // (scheme/host/path tokenisation, punycode, etc.) and used to be
+        // repeated on every leaf we rewrote.
+        $this->parsed_mapping = [];
+        foreach ($url_mapping as $from_url_string => $to_url_string) {
+            $this->parsed_mapping[] = [
+                'from_url' => WPURL::parse($from_url_string),
+                'to_url'   => WPURL::parse($to_url_string),
+            ];
+        }
+
+        // Default base_url: first from-url in the mapping. Preserves the
+        // behaviour of the previous per-call default so outputs are unchanged.
+        $from_urls = array_keys($url_mapping);
+        $this->base_url = $from_urls[0] ?? '';
     }
 
     /**
@@ -119,11 +152,7 @@ class StructuredDataUrlRewriter
         // Base64ValueScanner in SqlStatementRewriter — this block
         // was for base64-within-base64 nesting which is rare in practice.
 
-        return self::rewrite_urls([
-            'content' => $value,
-            'content_type' => $content_type,
-            'url-mapping' => $this->url_mapping,
-        ]);
+        return $this->rewrite_urls($value, $content_type);
     }
 
     /**
@@ -179,27 +208,19 @@ class StructuredDataUrlRewriter
      * 
      * TODO: Migrate these changes back into the php-toolkit repo
      */
-    static private function rewrite_urls( $options ) {
-        if ( empty( $options['base_url'] ) ) {
-            // Use first from-url as base_url if not specified.
-            $from_urls           = array_keys( $options['url-mapping'] );
-            $options['base_url'] = $from_urls[0];
-        }
+    private function rewrite_urls( string $content, string $content_type ): string {
+        // $this->parsed_mapping is built once in the constructor and reused
+        // here on every call, avoiding a fresh round of WPURL::parse() per
+        // leaf value.
+        $parsed_mapping = $this->parsed_mapping;
+        $base_url       = $this->base_url;
 
-        $url_mapping = array();
-        foreach ( $options['url-mapping'] as $from_url_string => $to_url_string ) {
-            $url_mapping[] = array(
-                'from_url' => WPURL::parse( $from_url_string ),
-                'to_url'   => WPURL::parse( $to_url_string ),
-            );
-        }
-
-        switch($options['content_type']) {
+        switch ( $content_type ) {
             case self::BLOCK_MARKUP:
-                $p = new BlockMarkupUrlProcessor( $options['content'], $options['base_url'] );
+                $p = new BlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $parsed_url = $p->get_parsed_url();
-                    foreach ( $url_mapping as $mapping ) {
+                    foreach ( $parsed_mapping as $mapping ) {
                         if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
                             $p->replace_base_url( $mapping['to_url'] );
                             break;
@@ -208,17 +229,17 @@ class StructuredDataUrlRewriter
                 }
 
                 return $p->get_updated_html();
-                
+
             case self::PLAIN_TEXT:
-                $p = new URLInTextProcessor( $options['content'], $options['base_url'] );
+                $p = new URLInTextProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $parsed_url = $p->get_parsed_url();
-                    foreach ( $url_mapping as $mapping ) {
+                    foreach ( $parsed_mapping as $mapping ) {
                         if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
                             $new_raw_url = WPURL::replace_base_url(
                                 $parsed_url,
                                 array(
-                                    'old_base_url' => $options['base_url'],
+                                    'old_base_url' => $base_url,
                                     'new_base_url' => $mapping['to_url'],
                                     'raw_url'      => $p->get_raw_url(),
                                     'is_relative'  => false,
