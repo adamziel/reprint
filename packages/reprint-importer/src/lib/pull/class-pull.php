@@ -237,29 +237,30 @@ class Pull
      */
     private function validate_and_default_options(array $options): array
     {
+        // --runtime and --start-runtime values are validated at CLI parse
+        // time from VALID_TARGET_RUNTIMES. Re-check here for programmatic
+        // callers (e.g. ImportClient::run invoked directly) that bypass
+        // the CLI parser.
+        foreach (['runtime', 'start_runtime'] as $key) {
+            if (!empty($options[$key]) && !in_array($options[$key], VALID_TARGET_RUNTIMES, true)) {
+                $flag = str_replace('_', '-', $key);
+                throw new InvalidArgumentException(
+                    "Invalid --{$flag} value: {$options[$key]}. " .
+                    "Valid runtimes: " . implode(', ', VALID_TARGET_RUNTIMES)
+                );
+            }
+        }
+
         // Default --runtime to php-builtin so pull always ends with a
         // running local server. Users can override with --runtime=nginx-fpm,
         // --runtime=playground-cli, or --runtime=none to skip runtime
         // generation entirely.
-        $valid_runtimes = ['nginx-fpm', 'php-builtin', 'playground-cli', 'none'];
-        if (!empty($options['start_runtime']) && !in_array($options['start_runtime'], $valid_runtimes, true)) {
-            throw new InvalidArgumentException(
-                "Invalid --start-runtime value: {$options['start_runtime']}. " .
-                "Valid start runtimes: " . implode(', ', $valid_runtimes)
-            );
-        }
         if (empty($options['runtime'])) {
             if (!empty($options['start_runtime']) && $options['start_runtime'] !== 'none') {
                 $options['runtime'] = $options['start_runtime'];
             } else {
                 $options['runtime'] = 'php-builtin';
             }
-        }
-        if (!in_array($options['runtime'], $valid_runtimes, true)) {
-            throw new InvalidArgumentException(
-                "Invalid --runtime value: {$options['runtime']}. " .
-                "Valid runtimes: " . implode(', ', $valid_runtimes)
-            );
         }
 
         if (empty($options['start_runtime'])) {

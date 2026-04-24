@@ -3722,7 +3722,7 @@ class ImportClient
         $runtime = $options["runtime"] ?? null;
         if (empty($runtime)) {
             throw new InvalidArgumentException(
-                "apply-runtime requires --runtime=RUNTIME. Valid runtimes: nginx-fpm, php-builtin, playground-cli"
+                "apply-runtime requires --runtime=RUNTIME."
             );
         }
 
@@ -10889,6 +10889,7 @@ if (
             'type' => 'value',
             'target' => 'runtime',
             'placeholder' => 'RUNTIME',
+            'valid_values' => VALID_TARGET_RUNTIMES,
             'help' => 'Target server runtime: php-builtin, playground-cli, nginx-fpm, or none',
             'commands' => ['pull', 'apply-runtime'],
         ],
@@ -10897,7 +10898,7 @@ if (
             'type' => 'value',
             'target' => 'start_runtime',
             'placeholder' => 'RUNTIME',
-            'valid_values' => ['nginx-fpm', 'php-builtin', 'playground-cli', 'none'],
+            'valid_values' => VALID_TARGET_RUNTIMES,
             'help' => 'Runtime to launch after pull (php-builtin|playground-cli|nginx-fpm|none)',
             'commands' => ['pull'],
         ],

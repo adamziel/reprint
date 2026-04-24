@@ -118,7 +118,7 @@ class PullStartModeTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage(
-            'Invalid --start-runtime value: later. Valid start runtimes: nginx-fpm, php-builtin, playground-cli, none'
+            'Invalid --start-runtime value: later. Valid runtimes: nginx-fpm, php-builtin, playground-cli, none'
         );
 
         $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
