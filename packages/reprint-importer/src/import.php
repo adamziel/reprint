@@ -1274,6 +1274,20 @@ class ImportClient
             filesize($this->skipped_download_list_file) > 0;
     }
 
+    /** Override the active filter without persisting it to state. */
+    public function set_filter_mode(string $filter): void
+    {
+        $this->filter = $filter;
+    }
+
+    /** True when a completed pull still has deferred files pending. */
+    public function pull_has_skipped_files_pending(): bool
+    {
+        return
+            !empty($this->state['pull']['skipped_pending']) &&
+            ($this->state['pull']['files_filter'] ?? null) === 'essential-files';
+    }
+
     /**
      * Log the executed command and full argv to the audit log.
      * Called from the CLI entry point before run() so the invocation
@@ -1504,11 +1518,11 @@ class ImportClient
             $next = $options["filter"];
             if (
                 $command === "pull" &&
-                !in_array($next, ["none", "essential-files"], true)
+                !in_array($next, ["none", "essential-files", "skipped-earlier"], true)
             ) {
                 throw new InvalidArgumentException(
                     "Invalid --filter value for pull: {$next}. " .
-                        "Valid values: none, essential-files",
+                        "Valid values: none, essential-files, skipped-earlier",
                 );
             }
             $prev = $this->state["filter"] ?? null;
@@ -1521,8 +1535,11 @@ class ImportClient
                 );
             }
             $this->filter = $next;
-            $this->state["filter"] = $this->filter;
-            $this->save_state($this->state);
+            $persist_filter = !($command === "pull" && $next === "skipped-earlier");
+            if ($persist_filter) {
+                $this->state["filter"] = $this->filter;
+                $this->save_state($this->state);
+            }
         } elseif (isset($this->state["filter"])) {
             $this->filter = $this->state["filter"];
         }
@@ -2504,22 +2521,9 @@ class ImportClient
                             "Run files-pull with --filter=essential-files first.",
                     );
                 }
-                $this->audit_log(
+                $this->resume_skipped_file_downloads(
                     "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
-                    true,
                 );
-                $this->progress->show_lifecycle_line("Downloading previously skipped files\n");
-                $this->output_progress([
-                    "type" => "lifecycle",
-                    "event" => "starting",
-                    "command" => "files-pull",
-                    "stage" => "fetch-skipped",
-                    "message" => "Downloading previously skipped files",
-                ], true);
-                $this->state["status"] = "in_progress";
-                $this->state["stage"] = "fetch-skipped";
-                $this->save_state($this->state);
-                $this->run_files_sync_pipeline();
                 return;
             }
 
@@ -2548,6 +2552,22 @@ class ImportClient
                 "has_skipped" => $has_skipped,
                 "message" => "files-pull already complete: {$index_size} files indexed",
             ], true);
+            return;
+        }
+
+        if (
+            $this->filter === "skipped-earlier" &&
+            $this->pull_has_skipped_files_pending()
+        ) {
+            if (!$this->has_skipped_files_pending()) {
+                throw new RuntimeException(
+                    "--filter=skipped-earlier was requested but the skipped file list is missing. " .
+                        "Run pull --filter=essential-files again or use --abort to start over.",
+                );
+            }
+            $this->resume_skipped_file_downloads(
+                "FETCH SKIPPED | pull completed with deferred files — downloading them now",
+            );
             return;
         }
 
@@ -2879,6 +2899,24 @@ class ImportClient
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
+    }
+
+    private function resume_skipped_file_downloads(string $audit_message): void
+    {
+        $this->audit_log($audit_message, true);
+        $this->progress->show_lifecycle_line("Downloading previously skipped files\n");
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "starting",
+            "command" => "files-pull",
+            "stage" => "fetch-skipped",
+            "message" => "Downloading previously skipped files",
+        ], true);
+        $this->state["command"] = "files-pull";
+        $this->state["status"] = "in_progress";
+        $this->state["stage"] = "fetch-skipped";
+        $this->save_state($this->state);
+        $this->run_files_sync_pipeline();
     }
 
     /**
@@ -10747,7 +10785,7 @@ if (
             'target' => 'filter',
             'placeholder' => 'MODE',
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
-            'help' => 'Filter which files to download (pull: none|essential-files; files-pull also supports skipped-earlier)',
+            'help' => 'Filter which files to download (none|essential-files|skipped-earlier)',
             'commands' => ['pull', 'files-pull'],
         ],
         [
@@ -11371,7 +11409,8 @@ if (
                 "Running pull again after completion performs a delta sync.\n" .
                 "\n" .
                 "Use --filter=essential-files to defer uploads and other large wp-content\n" .
-                "entries while still completing the rest of the pull.\n" .
+                "entries while still completing the rest of the pull. Later, use\n" .
+                "--filter=skipped-earlier to download only that deferred file tail.\n" .
                 "\n" .
                 "The ?site-export-api query parameter is added automatically if missing,\n" .
                 "so you can pass just the site URL.\n",
@@ -11391,6 +11430,11 @@ if (
                 "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --filter=essential-files --target-engine=sqlite --runtime=none\n" .
+                "\n" .
+                "  # Later, download the deferred file tail into the same mirror:\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --filter=skipped-earlier\n" .
                 "\n" .
                 "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
                 "  reprint pull https://example.com \\\n" .
