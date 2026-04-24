@@ -139,16 +139,223 @@ class SqlStatementRewriter
     }
 
     /**
-     * Parse the SQL with WP_MySQL_Parser to extract the table name and build
-     * an offset→column map. Each map entry is [start, end, column_name] where
-     * start/end are byte offsets of the value expression in the SQL string.
+     * Parse the SQL and build an offset→column map.
      *
-     * Returns null for non-INSERT/UPDATE statements or parse failures — the
-     * caller falls back to auto-detect with no column awareness.
+     * Fast path: a lexer-only walk handles the overwhelming common case
+     * (multi-row `INSERT INTO \`t\` (\`c1\`,\`c2\`,…) VALUES (…),(…),…;` as
+     * emitted by `MySQLDumpProducer`). Every INSERT in a dump matches that
+     * shape, and a full AST build there was costing ~125 ms per statement
+     * under WASM PHP — more than the actual URL rewriting on each statement.
+     *
+     * Slow path: UPDATE and anything the fast path rejects fall through to
+     * the full `WP_MySQL_Parser` AST, which handles complex constructs
+     * (subqueries, CONVERT(...), nested expressions, joins in UPDATE) that
+     * a token walker can't safely characterise.
      *
      * @return array{table: string, column_map: list<array{int, int, string}>}|null
      */
     private function parse_statement(string $sql): ?array
+    {
+        $fast = $this->parse_insert_fast($sql);
+        if ($fast !== null) {
+            return $fast;
+        }
+        return $this->parse_statement_via_ast($sql);
+    }
+
+    /**
+     * Token-only extractor for the canonical INSERT shape emitted by
+     * MySQLDumpProducer. Returns null on anything unexpected so the caller
+     * falls back to the full grammar-driven parser.
+     *
+     * Accepted shape (whitespace / comments between tokens allowed):
+     *
+     *     INSERT INTO `t` (`c1`,`c2`,…) VALUES (e1,e2,…),(e1,e2,…),…;
+     *
+     * Not accepted (fast path returns null):
+     *   - INSERT … SELECT …
+     *   - INSERT … SET col=expr, …
+     *   - INSERT without column list
+     *   - REPLACE / INSERT IGNORE / INSERT … ON DUPLICATE KEY UPDATE
+     *   - fully-qualified table names like `db`.`t`
+     *
+     * @return array{table: string, column_map: list<array{int, int, string}>}|null
+     */
+    private function parse_insert_fast(string $sql): ?array
+    {
+        $lexer = new WP_MySQL_Lexer($sql);
+        $tokens = self::filter_significant_tokens($lexer->remaining_tokens());
+
+        $n = count($tokens);
+        if ($n < 6) {
+            return null;
+        }
+
+        // Expect: INSERT INTO <ident>
+        if (
+            $tokens[0]->id !== WP_MySQL_Lexer::INSERT_SYMBOL
+            || $tokens[1]->id !== WP_MySQL_Lexer::INTO_SYMBOL
+        ) {
+            return null;
+        }
+
+        $table = self::unquote_identifier_token($tokens[2]);
+        if ($table === null) {
+            return null;
+        }
+
+        // Expect: `(` col_list `)` VALUES `(` … `)` [ `,` `(` … `)` ]* `;`
+        $i = 3;
+        if ($tokens[$i]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+            return null;
+        }
+        $i++;
+
+        $columns = [];
+        while ($i < $n && $tokens[$i]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+            $col = self::unquote_identifier_token($tokens[$i]);
+            if ($col === null) {
+                return null;
+            }
+            $columns[] = $col;
+            $i++;
+            if ($i < $n && $tokens[$i]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
+                $i++;
+            }
+        }
+        if ($i >= $n || $tokens[$i]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+            return null;
+        }
+        $i++;
+
+        if ($i >= $n || $tokens[$i]->id !== WP_MySQL_Lexer::VALUES_SYMBOL) {
+            return null;
+        }
+        $i++;
+
+        // Walk each `(…)` tuple, mapping each top-level expression to a
+        // column by position. Expression byte ranges run from the first
+        // byte of the first token in the expression through the last byte
+        // of the last token, giving the same [start, end) boundaries the
+        // AST-driven path produced.
+        $column_map = [];
+        $col_count = count($columns);
+        while ($i < $n) {
+            if ($tokens[$i]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                return null;
+            }
+            $i++; // skip `(`
+
+            $col_index = 0;
+            $expr_start_token = $i;
+            $depth = 0;
+            while ($i < $n) {
+                $id = $tokens[$i]->id;
+                if ($id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                    $depth++;
+                } elseif ($id === WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+                    if ($depth === 0) {
+                        // End of tuple — record the last expression.
+                        if ($col_index < $col_count && $expr_start_token < $i) {
+                            $first = $tokens[$expr_start_token];
+                            $last = $tokens[$i - 1];
+                            $column_map[] = [
+                                $first->start,
+                                $last->start + $last->length,
+                                $columns[$col_index],
+                            ];
+                        }
+                        break;
+                    }
+                    $depth--;
+                } elseif ($id === WP_MySQL_Lexer::COMMA_SYMBOL && $depth === 0) {
+                    if ($col_index < $col_count && $expr_start_token < $i) {
+                        $first = $tokens[$expr_start_token];
+                        $last = $tokens[$i - 1];
+                        $column_map[] = [
+                            $first->start,
+                            $last->start + $last->length,
+                            $columns[$col_index],
+                        ];
+                    }
+                    $col_index++;
+                    $expr_start_token = $i + 1;
+                }
+                $i++;
+            }
+            if ($i >= $n) {
+                return null;
+            }
+            $i++; // skip `)`
+
+            if ($i < $n && $tokens[$i]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
+                $i++; // another tuple follows
+                continue;
+            }
+            // Allow an optional trailing `;` — nothing else may follow.
+            if ($i < $n && $tokens[$i]->id === WP_MySQL_Lexer::SEMICOLON_SYMBOL) {
+                $i++;
+            }
+            if ($i !== $n) {
+                return null;
+            }
+            break;
+        }
+
+        return ['table' => $table, 'column_map' => $column_map];
+    }
+
+    /**
+     * Return the input array minus whitespace and comment tokens. The lexer
+     * emits those as real tokens; we want to walk the stream at statement
+     * granularity so they just get in the way.
+     *
+     * @param WP_MySQL_Token[] $tokens
+     * @return WP_MySQL_Token[]
+     */
+    private static function filter_significant_tokens(array $tokens): array
+    {
+        $out = [];
+        foreach ($tokens as $t) {
+            if (
+                $t->id === WP_MySQL_Lexer::WHITESPACE
+                || $t->id === WP_MySQL_Lexer::COMMENT
+                || $t->id === WP_MySQL_Lexer::MYSQL_COMMENT_START
+                || $t->id === WP_MySQL_Lexer::MYSQL_COMMENT_END
+            ) {
+                continue;
+            }
+            $out[] = $t;
+        }
+        return $out;
+    }
+
+    /**
+     * Extract the bare identifier text from a single-identifier token. Returns
+     * null for anything that isn't an identifier (keyword, punctuation, etc.)
+     * or for qualified names like `db`.`t` that would span multiple tokens —
+     * the fast path punts on those and falls back to the AST.
+     */
+    private static function unquote_identifier_token(WP_MySQL_Token $token): ?string
+    {
+        if ($token->id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID) {
+            $raw = $token->get_bytes();
+            // Strip surrounding backticks and unescape `` -> `
+            return str_replace('``', '`', substr($raw, 1, strlen($raw) - 2));
+        }
+        if ($token->id === WP_MySQL_Lexer::IDENTIFIER) {
+            return $token->get_bytes();
+        }
+        return null;
+    }
+
+    /**
+     * Slow-path parser used when the fast INSERT extractor can't handle the
+     * statement (UPDATE, INSERT with unexpected shape, etc.).
+     *
+     * @return array{table: string, column_map: list<array{int, int, string}>}|null
+     */
+    private function parse_statement_via_ast(string $sql): ?array
     {
         $lexer  = new WP_MySQL_Lexer($sql);
         $tokens = $lexer->remaining_tokens();
