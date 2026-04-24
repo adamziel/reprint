@@ -5019,6 +5019,25 @@ class ImportClient
             false,
         );
 
+        // Batch statements into SQLite transactions so we fsync once per
+        // cursor-save window (~100 statements) instead of once per INSERT.
+        // The MySQLDumpProducer output never contains BEGIN/COMMIT/LOCK
+        // TABLES, so there is nothing to collide with. We only do this on
+        // the SQLite target; native MySQL autocommit for INSERTs is cheap
+        // compared to SQLite's per-statement journal fsync, and the MySQL
+        // driver is happier without outer transactions around edge cases
+        // like CREATE TABLE statements in the dump.
+        $target_engine = strtolower((string) ($options["target_engine"] ?? "mysql"));
+        $use_transactions = ($target_engine === 'sqlite');
+        $in_transaction = false;
+
+        // Track the last durably-committed checkpoint separately from the
+        // running counters. Rollback on shutdown or failure rewinds the
+        // resume cursor to these values, so we never record statements as
+        // executed when the transaction they lived in was rolled back.
+        $committed_statements_executed = $statements_executed;
+        $committed_bytes_read = $bytes_read;
+
         // Stream db.sql through the query stream and execute
         $query_stream = new \WP_MySQL_Naive_Query_Stream();
         $sql_handle = fopen($sql_file, "r");
@@ -5065,6 +5084,25 @@ class ImportClient
             "message" => "Applying SQL" . ($statements_total !== null ? " ({$statements_total} statements)" : ""),
         ]);
 
+        // A statement is safe to batch inside a transaction only if it's
+        // data manipulation. The dump starts with `SET AUTOCOMMIT=0;` +
+        // `CREATE TABLE` statements and ends with a literal `COMMIT;`, and
+        // the sqlite-database-integration driver handles MySQL `COMMIT`
+        // statements by closing the user transaction outright — so we must
+        // drop out of our batch before any non-DML statement reaches the
+        // driver, not wrap the entire dump.
+        $is_batchable = function (string $query): bool {
+            $stripped = ltrim($query);
+            if ($stripped === '') {
+                return false;
+            }
+            $first = strtoupper(substr($stripped, 0, 7));
+            return str_starts_with($first, 'INSERT ')
+                || str_starts_with($first, 'UPDATE ')
+                || str_starts_with($first, 'DELETE ')
+                || str_starts_with($first, 'REPLACE');
+        };
+
         try {
             $chunk_size = 64 * 1024; // 64KB read chunks
 
@@ -5100,6 +5138,24 @@ class ImportClient
                         $query = $stmt_rewriter->rewrite($query);
                     }
 
+                    // Batch DML statements into transactions to amortise
+                    // per-statement fsync cost on SQLite. Commit the open
+                    // batch before any non-DML statement so CREATE TABLE,
+                    // SET, and the dump's literal COMMIT don't collide with
+                    // our user transaction.
+                    $batchable = $is_batchable($query);
+                    if ($use_transactions) {
+                        if ($batchable && !$in_transaction) {
+                            $pdo->beginTransaction();
+                            $in_transaction = true;
+                        } elseif (!$batchable && $in_transaction) {
+                            $pdo->commit();
+                            $in_transaction = false;
+                            $committed_statements_executed = $statements_executed;
+                            $committed_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                        }
+                    }
+
                     // Execute against target database
                     try {
                         $pdo->exec($query);
@@ -5121,6 +5177,12 @@ class ImportClient
 
                     $statements_executed++;
                     $stmts_since_save++;
+                    if (!$batchable) {
+                        // Non-DML (CREATE, SET, COMMIT, …) is auto-committed
+                        // by the driver; its effect is already durable.
+                        $committed_statements_executed = $statements_executed;
+                        $committed_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                    }
 
                     // Save state periodically. bytes_read is the file offset
                     // right after the last extracted query — NOT total_bytes_read,
@@ -5128,10 +5190,30 @@ class ImportClient
                     // formed a complete query yet. This ensures resumption starts at
                     // the exact boundary between executed and un-executed queries.
                     if ($stmts_since_save >= $save_every) {
-                        $this->state["apply"]["statements_executed"] = $statements_executed;
-                        $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
+                        // Commit the batch before persisting the cursor so the
+                        // saved offset only points past durable work. The
+                        // millisecond window between commit and save_state is
+                        // the only regression from the previous autocommit
+                        // behaviour — a crash there would leave the cursor
+                        // pointing into a committed batch on resume and fail
+                        // with PK collisions, recoverable with --abort. That's
+                        // considered acceptable vs. fsyncing per statement.
+                        if ($in_transaction) {
+                            $pdo->commit();
+                            $in_transaction = false;
+                        }
+
+                        $committed_statements_executed = $statements_executed;
+                        $committed_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                        $this->state["apply"]["statements_executed"] = $committed_statements_executed;
+                        $this->state["apply"]["bytes_read"] = $committed_bytes_read;
                         $this->save_state($this->state);
                         $stmts_since_save = 0;
+
+                        if ($use_transactions) {
+                            $pdo->beginTransaction();
+                            $in_transaction = true;
+                        }
 
                         // Progress output
                         $apply_fraction = $sql_file_size > 0
@@ -5176,6 +5258,24 @@ class ImportClient
                     $query = $stmt_rewriter->rewrite($query);
                 }
 
+                // Same batching gate as the main loop. The drain only runs
+                // after input is exhausted, so this is usually the literal
+                // `COMMIT;` trailer + the `SET` statements that restore
+                // session variables — all non-DML, which flushes any
+                // remaining DML batch before they execute.
+                $batchable = $is_batchable($query);
+                if ($use_transactions) {
+                    if ($batchable && !$in_transaction) {
+                        $pdo->beginTransaction();
+                        $in_transaction = true;
+                    } elseif (!$batchable && $in_transaction) {
+                        $pdo->commit();
+                        $in_transaction = false;
+                        $committed_statements_executed = $statements_executed;
+                        $committed_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                    }
+                }
+
                 try {
                     $pdo->exec($query);
                 } catch (PDOException $e) {
@@ -5195,29 +5295,50 @@ class ImportClient
                 }
 
                 $statements_executed++;
+                if (!$batchable) {
+                    $committed_statements_executed = $statements_executed;
+                    $committed_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                }
             }
 
             if ($this->shutdown_requested) {
-                // Save partial progress
-                $this->state["apply"]["statements_executed"] = $statements_executed;
-                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
+                // Drop the open batch — the partial cursor we save covers
+                // only statements that have already been committed via the
+                // save_every path above. Rewinding the cursor to the last
+                // committed checkpoint keeps resume byte-exact.
+                if ($in_transaction) {
+                    $pdo->rollBack();
+                    $in_transaction = false;
+                }
+
+                // Save partial progress (pointing at last committed work)
+                $this->state["apply"]["statements_executed"] = $committed_statements_executed;
+                $this->state["apply"]["bytes_read"] = $committed_bytes_read;
                 $this->state["status"] = "partial";
                 $this->save_state($this->state);
                 $this->audit_log(
                     sprintf(
                         "PARTIAL db-apply | %d statements executed",
-                        $statements_executed,
+                        $committed_statements_executed,
                     ),
                     true,
                 );
                 $this->output_progress([
                     "status" => "partial",
                     "phase" => "db-apply",
-                    "statements_executed" => $statements_executed,
+                    "statements_executed" => $committed_statements_executed,
                     "statements_total" => $statements_total,
-                    "message" => "db-apply partial: {$statements_executed} statements executed",
+                    "message" => "db-apply partial: {$committed_statements_executed} statements executed",
                 ], true);
             } else {
+                // Commit the final batch before anything else looks at the
+                // target DB. deactivate_host_plugins() runs UPDATEs which
+                // should see the freshly-applied wp_options state.
+                if ($in_transaction) {
+                    $pdo->commit();
+                    $in_transaction = false;
+                }
+
                 // Deactivate host-specific plugins before marking complete.
                 // The host analyzer declares paths_to_remove; any entry under
                 // wp-content/plugins/ means that plugin will be deleted from
@@ -5261,6 +5382,17 @@ class ImportClient
                 $this->progress->show_lifecycle_line("db-apply complete ({$statements_executed} statements executed)\n");
             }
         } finally {
+            // If we're unwinding on an exception with an open transaction,
+            // roll it back so the SQLite file isn't left locked for the
+            // retry. On the happy-path this is always already false.
+            if ($in_transaction) {
+                try {
+                    $pdo->rollBack();
+                } catch (\Throwable $_) {
+                    // Swallow — we're already in an error path.
+                }
+                $in_transaction = false;
+            }
             fclose($sql_handle);
         }
     }
