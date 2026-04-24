@@ -31,7 +31,8 @@ class Pull
      * Always: preflight → files-pull → db-pull.
      * Adds db-apply when a database target is configured, flat-docroot
      * when --flatten-to is set, apply-runtime when --runtime is set,
-     * and start when the runtime can be launched in-process.
+     * and start when the selected start runtime can be launched
+     * in-process.
      */
     public function stages(array $options): array
     {
@@ -47,11 +48,15 @@ class Pull
         if (!empty($options['flatten_to'])) {
             $stages[] = 'flat-docroot';
         }
-        if (!empty($options['runtime'])) {
+        $runtime = $this->resolve_runtime($options);
+        $start_runtime = $this->resolve_start_runtime($options, $runtime);
+        if ($runtime !== null && $runtime !== 'none') {
             $stages[] = 'apply-runtime';
-            // php-builtin and playground-cli both generate a start.sh
-            // that can be launched directly from the CLI.
-            if (in_array($options['runtime'], ['php-builtin', 'playground-cli'], true)) {
+            if (
+                $start_runtime !== 'none' &&
+                $start_runtime === $runtime &&
+                $this->can_start_runtime($start_runtime)
+            ) {
                 $stages[] = 'start';
             }
         }
@@ -242,20 +247,50 @@ class Pull
      */
     private function validate_and_default_options(array $options): array
     {
+        // --runtime and --start-runtime values are validated at CLI parse
+        // time from VALID_TARGET_RUNTIMES. Re-check here for programmatic
+        // callers (e.g. ImportClient::run invoked directly) that bypass
+        // the CLI parser.
+        foreach (['runtime', 'start_runtime'] as $key) {
+            if (!empty($options[$key]) && !in_array($options[$key], VALID_TARGET_RUNTIMES, true)) {
+                $flag = str_replace('_', '-', $key);
+                throw new InvalidArgumentException(
+                    "Invalid --{$flag} value: {$options[$key]}. " .
+                    "Valid runtimes: " . implode(', ', VALID_TARGET_RUNTIMES)
+                );
+            }
+        }
+
         // Default --runtime to php-builtin so pull always ends with a
         // running local server. Users can override with --runtime=nginx-fpm,
         // --runtime=playground-cli, or --runtime=none to skip runtime
         // generation entirely.
         if (empty($options['runtime'])) {
-            $options['runtime'] = 'php-builtin';
+            if (!empty($options['start_runtime']) && $options['start_runtime'] !== 'none') {
+                $options['runtime'] = $options['start_runtime'];
+            } else {
+                $options['runtime'] = 'php-builtin';
+            }
         }
-        $valid_runtimes = ['nginx-fpm', 'php-builtin', 'playground-cli', 'none'];
-        if (!in_array($options['runtime'], $valid_runtimes, true)) {
-            throw new InvalidArgumentException(
-                "Invalid --runtime value: {$options['runtime']}. " .
-                "Valid runtimes: " . implode(', ', $valid_runtimes)
-            );
+
+        if (empty($options['start_runtime'])) {
+            $options['start_runtime'] = $this->default_start_runtime($options['runtime']);
         }
+        if ($options['start_runtime'] !== 'none') {
+            if (!$this->can_start_runtime($options['start_runtime'])) {
+                throw new InvalidArgumentException(
+                    "Starting runtime {$options['start_runtime']} is not supported yet. " .
+                    "Supported start runtimes: php-builtin, playground-cli, none"
+                );
+            }
+            if ($options['start_runtime'] !== $options['runtime']) {
+                throw new InvalidArgumentException(
+                    "--start-runtime={$options['start_runtime']} requires matching --runtime={$options['start_runtime']}, " .
+                    "or omit --runtime to use {$options['start_runtime']} for both."
+                );
+            }
+        }
+
         if ($options['runtime'] === 'none') {
             unset($options['runtime']);
         }
@@ -308,6 +343,35 @@ class Pull
         }
 
         return $options;
+    }
+
+    private function resolve_runtime(array $options): ?string
+    {
+        if (!empty($options['runtime'])) {
+            return $options['runtime'];
+        }
+        if (!empty($options['start_runtime']) && $options['start_runtime'] !== 'none') {
+            return $options['start_runtime'];
+        }
+        return null;
+    }
+
+    private function resolve_start_runtime(array $options, ?string $runtime): string
+    {
+        if (!empty($options['start_runtime'])) {
+            return $options['start_runtime'];
+        }
+        return $this->default_start_runtime($runtime);
+    }
+
+    private function default_start_runtime(?string $runtime): string
+    {
+        return $this->can_start_runtime($runtime) ? $runtime : 'none';
+    }
+
+    private function can_start_runtime(?string $runtime): bool
+    {
+        return in_array($runtime, ['php-builtin', 'playground-cli'], true);
     }
 
     /**

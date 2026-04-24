@@ -6,6 +6,16 @@
  */
 
 /**
+ * Valid values for --runtime and --start-runtime. Single source of
+ * truth consumed by the CLI option definitions (enforced at parse
+ * time), the Pull orchestrator, and runtime_applier_for().
+ *
+ * 'none' is a pull-time sentinel meaning "skip runtime generation";
+ * it has no applier and runtime_applier_for() rejects it.
+ */
+const VALID_TARGET_RUNTIMES = ['nginx-fpm', 'php-builtin', 'playground-cli', 'none'];
+
+/**
  * Instantiate the right applier for a runtime name.
  */
 function runtime_applier_for(string $runtime): RuntimeApplier
@@ -18,8 +28,9 @@ function runtime_applier_for(string $runtime): RuntimeApplier
         case 'playground-cli':
             return new PlaygroundCliApplier();
         default:
+            $appliable = array_values(array_diff(VALID_TARGET_RUNTIMES, ['none']));
             throw new InvalidArgumentException(
-                "Unknown runtime: {$runtime}. Valid runtimes: nginx-fpm, php-builtin, playground-cli"
+                "Unknown runtime: {$runtime}. Valid runtimes: " . implode(', ', $appliable)
             );
     }
 }

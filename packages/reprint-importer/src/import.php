@@ -3747,7 +3747,7 @@ class ImportClient
         $runtime = $options["runtime"] ?? null;
         if (empty($runtime)) {
             throw new InvalidArgumentException(
-                "apply-runtime requires --runtime=RUNTIME. Valid runtimes: nginx-fpm, php-builtin, playground-cli"
+                "apply-runtime requires --runtime=RUNTIME."
             );
         }
 
@@ -10916,8 +10916,18 @@ if (
             'type' => 'value',
             'target' => 'runtime',
             'placeholder' => 'RUNTIME',
+            'valid_values' => VALID_TARGET_RUNTIMES,
             'help' => 'Target server runtime: php-builtin, playground-cli, nginx-fpm, or none',
             'commands' => ['pull', 'apply-runtime'],
+        ],
+        [
+            'name' => 'start-runtime',
+            'type' => 'value',
+            'target' => 'start_runtime',
+            'placeholder' => 'RUNTIME',
+            'valid_values' => VALID_TARGET_RUNTIMES,
+            'help' => 'Runtime to launch after pull (php-builtin|playground-cli|nginx-fpm|none)',
+            'commands' => ['pull'],
         ],
         [
             'name' => 'output-dir',
@@ -11364,7 +11374,7 @@ if (
                 "  4. Import    — apply SQL to a local database (if --target-db)\n" .
                 "  5. Flatten   — reassemble into standard WP layout (if --flatten-to)\n" .
                 "  6. Runtime   — generate server config (default: php-builtin)\n" .
-                "  7. Start     — launch the local server (php-builtin only)\n" .
+                "  7. Start     — launch the selected runtime when supported\n" .
                 "\n" .
                 "Each step retries automatically on server timeouts. If the process is\n" .
                 "interrupted, re-run the same command to resume from where it left off.\n" .
@@ -11397,7 +11407,12 @@ if (
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite \\\n" .
                 "    --new-site-url=http://localhost:8881 \\\n" .
-                "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n",
+                "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n" .
+                "\n" .
+                "  # Prepare a Playground runtime but let another process start it:\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --runtime=playground-cli --start-runtime=none --output-dir=./runtime\n",
         ],
         "install-exporter" => [
             "level" => "high",
