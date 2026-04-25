@@ -314,15 +314,31 @@ class SqlStatementRewriter
      * Find which column a FROM_BASE64() expression belongs to by checking
      * which expression range contains the given byte offset.
      *
+     * The column_map is built by parse_insert / parse_update by walking the
+     * statement in source order, so it's already sorted by `start` offset
+     * and the ranges never overlap. That lets us use a binary search instead
+     * of the obvious linear scan — a multi-row INSERT can produce thousands
+     * of entries and we look up an offset for every FROM_BASE64() value, so
+     * the linear cost was quadratic in row count and showed up as ~150 µs per
+     * lookup under WASM PHP.
+     *
      * @param list<array{int, int, string}> $column_map [start, end, column_name] entries.
      * @param int $offset Byte offset of the CONVERT or FROM_BASE64 token.
      * @return string|null Column name, or null if the offset isn't in any range.
      */
     private function find_column_at_offset(array $column_map, int $offset): ?string
     {
-        foreach ($column_map as [$start, $end, $column]) {
-            if ($offset >= $start && $offset < $end) {
-                return $column;
+        $low = 0;
+        $high = count($column_map) - 1;
+        while ($low <= $high) {
+            $mid = ($low + $high) >> 1;
+            $entry = $column_map[$mid];
+            if ($offset < $entry[0]) {
+                $high = $mid - 1;
+            } elseif ($offset >= $entry[1]) {
+                $low = $mid + 1;
+            } else {
+                return $entry[2];
             }
         }
         return null;
