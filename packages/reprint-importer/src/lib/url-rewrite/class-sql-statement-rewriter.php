@@ -511,46 +511,46 @@ class SqlStatementRewriter
     }
 
     /**
-     * Lex once and drop the tokens the walker doesn't care about: whitespace,
-     * comments, and the lexer's terminal EOF marker. The lexer itself already
-     * handles all the subtle string / comment / escape rules, so the walker
-     * just needs to track parenthesis depth at the token level.
+     * Lex the statement and drop the lexer's terminal EOF marker.
+     *
+     * `WP_MySQL_Lexer::next_token()` already skips whitespace and comment
+     * tokens internally, so the array we get back is already
+     * structure-only. The only token left to filter is the EOF that the
+     * lexer appends after the last real token, which would otherwise trip
+     * the walker's "trailing tokens after the last value tuple" guard.
      *
      * @return WP_MySQL_Token[]
      */
     private static function significant_tokens(string $sql): array
     {
         $lexer = new WP_MySQL_Lexer($sql);
-        $significant_tokens = [];
-        foreach ($lexer->remaining_tokens() as $token) {
-            $token_id = $token->id;
-            if (
-                $token_id === WP_MySQL_Lexer::WHITESPACE
-                || $token_id === WP_MySQL_Lexer::COMMENT
-                || $token_id === WP_MySQL_Lexer::MYSQL_COMMENT_START
-                || $token_id === WP_MySQL_Lexer::MYSQL_COMMENT_END
-                || $token_id === WP_MySQL_Lexer::EOF
-            ) {
-                continue;
-            }
-            $significant_tokens[] = $token;
+        $tokens = $lexer->remaining_tokens();
+        if (
+            !empty($tokens)
+            && end($tokens)->id === WP_MySQL_Lexer::EOF
+        ) {
+            array_pop($tokens);
         }
-        return $significant_tokens;
+        return $tokens;
     }
 
     /**
-     * Strip the surrounding backticks (and unescape doubled backticks) from
-     * a backtick-quoted identifier token, or return the raw bytes for an
-     * unquoted IDENTIFIER. Anything else returns null so the walker bails.
+     * Return the unquoted text of an identifier token, or null when the
+     * token isn't an identifier.
+     *
+     * `WP_MySQL_Token::get_value()` already does the unquoting work for
+     * `BACK_TICK_QUOTED_ID` (including doubled-backtick escapes and the
+     * SQL-mode-aware backslash escape rules); we just need to gate which
+     * token IDs we accept here so the walker bails out on keywords,
+     * function names, etc.
      */
-    private static function unquote_identifier_token($token): ?string
+    private static function unquote_identifier_token(WP_MySQL_Token $token): ?string
     {
-        if ($token->id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID) {
-            $raw_bytes = $token->get_bytes();
-            return str_replace('``', '`', substr($raw_bytes, 1, strlen($raw_bytes) - 2));
-        }
-        if ($token->id === WP_MySQL_Lexer::IDENTIFIER) {
-            return $token->get_bytes();
+        if (
+            $token->id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID
+            || $token->id === WP_MySQL_Lexer::IDENTIFIER
+        ) {
+            return $token->get_value();
         }
         return null;
     }
