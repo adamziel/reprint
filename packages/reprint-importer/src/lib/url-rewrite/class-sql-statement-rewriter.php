@@ -150,6 +150,16 @@ class SqlStatementRewriter
      */
     private function parse_statement(string $sql): ?array
     {
+        // Fast path: walk the lexer output directly for the canonical
+        // multi-row INSERT shape that MySQLDumpProducer emits. Anything
+        // it can't handle returns null and falls through to the full
+        // grammar-driven AST below — UPDATE, INSERT … SELECT, INSERT
+        // without a column list, qualified table names, etc.
+        $fast = self::parse_insert_via_lexer($sql);
+        if ($fast !== null) {
+            return $fast;
+        }
+
         $lexer  = new WP_MySQL_Lexer($sql);
         $tokens = $lexer->remaining_tokens();
         $parser = new WP_MySQL_Parser(self::get_grammar(), $tokens);
@@ -343,6 +353,260 @@ class SqlStatementRewriter
             return null;
         }
         return end($tokens)->get_value();
+    }
+
+    /**
+     * Lex an INSERT statement and recover the same column_map data the
+     * AST path produces, but without inflating the 200 KB MySQL grammar.
+     *
+     * Accepted shapes (recognised, fast):
+     *   - INSERT [LOW_PRIORITY|DELAYED|HIGH_PRIORITY] [IGNORE] INTO `t`
+     *   - REPLACE [LOW_PRIORITY|DELAYED] INTO `t`
+     *   - followed by `(\`c1\`,\`c2\`,…)` column list
+     *   - followed by `VALUES` or `VALUE`
+     *   - one or more `(…)` or `ROW(…)` tuples, separated by commas
+     *   - optional trailing `;` and / or `ON DUPLICATE KEY UPDATE …`
+     *
+     * Falls back (returns null, AST path takes over):
+     *   - INSERT … SELECT
+     *   - INSERT … SET col=v
+     *   - INSERT without column list
+     *   - Qualified table names like `db`.`t`
+     *   - Anything else surprising
+     *
+     * The lexer already correctly handles strings, comments, escaped
+     * backticks, hex / binary literals, and so on, so the walker only
+     * needs to track parenthesis depth at the token level — strings that
+     * contain `(`, `)`, `,`, etc. arrive as a single string-literal token
+     * and never affect depth.
+     *
+     * @return array{table: string, column_map: list<array{int, int, string}>}|null
+     */
+    private static function parse_insert_via_lexer(string $sql): ?array
+    {
+        $tokens = self::significant_tokens($sql);
+        $n = count($tokens);
+        if ($n < 6) {
+            return null;
+        }
+
+        $i = 0;
+
+        // Leading verb: INSERT or REPLACE (treat REPLACE the same way —
+        // it has identical surface syntax for our purposes).
+        if (
+            $tokens[$i]->id !== WP_MySQL_Lexer::INSERT_SYMBOL
+            && $tokens[$i]->id !== WP_MySQL_Lexer::REPLACE_SYMBOL
+        ) {
+            return null;
+        }
+        $i++;
+
+        // Optional priority and IGNORE modifiers, in the order MySQL
+        // accepts them. We only need to skip past tokens we recognise;
+        // an unrecognised one drops us out of the fast path.
+        while ($i < $n) {
+            $id = $tokens[$i]->id;
+            if (
+                $id === WP_MySQL_Lexer::LOW_PRIORITY_SYMBOL
+                || $id === WP_MySQL_Lexer::DELAYED_SYMBOL
+                || $id === WP_MySQL_Lexer::HIGH_PRIORITY_SYMBOL
+                || $id === WP_MySQL_Lexer::IGNORE_SYMBOL
+            ) {
+                $i++;
+                continue;
+            }
+            break;
+        }
+
+        // INTO
+        if ($i >= $n || $tokens[$i]->id !== WP_MySQL_Lexer::INTO_SYMBOL) {
+            return null;
+        }
+        $i++;
+
+        // Table name. Reject qualified names so we don't get the database
+        // wrong — `db`.`t` would be three tokens: BACK_TICK_QUOTED_ID,
+        // DOT_SYMBOL, BACK_TICK_QUOTED_ID. We bail and let the AST path
+        // handle those.
+        if ($i >= $n) {
+            return null;
+        }
+        $table = self::unquote_identifier_token($tokens[$i]);
+        if ($table === null) {
+            return null;
+        }
+        $i++;
+        if ($i < $n && $tokens[$i]->id === WP_MySQL_Lexer::DOT_SYMBOL) {
+            return null;
+        }
+
+        // Column list `( col, col, … )`. We require this — INSERT without
+        // a column list (`INSERT INTO t VALUES …`) carries no names to
+        // map to and the AST path is no faster on it anyway.
+        if ($i >= $n || $tokens[$i]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+            return null;
+        }
+        $i++;
+
+        $columns = [];
+        while ($i < $n && $tokens[$i]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+            $col = self::unquote_identifier_token($tokens[$i]);
+            if ($col === null) {
+                return null;
+            }
+            $columns[] = $col;
+            $i++;
+            if ($i < $n && $tokens[$i]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
+                $i++;
+                continue;
+            }
+            break;
+        }
+        if ($i >= $n || $tokens[$i]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+            return null;
+        }
+        $i++;
+
+        // VALUES (or its singular alias VALUE).
+        if (
+            $i >= $n
+            || (
+                $tokens[$i]->id !== WP_MySQL_Lexer::VALUES_SYMBOL
+                && $tokens[$i]->id !== WP_MySQL_Lexer::VALUE_SYMBOL
+            )
+        ) {
+            return null;
+        }
+        $i++;
+
+        // One or more `(…)` or `ROW(…)` tuples.
+        $col_count = count($columns);
+        $column_map = [];
+        while ($i < $n) {
+            // Optional ROW prefix (MySQL 8.0+ explicit row constructor).
+            if ($tokens[$i]->id === WP_MySQL_Lexer::ROW_SYMBOL) {
+                $i++;
+                if ($i >= $n) {
+                    return null;
+                }
+            }
+
+            if ($tokens[$i]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                return null;
+            }
+            $i++; // step past `(`
+
+            $col_index = 0;
+            $expr_start = $i;
+            $depth = 0;
+            $tuple_closed = false;
+            while ($i < $n) {
+                $id = $tokens[$i]->id;
+                if ($id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                    $depth++;
+                } elseif ($id === WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+                    if ($depth === 0) {
+                        if ($col_index < $col_count && $expr_start < $i) {
+                            $first = $tokens[$expr_start];
+                            $last = $tokens[$i - 1];
+                            $column_map[] = [
+                                $first->start,
+                                $last->start + $last->length,
+                                $columns[$col_index],
+                            ];
+                        }
+                        $tuple_closed = true;
+                        break;
+                    }
+                    $depth--;
+                } elseif ($id === WP_MySQL_Lexer::COMMA_SYMBOL && $depth === 0) {
+                    if ($col_index < $col_count && $expr_start < $i) {
+                        $first = $tokens[$expr_start];
+                        $last = $tokens[$i - 1];
+                        $column_map[] = [
+                            $first->start,
+                            $last->start + $last->length,
+                            $columns[$col_index],
+                        ];
+                    }
+                    $col_index++;
+                    $expr_start = $i + 1;
+                }
+                $i++;
+            }
+            if (!$tuple_closed) {
+                return null;
+            }
+            $i++; // step past `)`
+
+            // Another tuple, statement terminator, or ON DUPLICATE KEY UPDATE.
+            if ($i < $n && $tokens[$i]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
+                $i++;
+                continue;
+            }
+            if ($i < $n && $tokens[$i]->id === WP_MySQL_Lexer::SEMICOLON_SYMBOL) {
+                $i++;
+            }
+            if ($i < $n && $tokens[$i]->id === WP_MySQL_Lexer::ON_SYMBOL) {
+                // ON DUPLICATE KEY UPDATE … — ignore everything after; the
+                // assignment list doesn't carry FROM_BASE64 values we'd
+                // need to map. Stopping here is safe because the rewriter
+                // will only look up offsets that fall inside the value
+                // tuples we already recorded.
+                break;
+            }
+            if ($i !== $n) {
+                return null;
+            }
+            break;
+        }
+
+        return ['table' => $table, 'column_map' => $column_map];
+    }
+
+    /**
+     * Lex once and drop the whitespace / comment tokens. Statement-shape
+     * walking is cleaner with those out of the way and the lexer already
+     * handles all the subtle string / comment escaping.
+     *
+     * @return WP_MySQL_Token[]
+     */
+    private static function significant_tokens(string $sql): array
+    {
+        $lexer = new WP_MySQL_Lexer($sql);
+        $out = [];
+        foreach ($lexer->remaining_tokens() as $tok) {
+            $id = $tok->id;
+            if (
+                $id === WP_MySQL_Lexer::WHITESPACE
+                || $id === WP_MySQL_Lexer::COMMENT
+                || $id === WP_MySQL_Lexer::MYSQL_COMMENT_START
+                || $id === WP_MySQL_Lexer::MYSQL_COMMENT_END
+            ) {
+                continue;
+            }
+            $out[] = $tok;
+        }
+        return $out;
+    }
+
+    /**
+     * Strip the surrounding backticks (and unescape doubled backticks) from
+     * a backtick-quoted identifier token, or return the raw bytes for an
+     * unquoted IDENTIFIER. Anything else returns null so the caller can
+     * fall back to the full grammar parser.
+     */
+    private static function unquote_identifier_token($token): ?string
+    {
+        if ($token->id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID) {
+            $raw = $token->get_bytes();
+            return str_replace('``', '`', substr($raw, 1, strlen($raw) - 2));
+        }
+        if ($token->id === WP_MySQL_Lexer::IDENTIFIER) {
+            return $token->get_bytes();
+        }
+        return null;
     }
 
     /**
