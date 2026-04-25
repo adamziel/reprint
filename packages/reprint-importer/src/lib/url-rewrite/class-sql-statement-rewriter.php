@@ -150,6 +150,28 @@ class SqlStatementRewriter
      */
     private function parse_statement(string $sql): ?array
     {
+        // Fast path: peek at the INSERT header to see whether any column
+        // in this statement could ever map to the block_markup hint. If
+        // none can, the column_map would be wasted work — every value
+        // would resolve to a null content type and fall through to the
+        // plain-text rewriter regardless. Skip the full grammar build.
+        //
+        // This is behaviour-preserving: an empty column_map produces the
+        // same downstream content_type (null → PLAIN_TEXT) as a fully
+        // populated map would have for these tables. URLs in plain text,
+        // serialized PHP, JSON, etc. still get rewritten exactly as
+        // before. Only the tables that actually use block_markup
+        // (wp_posts, wp_comments, wp_term_taxonomy) still pay for the
+        // full AST build.
+        //
+        // Skipped tables on a typical wp.com dump: wp_postmeta, wp_options,
+        // wp_termmeta, wp_users, wp_usermeta, wp_links, plus any plugin
+        // tables — collectively the majority of INSERT statements.
+        $peek = self::peek_insert_header($sql);
+        if ($peek !== null && !$this->columns_need_block_markup($peek['table'], $peek['columns'])) {
+            return ['table' => $peek['table'], 'column_map' => []];
+        }
+
         $lexer  = new WP_MySQL_Lexer($sql);
         $tokens = $lexer->remaining_tokens();
         $parser = new WP_MySQL_Parser(self::get_grammar(), $tokens);
@@ -359,6 +381,115 @@ class SqlStatementRewriter
             return null;
         }
         return end($tokens)->get_value();
+    }
+
+    /**
+     * Lex just enough of the SQL to recover the INSERT statement's table
+     * name and column list. Returns null for anything that isn't a plain
+     * `INSERT INTO \`t\` (\`c1\`,\`c2\`,…) VALUES …` so the full grammar
+     * path can handle UPDATE, INSERT … SELECT, INSERT without a column
+     * list, qualified names like `db`.`t`, etc.
+     *
+     * Lexing stops as soon as we close the column list — we don't need
+     * to walk into the (potentially multi-megabyte) VALUES clause.
+     *
+     * @return array{table: string, columns: string[]}|null
+     */
+    private static function peek_insert_header(string $sql): ?array
+    {
+        $lexer = new WP_MySQL_Lexer($sql);
+        $tokens = [];
+        foreach ($lexer->remaining_tokens() as $tok) {
+            if (
+                $tok->id === WP_MySQL_Lexer::WHITESPACE
+                || $tok->id === WP_MySQL_Lexer::COMMENT
+                || $tok->id === WP_MySQL_Lexer::MYSQL_COMMENT_START
+                || $tok->id === WP_MySQL_Lexer::MYSQL_COMMENT_END
+            ) {
+                continue;
+            }
+            $tokens[] = $tok;
+            if (count($tokens) > 4 && $tok->id === WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+                break;
+            }
+        }
+
+        $n = count($tokens);
+        if ($n < 6) {
+            return null;
+        }
+        if (
+            $tokens[0]->id !== WP_MySQL_Lexer::INSERT_SYMBOL
+            || $tokens[1]->id !== WP_MySQL_Lexer::INTO_SYMBOL
+        ) {
+            return null;
+        }
+
+        $table = self::unquote_identifier_token($tokens[2]);
+        if ($table === null) {
+            return null;
+        }
+
+        if ($tokens[3]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+            return null;
+        }
+
+        $columns = [];
+        for ($i = 4; $i < $n; $i++) {
+            $tok = $tokens[$i];
+            if ($tok->id === WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+                return ['table' => $table, 'columns' => $columns];
+            }
+            if ($tok->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
+                continue;
+            }
+            $name = self::unquote_identifier_token($tok);
+            if ($name === null) {
+                return null;
+            }
+            $columns[] = $name;
+        }
+
+        return null;
+    }
+
+    /**
+     * Strip the surrounding backticks (and unescape doubled backticks) from
+     * a backtick-quoted identifier token, or return the raw bytes for an
+     * unquoted IDENTIFIER. Anything else returns null.
+     */
+    private static function unquote_identifier_token($token): ?string
+    {
+        if ($token->id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID) {
+            $raw = $token->get_bytes();
+            return str_replace('``', '`', substr($raw, 1, strlen($raw) - 2));
+        }
+        if ($token->id === WP_MySQL_Lexer::IDENTIFIER) {
+            return $token->get_bytes();
+        }
+        return null;
+    }
+
+    /**
+     * Does any column in this INSERT need the block_markup hint? If not,
+     * the column_map adds no information — every value resolves to a null
+     * content type and falls through to the plain-text rewriter — so we
+     * can skip the full AST build entirely.
+     *
+     * @param string[] $columns
+     */
+    private function columns_need_block_markup(string $table, array $columns): bool
+    {
+        $by_column = $this->db_columns_with_block_markup[$table] ?? null;
+        if ($by_column === null) {
+            return false;
+        }
+        foreach ($columns as $col) {
+            if (isset($by_column[$col])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
