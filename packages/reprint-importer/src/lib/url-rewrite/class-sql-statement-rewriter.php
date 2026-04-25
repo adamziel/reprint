@@ -97,9 +97,10 @@ class SqlStatementRewriter
             return $sql;
         }
 
-        // Parse the INSERT/UPDATE statement to extract the table name and
-        // build a byte-offset→column map.
-        $parsed_statement = $this->parse_statement($sql);
+        // Recover the table name and a byte-offset→column map from the
+        // INSERT/UPDATE shape so we can hand each FROM_BASE64() value the
+        // right content-type hint downstream.
+        $extracted_columns = $this->extract_columns($sql);
 
         // Iterate over all FROM_BASE64() values using the cursor-based scanner
         $scanner = new Base64ValueScanner($sql);
@@ -118,13 +119,13 @@ class SqlStatementRewriter
 
             // Determine content type hint for this column
             $content_type = null;
-            if ($parsed_statement !== null) {
+            if ($extracted_columns !== null) {
                 $column_name = $this->find_column_at_offset(
-                    $parsed_statement['column_map'],
+                    $extracted_columns['column_map'],
                     $scanner->get_match_offset()
                 );
                 if ($column_name !== null) {
-                    $content_type = $this->get_content_type($parsed_statement['table'], $column_name);
+                    $content_type = $this->get_content_type($extracted_columns['table'], $column_name);
                 }
             }
 
@@ -176,7 +177,7 @@ class SqlStatementRewriter
      *
      * @return array{table: string, column_map: list<array{int, int, string}>}|null
      */
-    private function parse_statement(string $sql): ?array
+    private function extract_columns(string $sql): ?array
     {
         $tokens = self::significant_tokens($sql);
         $token_count = count($tokens);

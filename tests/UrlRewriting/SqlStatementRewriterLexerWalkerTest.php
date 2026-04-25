@@ -507,11 +507,11 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
      * canonical INSERT, plus the right table name and a column_map size
      * that matches `<columns> × <rows>`.
      */
-    private function invokeParseStatement(string $sql): ?array
+    private function invokeExtractColumns(string $sql): ?array
     {
         $rewriter = $this->rewriter();
         $reflection = new \ReflectionClass(SqlStatementRewriter::class);
-        $method = $reflection->getMethod('parse_statement');
+        $method = $reflection->getMethod('extract_columns');
         $method->setAccessible(true);
         return $method->invoke($rewriter, $sql);
     }
@@ -524,7 +524,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('b')
         );
 
-        $parsed = $this->invokeParseStatement($sql);
+        $parsed = $this->invokeExtractColumns($sql);
 
         $this->assertIsArray(
             $parsed,
@@ -552,7 +552,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('a')
         );
 
-        $parsed = $this->invokeParseStatement($sql);
+        $parsed = $this->invokeExtractColumns($sql);
 
         $this->assertIsArray($parsed, 'walker must accept INSERTs without trailing semicolon');
     }
@@ -567,7 +567,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('a')
         );
 
-        $parsed = $this->invokeParseStatement($sql);
+        $parsed = $this->invokeExtractColumns($sql);
 
         $this->assertIsArray($parsed, 'walker must return a parsed result for UPDATE');
         $this->assertSame('wp_postmeta', $parsed['table']);
@@ -582,7 +582,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('<p>x</p>')
         );
 
-        $parsed = $this->invokeParseStatement($sql);
+        $parsed = $this->invokeExtractColumns($sql);
 
         $this->assertIsArray($parsed);
         $this->assertSame('wp_posts', $parsed['table']);
@@ -609,55 +609,6 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
         $this->assertStringContainsString(self::TO, $values[0]);
     }
 
-    /* ------------------------------------------------------------------
-     * Defensive: the walker must produce the SAME column_map as the AST
-     * for shapes both can handle. We compare by replaying through the
-     * rewriter and asserting the output is byte-identical.
-     * ------------------------------------------------------------------ */
-
-    public function testFastPathOutputMatchesAstOutputForCanonicalInsert(): void
-    {
-        $html = '<a href="' . self::FROM . '/x">x</a>';
-        $sql = sprintf(
-            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES (1, FROM_BASE64('%s')), (2, FROM_BASE64('%s'));",
-            $this->b64($html),
-            $this->b64($html)
-        );
-
-        $with_walker = $this->rewriter()->rewrite($sql);
-
-        // Compare against AST path by passing the same input through a
-        // rewriter where the walker is forced off via reflection.
-        $rewriter = $this->rewriter();
-        $without_walker = $this->rewriteWithAstOnly($rewriter, $sql);
-
-        $this->assertSame($without_walker, $with_walker);
-    }
-
-    /**
-     * Run a SQL statement through the rewriter with the lexer-only fast
-     * path disabled. We use reflection to bypass `parse_insert_via_lexer`
-     * and force the AST code path.
-     *
-     * Implementation: temporarily swap the method definition of the file
-     * isn't possible in PHP, so we rely on `parse_statement` falling
-     * through to the AST when the fast path is unavailable. A simpler
-     * proxy: pass an UPDATE that yields the same column_map shape — but
-     * the cleanest equivalence check is the one we already have via the
-     * test suite's existing canonical tests, which all run through both
-     * paths today. This helper just routes through a full grammar parse
-     * by giving the rewriter input that the fast path declines.
-     */
-    private function rewriteWithAstOnly(SqlStatementRewriter $rewriter, string $sql): string
-    {
-        // We don't have a runtime toggle, so we instead exercise the
-        // fact that inputs the fast path doesn't recognise round-trip
-        // through the AST path. For canonical INSERTs this means the
-        // assertion above is effectively a self-consistency check —
-        // both paths run today and produce the same output, verified
-        // by the existing unit tests in SqlStatementRewriterTest.
-        return $rewriter->rewrite($sql);
-    }
 }
 
 /**
