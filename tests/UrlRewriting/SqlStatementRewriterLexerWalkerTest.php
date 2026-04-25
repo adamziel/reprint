@@ -497,6 +497,64 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
         $this->assertStringContainsString(self::TO, $values[0]);
     }
 
+    /**
+     * Direct fast-path engagement test. The earlier behaviour-only tests
+     * couldn't tell whether the lexer walker actually fired or whether
+     * the AST path produced the same output by coincidence — and in fact
+     * a stray EOF token kept the walker from firing on the real
+     * benchmark even though all 26 indirect tests passed. Call the
+     * walker directly and assert it returns a non-null column_map for a
+     * canonical INSERT, plus the right table name and a column_map size
+     * that matches `<columns> × <rows>`.
+     */
+    public function testWalkerEngagesOnCanonicalDumpedInsert(): void
+    {
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES (1, FROM_BASE64('%s')), (2, FROM_BASE64('%s'));",
+            $this->b64('a'),
+            $this->b64('b')
+        );
+
+        $reflection = new \ReflectionClass(SqlStatementRewriter::class);
+        $method = $reflection->getMethod('parse_insert_via_lexer');
+        $method->setAccessible(true);
+        $parsed = $method->invoke(null, $sql);
+
+        $this->assertIsArray(
+            $parsed,
+            'walker must return a parsed result for a canonical INSERT'
+        );
+        $this->assertSame('wp_posts', $parsed['table']);
+        $this->assertCount(
+            4,
+            $parsed['column_map'],
+            '2 columns × 2 rows = 4 column_map entries'
+        );
+        // Even rows should map to ID, odd rows to post_content.
+        $this->assertSame('ID', $parsed['column_map'][0][2]);
+        $this->assertSame('post_content', $parsed['column_map'][1][2]);
+        $this->assertSame('ID', $parsed['column_map'][2][2]);
+        $this->assertSame('post_content', $parsed['column_map'][3][2]);
+    }
+
+    public function testWalkerEngagesEvenWhenStatementOmitsTrailingSemicolon(): void
+    {
+        // The stream-level statement extractor sometimes hands us an INSERT
+        // without a trailing semicolon. The walker must handle that without
+        // tripping its trailing-tokens guard.
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES (1, FROM_BASE64('%s'))",
+            $this->b64('a')
+        );
+
+        $reflection = new \ReflectionClass(SqlStatementRewriter::class);
+        $method = $reflection->getMethod('parse_insert_via_lexer');
+        $method->setAccessible(true);
+        $parsed = $method->invoke(null, $sql);
+
+        $this->assertIsArray($parsed, 'walker must accept INSERTs without trailing semicolon');
+    }
+
     public function testUpdateStatementsStillUseAstPath(): void
     {
         // UPDATE … SET … FROM_BASE64 — the walker is INSERT-only, so this

@@ -578,11 +578,15 @@ class SqlStatementRewriter
         $out = [];
         foreach ($lexer->remaining_tokens() as $tok) {
             $id = $tok->id;
+            // The lexer emits a final EOF (-1) token; skip it along with
+            // whitespace/comments so the trailing-tokens check after the
+            // value list doesn't fire on otherwise canonical INSERTs.
             if (
                 $id === WP_MySQL_Lexer::WHITESPACE
                 || $id === WP_MySQL_Lexer::COMMENT
                 || $id === WP_MySQL_Lexer::MYSQL_COMMENT_START
                 || $id === WP_MySQL_Lexer::MYSQL_COMMENT_END
+                || $id === WP_MySQL_Lexer::EOF
             ) {
                 continue;
             }
