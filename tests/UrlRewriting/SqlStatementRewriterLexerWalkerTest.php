@@ -507,11 +507,11 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
      * canonical INSERT, plus the right table name and a column_map size
      * that matches `<columns> × <rows>`.
      */
-    private function invokeExtractColumns(string $sql): ?array
+    private function invokeMapValuesToColumns(string $sql): ?array
     {
         $rewriter = $this->rewriter();
         $reflection = new \ReflectionClass(SqlStatementRewriter::class);
-        $method = $reflection->getMethod('extract_columns');
+        $method = $reflection->getMethod('map_values_to_columns');
         $method->setAccessible(true);
         return $method->invoke($rewriter, $sql);
     }
@@ -524,7 +524,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('b')
         );
 
-        $parsed = $this->invokeExtractColumns($sql);
+        $parsed = $this->invokeMapValuesToColumns($sql);
 
         $this->assertIsArray(
             $parsed,
@@ -552,7 +552,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('a')
         );
 
-        $parsed = $this->invokeExtractColumns($sql);
+        $parsed = $this->invokeMapValuesToColumns($sql);
 
         $this->assertIsArray($parsed, 'walker must accept INSERTs without trailing semicolon');
     }
@@ -567,7 +567,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('a')
         );
 
-        $parsed = $this->invokeExtractColumns($sql);
+        $parsed = $this->invokeMapValuesToColumns($sql);
 
         $this->assertIsArray($parsed, 'walker must return a parsed result for UPDATE');
         $this->assertSame('wp_postmeta', $parsed['table']);
@@ -582,7 +582,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('<p>x</p>')
         );
 
-        $parsed = $this->invokeExtractColumns($sql);
+        $parsed = $this->invokeMapValuesToColumns($sql);
 
         $this->assertIsArray($parsed);
         $this->assertSame('wp_posts', $parsed['table']);
