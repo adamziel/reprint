@@ -507,6 +507,15 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
      * canonical INSERT, plus the right table name and a column_map size
      * that matches `<columns> × <rows>`.
      */
+    private function invokeParseStatement(string $sql): ?array
+    {
+        $rewriter = $this->rewriter();
+        $reflection = new \ReflectionClass(SqlStatementRewriter::class);
+        $method = $reflection->getMethod('parse_statement');
+        $method->setAccessible(true);
+        return $method->invoke($rewriter, $sql);
+    }
+
     public function testWalkerEngagesOnCanonicalDumpedInsert(): void
     {
         $sql = sprintf(
@@ -515,10 +524,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('b')
         );
 
-        $reflection = new \ReflectionClass(SqlStatementRewriter::class);
-        $method = $reflection->getMethod('parse_insert_via_lexer');
-        $method->setAccessible(true);
-        $parsed = $method->invoke(null, $sql);
+        $parsed = $this->invokeParseStatement($sql);
 
         $this->assertIsArray(
             $parsed,
@@ -530,7 +536,6 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $parsed['column_map'],
             '2 columns × 2 rows = 4 column_map entries'
         );
-        // Even rows should map to ID, odd rows to post_content.
         $this->assertSame('ID', $parsed['column_map'][0][2]);
         $this->assertSame('post_content', $parsed['column_map'][1][2]);
         $this->assertSame('ID', $parsed['column_map'][2][2]);
@@ -547,12 +552,44 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
             $this->b64('a')
         );
 
-        $reflection = new \ReflectionClass(SqlStatementRewriter::class);
-        $method = $reflection->getMethod('parse_insert_via_lexer');
-        $method->setAccessible(true);
-        $parsed = $method->invoke(null, $sql);
+        $parsed = $this->invokeParseStatement($sql);
 
         $this->assertIsArray($parsed, 'walker must accept INSERTs without trailing semicolon');
+    }
+
+    public function testWalkerEngagesOnUpdate(): void
+    {
+        // The oversized-update path in MySQLDumpProducer emits this exact
+        // shape. The walker must map the FROM_BASE64() value to the
+        // assigned column.
+        $sql = sprintf(
+            "UPDATE `wp_postmeta` SET `meta_value` = CONCAT(`meta_value`, FROM_BASE64('%s')) WHERE `meta_id` = 1;",
+            $this->b64('a')
+        );
+
+        $parsed = $this->invokeParseStatement($sql);
+
+        $this->assertIsArray($parsed, 'walker must return a parsed result for UPDATE');
+        $this->assertSame('wp_postmeta', $parsed['table']);
+        $this->assertCount(1, $parsed['column_map']);
+        $this->assertSame('meta_value', $parsed['column_map'][0][2]);
+    }
+
+    public function testWalkerEngagesOnUpdateWithMultipleSetClauses(): void
+    {
+        $sql = sprintf(
+            "UPDATE `wp_posts` SET `post_title` = 'x', `post_content` = FROM_BASE64('%s'), `post_excerpt` = 'y' WHERE `ID` = 1;",
+            $this->b64('<p>x</p>')
+        );
+
+        $parsed = $this->invokeParseStatement($sql);
+
+        $this->assertIsArray($parsed);
+        $this->assertSame('wp_posts', $parsed['table']);
+        $this->assertCount(3, $parsed['column_map']);
+        $this->assertSame('post_title', $parsed['column_map'][0][2]);
+        $this->assertSame('post_content', $parsed['column_map'][1][2]);
+        $this->assertSame('post_excerpt', $parsed['column_map'][2][2]);
     }
 
     public function testUpdateStatementsStillUseAstPath(): void
