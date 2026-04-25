@@ -363,12 +363,13 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
      * Shapes the walker must REJECT, falling back to AST.
      * ------------------------------------------------------------------ */
 
-    public function testInsertWithoutColumnListFallsBack(): void
+    public function testInsertWithoutColumnListPlainTextStillRewritten(): void
     {
         // No column list means we have nothing to map FROM_BASE64 offsets
-        // against. The fast path returns null; the AST path runs and the
-        // statement still goes through the rewriter, just without a
-        // block_markup hint. Plain-text rewriting still happens.
+        // against. The fast path returns null; the AST path runs with an
+        // empty column_map, so every value gets the null content type and
+        // falls through to the plain-text URL rewriter. The URL must
+        // still get rewritten.
         $plain = self::FROM . '/meta';
         $sql = sprintf(
             "INSERT INTO `wp_postmeta` VALUES (1, 1, '_url', FROM_BASE64('%s'));",
@@ -377,12 +378,73 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
 
         $result = $this->rewriter()->rewrite($sql);
 
-        // Either the rewrite happened (AST handled it) or the statement
-        // is unchanged (acceptable conservative outcome). What matters
-        // is no corruption.
+        $values = $this->decoded($result);
+        $this->assertCount(1, $values, 'expected exactly one base64 value');
+        $this->assertStringContainsString(
+            self::TO,
+            $values[0],
+            'plain-text URL must still be rewritten when column list is absent'
+        );
+        $this->assertStringNotContainsString(
+            self::FROM,
+            $values[0],
+            'source URL must be gone after rewriting'
+        );
+    }
+
+    public function testInsertWithoutColumnListBlockMarkupValueGetsPlainTextRewriting(): void
+    {
+        // Even though this targets `wp_posts` (a block-markup table), the
+        // missing column list means we can't tell which column the value
+        // sits in, so block_markup-aware rewriting is impossible. Plain
+        // text rewriting still happens — that's the conservative outcome
+        // and the URL must come out updated. The block-markup HTML
+        // structure is preserved verbatim by URLInTextProcessor (it only
+        // rewrites the URL text, not the surrounding HTML).
+        $html = '<a href="' . self::FROM . '/page">link</a>';
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` VALUES (1, 1, NOW(), NOW(), FROM_BASE64('%s'), 'title', 'excerpt', 'publish');",
+            $this->b64($html)
+        );
+
+        $result = $this->rewriter()->rewrite($sql);
+
         $values = $this->decoded($result);
         $this->assertCount(1, $values);
-        $this->assertNotEmpty($values[0]);
+        $this->assertStringContainsString(self::TO, $values[0]);
+        $this->assertStringNotContainsString(self::FROM, $values[0]);
+    }
+
+    public function testInsertWithoutColumnListMultiRowAllValuesRewritten(): void
+    {
+        // Multi-row INSERT without a column list. Every base64 value in
+        // every tuple must still get plain-text URL rewriting.
+        $a = self::FROM . '/a';
+        $b = self::FROM . '/b';
+        $c = self::FROM . '/c';
+        $sql = sprintf(
+            "INSERT INTO `wp_postmeta` VALUES (1, 1, '_a', FROM_BASE64('%s')), (2, 1, '_b', FROM_BASE64('%s')), (3, 1, '_c', FROM_BASE64('%s'));",
+            $this->b64($a),
+            $this->b64($b),
+            $this->b64($c)
+        );
+
+        $result = $this->rewriter()->rewrite($sql);
+
+        $values = $this->decoded($result);
+        $this->assertCount(3, $values);
+        foreach ($values as $idx => $v) {
+            $this->assertStringContainsString(
+                self::TO,
+                $v,
+                "row {$idx}: target URL not present"
+            );
+            $this->assertStringNotContainsString(
+                self::FROM,
+                $v,
+                "row {$idx}: source URL still present"
+            );
+        }
     }
 
     public function testQualifiedTableNameFallsBackOrIsRewritten(): void
