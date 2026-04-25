@@ -241,7 +241,10 @@ class SqlStatementRewriter
         if ($cursor >= $token_count) {
             return null;
         }
-        $table_name = self::unquote_identifier_token($tokens[$cursor]);
+        $table_token_id = $tokens[$cursor]->id;
+        $table_name = ($table_token_id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID || $table_token_id === WP_MySQL_Lexer::IDENTIFIER)
+            ? $tokens[$cursor]->get_value()
+            : null;
         if ($table_name === null) {
             return null;
         }
@@ -259,7 +262,10 @@ class SqlStatementRewriter
 
         $column_names = [];
         while ($cursor < $token_count && $tokens[$cursor]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
-            $column_name = self::unquote_identifier_token($tokens[$cursor]);
+            $column_token_id = $tokens[$cursor]->id;
+            $column_name = ($column_token_id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID || $column_token_id === WP_MySQL_Lexer::IDENTIFIER)
+                ? $tokens[$cursor]->get_value()
+                : null;
             if ($column_name === null) {
                 return null;
             }
@@ -402,7 +408,10 @@ class SqlStatementRewriter
         if ($cursor >= $token_count) {
             return null;
         }
-        $table_name = self::unquote_identifier_token($tokens[$cursor]);
+        $table_token_id = $tokens[$cursor]->id;
+        $table_name = ($table_token_id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID || $table_token_id === WP_MySQL_Lexer::IDENTIFIER)
+            ? $tokens[$cursor]->get_value()
+            : null;
         if ($table_name === null) {
             return null;
         }
@@ -424,7 +433,10 @@ class SqlStatementRewriter
         $column_map = [];
         while ($cursor < $token_count) {
             // Column being assigned to.
-            $assigned_column_name = self::unquote_identifier_token($tokens[$cursor]);
+            $assigned_column_token_id = $tokens[$cursor]->id;
+            $assigned_column_name = ($assigned_column_token_id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID || $assigned_column_token_id === WP_MySQL_Lexer::IDENTIFIER)
+                ? $tokens[$cursor]->get_value()
+                : null;
             if ($assigned_column_name === null) {
                 return null;
             }
@@ -532,27 +544,6 @@ class SqlStatementRewriter
             array_pop($tokens);
         }
         return $tokens;
-    }
-
-    /**
-     * Return the unquoted text of an identifier token, or null when the
-     * token isn't an identifier.
-     *
-     * `WP_MySQL_Token::get_value()` already does the unquoting work for
-     * `BACK_TICK_QUOTED_ID` (including doubled-backtick escapes and the
-     * SQL-mode-aware backslash escape rules); we just need to gate which
-     * token IDs we accept here so the walker bails out on keywords,
-     * function names, etc.
-     */
-    private static function unquote_identifier_token(WP_MySQL_Token $token): ?string
-    {
-        if (
-            $token->id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID
-            || $token->id === WP_MySQL_Lexer::IDENTIFIER
-        ) {
-            return $token->get_value();
-        }
-        return null;
     }
 
     /**
