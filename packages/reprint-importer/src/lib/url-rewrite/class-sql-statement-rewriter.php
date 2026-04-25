@@ -328,15 +328,15 @@ class SqlStatementRewriter
      */
     private function find_column_at_offset(array $column_map, int $offset): ?string
     {
-        $lo = 0;
-        $hi = count($column_map) - 1;
-        while ($lo <= $hi) {
-            $mid = ($lo + $hi) >> 1;
+        $low = 0;
+        $high = count($column_map) - 1;
+        while ($low <= $high) {
+            $mid = ($low + $high) >> 1;
             $entry = $column_map[$mid];
             if ($offset < $entry[0]) {
-                $hi = $mid - 1;
+                $high = $mid - 1;
             } elseif ($offset >= $entry[1]) {
-                $lo = $mid + 1;
+                $low = $mid + 1;
             } else {
                 return $entry[2];
             }
