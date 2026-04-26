@@ -55,7 +55,7 @@ jobs:
     name: Pull pipeline benchmark
     needs: [build-pr-phar, build-trunk-phar]
     runs-on: ubuntu-22.04
-    timeout-minutes: 35
+    timeout-minutes: 60
     env:
       PHP_VERSION: '8.2'
 

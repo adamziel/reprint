@@ -38,7 +38,12 @@ const trunk = existsSync(trunkPath) ? JSON.parse(readFileSync(trunkPath, 'utf-8'
 const lines = [];
 lines.push(`## Pull pipeline performance — \`${pr.meta.site}\``);
 lines.push('');
-lines.push(`Site: \`${pr.meta.site}\` · ${pr.meta.fileCount} files · PHP \`${pr.meta.phpVersion}\``);
+{
+    const seedSuffix = (pr.meta.seedPosts && pr.meta.seedPostmeta)
+        ? ` · ${Number(pr.meta.seedPosts).toLocaleString('en-US')} posts · ${Number(pr.meta.seedPostmeta).toLocaleString('en-US')} postmeta`
+        : '';
+    lines.push(`Site: \`${pr.meta.site}\` · ${pr.meta.fileCount} files${seedSuffix} · PHP \`${pr.meta.phpVersion}\``);
+}
 lines.push('');
 
 if (trunk) {
