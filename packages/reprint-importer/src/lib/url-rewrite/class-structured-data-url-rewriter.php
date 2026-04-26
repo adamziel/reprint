@@ -152,8 +152,31 @@ class StructuredDataUrlRewriter
         // Base64ValueScanner in SqlStatementRewriter — this block
         // was for base64-within-base64 nesting which is rare in practice.
 
+        // Fast path: content tagged block_markup but containing no HTML
+        // structure (no `<` for tags / block comments, no `&` for entities)
+        // is plain text by every observable measure. BlockMarkupUrlProcessor
+        // would tokenise it as a single text node and forward it to
+        // URLInTextProcessor anyway — the wrapping HTML tokenisation is
+        // pure overhead. URLs in attributes (where block markup escapes
+        // differently) can't appear without `<`, so the output stays
+        // byte-identical to the slow path.
+        //
+        // Why this matters: posts written in the Classic Editor (and most
+        // posts in long migration tails) carry no block delimiters; they
+        // still flow through the block_markup column hint and pay the
+        // HTML tokeniser anyway. On the bench fixture this fast path
+        // catches 100% of post_content values.
+        if (
+            $content_type === self::BLOCK_MARKUP
+            && strpos($value, '<') === false
+            && strpos($value, '&') === false
+        ) {
+            return $this->rewrite_urls($value, self::PLAIN_TEXT);
+        }
+
         return $this->rewrite_urls($value, $content_type);
     }
+
 
     /**
      * Quick-reject check: returns false when the value certainly doesn't
