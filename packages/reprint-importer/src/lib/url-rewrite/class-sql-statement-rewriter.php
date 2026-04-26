@@ -151,17 +151,21 @@ class SqlStatementRewriter
             self::$prof_get_value_us += (microtime(true) - $__t) * 1e6;
             self::$prof_values_seen++;
 
-            // Skip values that can't contain a URL we'd rewrite. Every
-            // rewritable domain starts with http:// or https://, so a value
-            // without "http" anywhere in it has nothing for us to do. This
-            // avoids the column-map lookup and the full StructuredDataUrlRewriter
-            // pipeline (HTML parse, block markup, PHP/JSON recursion) per value.
+            // Skip values that obviously can't carry a URL we'd rewrite.
+            // The cheaper "no http anywhere" test runs first, then we ask
+            // the rewriter whether the value might actually contain one of
+            // its mapped hosts (the rewriter caches its source-domains
+            // list, so this is just strpos per host).
             // See https://github.com/adamziel/reprint/pull/152
             if (strpos($value, 'http') === false) {
                 self::$prof_values_skipped_no_http++;
                 continue;
             }
             self::$prof_values_with_http++;
+            if (!$this->url_rewriter->maybe_contains_rewritable_urls($value)) {
+                self::$prof_values_skipped_no_host++;
+                continue;
+            }
 
             // Determine content type hint for this column
             $content_type = null;
@@ -205,6 +209,7 @@ class SqlStatementRewriter
     public static int $prof_values_seen = 0;
     public static int $prof_values_with_http = 0;
     public static int $prof_values_skipped_no_http = 0;
+    public static int $prof_values_skipped_no_host = 0;
 
     /**
      * Walk the lexer output to recover, for an INSERT or UPDATE statement,

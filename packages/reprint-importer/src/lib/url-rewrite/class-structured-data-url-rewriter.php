@@ -99,6 +99,7 @@ class StructuredDataUrlRewriter
      */
     public function rewrite(string $value, ?string $content_type = null): string
     {
+        self::$prof_calls++;
         if ($value === '') {
             return $value;
         }
@@ -115,14 +116,23 @@ class StructuredDataUrlRewriter
         // source domain, there's nothing to rewrite. This avoids expensive
         // parsing (serialized PHP, JSON, block markup) for the vast majority
         // of values that don't contain any rewritable URLs.
-        if (!$this->maybe_contains_rewritable_urls($value)) {
+        $__t = microtime(true);
+        $maybe = $this->maybe_contains_rewritable_urls($value);
+        self::$prof_prefilter_us += (microtime(true) - $__t) * 1e6;
+        if (!$maybe) {
+            self::$prof_prefilter_rejects++;
             return $value;
         }
 
         // Try serialized PHP: the parser validates the entire structure
         // in the constructor. If it's not malformed, iterate and recurse.
+        $__t = microtime(true);
         $p = new PhpSerializationProcessor($value);
-        if (!$p->is_malformed()) {
+        $is_php_serialized = !$p->is_malformed();
+        self::$prof_php_detect_us += (microtime(true) - $__t) * 1e6;
+        if ($is_php_serialized) {
+            self::$prof_php_branch++;
+            $__t = microtime(true);
             while ($p->next_value()) {
                 $original = $p->get_value();
                 $rewritten = $this->rewrite($original, $content_type);
@@ -130,13 +140,20 @@ class StructuredDataUrlRewriter
                     $p->set_value($rewritten);
                 }
             }
-            return $p->get_updated_serialization();
+            $result = $p->get_updated_serialization();
+            self::$prof_php_walk_us += (microtime(true) - $__t) * 1e6;
+            return $result;
         }
 
         // Try JSON: the iterator calls json_decode in the constructor.
         // If it's not malformed, iterate and recurse.
+        $__t = microtime(true);
         $iter = new JsonStringIterator($value);
-        if (!$iter->is_malformed()) {
+        $is_json = !$iter->is_malformed();
+        self::$prof_json_detect_us += (microtime(true) - $__t) * 1e6;
+        if ($is_json) {
+            self::$prof_json_branch++;
+            $__t = microtime(true);
             while ($iter->next_value()) {
                 $original = $iter->get_value();
                 $rewritten = $this->rewrite($original, $content_type);
@@ -144,7 +161,9 @@ class StructuredDataUrlRewriter
                     $iter->set_value($rewritten);
                 }
             }
-            return $iter->get_result();
+            $result = $iter->get_result();
+            self::$prof_json_walk_us += (microtime(true) - $__t) * 1e6;
+            return $result;
         }
 
         // Base64 decoding is temporarily disabled for performance.
@@ -152,8 +171,34 @@ class StructuredDataUrlRewriter
         // Base64ValueScanner in SqlStatementRewriter — this block
         // was for base64-within-base64 nesting which is rare in practice.
 
-        return $this->rewrite_urls($value, $content_type);
+        $__t = microtime(true);
+        if ($content_type === self::BLOCK_MARKUP) {
+            self::$prof_block_branch++;
+        } else {
+            self::$prof_text_branch++;
+        }
+        $result = $this->rewrite_urls($value, $content_type);
+        if ($content_type === self::BLOCK_MARKUP) {
+            self::$prof_block_us += (microtime(true) - $__t) * 1e6;
+        } else {
+            self::$prof_text_us += (microtime(true) - $__t) * 1e6;
+        }
+        return $result;
     }
+
+    public static int $prof_calls = 0;
+    public static int $prof_prefilter_rejects = 0;
+    public static int $prof_php_branch = 0;
+    public static int $prof_json_branch = 0;
+    public static int $prof_block_branch = 0;
+    public static int $prof_text_branch = 0;
+    public static float $prof_prefilter_us = 0.0;
+    public static float $prof_php_detect_us = 0.0;
+    public static float $prof_php_walk_us = 0.0;
+    public static float $prof_json_detect_us = 0.0;
+    public static float $prof_json_walk_us = 0.0;
+    public static float $prof_block_us = 0.0;
+    public static float $prof_text_us = 0.0;
 
     /**
      * Quick-reject check: returns false when the value certainly doesn't
@@ -163,7 +208,7 @@ class StructuredDataUrlRewriter
      * - href=" or src=" (HTML attributes that carry URLs), OR
      * - any source domain from the url_mapping (bare URL occurrences)
      */
-    private function maybe_contains_rewritable_urls(string $value): bool
+    public function maybe_contains_rewritable_urls(string $value): bool
     {
         if (strpos($value, 'href="') !== false || strpos($value, 'src="') !== false) {
             return true;

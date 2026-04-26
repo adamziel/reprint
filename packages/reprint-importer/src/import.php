@@ -5334,6 +5334,24 @@ class ImportClient
                     "values_seen" => SqlStatementRewriter::$prof_values_seen,
                     "values_with_http" => SqlStatementRewriter::$prof_values_with_http,
                     "values_skipped_no_http" => SqlStatementRewriter::$prof_values_skipped_no_http,
+                    "values_skipped_no_host" => SqlStatementRewriter::$prof_values_skipped_no_host,
+                ];
+            }
+            if (class_exists('StructuredDataUrlRewriter', false)) {
+                $profile["structured_inner"] = [
+                    "calls" => StructuredDataUrlRewriter::$prof_calls,
+                    "prefilter_rejects" => StructuredDataUrlRewriter::$prof_prefilter_rejects,
+                    "php_branch" => StructuredDataUrlRewriter::$prof_php_branch,
+                    "json_branch" => StructuredDataUrlRewriter::$prof_json_branch,
+                    "block_branch" => StructuredDataUrlRewriter::$prof_block_branch,
+                    "text_branch" => StructuredDataUrlRewriter::$prof_text_branch,
+                    "prefilter_us" => StructuredDataUrlRewriter::$prof_prefilter_us,
+                    "php_detect_us" => StructuredDataUrlRewriter::$prof_php_detect_us,
+                    "php_walk_us" => StructuredDataUrlRewriter::$prof_php_walk_us,
+                    "json_detect_us" => StructuredDataUrlRewriter::$prof_json_detect_us,
+                    "json_walk_us" => StructuredDataUrlRewriter::$prof_json_walk_us,
+                    "block_us" => StructuredDataUrlRewriter::$prof_block_us,
+                    "text_us" => StructuredDataUrlRewriter::$prof_text_us,
                 ];
             }
             if (class_exists('Base64ValueScanner', false)) {
