@@ -8,8 +8,31 @@ permissions:
   pull-requests: write
 
 jobs:
+  build-phar:
+    name: Build reprint.phar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+
+      - run: composer install --no-dev --no-interaction --prefer-dist
+
+      - run: ./bin/build-reprint-phar.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: importer-phar-perf
+          path: reprint.phar
+
   bench:
     name: Pull pipeline benchmark
+    needs: build-phar
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
@@ -20,14 +43,9 @@ jobs:
         with:
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: actions/download-artifact@v4
         with:
-          php-version: ${{ env.PHP_VERSION }}
-          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
-
-      - run: composer install --no-dev --no-interaction --prefer-dist
-
-      - run: ./bin/build-reprint-phar.sh
+          name: importer-phar-perf
 
       - uses: actions/setup-node@v4
         with:
@@ -64,9 +82,20 @@ jobs:
           path: |
             tests/e2e/bench-results.json
             tests/e2e/bench-results.md
+          if-no-files-found: ignore
+
+      - name: Check bench-results.md exists
+        id: check_md
+        if: always()
+        run: |
+          if [ -f tests/e2e/bench-results.md ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Post sticky PR comment
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && steps.check_md.outputs.exists == 'true'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: pull-pipeline-perf
