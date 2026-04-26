@@ -97,26 +97,54 @@ class SqlStatementRewriter
             return $sql;
         }
 
-        // Lex the statement once. Both the column-map walker and
-        // Base64ValueScanner used to lex the SQL independently — the
-        // WP_MySQL_Lexer pass dominated the rewrite slice (15% of db-apply
-        // wall on the bench fixture). Sharing the token array here cuts
-        // that to a single pass.
+        // Fast path: producer-shape INSERTs (the overwhelming majority of
+        // statements in a typical dump) are recovered with strpos / regex
+        // and never touch WP_MySQL_Lexer. The lexer pass costs ~15% of
+        // db-apply wall on the bench fixture, so skipping it for the
+        // common case is a big win. Anything the fast scanner doesn't
+        // recognise — UPDATE, INSERT … SELECT, qualified names, hex
+        // literals, escaped quotes — falls through to the lexer path
+        // below with identical behaviour.
+        $__t = microtime(true);
+        $fast = FastInsertScanner::scan($sql);
+        self::$prof_fast_scan_us += (microtime(true) - $__t) * 1e6;
+        if ($fast !== null) {
+            self::$prof_fast_scan_hits++;
+            $value_to_column_map = [
+                'table' => $fast['table'],
+                'column_map' => $fast['column_map'],
+            ];
+            $__t = microtime(true);
+            $scanner = Base64ValueScanner::from_entries($sql, $fast['base64_entries']);
+            self::$prof_scanner_ctor_us += (microtime(true) - $__t) * 1e6;
+            return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+        }
+        self::$prof_fast_scan_misses++;
+
+        // Slow path: lex once, share the token array between the column
+        // map walker and Base64ValueScanner.
         $__t = microtime(true);
         $tokens = self::significant_tokens($sql);
         self::$prof_lex_us += (microtime(true) - $__t) * 1e6;
 
-        // Recover the table name and a byte-offset→column map from the
-        // INSERT/UPDATE shape so we can hand each FROM_BASE64() value the
-        // right content-type hint downstream.
         $__t = microtime(true);
         $value_to_column_map = $this->map_values_to_columns_from_tokens($tokens);
         self::$prof_column_map_us += (microtime(true) - $__t) * 1e6;
 
-        // Iterate over all FROM_BASE64() values using the cursor-based scanner
         $__t = microtime(true);
         $scanner = new Base64ValueScanner($sql, $tokens);
         self::$prof_scanner_ctor_us += (microtime(true) - $__t) * 1e6;
+        return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+    }
+
+    /**
+     * Run the value-rewriting loop given an already-populated scanner and
+     * the table/column-map context. Shared between the fast and lexer paths.
+     *
+     * @param array{table: string, column_map: list<array{int, int, string}>}|null $value_to_column_map
+     */
+    private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
+    {
         while ($scanner->next_value()) {
             $__t = microtime(true);
             $value = $scanner->get_value();
@@ -165,6 +193,9 @@ class SqlStatementRewriter
         return $result;
     }
 
+    public static float $prof_fast_scan_us = 0.0;
+    public static int $prof_fast_scan_hits = 0;
+    public static int $prof_fast_scan_misses = 0;
     public static float $prof_lex_us = 0.0;
     public static float $prof_column_map_us = 0.0;
     public static float $prof_scanner_ctor_us = 0.0;

@@ -5322,6 +5322,9 @@ class ImportClient
             // is active (otherwise the rewriter is never invoked).
             if (class_exists('SqlStatementRewriter', false)) {
                 $profile["rewrite_inner"] = [
+                    "fast_scan_us" => SqlStatementRewriter::$prof_fast_scan_us,
+                    "fast_scan_hits" => SqlStatementRewriter::$prof_fast_scan_hits,
+                    "fast_scan_misses" => SqlStatementRewriter::$prof_fast_scan_misses,
                     "lex_us" => SqlStatementRewriter::$prof_lex_us,
                     "column_map_us" => SqlStatementRewriter::$prof_column_map_us,
                     "scanner_ctor_us" => SqlStatementRewriter::$prof_scanner_ctor_us,
