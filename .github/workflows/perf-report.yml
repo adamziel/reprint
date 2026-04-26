@@ -8,8 +8,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  build-phar:
-    name: Build reprint.phar
+  build-pr-phar:
+    name: Build reprint.phar (PR)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -22,19 +22,40 @@ jobs:
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
 
       - run: composer install --no-dev --no-interaction --prefer-dist
-
       - run: ./bin/build-reprint-phar.sh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: importer-phar-perf
+          name: importer-phar-pr
+          path: reprint.phar
+
+  build-trunk-phar:
+    name: Build reprint.phar (trunk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: trunk
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+
+      - run: composer install --no-dev --no-interaction --prefer-dist
+      - run: ./bin/build-reprint-phar.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: importer-phar-trunk
           path: reprint.phar
 
   bench:
     name: Pull pipeline benchmark
-    needs: build-phar
+    needs: [build-pr-phar, build-trunk-phar]
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       PHP_VERSION: '8.2'
 
@@ -43,9 +64,17 @@ jobs:
         with:
           submodules: true
 
-      - uses: actions/download-artifact@v4
+      - name: Download PR phar
+        uses: actions/download-artifact@v4
         with:
-          name: importer-phar-perf
+          name: importer-phar-pr
+          path: phars/pr
+
+      - name: Download trunk phar
+        uses: actions/download-artifact@v4
+        with:
+          name: importer-phar-trunk
+          path: phars/trunk
 
       - uses: actions/setup-node@v4
         with:
@@ -68,11 +97,30 @@ jobs:
             chmod +x /tmp/wp-cli.phar
           fi
 
-      - name: Run pull pipeline benchmark
+      - name: Bench PR
         working-directory: tests/e2e
         env:
-          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          IMPORTER_PATH: ${{ github.workspace }}/phars/pr/reprint.phar
+          BENCH_LABEL: pr
+          BENCH_JSON_OUT: bench-pr.json
+          BENCH_MD_OUT: bench-pr.md
         run: node benchmark/bench-pull.mjs
+
+      - name: Bench trunk
+        working-directory: tests/e2e
+        env:
+          IMPORTER_PATH: ${{ github.workspace }}/phars/trunk/reprint.phar
+          BENCH_LABEL: trunk
+          BENCH_JSON_OUT: bench-trunk.json
+          BENCH_MD_OUT: bench-trunk.md
+        # Don't fail the whole job if trunk's bench fails — we still want
+        # to publish the PR's numbers.
+        continue-on-error: true
+        run: node benchmark/bench-pull.mjs
+
+      - name: Render PR vs. trunk diff
+        working-directory: tests/e2e
+        run: node benchmark/render-diff.mjs
 
       - name: Upload benchmark artifacts
         if: always()
@@ -80,7 +128,8 @@ jobs:
         with:
           name: pull-pipeline-bench
           path: |
-            tests/e2e/bench-results.json
+            tests/e2e/bench-pr.json
+            tests/e2e/bench-trunk.json
             tests/e2e/bench-results.md
           if-no-files-found: ignore
 

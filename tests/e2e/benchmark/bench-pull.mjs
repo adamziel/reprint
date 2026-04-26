@@ -170,8 +170,11 @@ async function main() {
     const md = renderMarkdown(results, meta);
     console.log('\n' + md);
 
-    writeFileSync('bench-results.json', JSON.stringify({ meta, results }, null, 2));
-    writeFileSync('bench-results.md', md);
+    const label = process.env.BENCH_LABEL || 'pr';
+    const jsonOut = process.env.BENCH_JSON_OUT || 'bench-results.json';
+    const mdOut = process.env.BENCH_MD_OUT || 'bench-results.md';
+    writeFileSync(jsonOut, JSON.stringify({ meta: { ...meta, label }, results }, null, 2));
+    writeFileSync(mdOut, md);
 
     if (process.env.GITHUB_STEP_SUMMARY) {
         appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n');
