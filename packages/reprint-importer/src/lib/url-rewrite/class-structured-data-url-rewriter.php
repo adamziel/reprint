@@ -58,6 +58,15 @@ class StructuredDataUrlRewriter
     private string $base_url;
 
     /**
+     * Literal $from_url => $to_url map used by the strtr fast path.
+     * Same content as $url_mapping but kept here so try_literal_replace()
+     * can avoid array_combine on every call.
+     *
+     * @var array<string, string>
+     */
+    private array $literal_mapping;
+
+    /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
      */
     public function __construct(array $url_mapping)
@@ -87,6 +96,130 @@ class StructuredDataUrlRewriter
         // behaviour of the previous per-call default so outputs are unchanged.
         $from_urls = array_keys($url_mapping);
         $this->base_url = $from_urls[0] ?? '';
+
+        // Build the literal map. Cover both the plain `https://old.com` form
+        // and the JSON-escaped `https:\/\/old.com` form that block-comment
+        // JSON serialises slashes as. The structured pipeline knows about
+        // JSON contexts and re-escapes when replacing; the strtr fast path
+        // doesn't, so we pre-stage both forms.
+        $this->literal_mapping = [];
+        foreach ($url_mapping as $from => $to) {
+            $this->literal_mapping[$from] = $to;
+            $from_json = str_replace('/', '\\/', $from);
+            $to_json = str_replace('/', '\\/', $to);
+            if ($from_json !== $from) {
+                $this->literal_mapping[$from_json] = $to_json;
+            }
+        }
+    }
+
+    /**
+     * @var string|null Cached regex matching any literal from_url with a
+     *   safe URL-start boundary. Built lazily on first use because building
+     *   it requires the literal_mapping to be populated.
+     */
+    private ?string $literal_replace_regex = null;
+
+    /**
+     * Tokenization-free URL rewrite for the common case where the URL
+     * appears as a literal `$from_url{path}{query}{fragment}` substring.
+     *
+     * The structured pipeline's main cost is WPURL::parse — measured at
+     * ~78 µs per call, ~80% of URLInTextProcessor::next_url(). For URLs
+     * the user already wrote in the canonical form their mapping keys
+     * specify, the parse/replace_base_url roundtrip produces byte-
+     * identical output to a regex-driven substring substitution.
+     *
+     * Two safety nets keep this from rewriting things the structured
+     * pipeline wouldn't:
+     *
+     *   - Left-boundary lookbehind (?<!\w) prevents matching when the
+     *     from_url is glued onto another word, e.g.
+     *     `do-you-knowhttp://old.com/x` should not rewrite.
+     *
+     *   - Bailout on `[=&]https?://` patterns: when an URL appears as a
+     *     query-string parameter of an outer URL the structured
+     *     pipeline correctly leaves the inner URL alone (it sees only
+     *     the outer URL). strtr-style replacement can't make that
+     *     distinction, so we fall through to the structured pipeline
+     *     for any value that contains the giveaway.
+     *
+     *   - Post-replace source-domain check: if the result still mentions
+     *     a source host the regex didn't catch — port-stripped, scheme-
+     *     mismatched, scheme-less — fall through so the structured
+     *     pipeline can clean up the leftovers on the partially-rewritten
+     *     output.
+     *
+     * Three return cases:
+     *   - null: strtr-equivalent did nothing useful. Caller runs the
+     *     structured pipeline on the original value.
+     *   - ['result' => …, 'pipeline_needed' => false]: every URL in the
+     *     value was handled. Skip the structured pipeline entirely.
+     *   - ['result' => …, 'pipeline_needed' => true]: handled some URLs
+     *     but variants remain. Caller runs the structured pipeline on
+     *     this partial output so we keep what we already rewrote.
+     *
+     * @return array{result: string, pipeline_needed: bool}|null
+     */
+    public function try_literal_replace(string $value): ?array
+    {
+        // Bail on HTML / block markup. URLs inside JSON within block
+        // comments need structural awareness — BlockMarkupUrlProcessor
+        // applies JSON-style slash escaping when rewriting attribute
+        // values, and strtr / regex replacement can't replicate that
+        // context-sensitively. The presence of any `<` byte is the
+        // safe signal: no tag-or-block-comment markup, no escaping
+        // surprises.
+        if (strpos($value, '<') !== false) {
+            return null;
+        }
+        // Bail on URL-inside-URL nesting: `?url=https://...` or
+        // `&continue=http://...`. The structured pipeline correctly leaves
+        // these alone; we have no cheap way to.
+        if (preg_match('/[=&]https?:\/\//', $value)) {
+            return null;
+        }
+
+        if ($this->literal_replace_regex === null) {
+            $this->literal_replace_regex = $this->build_literal_replace_regex();
+        }
+        if ($this->literal_replace_regex === '') {
+            return null; // empty mapping
+        }
+
+        $changed = false;
+        $rewritten = preg_replace_callback(
+            $this->literal_replace_regex,
+            function ($m) use (&$changed) {
+                $changed = true;
+                return $this->literal_mapping[$m[1]];
+            },
+            $value
+        );
+        if (!$changed) {
+            return null;
+        }
+        foreach ($this->source_domains as $domain) {
+            if (strpos($rewritten, $domain) !== false) {
+                return ['result' => $rewritten, 'pipeline_needed' => true];
+            }
+        }
+        return ['result' => $rewritten, 'pipeline_needed' => false];
+    }
+
+    private function build_literal_replace_regex(): string
+    {
+        if (empty($this->literal_mapping)) {
+            return '';
+        }
+        // Sort by length descending so longer prefixes match first
+        // (e.g. http://example.com/blog before http://example.com).
+        $keys = array_keys($this->literal_mapping);
+        usort($keys, fn($a, $b) => strlen($b) - strlen($a));
+        $alternatives = implode('|', array_map(fn($k) => preg_quote($k, '/'), $keys));
+        // Left boundary: not a word char or '-' (so do-you-knowhttp:// doesn't
+        // match). preg_match with /u keeps things sane on multibyte input.
+        return '/(?<![\w-])(' . $alternatives . ')/u';
     }
 
     /**
@@ -152,7 +285,17 @@ class StructuredDataUrlRewriter
         // Base64ValueScanner in SqlStatementRewriter — this block
         // was for base64-within-base64 nesting which is rare in practice.
 
-        return $this->rewrite_urls($value, $content_type);
+        // Leaf text. Try the literal strtr path first — it handles the
+        // common case (URLs appear in the value as exact substrings of
+        // mapping keys) without going through WPURL::parse, which costs
+        // ~80µs per URL and is the largest single cost in db-apply for
+        // URL-rewriting workloads.
+        $literal = $this->try_literal_replace($value);
+        if ($literal !== null && !$literal['pipeline_needed']) {
+            return $literal['result'];
+        }
+        $start = $literal !== null ? $literal['result'] : $value;
+        return $this->rewrite_urls($start, $content_type);
     }
 
     /**
