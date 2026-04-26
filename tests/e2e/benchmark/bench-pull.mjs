@@ -58,6 +58,9 @@ async function seedSourceDb() {
 
         console.log(`Seeding source DB: ${SEED_POSTS} posts, ${SEED_POSTMETA} postmeta...`);
         // Speed up bulk inserts: skip per-row durability, defer index updates.
+        // Drop STRICT mode so TEXT columns without defaults (to_ping,
+        // pinged, post_content_filtered, etc.) accept implicit ''.
+        await conn.query("SET SESSION sql_mode='';");
         await conn.query('SET autocommit=0; SET unique_checks=0; SET foreign_key_checks=0;');
         await conn.query('ALTER TABLE wp_posts DISABLE KEYS; ALTER TABLE wp_postmeta DISABLE KEYS;');
 
