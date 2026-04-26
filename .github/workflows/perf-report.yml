@@ -1,0 +1,73 @@
+name: Performance Report
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  bench:
+    name: Pull pipeline benchmark
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      PHP_VERSION: '8.2'
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+
+      - run: composer install --no-dev --no-interaction --prefer-dist
+
+      - run: ./bin/build-reprint-phar.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup infrastructure
+        run: tests/e2e/ci/setup-infrastructure.sh "${{ env.PHP_VERSION }}"
+
+      - name: Setup test sites
+        run: tests/e2e/setup.sh
+
+      - name: Install e2e dependencies
+        working-directory: tests/e2e
+        run: npm install
+
+      - name: Download wp-cli
+        run: |
+          if [ ! -f /tmp/wp-cli.phar ]; then
+            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
+            chmod +x /tmp/wp-cli.phar
+          fi
+
+      - name: Run pull pipeline benchmark
+        working-directory: tests/e2e
+        env:
+          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+        run: node benchmark/bench-pull.mjs
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pull-pipeline-bench
+          path: |
+            tests/e2e/bench-results.json
+            tests/e2e/bench-results.md
+
+      - name: Post sticky PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pull-pipeline-perf
+          path: tests/e2e/bench-results.md
