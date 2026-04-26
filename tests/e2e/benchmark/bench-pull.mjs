@@ -44,12 +44,12 @@ async function provisionDatabase() {
     await conn.end();
 }
 
-function runStage(stage, stateDir, extraArgs = []) {
+function runStage(stage, stateDir, extraArgs = [], { includeUrl = true } = {}) {
     const url = `${getSiteUrl(SITE)}&directory=${getSiteDir(SITE)}`;
     const args = [
         IMPORTER_PATH,
         stage,
-        url,
+        ...(includeUrl ? [url] : []),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
         `--secret=${getSiteSecret(SITE)}`,
@@ -137,20 +137,26 @@ async function main() {
         `--target-db=${IMPORT_DB}`,
         `--new-site-url=http://localhost:9999`,
     ];
-    const runtimeArgs = ['--runtime=none'];
+    const runtimeOutDir = join(stateDir, 'runtime-out');
+    mkdirSync(runtimeOutDir, { recursive: true });
+    const runtimeArgs = [
+        '--runtime=php-builtin',
+        `--output-dir=${runtimeOutDir}`,
+    ];
 
     const stages = [
         { name: 'preflight', extra: [] },
         { name: 'files-pull', extra: [] },
         { name: 'db-pull', extra: [] },
         { name: 'db-apply', extra: dbApplyArgs },
-        { name: 'apply-runtime', extra: runtimeArgs },
+        // apply-runtime is local-only; it doesn't take a remote URL.
+        { name: 'apply-runtime', extra: runtimeArgs, includeUrl: false },
     ];
 
     const results = [];
-    for (const { name, extra } of stages) {
+    for (const { name, extra, includeUrl } of stages) {
         console.log(`-> ${name}`);
-        const r = runStage(name, stateDir, extra);
+        const r = runStage(name, stateDir, extra, { includeUrl });
         results.push(r);
         console.log(`   ${r.ok ? 'ok' : 'FAIL'} in ${fmtMs(r.elapsedMs)} (attempts=${r.attempts})`);
         if (!r.ok) {
