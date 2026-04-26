@@ -59,7 +59,7 @@ jobs:
             split_commit="$(git subtree split --prefix="packages/${pkg}" HEAD)"
             remote_url="https://github.com/${GH_ORG}/${pkg}.git"
 
-            git push "${remote_url}" "${split_commit}:refs/heads/main"
+            git push --force "${remote_url}" "${split_commit}:refs/heads/main"
             git push "${remote_url}" "${split_commit}:refs/tags/${{ steps.release_ref.outputs.tag }}"
           done
 
