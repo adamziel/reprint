@@ -5065,6 +5065,23 @@ class ImportClient
             "message" => "Applying SQL" . ($statements_total !== null ? " ({$statements_total} statements)" : ""),
         ]);
 
+        // Per-stage profile. Cheap monotonic timers around the four hot
+        // sections — read I/O, query stream parse, URL rewrite, PDO exec —
+        // so the bench harness can show *where* db-apply spends its time
+        // rather than just the total wall clock.
+        $profile = [
+            "read_io_us" => 0.0,
+            "qs_append_us" => 0.0,
+            "qs_next_us" => 0.0,
+            "rewrite_us" => 0.0,
+            "exec_us" => 0.0,
+            "rewrite_calls" => 0,
+            "exec_calls" => 0,
+            "stmt_kinds" => [],
+            "started_at" => microtime(true),
+        ];
+        $profile_path = $this->state_dir . "/.import-apply-profile.json";
+
         try {
             $chunk_size = 64 * 1024; // 64KB read chunks
 
@@ -5078,14 +5095,24 @@ class ImportClient
                     pcntl_signal_dispatch();
                 }
 
+                $t0 = microtime(true);
                 $data = fread($sql_handle, $chunk_size);
+                $profile["read_io_us"] += (microtime(true) - $t0) * 1e6;
                 if ($data === false || $data === '') {
                     break;
                 }
                 $total_bytes_read += strlen($data);
+                $t0 = microtime(true);
                 $query_stream->append_sql($data);
+                $profile["qs_append_us"] += (microtime(true) - $t0) * 1e6;
 
-                while ($query_stream->next_query()) {
+                while (true) {
+                    $t0 = microtime(true);
+                    $has_next = $query_stream->next_query();
+                    $profile["qs_next_us"] += (microtime(true) - $t0) * 1e6;
+                    if (!$has_next) {
+                        break;
+                    }
                     $query = $query_stream->get_query();
                     $stmt_count++;
 
@@ -5095,14 +5122,28 @@ class ImportClient
                         continue;
                     }
 
+                    // Cheap statement-kind classification — first non-space
+                    // word lets us see how many INSERTs vs CREATE vs UPDATE
+                    // dominate the apply phase.
+                    if (preg_match('/^\s*([A-Za-z]+)/', $query, $m)) {
+                        $kind = strtoupper($m[1]);
+                        $profile["stmt_kinds"][$kind] = ($profile["stmt_kinds"][$kind] ?? 0) + 1;
+                    }
+
                     // Rewrite URLs if mapping is configured
                     if ($stmt_rewriter) {
+                        $t0 = microtime(true);
                         $query = $stmt_rewriter->rewrite($query);
+                        $profile["rewrite_us"] += (microtime(true) - $t0) * 1e6;
+                        $profile["rewrite_calls"]++;
                     }
 
                     // Execute against target database
                     try {
+                        $t0 = microtime(true);
                         $pdo->exec($query);
+                        $profile["exec_us"] += (microtime(true) - $t0) * 1e6;
+                        $profile["exec_calls"]++;
                     } catch (PDOException $e) {
                         $this->audit_log(
                             sprintf(
@@ -5172,12 +5213,23 @@ class ImportClient
                     continue;
                 }
 
+                if (preg_match('/^\s*([A-Za-z]+)/', $query, $m)) {
+                    $kind = strtoupper($m[1]);
+                    $profile["stmt_kinds"][$kind] = ($profile["stmt_kinds"][$kind] ?? 0) + 1;
+                }
+
                 if ($stmt_rewriter) {
+                    $t0 = microtime(true);
                     $query = $stmt_rewriter->rewrite($query);
+                    $profile["rewrite_us"] += (microtime(true) - $t0) * 1e6;
+                    $profile["rewrite_calls"]++;
                 }
 
                 try {
+                    $t0 = microtime(true);
                     $pdo->exec($query);
+                    $profile["exec_us"] += (microtime(true) - $t0) * 1e6;
+                    $profile["exec_calls"]++;
                 } catch (PDOException $e) {
                     $this->audit_log(
                         sprintf(
@@ -5262,6 +5314,36 @@ class ImportClient
             }
         } finally {
             fclose($sql_handle);
+            $profile["wall_us"] = (microtime(true) - $profile["started_at"]) * 1e6;
+            $profile["statements_executed"] = $statements_executed;
+            $profile["bytes_read"] = $total_bytes_read;
+            unset($profile["started_at"]);
+            // Inner rewriter breakdown — only meaningful when a URL mapping
+            // is active (otherwise the rewriter is never invoked).
+            if (class_exists('SqlStatementRewriter', false)) {
+                $profile["rewrite_inner"] = [
+                    "column_map_us" => SqlStatementRewriter::$prof_column_map_us,
+                    "scanner_ctor_us" => SqlStatementRewriter::$prof_scanner_ctor_us,
+                    "get_value_us" => SqlStatementRewriter::$prof_get_value_us,
+                    "url_rewrite_us" => SqlStatementRewriter::$prof_url_rewrite_us,
+                    "get_result_us" => SqlStatementRewriter::$prof_get_result_us,
+                    "values_seen" => SqlStatementRewriter::$prof_values_seen,
+                    "values_with_http" => SqlStatementRewriter::$prof_values_with_http,
+                    "values_skipped_no_http" => SqlStatementRewriter::$prof_values_skipped_no_http,
+                ];
+            }
+            if (class_exists('Base64ValueScanner', false)) {
+                $profile["scanner_inner"] = [
+                    "lexer_us" => Base64ValueScanner::$prof_lexer_us,
+                    "b64_decode_us" => Base64ValueScanner::$prof_b64_decode_us,
+                    "decoded_count" => Base64ValueScanner::$prof_decoded_count,
+                ];
+            }
+            // Best-effort write — never let profile I/O break db-apply.
+            @file_put_contents(
+                $profile_path,
+                json_encode($profile, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
+            );
         }
     }
 

@@ -100,12 +100,19 @@ class SqlStatementRewriter
         // Recover the table name and a byte-offset→column map from the
         // INSERT/UPDATE shape so we can hand each FROM_BASE64() value the
         // right content-type hint downstream.
+        $__t = microtime(true);
         $value_to_column_map = $this->map_values_to_columns($sql);
+        self::$prof_column_map_us += (microtime(true) - $__t) * 1e6;
 
         // Iterate over all FROM_BASE64() values using the cursor-based scanner
+        $__t = microtime(true);
         $scanner = new Base64ValueScanner($sql);
+        self::$prof_scanner_ctor_us += (microtime(true) - $__t) * 1e6;
         while ($scanner->next_value()) {
+            $__t = microtime(true);
             $value = $scanner->get_value();
+            self::$prof_get_value_us += (microtime(true) - $__t) * 1e6;
+            self::$prof_values_seen++;
 
             // Skip values that can't contain a URL we'd rewrite. Every
             // rewritable domain starts with http:// or https://, so a value
@@ -114,8 +121,10 @@ class SqlStatementRewriter
             // pipeline (HTML parse, block markup, PHP/JSON recursion) per value.
             // See https://github.com/adamziel/reprint/pull/152
             if (strpos($value, 'http') === false) {
+                self::$prof_values_skipped_no_http++;
                 continue;
             }
+            self::$prof_values_with_http++;
 
             // Determine content type hint for this column
             $content_type = null;
@@ -131,7 +140,9 @@ class SqlStatementRewriter
 
             // Rewrite URLs in the value — StructuredDataUrlRewriter classifies the
             // content type and applies the right strategy for each.
+            $__t = microtime(true);
             $rewritten = $this->url_rewriter->rewrite($value, $content_type);
+            self::$prof_url_rewrite_us += (microtime(true) - $__t) * 1e6;
 
             // Only replace if the value actually changed
             if ($rewritten !== $value) {
@@ -139,8 +150,20 @@ class SqlStatementRewriter
             }
         }
 
-        return $scanner->get_result();
+        $__t = microtime(true);
+        $result = $scanner->get_result();
+        self::$prof_get_result_us += (microtime(true) - $__t) * 1e6;
+        return $result;
     }
+
+    public static float $prof_column_map_us = 0.0;
+    public static float $prof_scanner_ctor_us = 0.0;
+    public static float $prof_get_value_us = 0.0;
+    public static float $prof_url_rewrite_us = 0.0;
+    public static float $prof_get_result_us = 0.0;
+    public static int $prof_values_seen = 0;
+    public static int $prof_values_with_http = 0;
+    public static int $prof_values_skipped_no_http = 0;
 
     /**
      * Walk the lexer output to recover, for an INSERT or UPDATE statement,

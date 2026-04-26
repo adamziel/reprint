@@ -190,6 +190,25 @@ function renderMarkdown(results, meta) {
     }
     lines.push(`| **Total** | **${fmtMs(total)}** | | |`);
     lines.push('');
+    const apply = results.find((r) => r.stage === 'db-apply' && r.profile);
+    if (apply) {
+        const p = apply.profile;
+        const fmtUs = (us) => fmtMs(us / 1000);
+        lines.push('### `db-apply` breakdown');
+        lines.push('');
+        lines.push('| Bucket | Time | Calls |');
+        lines.push('|---|---:|---:|');
+        lines.push(`| read I/O | ${fmtUs(p.read_io_us)} | — |`);
+        lines.push(`| query stream parse | ${fmtUs(p.query_stream_us)} | — |`);
+        lines.push(`| URL rewrite | ${fmtUs(p.rewrite_us)} | ${p.rewrite_calls} |`);
+        lines.push(`| PDO exec | ${fmtUs(p.exec_us)} | ${p.exec_calls} |`);
+        lines.push('');
+        const kinds = Object.entries(p.stmt_kinds || {}).sort((a, b) => b[1] - a[1]);
+        if (kinds.length) {
+            lines.push('Statement kinds: ' + kinds.map(([k, v]) => `\`${k}\`=${v}`).join(', '));
+            lines.push('');
+        }
+    }
     return lines.join('\n');
 }
 
@@ -240,8 +259,24 @@ async function main() {
     for (const { name, extra, includeUrl } of stages) {
         console.log(`-> ${name}`);
         const r = runStage(name, stateDir, extra, { includeUrl });
+        // Pick up the per-stage profile JSON written by the importer (currently
+        // db-apply only). Surfaces the inner breakdown — read I/O, query
+        // parse, URL rewrite, PDO exec — so the bench can show *where* the
+        // wall-clock goes, not just how long it took overall.
+        const profilePath = join(stateDir, '.import-apply-profile.json');
+        if (name === 'db-apply' && existsSync(profilePath)) {
+            try {
+                r.profile = JSON.parse(readFileSync(profilePath, 'utf-8'));
+            } catch { /* best effort */ }
+        }
         results.push(r);
         console.log(`   ${r.ok ? 'ok' : 'FAIL'} in ${fmtMs(r.elapsedMs)} (attempts=${r.attempts})`);
+        if (r.profile) {
+            const p = r.profile;
+            const usToS = (us) => (us / 1e6).toFixed(2) + 's';
+            console.log(`   db-apply breakdown: read=${usToS(p.read_io_us)} parse=${usToS(p.query_stream_us)} rewrite=${usToS(p.rewrite_us)} exec=${usToS(p.exec_us)} (${p.exec_calls} statements)`);
+            console.log(`   stmt kinds: ${Object.entries(p.stmt_kinds).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+        }
         if (!r.ok) {
             console.error(`   stderr (tail):\n${r.stderr}`);
             console.error(`   stdout (tail):\n${r.stdout}`);

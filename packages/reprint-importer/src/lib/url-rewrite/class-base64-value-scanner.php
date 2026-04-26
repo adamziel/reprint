@@ -108,15 +108,22 @@ class Base64ValueScanner
      * Tokenize the SQL and find all FROM_BASE64('...') expressions.
      * Tracks whether each is wrapped in CONVERT(...) for correct expr_start offset.
      */
+    public static float $prof_lexer_us = 0.0;
+    public static float $prof_b64_decode_us = 0.0;
+    public static int $prof_decoded_count = 0;
+
     private function scan(): void
     {
+        $__t = microtime(true);
         $lexer = new WP_MySQL_Lexer($this->sql);
+        self::$prof_lexer_us += (microtime(true) - $__t) * 1e6;
 
         // Track the last two tokens so we can detect CONVERT( before FROM_BASE64.
         // next_token() skips whitespace/comments, so CONVERT ( FROM_BASE64 appears
         // as three consecutive tokens.
         $prev = [null, null];
 
+        $__loop_start = microtime(true);
         while ($lexer->next_token()) {
             $token = $lexer->get_token();
 
@@ -144,7 +151,10 @@ class Base64ValueScanner
                         $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
                         || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
                     ) {
+                        $__td = microtime(true);
                         $decoded = base64_decode($inner->get_value(), true);
+                        self::$prof_b64_decode_us += (microtime(true) - $__td) * 1e6;
+                        self::$prof_decoded_count++;
                         $this->entries[] = [
                             'expr_start' => $expr_start,
                             'quote_start' => $inner->start,
@@ -165,5 +175,6 @@ class Base64ValueScanner
             $prev[0] = $prev[1];
             $prev[1] = $token;
         }
+        self::$prof_lexer_us += (microtime(true) - $__loop_start) * 1e6;
     }
 }
