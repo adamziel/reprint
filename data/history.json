@@ -529,6 +529,54 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "4c621a4a5f9d59933ffc6c12f86b57de8af1e202",
+      "shortSha": "4c621a4",
+      "date": "2026-04-27T17:01:59+02:00",
+      "message": "Add manual perf-history backfill workflow (#181)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.5",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 76.60063600000103,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5276.96394,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 113455.70623399998,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 40659.40285099999,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 53.573468999995384,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
