@@ -1,0 +1,149 @@
+name: Performance History
+
+# After each commit lands on trunk, run the pull-pipeline benchmark and
+# publish a new data point to GitHub Pages (gh-pages branch).
+#
+# The page itself lives in `perf-site/` on trunk and is copied to gh-pages
+# on each run, so edits to the visualization happen via normal PRs.
+
+on:
+  push:
+    branches: [trunk]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: perf-history
+  cancel-in-progress: false
+
+jobs:
+  build-phar:
+    name: Build reprint.phar (trunk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+
+      - run: composer install --no-dev --no-interaction --prefer-dist
+      - run: ./bin/build-reprint-phar.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: importer-phar-trunk
+          path: reprint.phar
+
+  bench-and-publish:
+    name: Bench trunk and publish to gh-pages
+    needs: build-phar
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      PHP_VERSION: '8.5'
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Download trunk phar
+        uses: actions/download-artifact@v4
+        with:
+          name: importer-phar-trunk
+          path: phars/trunk
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup infrastructure
+        run: tests/e2e/ci/setup-infrastructure.sh "${{ env.PHP_VERSION }}"
+
+      - name: Setup test sites
+        run: tests/e2e/setup.sh
+
+      - name: Install e2e dependencies
+        working-directory: tests/e2e
+        run: npm install
+
+      - name: Download wp-cli
+        run: |
+          if [ ! -f /tmp/wp-cli.phar ]; then
+            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
+            chmod +x /tmp/wp-cli.phar
+          fi
+
+      - name: Bench trunk
+        working-directory: tests/e2e
+        env:
+          IMPORTER_PATH: ${{ github.workspace }}/phars/trunk/reprint.phar
+          BENCH_LABEL: trunk
+          BENCH_JSON_OUT: bench-trunk.json
+          BENCH_MD_OUT: bench-trunk.md
+        run: node benchmark/bench-pull.mjs
+
+      - name: Capture commit metadata
+        id: commit
+        run: |
+          echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          {
+            echo 'message<<EOF'
+            git log -1 --pretty=%s
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+          echo "author=$(git log -1 --pretty=%an)" >> "$GITHUB_OUTPUT"
+          echo "date=$(git log -1 --pretty=%cI)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout gh-pages branch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          mkdir -p pages
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch origin gh-pages:gh-pages
+            git worktree add pages gh-pages
+          else
+            git worktree add --detach pages
+            (cd pages && git checkout --orphan gh-pages && git reset --hard && find . -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +)
+          fi
+
+      - name: Update site files and append history entry
+        env:
+          BENCH_JSON: tests/e2e/bench-trunk.json
+          HISTORY_JSON: pages/data/history.json
+          COMMIT_SHA: ${{ steps.commit.outputs.sha }}
+          COMMIT_DATE: ${{ steps.commit.outputs.date }}
+          COMMIT_MESSAGE: ${{ steps.commit.outputs.message }}
+          COMMIT_AUTHOR: ${{ steps.commit.outputs.author }}
+        run: |
+          set -euo pipefail
+          mkdir -p pages/data
+          # Refresh static site files from trunk on every run, but never
+          # clobber the accumulated history.json on gh-pages.
+          rsync -a --exclude='data/history.json' perf-site/ pages/
+          # First-time bootstrap: seed history from the version checked into trunk.
+          if [ ! -f pages/data/history.json ] && [ -f perf-site/data/history.json ]; then
+            cp perf-site/data/history.json pages/data/history.json
+          fi
+          touch pages/.nojekyll
+          node tests/e2e/benchmark/append-history.mjs
+
+      - name: Commit and push
+        working-directory: pages
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to publish."
+            exit 0
+          fi
+          git commit -m "perf: data point for ${{ steps.commit.outputs.sha }}"
+          git push origin gh-pages

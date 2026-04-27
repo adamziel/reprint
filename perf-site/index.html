@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Reprint pull-pipeline performance history</title>
+<style>
+    :root { color-scheme: light dark; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        margin: 0;
+        padding: 2rem;
+        max-width: 1100px;
+        margin-inline: auto;
+        line-height: 1.5;
+    }
+    h1 { margin-top: 0; }
+    .meta { color: #666; font-size: 0.9rem; }
+    .chart-wrap {
+        margin: 2rem 0;
+        padding: 1rem;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+    }
+    h2 { margin-top: 0; font-size: 1.1rem; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+    th, td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; text-align: left; }
+    th { background: #f6f6f6; position: sticky; top: 0; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .scroll { max-height: 480px; overflow: auto; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }
+    a { color: #0366d6; }
+    @media (prefers-color-scheme: dark) {
+        body { background: #1a1a1a; color: #e6e6e6; }
+        .chart-wrap { border-color: #333; }
+        th { background: #222; }
+        th, td { border-bottom-color: #2a2a2a; }
+        .meta { color: #999; }
+        a { color: #58a6ff; }
+    }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<h1>Pull pipeline performance — trunk history</h1>
+<p class="meta">
+    One data point per merged commit on <code>trunk</code>. Numbers carry runner noise; treat
+    individual commits as directional, look at trends.
+</p>
+
+<div class="chart-wrap">
+    <h2>Total wall time</h2>
+    <canvas id="totalChart" height="120"></canvas>
+</div>
+
+<div class="chart-wrap">
+    <h2>Per-stage wall time</h2>
+    <canvas id="stageChart" height="180"></canvas>
+</div>
+
+<div class="chart-wrap">
+    <h2>Recent commits</h2>
+    <div class="scroll">
+        <table id="entries">
+            <thead>
+                <tr>
+                    <th>Commit</th>
+                    <th>Date</th>
+                    <th>Message</th>
+                    <th class="num">Total</th>
+                    <th class="num">preflight</th>
+                    <th class="num">files-pull</th>
+                    <th class="num">db-pull</th>
+                    <th class="num">db-apply</th>
+                    <th class="num">apply-runtime</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
+<p class="meta" id="footer"></p>
+
+<script>
+const STAGES = ['preflight', 'files-pull', 'db-pull', 'db-apply', 'apply-runtime'];
+const COLORS = {
+    'preflight': '#1f77b4',
+    'files-pull': '#2ca02c',
+    'db-pull': '#ff7f0e',
+    'db-apply': '#d62728',
+    'apply-runtime': '#9467bd',
+};
+
+function fmtMs(ms) {
+    if (ms == null) return '—';
+    if (ms < 1000) return ms.toFixed(0) + ' ms';
+    return (ms / 1000).toFixed(2) + ' s';
+}
+
+function repoSlug() {
+    // Best-effort: derive owner/repo from pages URL "<owner>.github.io/<repo>/...".
+    const host = location.hostname;
+    const path = location.pathname.replace(/\/+$/, '');
+    const owner = host.split('.')[0];
+    const repo = path.split('/').filter(Boolean)[0] || '';
+    if (!owner || !repo) return null;
+    return owner + '/' + repo;
+}
+
+async function load() {
+    const res = await fetch('data/history.json', { cache: 'no-store' });
+    if (!res.ok) {
+        document.body.insertAdjacentHTML('beforeend',
+            '<p><strong>No history yet.</strong> Once a commit lands on trunk and the perf-history workflow runs, data will appear here.</p>');
+        return;
+    }
+    const data = await res.json();
+    const entries = (data.entries || []).slice().sort((a, b) => new Date(a.date) - new Date(b.date));
+    if (!entries.length) return;
+
+    const labels = entries.map((e) => e.shortSha);
+    const stageData = Object.fromEntries(STAGES.map((s) => [s,
+        entries.map((e) => (e.results.find((r) => r.stage === s) || {}).elapsedMs ?? null)
+    ]));
+    const totals = entries.map((e) => e.results.reduce((sum, r) => sum + (r.elapsedMs || 0), 0));
+
+    const tooltipFooter = (items) => {
+        const i = items[0].dataIndex;
+        const e = entries[i];
+        return [e.message, e.author, new Date(e.date).toLocaleString()];
+    };
+
+    new Chart(document.getElementById('totalChart'), {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [{
+                label: 'Total',
+                data: totals,
+                borderColor: '#333',
+                backgroundColor: 'rgba(0,0,0,0.05)',
+                tension: 0.2,
+                pointRadius: 3,
+            }],
+        },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                tooltip: { callbacks: { footer: tooltipFooter } },
+                legend: { display: false },
+            },
+            scales: { y: { ticks: { callback: fmtMs } } },
+        },
+    });
+
+    new Chart(document.getElementById('stageChart'), {
+        type: 'line',
+        data: {
+            labels,
+            datasets: STAGES.map((s) => ({
+                label: s,
+                data: stageData[s],
+                borderColor: COLORS[s],
+                backgroundColor: COLORS[s] + '22',
+                tension: 0.2,
+                pointRadius: 2,
+            })),
+        },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { tooltip: { callbacks: { footer: tooltipFooter } } },
+            scales: { y: { ticks: { callback: fmtMs } } },
+        },
+    });
+
+    const slug = repoSlug();
+    const tbody = document.querySelector('#entries tbody');
+    const recent = entries.slice().reverse();
+    for (const e of recent) {
+        const tr = document.createElement('tr');
+        const total = e.results.reduce((s, r) => s + (r.elapsedMs || 0), 0);
+        const byStage = Object.fromEntries(e.results.map((r) => [r.stage, r.elapsedMs]));
+        const shaCell = slug
+            ? `<a href="https://github.com/${slug}/commit/${e.sha}"><code>${e.shortSha}</code></a>`
+            : `<code>${e.shortSha}</code>`;
+        tr.innerHTML = `
+            <td>${shaCell}</td>
+            <td>${new Date(e.date).toISOString().slice(0, 10)}</td>
+            <td>${escapeHtml(e.message).slice(0, 80)}</td>
+            <td class="num">${fmtMs(total)}</td>
+            <td class="num">${fmtMs(byStage['preflight'])}</td>
+            <td class="num">${fmtMs(byStage['files-pull'])}</td>
+            <td class="num">${fmtMs(byStage['db-pull'])}</td>
+            <td class="num">${fmtMs(byStage['db-apply'])}</td>
+            <td class="num">${fmtMs(byStage['apply-runtime'])}</td>
+        `;
+        tbody.appendChild(tr);
+    }
+
+    document.getElementById('footer').textContent =
+        `${entries.length} commits · last updated ${new Date(entries[entries.length - 1].date).toLocaleString()}`;
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+}
+
+load().catch((err) => {
+    document.body.insertAdjacentHTML('beforeend',
+        `<p><strong>Failed to load history.json:</strong> ${escapeHtml(err.message)}</p>`);
+});
+</script>
+</body>
+</html>
