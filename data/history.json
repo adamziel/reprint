@@ -481,6 +481,54 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "e55bd34d4b6a57bee9b51727aeaa0e3e32519166",
+      "shortSha": "e55bd34",
+      "date": "2026-04-27T16:51:24+02:00",
+      "message": "Publish a per-commit pull-pipeline performance page (#180)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.5",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 76.12764400000015,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5323.522999000001,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 111312.15483400002,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 38732.617734,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 52.913028000009945,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
