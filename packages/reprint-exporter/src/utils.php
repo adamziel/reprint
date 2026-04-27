@@ -40,10 +40,9 @@ use RuntimeException;
 // path. In a monorepo where the same package is mirrored into vendor/
 // (e.g. tests/ pulls in vendor/wp-php-toolkit/reprint-exporter/src/utils.php
 // AND packages/reprint-exporter/src/utils.php), both copies are loaded.
-// Guard against redeclaration so only the first wins.
-if (function_exists(__NAMESPACE__ . '\\build_pdo_dsn')) {
-    return;
-}
+// `return` from inside a bracketed namespace block does not abort the
+// whole file, so guard the declarations themselves.
+if (!function_exists(__NAMESPACE__ . '\\build_pdo_dsn')) {
 
 /**
  * Builds a PDO DSN string from a WordPress DB_HOST value.
@@ -224,5 +223,7 @@ function assert_valid_path(string $path, string $label = "path"): void
         }
     }
 }
+
+} // !function_exists guard
 
 }
