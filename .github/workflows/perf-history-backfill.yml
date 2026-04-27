@@ -1,0 +1,173 @@
+name: Performance History Backfill
+
+# Manually retroactively populate the perf-history dashboard for trunk
+# commits since a given date. For each commit, build that commit's phar,
+# run the current pull-pipeline benchmark against it, and append the
+# data point to data/history.json on the gh-pages branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'Backfill trunk commits with committer date >= this (ISO 8601, e.g. 2026-04-23)'
+        required: true
+        default: '2026-04-23'
+      limit:
+        description: 'Max number of commits to process (newest first within range)'
+        required: false
+        default: '20'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: perf-history
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      PHP_VERSION: '8.5'
+
+    steps:
+      - name: Checkout latest trunk (host for bench scripts)
+        uses: actions/checkout@v5
+        with:
+          ref: trunk
+          submodules: true
+          path: host
+          fetch-depth: 0
+
+      - name: Clone trunk into src-historical for per-commit checkout
+        run: |
+          set -euo pipefail
+          git clone --no-local host src-historical
+          (cd src-historical && git fetch origin '+refs/heads/trunk:refs/remotes/origin/trunk')
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup infrastructure
+        working-directory: host
+        run: tests/e2e/ci/setup-infrastructure.sh "${{ env.PHP_VERSION }}"
+
+      - name: Setup test sites
+        working-directory: host
+        run: tests/e2e/setup.sh
+
+      - name: Install e2e dependencies
+        working-directory: host/tests/e2e
+        run: npm install
+
+      - name: Download wp-cli
+        run: |
+          if [ ! -f /tmp/wp-cli.phar ]; then
+            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
+            chmod +x /tmp/wp-cli.phar
+          fi
+
+      - name: Checkout gh-pages worktree
+        working-directory: host
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git fetch origin gh-pages:gh-pages
+          git worktree add ../pages gh-pages
+
+      - name: Enumerate target commits
+        id: commits
+        working-directory: src-historical
+        run: |
+          set -euo pipefail
+          SINCE="${{ github.event.inputs.since }}"
+          LIMIT="${{ github.event.inputs.limit }}"
+          # Newest-first; loop will reverse to chronological for nicer logs.
+          git log origin/trunk --since="$SINCE" --pretty=format:'%H' -n "$LIMIT" > /tmp/shas.txt
+          echo "Selected commits:"
+          cat /tmp/shas.txt
+          echo "count=$(wc -l < /tmp/shas.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Bench each commit and append to history
+        env:
+          BENCH_LABEL: backfill
+        run: |
+          set -euo pipefail
+          # Process oldest-first so the JSON tail reflects chronology nicely.
+          tac /tmp/shas.txt > /tmp/shas-asc.txt
+          while read -r SHA; do
+            [ -z "$SHA" ] && continue
+            echo "::group::Bench $SHA"
+
+            # Skip if this sha already has an entry on gh-pages.
+            if node -e "const h=require('./pages/data/history.json'); process.exit(h.entries.some(e=>e.sha==='$SHA')?0:1)" 2>/dev/null; then
+              echo "Already present in history.json, skipping."
+              echo "::endgroup::"
+              continue
+            fi
+
+            (
+              cd src-historical
+              git checkout --force --detach "$SHA"
+              git submodule update --init --recursive
+              composer install --no-dev --no-interaction --prefer-dist
+              ./bin/build-reprint-phar.sh
+            )
+
+            META_DATE=$(cd src-historical && git log -1 --pretty=%cI "$SHA")
+            META_MSG=$(cd src-historical && git log -1 --pretty=%s "$SHA")
+            META_AUTHOR=$(cd src-historical && git log -1 --pretty=%an "$SHA")
+
+            (
+              cd host/tests/e2e
+              IMPORTER_PATH="$GITHUB_WORKSPACE/src-historical/reprint.phar" \
+              BENCH_LABEL=backfill \
+              BENCH_JSON_OUT="$GITHUB_WORKSPACE/bench.json" \
+              BENCH_MD_OUT="$GITHUB_WORKSPACE/bench.md" \
+                node benchmark/bench-pull.mjs || {
+                  echo "Bench failed for $SHA, skipping append."
+                  echo "::endgroup::"
+                  exit 0
+                }
+            )
+
+            BENCH_JSON="$GITHUB_WORKSPACE/bench.json" \
+            HISTORY_JSON="$GITHUB_WORKSPACE/pages/data/history.json" \
+            COMMIT_SHA="$SHA" \
+            COMMIT_DATE="$META_DATE" \
+            COMMIT_MESSAGE="$META_MSG" \
+            COMMIT_AUTHOR="$META_AUTHOR" \
+              node host/tests/e2e/benchmark/append-history.mjs
+
+            # Sort entries by date so the page renders cleanly even if commits
+            # were processed out of order.
+            node -e "
+              const fs=require('fs');
+              const p='$GITHUB_WORKSPACE/pages/data/history.json';
+              const h=JSON.parse(fs.readFileSync(p,'utf8'));
+              h.entries.sort((a,b)=>new Date(a.date)-new Date(b.date));
+              fs.writeFileSync(p, JSON.stringify(h,null,2)+'\n');
+            "
+
+            echo "::endgroup::"
+          done < /tmp/shas-asc.txt
+
+      - name: Commit and push gh-pages
+        working-directory: pages
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No new data points to publish."
+            exit 0
+          fi
+          git commit -m "perf: backfill trunk commits since ${{ github.event.inputs.since }}"
+          git push origin gh-pages
