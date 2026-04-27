@@ -41,3 +41,7 @@ require_once $sdi . '/mysql/class-wp-mysql-parser.php';
 
 // Local: naive query stream (not part of the submodule)
 require_once __DIR__ . '/class-wp-mysql-naive-query-stream.php';
+// Local: fast query stream — strcspn-driven scanner that falls back to
+// the naive parser on any unrecoverable state. Loaded after the naive
+// parser because it instantiates one as a fallback.
+require_once __DIR__ . '/class-wp-mysql-fast-query-stream.php';

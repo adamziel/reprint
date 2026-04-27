@@ -5019,8 +5019,30 @@ class ImportClient
             false,
         );
 
-        // Stream db.sql through the query stream and execute
-        $query_stream = new \WP_MySQL_Naive_Query_Stream();
+        // Stream db.sql through the query stream and execute. Use the
+        // fast strcspn-based parser by default; it self-falls-back to
+        // WP_MySQL_Naive_Query_Stream if it ever fails to make progress
+        // (buffer overflow without a top-level semicolon, or input drained
+        // mid-string/comment), so the slow path is still available for
+        // any input the fast scanner doesn't handle.
+        $query_stream = new \WP_MySQL_FastQueryStream();
+        $query_stream->set_error_logger(function (array $err) use (&$stmt_count) {
+            $this->audit_log(
+                sprintf(
+                    "FAST QUERY STREAM fallback | reason=%s | byte_offset=%d | stmt=%d | %s | context=%.200s",
+                    $err['reason'] ?? '?',
+                    $err['byte_offset'] ?? 0,
+                    $stmt_count,
+                    $err['message'] ?? '',
+                    $err['context'] ?? ''
+                ),
+                true
+            );
+            $this->progress->show_lifecycle_line(
+                "Fast query stream fell back to lexer-based parser at byte offset "
+                . ($err['byte_offset'] ?? 0) . "; see audit log for details\n"
+            );
+        });
         $sql_handle = fopen($sql_file, "r");
         if (!$sql_handle) {
             throw new RuntimeException("Cannot open SQL file: {$sql_file}");
