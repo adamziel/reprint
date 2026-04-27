@@ -58,6 +58,21 @@ class Base64ValueScanner
     }
 
     /**
+     * Build a scanner from a pre-built entry list. Used by the
+     * tokenization-free FastInsertScanner path — when the caller has
+     * already located every FROM_BASE64() expression and decoded its
+     * payload, the scanner skips both lexer and base64_decode work.
+     *
+     * @param list<array{expr_start: int, quote_start: int, quote_length: int, value: string, new_value: ?string}> $entries
+     */
+    public static function from_entries(string $sql, array $entries): self
+    {
+        $instance = new self($sql, []); // empty tokens = no scanning
+        $instance->entries = $entries;
+        return $instance;
+    }
+
+    /**
      * Advance to the next FROM_BASE64() value.
      */
     public function next_value(): bool

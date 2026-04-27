@@ -97,20 +97,38 @@ class SqlStatementRewriter
             return $sql;
         }
 
-        // Lex the statement once. Both the column-map walker and
-        // Base64ValueScanner used to lex the SQL independently; the
-        // WP_MySQL_Lexer pass dominated the rewriter's CPU time on
-        // bench-shaped dumps. Sharing a single token array between the
-        // two consumers cuts that to a single pass.
+        // Fast path: producer-shape INSERTs (the overwhelming majority of
+        // statements in a typical dump) are recovered with strpos / regex
+        // and never touch WP_MySQL_Lexer. Anything the fast scanner doesn't
+        // recognise — UPDATE, INSERT … SELECT, qualified names, hex
+        // literals, escaped quotes — falls through to the lexer path
+        // below with identical behaviour.
+        $fast = FastInsertScanner::scan($sql);
+        if ($fast !== null) {
+            $value_to_column_map = [
+                'table' => $fast['table'],
+                'column_map' => $fast['column_map'],
+            ];
+            $scanner = Base64ValueScanner::from_entries($sql, $fast['base64_entries']);
+            return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+        }
+
+        // Slow path: lex once, share the token array between the column
+        // map walker and Base64ValueScanner.
         $tokens = self::significant_tokens($sql);
-
-        // Recover the table name and a byte-offset→column map from the
-        // INSERT/UPDATE shape so we can hand each FROM_BASE64() value the
-        // right content-type hint downstream.
         $value_to_column_map = $this->map_values_to_columns_from_tokens($tokens);
-
-        // Iterate over all FROM_BASE64() values using the cursor-based scanner
         $scanner = new Base64ValueScanner($sql, $tokens);
+        return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+    }
+
+    /**
+     * Run the value-rewriting loop given an already-populated scanner and
+     * the table/column-map context. Shared between the fast and lexer paths.
+     *
+     * @param array{table: string, column_map: list<array{int, int, string}>}|null $value_to_column_map
+     */
+    private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
+    {
         while ($scanner->next_value()) {
             $value = $scanner->get_value();
 
