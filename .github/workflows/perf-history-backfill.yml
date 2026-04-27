@@ -46,10 +46,10 @@ jobs:
           git clone --no-local host src-historical
           (cd src-historical && git fetch origin '+refs/heads/trunk:refs/remotes/origin/trunk')
 
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.5'
-          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+      # Don't add shivammathur/setup-php here — it adds the ondrej PPA with a
+      # different Signed-By keyring than setup-infrastructure.sh, which makes
+      # apt-get update fail later. setup-infrastructure.sh installs PHP 8.5
+      # itself, and composer is preinstalled on ubuntu-22.04 runners.
 
       - uses: actions/setup-node@v4
         with:
