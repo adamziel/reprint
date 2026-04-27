@@ -577,6 +577,54 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "94489e7181e5efd479ae4bb9b6feed56c43d8fcf",
+      "shortSha": "94489e7",
+      "date": "2026-04-27T17:25:35+02:00",
+      "message": "Fix backfill workflow apt repo conflict (#182)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.5",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 76.06517899999926,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5309.498952999998,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 112236.442422,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 38002.114411999995,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 50.88024699999369,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
