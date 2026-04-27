@@ -200,17 +200,8 @@ class SqlStatementRewriter
      * contain `(`, `)`, `,` etc. arrive as a single token and never affect
      * depth.
      *
-     * @return array{table: string, column_map: list<array{int, int, string}>}|null
-     */
-    private function map_values_to_columns(string $sql): ?array
-    {
-        return $this->map_values_to_columns_from_tokens(self::significant_tokens($sql));
-    }
-
-    /**
-     * Same contract as map_values_to_columns(), but consumes a pre-lexed
-     * token array. Lets callers that already lexed the statement avoid a
-     * second WP_MySQL_Lexer pass.
+     * Consumes a pre-lexed token array. Lets callers that already lexed the
+     * statement avoid a second WP_MySQL_Lexer pass.
      *
      * @param WP_MySQL_Token[] $tokens
      * @return array{table: string, column_map: list<array{int, int, string}>}|null
