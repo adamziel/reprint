@@ -3,18 +3,99 @@
   "note": "Seeded from PR sticky comments (PR-side numbers) starting at PR #165. Subsequent entries are appended automatically by the perf-history workflow on each push to trunk.",
   "entries": [
     {
+      "sha": "68de70a3a959db4622cf3df1e0168589cf55e35d",
+      "shortSha": "68de70a3",
+      "date": "2026-04-26T23:31:12+02:00",
+      "message": "Report per-stage pull timings on each PR (#164)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.2.30",
+        "label": "trunk",
+        "source": "pr-comment-seed (trunk col of #165)"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 47,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5370,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 114930,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 124810,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 39,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
+    },
+    {
       "sha": "4fa88f89d250b4c811f340c74d342b0a8ed29c7f",
       "shortSha": "4fa88f89",
       "date": "2026-04-26T23:58:44+02:00",
       "message": "Bench pull pipeline against a larger seeded DB (#165)",
       "author": "Adam Zieliński",
-      "meta": { "site": "large-directory", "fileCount": "2,000+", "seedPosts": 320007, "seedPostmeta": 720015, "phpVersion": "8.2.30", "label": "pr", "source": "pr-comment-seed" },
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.2.30",
+        "label": "pr",
+        "source": "pr-comment-seed"
+      },
       "results": [
-        { "stage": "preflight", "elapsedMs": 236, "attempts": 1, "ok": true },
-        { "stage": "files-pull", "elapsedMs": 4790, "attempts": 1, "ok": true },
-        { "stage": "db-pull", "elapsedMs": 109930, "attempts": 1, "ok": true },
-        { "stage": "db-apply", "elapsedMs": 124510, "attempts": 1, "ok": true },
-        { "stage": "apply-runtime", "elapsedMs": 42, "attempts": 1, "ok": true }
+        {
+          "stage": "preflight",
+          "elapsedMs": 236,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 4790,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 109930,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 124510,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 42,
+          "attempts": 1,
+          "ok": true
+        }
       ]
     },
     {
@@ -23,13 +104,46 @@
       "date": "2026-04-27T11:27:53+02:00",
       "message": "db-apply: lex each SQL statement only once during URL rewriting (#167)",
       "author": "Adam Zieliński",
-      "meta": { "site": "large-directory", "fileCount": "2,000+", "seedPosts": 320007, "seedPostmeta": 720015, "phpVersion": "8.2.30", "label": "pr", "source": "pr-comment-seed" },
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.2.30",
+        "label": "pr",
+        "source": "pr-comment-seed"
+      },
       "results": [
-        { "stage": "preflight", "elapsedMs": 73, "attempts": 1, "ok": true },
-        { "stage": "files-pull", "elapsedMs": 5340, "attempts": 1, "ok": true },
-        { "stage": "db-pull", "elapsedMs": 143380, "attempts": 1, "ok": true },
-        { "stage": "db-apply", "elapsedMs": 125460, "attempts": 1, "ok": true },
-        { "stage": "apply-runtime", "elapsedMs": 50, "attempts": 1, "ok": true }
+        {
+          "stage": "preflight",
+          "elapsedMs": 73,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5340,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 143380,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 125460,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 50,
+          "attempts": 1,
+          "ok": true
+        }
       ]
     },
     {
@@ -38,13 +152,46 @@
       "date": "2026-04-27T11:59:48+02:00",
       "message": "db-apply: skip the SQL lexer for producer-shape INSERTs (#168)",
       "author": "Adam Zieliński",
-      "meta": { "site": "large-directory", "fileCount": "2,000+", "seedPosts": 320007, "seedPostmeta": 720015, "phpVersion": "8.2.30", "label": "pr", "source": "pr-comment-seed" },
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.2.30",
+        "label": "pr",
+        "source": "pr-comment-seed"
+      },
       "results": [
-        { "stage": "preflight", "elapsedMs": 67, "attempts": 1, "ok": true },
-        { "stage": "files-pull", "elapsedMs": 5240, "attempts": 1, "ok": true },
-        { "stage": "db-pull", "elapsedMs": 131590, "attempts": 1, "ok": true },
-        { "stage": "db-apply", "elapsedMs": 88740, "attempts": 1, "ok": true },
-        { "stage": "apply-runtime", "elapsedMs": 45, "attempts": 1, "ok": true }
+        {
+          "stage": "preflight",
+          "elapsedMs": 67,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5240,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 131590,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 88740,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 45,
+          "attempts": 1,
+          "ok": true
+        }
       ]
     },
     {
@@ -53,13 +200,46 @@
       "date": "2026-04-27T12:25:19+02:00",
       "message": "db-apply: add WP_MySQL_FastQueryStream with naive-parser fallback (#169)",
       "author": "Adam Zieliński",
-      "meta": { "site": "large-directory", "fileCount": "2,000+", "seedPosts": 320007, "seedPostmeta": 720015, "phpVersion": "8.2.30", "label": "pr", "source": "pr-comment-seed" },
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.2.30",
+        "label": "pr",
+        "source": "pr-comment-seed"
+      },
       "results": [
-        { "stage": "preflight", "elapsedMs": 71, "attempts": 1, "ok": true },
-        { "stage": "files-pull", "elapsedMs": 5400, "attempts": 1, "ok": true },
-        { "stage": "db-pull", "elapsedMs": 140380, "attempts": 1, "ok": true },
-        { "stage": "db-apply", "elapsedMs": 36970, "attempts": 1, "ok": true },
-        { "stage": "apply-runtime", "elapsedMs": 48, "attempts": 1, "ok": true }
+        {
+          "stage": "preflight",
+          "elapsedMs": 71,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5400,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 140380,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 36970,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 48,
+          "attempts": 1,
+          "ok": true
+        }
       ]
     },
     {
@@ -68,13 +248,46 @@
       "date": "2026-04-27T16:05:34+02:00",
       "message": "Namespace exporter utils so parse_size() stops fataling third-party plugins (#176)",
       "author": "Adam Zieliński",
-      "meta": { "site": "large-directory", "fileCount": "2,000+", "seedPosts": 320007, "seedPostmeta": 720015, "phpVersion": "8.2.30", "label": "pr", "source": "pr-comment-seed" },
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.2.30",
+        "label": "pr",
+        "source": "pr-comment-seed"
+      },
       "results": [
-        { "stage": "preflight", "elapsedMs": 73, "attempts": 1, "ok": true },
-        { "stage": "files-pull", "elapsedMs": 5480, "attempts": 1, "ok": true },
-        { "stage": "db-pull", "elapsedMs": 144270, "attempts": 1, "ok": true },
-        { "stage": "db-apply", "elapsedMs": 39120, "attempts": 1, "ok": true },
-        { "stage": "apply-runtime", "elapsedMs": 53, "attempts": 1, "ok": true }
+        {
+          "stage": "preflight",
+          "elapsedMs": 73,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5480,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 144270,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 39120,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 53,
+          "attempts": 1,
+          "ok": true
+        }
       ]
     },
     {
@@ -83,13 +296,46 @@
       "date": "2026-04-27T16:08:25+02:00",
       "message": "Fix static analysis on trunk (#174)",
       "author": "Adam Zieliński",
-      "meta": { "site": "large-directory", "fileCount": "2,000+", "seedPosts": 320007, "seedPostmeta": 720015, "phpVersion": "8.2.30", "label": "pr", "source": "pr-comment-seed" },
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.2.30",
+        "label": "pr",
+        "source": "pr-comment-seed"
+      },
       "results": [
-        { "stage": "preflight", "elapsedMs": 75, "attempts": 1, "ok": true },
-        { "stage": "files-pull", "elapsedMs": 5370, "attempts": 1, "ok": true },
-        { "stage": "db-pull", "elapsedMs": 135320, "attempts": 1, "ok": true },
-        { "stage": "db-apply", "elapsedMs": 35920, "attempts": 1, "ok": true },
-        { "stage": "apply-runtime", "elapsedMs": 51, "attempts": 1, "ok": true }
+        {
+          "stage": "preflight",
+          "elapsedMs": 75,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5370,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 135320,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 35920,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 51,
+          "attempts": 1,
+          "ok": true
+        }
       ]
     },
     {
@@ -98,13 +344,46 @@
       "date": "2026-04-27T16:13:48+02:00",
       "message": "Fix static analysis (#178)",
       "author": "Adam Zieliński",
-      "meta": { "site": "large-directory", "fileCount": "2,000+", "seedPosts": 320007, "seedPostmeta": 720015, "phpVersion": "8.2.30", "label": "pr", "source": "pr-comment-seed" },
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.2.30",
+        "label": "pr",
+        "source": "pr-comment-seed"
+      },
       "results": [
-        { "stage": "preflight", "elapsedMs": 66, "attempts": 1, "ok": true },
-        { "stage": "files-pull", "elapsedMs": 5220, "attempts": 1, "ok": true },
-        { "stage": "db-pull", "elapsedMs": 136980, "attempts": 1, "ok": true },
-        { "stage": "db-apply", "elapsedMs": 36780, "attempts": 1, "ok": true },
-        { "stage": "apply-runtime", "elapsedMs": 47, "attempts": 1, "ok": true }
+        {
+          "stage": "preflight",
+          "elapsedMs": 66,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5220,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 136980,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 36780,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 47,
+          "attempts": 1,
+          "ok": true
+        }
       ]
     },
     {
@@ -113,13 +392,46 @@
       "date": "2026-04-27T16:14:14+02:00",
       "message": "Run perf checks on PHP 8.5 (#177)",
       "author": "Adam Zieliński",
-      "meta": { "site": "large-directory", "fileCount": "2,000+", "seedPosts": 320007, "seedPostmeta": 720015, "phpVersion": "8.5.5", "label": "pr", "source": "pr-comment-seed" },
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.5",
+        "label": "pr",
+        "source": "pr-comment-seed"
+      },
       "results": [
-        { "stage": "preflight", "elapsedMs": 79, "attempts": 1, "ok": true },
-        { "stage": "files-pull", "elapsedMs": 5780, "attempts": 1, "ok": true },
-        { "stage": "db-pull", "elapsedMs": 128520, "attempts": 1, "ok": true },
-        { "stage": "db-apply", "elapsedMs": 35300, "attempts": 1, "ok": true },
-        { "stage": "apply-runtime", "elapsedMs": 54, "attempts": 1, "ok": true }
+        {
+          "stage": "preflight",
+          "elapsedMs": 79,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5780,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 128520,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 35300,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 54,
+          "attempts": 1,
+          "ok": true
+        }
       ]
     },
     {
@@ -128,13 +440,46 @@
       "date": "2026-04-27T16:34:36+02:00",
       "message": "Bump wp-php-toolkit packages to ^0.6.2 (#179)",
       "author": "Adam Zieliński",
-      "meta": { "site": "large-directory", "fileCount": "2,000+", "seedPosts": 320007, "seedPostmeta": 720015, "phpVersion": "8.5.5", "label": "pr", "source": "pr-comment-seed" },
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.5",
+        "label": "pr",
+        "source": "pr-comment-seed"
+      },
       "results": [
-        { "stage": "preflight", "elapsedMs": 67, "attempts": 1, "ok": true },
-        { "stage": "files-pull", "elapsedMs": 5130, "attempts": 1, "ok": true },
-        { "stage": "db-pull", "elapsedMs": 87880, "attempts": 1, "ok": true },
-        { "stage": "db-apply", "elapsedMs": 37580, "attempts": 1, "ok": true },
-        { "stage": "apply-runtime", "elapsedMs": 46, "attempts": 1, "ok": true }
+        {
+          "stage": "preflight",
+          "elapsedMs": 67,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5130,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 87880,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 37580,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 46,
+          "attempts": 1,
+          "ok": true
+        }
       ]
     }
   ]
