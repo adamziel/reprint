@@ -76,6 +76,19 @@ if (trunk) {
 
 lines.push('');
 lines.push('<sub>Numbers carry runner noise; treat single-run deltas as directional, not authoritative.</sub>');
+
+const historyUrl = (() => {
+    if (process.env.PERF_HISTORY_URL) return process.env.PERF_HISTORY_URL;
+    const slug = process.env.GITHUB_REPOSITORY;
+    if (!slug) return null;
+    const [owner, repo] = slug.split('/');
+    if (!owner || !repo) return null;
+    return `https://${owner}.github.io/${repo}/`;
+})();
+if (historyUrl) {
+    lines.push('');
+    lines.push(`<sub>📈 [Trunk performance history](${historyUrl}) — commit-by-commit timeline.</sub>`);
+}
 lines.push('');
 
 const md = lines.join('\n');
