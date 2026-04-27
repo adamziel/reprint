@@ -1,5 +1,7 @@
 <?php
 
+use function WordPress\Reprint\Exporter\parse_size;
+
 /**
  * HTTP dispatcher for the Site Export API.
  */
