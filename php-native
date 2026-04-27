@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Wrapper that runs PHP with the native Rust extension loaded.
+# Usage: PHP_BINARY=/path/to/php-native bench-pull.mjs
+#   or directly: php-native import.php [args...]
+
+EXT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/ext/reprint-native/target/release" && pwd)"
+exec php \
+  -d "extension_dir=${EXT_DIR}" \
+  -d "extension=libreprint_native.so" \
+  "$@"

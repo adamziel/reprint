@@ -43,6 +43,11 @@ class FastInsertScanner
      */
     public static function scan(string $sql): ?array
     {
+        // Native fast path: Rust byte scanner, avoids regex and PHP overhead.
+        if ( function_exists( 'reprint_fast_insert_scan' ) ) {
+            return reprint_fast_insert_scan( $sql );
+        }
+
         // Header: optional leading whitespace, INSERT (no priority/IGNORE
         // modifiers — producer never emits those), INTO, backticked table,
         // backticked column list, VALUES.
@@ -259,7 +264,14 @@ class FastInsertScanner
             if (!is_array($entry)) {
                 return null;
             }
-            // Expect: USING utf8mb4 )
+            // Consume the closing ) of FROM_BASE64( … ) then expect USING utf8mb4 )
+            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
+                $cursor++;
+            }
+            if ($cursor >= $sql_len || $sql[$cursor] !== ')') {
+                return null;
+            }
+            $cursor++; // past FROM_BASE64's closing )
             while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
                 $cursor++;
             }

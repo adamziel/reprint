@@ -1,0 +1,19 @@
+[package]
+name = "reprint-native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "reprint_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+ext-php-rs = "0.13"
+aho-corasick = "1"
+url = "2"
+memchr = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

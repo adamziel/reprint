@@ -45,6 +45,9 @@ class WP_MySQL_Naive_Query_Stream {
 	 */
 	private $bytes_consumed = 0;
 
+	/** @var string[] Batch of complete query strings from the native splitter, waiting to be dispatched. */
+	private $native_batch = [];
+
 	const STATE_QUERY = 'valid';
 	const STATE_SYNTAX_ERROR = 'syntax_error';
 	const STATE_PAUSED_ON_INCOMPLETE_INPUT = 'paused_on_incomplete_input';
@@ -94,6 +97,38 @@ class WP_MySQL_Naive_Query_Stream {
 	}
 
 	private function do_next_query() {
+		// Native fast path: Rust byte-level state machine, ~10-50× faster than
+		// constructing WP_MySQL_Lexer per call. Batches all complete statements
+		// from the current buffer in one Rust call, then dispatches them one by one.
+		if ( function_exists( 'reprint_sql_split' ) ) {
+			if ( ! empty( $this->native_batch ) ) {
+				$query = array_shift( $this->native_batch );
+				$this->bytes_consumed += strlen( $query );
+				$this->last_query      = $query;
+				$this->state           = self::STATE_QUERY;
+				return true;
+			}
+
+			$r = reprint_sql_split( $this->sql_buffer, $this->input_complete );
+
+			if ( empty( $r['queries'] ) ) {
+				$this->state = $this->input_complete
+					? self::STATE_FINISHED
+					: self::STATE_PAUSED_ON_INCOMPLETE_INPUT;
+				return false;
+			}
+
+			// Trim consumed bytes from the buffer so the next call sees only
+			// the remainder (potentially an incomplete statement).
+			$this->sql_buffer  = substr( $this->sql_buffer, $r['consumed'] );
+			$this->native_batch = $r['queries'];
+
+			$query = array_shift( $this->native_batch );
+			$this->bytes_consumed += strlen( $query );
+			$this->last_query      = $query;
+			$this->state           = self::STATE_QUERY;
+			return true;
+		}
 
 		$query = [];
 		$lexer = new WP_MySQL_Lexer( $this->sql_buffer );

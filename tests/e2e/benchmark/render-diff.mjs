@@ -2,6 +2,9 @@
  * Combine PR and trunk bench results into a single markdown table with
  * per-stage deltas. Reads bench-pr.json and bench-trunk.json, writes
  * bench-results.md.
+ *
+ * When bench-pr-native.json exists (native Rust extension run), appends a
+ * second table showing the native-ext speedup relative to plain PHP.
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
@@ -25,6 +28,7 @@ function fmtDelta(prMs, trunkMs) {
 
 const prPath = process.env.PR_JSON || 'bench-pr.json';
 const trunkPath = process.env.TRUNK_JSON || 'bench-trunk.json';
+const nativePath = process.env.NATIVE_JSON || 'bench-pr-native.json';
 const outPath = process.env.OUT_MD || 'bench-results.md';
 
 if (!existsSync(prPath)) {
@@ -34,6 +38,7 @@ if (!existsSync(prPath)) {
 
 const pr = JSON.parse(readFileSync(prPath, 'utf-8'));
 const trunk = existsSync(trunkPath) ? JSON.parse(readFileSync(trunkPath, 'utf-8')) : null;
+const native = existsSync(nativePath) ? JSON.parse(readFileSync(nativePath, 'utf-8')) : null;
 
 const lines = [];
 lines.push(`## Pull pipeline performance — \`${pr.meta.site}\``);
@@ -72,6 +77,26 @@ if (trunk) {
         lines.push(`| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${r.attempts} | ${r.ok ? '✓' : '✗ exit ' + r.exitCode} |`);
     }
     lines.push(`| **Total** | **${fmtMs(total)}** | | |`);
+}
+
+// ─── Native extension comparison ─────────────────────────────────────────────
+if (native) {
+    lines.push('');
+    lines.push('### Native Rust extension speedup (PR + ext vs plain PHP)');
+    lines.push('');
+    lines.push('| Stage | PHP | + native ext | Δ |');
+    lines.push('|---|---:|---:|---:|');
+    const phpByStage = Object.fromEntries(pr.results.map((r) => [r.stage, r]));
+    let phpTotal = 0;
+    let nativeTotal = 0;
+    for (const r of native.results) {
+        const p = phpByStage[r.stage];
+        phpTotal += p?.elapsedMs ?? 0;
+        nativeTotal += r.elapsedMs;
+        const delta = p ? fmtDelta(r.elapsedMs, p.elapsedMs) : '—';
+        lines.push(`| \`${r.stage}\` | ${p ? fmtMs(p.elapsedMs) : '—'} | ${fmtMs(r.elapsedMs)} | ${delta} |`);
+    }
+    lines.push(`| **Total** | **${fmtMs(phpTotal)}** | **${fmtMs(nativeTotal)}** | **${fmtDelta(nativeTotal, phpTotal)}** |`);
 }
 
 lines.push('');

@@ -54,6 +54,12 @@ class StructuredDataUrlRewriter
      */
     private array $parsed_mapping;
 
+    /** @var string[] Original from-URL strings, kept for the native rewriter. */
+    private array $from_url_strings;
+
+    /** @var string[] Original to-URL strings, kept for the native rewriter. */
+    private array $to_url_strings;
+
     /** @var string Default base_url used by the URL processors (first from-url). */
     private string $base_url;
 
@@ -82,6 +88,11 @@ class StructuredDataUrlRewriter
                 'to_url'   => WPURL::parse($to_url_string),
             ];
         }
+
+        // Keep the original strings for the native URL rewriter which needs
+        // string inputs rather than pre-parsed objects.
+        $this->from_url_strings = array_keys($url_mapping);
+        $this->to_url_strings   = array_values($url_mapping);
 
         // Default base_url: first from-url in the mapping. Preserves the
         // behaviour of the previous per-call default so outputs are unchanged.
@@ -217,6 +228,39 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
+                // Tag-free shortcut (mirrors PR #171): when the value contains no
+                // HTML tags or entities, BlockMarkupUrlProcessor finds nothing in
+                // HTML attributes. Use the cheaper plain-text path instead.
+                if ( strpos( $content, '<' ) === false && strpos( $content, '&' ) === false ) {
+                    if ( function_exists( 'reprint_url_rewrite_plain_text' ) ) {
+                        return reprint_url_rewrite_plain_text(
+                            $content,
+                            $this->from_url_strings,
+                            $this->to_url_strings
+                        );
+                    }
+                    // PHP plain-text fallback for tag-free block markup.
+                    $p = new URLInTextProcessor( $content, $base_url );
+                    while ( $p->next_url() ) {
+                        $parsed_url = $p->get_parsed_url();
+                        foreach ( $parsed_mapping as $mapping ) {
+                            if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
+                                $new_raw_url = WPURL::replace_base_url(
+                                    $parsed_url,
+                                    array(
+                                        'old_base_url' => $base_url,
+                                        'new_base_url' => $mapping['to_url'],
+                                        'raw_url'      => $p->get_raw_url(),
+                                        'is_relative'  => false,
+                                    )
+                                );
+                                $p->set_raw_url( $new_raw_url );
+                                break;
+                            }
+                        }
+                    }
+                    return $p->get_updated_text();
+                }
                 $p = new BlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $parsed_url = $p->get_parsed_url();
@@ -231,6 +275,14 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
+                // Native path: Rust WHATWG URL parser, avoids Rowbot ~78 µs/call overhead.
+                if ( function_exists( 'reprint_url_rewrite_plain_text' ) ) {
+                    return reprint_url_rewrite_plain_text(
+                        $content,
+                        $this->from_url_strings,
+                        $this->to_url_strings
+                    );
+                }
                 $p = new URLInTextProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $parsed_url = $p->get_parsed_url();

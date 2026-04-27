@@ -116,20 +116,34 @@ class Base64ValueScanner
      */
     public function get_result(): string
     {
-        $result = $this->sql;
-
-        // Process in reverse order to preserve byte offsets
-        for ($i = count($this->entries) - 1; $i >= 0; $i--) {
-            $entry = $this->entries[$i];
+        // O(N) pass: collect parts between replacements from the original SQL
+        // string and join once. This avoids the O(N²) cost of the old reverse
+        // loop where each iteration rebuilt the entire (potentially very large)
+        // SQL string for every replacement.
+        $has_changes = false;
+        foreach ($this->entries as $entry) {
             if ($entry['new_value'] !== null) {
-                $replacement = "'" . base64_encode($entry['new_value']) . "'";
-                $result = substr($result, 0, $entry['quote_start'])
-                    . $replacement
-                    . substr($result, $entry['quote_start'] + $entry['quote_length']);
+                $has_changes = true;
+                break;
             }
         }
+        if (!$has_changes) {
+            return $this->sql;
+        }
 
-        return $result;
+        $parts = [];
+        $pos = 0;
+        foreach ($this->entries as $entry) {
+            if ($entry['new_value'] !== null) {
+                // Gap between last replacement and this one.
+                $parts[] = substr($this->sql, $pos, $entry['quote_start'] - $pos);
+                $parts[] = "'" . base64_encode($entry['new_value']) . "'";
+                $pos = $entry['quote_start'] + $entry['quote_length'];
+            }
+        }
+        $parts[] = substr($this->sql, $pos);
+
+        return implode('', $parts);
     }
 
     /**
