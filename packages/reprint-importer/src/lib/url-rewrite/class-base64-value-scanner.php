@@ -38,10 +38,23 @@ class Base64ValueScanner
 
     private int $cursor = -1;
 
-    public function __construct(string $sql)
+    /**
+     * @param string $sql The SQL statement.
+     * @param WP_MySQL_Token[]|null $tokens Optional pre-lexed token list. When
+     *   provided, the scanner walks these tokens instead of running its own
+     *   WP_MySQL_Lexer pass. Callers that already lex the statement for
+     *   another reason (column-map extraction, etc.) can hand the same token
+     *   stream in to avoid a redundant tokenization. When null, behavior is
+     *   unchanged: the scanner lexes internally.
+     */
+    public function __construct(string $sql, ?array $tokens = null)
     {
         $this->sql = $sql;
-        $this->scan();
+        if ($tokens === null) {
+            $this->scan();
+        } else {
+            $this->scan_tokens($tokens);
+        }
     }
 
     /**
@@ -162,6 +175,73 @@ class Base64ValueScanner
             }
 
             // Shift the two-token window
+            $prev[0] = $prev[1];
+            $prev[1] = $token;
+        }
+    }
+
+    /**
+     * Walk a pre-lexed token list to find FROM_BASE64('…') expressions.
+     *
+     * Equivalent to scan() but reuses tokens already produced by another
+     * pass (typically SqlStatementRewriter, which lexes for the column
+     * map). Avoids re-running WP_MySQL_Lexer on the same statement.
+     *
+     * The buffered token array from WP_MySQL_Lexer::remaining_tokens()
+     * has already been stripped of whitespace and comments, so the
+     * CONVERT + ( + FROM_BASE64 pattern still appears as three
+     * consecutive tokens.
+     *
+     * @param WP_MySQL_Token[] $tokens
+     */
+    private function scan_tokens(array $tokens): void
+    {
+        $token_count = count($tokens);
+        $prev = [null, null];
+
+        for ($i = 0; $i < $token_count; $i++) {
+            $token = $tokens[$i];
+
+            if (
+                $token->id === WP_MySQL_Lexer::IDENTIFIER
+                && strtoupper($token->get_value()) === 'FROM_BASE64'
+            ) {
+                $expr_start = $token->start;
+
+                if (
+                    $prev[1] !== null
+                    && $prev[1]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL
+                    && $prev[0] !== null
+                    && $prev[0]->id === WP_MySQL_Lexer::CONVERT_SYMBOL
+                ) {
+                    $expr_start = $prev[0]->start;
+                }
+
+                // Walk forward to find the quoted base64 payload, mirroring
+                // scan(): step past the opening parenthesis, accept either
+                // SINGLE_ or DOUBLE_QUOTED_TEXT, abort on anything else.
+                for ($j = $i + 1; $j < $token_count; $j++) {
+                    $inner = $tokens[$j];
+                    if (
+                        $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
+                        || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
+                    ) {
+                        $decoded = base64_decode($inner->get_value(), true);
+                        $this->entries[] = [
+                            'expr_start' => $expr_start,
+                            'quote_start' => $inner->start,
+                            'quote_length' => $inner->length,
+                            'value' => $decoded !== false ? $decoded : '',
+                            'new_value' => null,
+                        ];
+                        break;
+                    }
+                    if ($inner->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                        break;
+                    }
+                }
+            }
+
             $prev[0] = $prev[1];
             $prev[1] = $token;
         }
