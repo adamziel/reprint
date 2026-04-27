@@ -97,13 +97,20 @@ class SqlStatementRewriter
             return $sql;
         }
 
+        // Lex the statement once. Both the column-map walker and
+        // Base64ValueScanner used to lex the SQL independently; the
+        // WP_MySQL_Lexer pass dominated the rewriter's CPU time on
+        // bench-shaped dumps. Sharing a single token array between the
+        // two consumers cuts that to a single pass.
+        $tokens = self::significant_tokens($sql);
+
         // Recover the table name and a byte-offset→column map from the
         // INSERT/UPDATE shape so we can hand each FROM_BASE64() value the
         // right content-type hint downstream.
-        $value_to_column_map = $this->map_values_to_columns($sql);
+        $value_to_column_map = $this->map_values_to_columns_from_tokens($tokens);
 
         // Iterate over all FROM_BASE64() values using the cursor-based scanner
-        $scanner = new Base64ValueScanner($sql);
+        $scanner = new Base64ValueScanner($sql, $tokens);
         while ($scanner->next_value()) {
             $value = $scanner->get_value();
 
@@ -179,7 +186,19 @@ class SqlStatementRewriter
      */
     private function map_values_to_columns(string $sql): ?array
     {
-        $tokens = self::significant_tokens($sql);
+        return $this->map_values_to_columns_from_tokens(self::significant_tokens($sql));
+    }
+
+    /**
+     * Same contract as map_values_to_columns(), but consumes a pre-lexed
+     * token array. Lets callers that already lexed the statement avoid a
+     * second WP_MySQL_Lexer pass.
+     *
+     * @param WP_MySQL_Token[] $tokens
+     * @return array{table: string, column_map: list<array{int, int, string}>}|null
+     */
+    private function map_values_to_columns_from_tokens(array $tokens): ?array
+    {
         $token_count = count($tokens);
         if ($token_count < 4) {
             return null;
