@@ -18,7 +18,7 @@ jobs:
 
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
+          php-version: '8.5'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
 
       - run: composer install --no-dev --no-interaction --prefer-dist
@@ -40,7 +40,7 @@ jobs:
 
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
+          php-version: '8.5'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
 
       - run: composer install --no-dev --no-interaction --prefer-dist
@@ -57,7 +57,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
-      PHP_VERSION: '8.2'
+      PHP_VERSION: '8.5'
 
     steps:
       - uses: actions/checkout@v5
