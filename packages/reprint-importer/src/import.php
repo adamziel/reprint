@@ -5065,6 +5065,91 @@ class ImportClient
             "message" => "Applying SQL" . ($statements_total !== null ? " ({$statements_total} statements)" : ""),
         ]);
 
+        // Batching the per-statement PDO::exec into multi-statement bursts
+        // collapses N round-trips into one. On localhost MySQL (mysqlnd) the
+        // savings are small; on a real LAN/WAN target the per-statement RTT
+        // is what dominates db-apply, so this is the lever for production.
+        //
+        // Batching is MySQL-only — the SQLite target uses
+        // WP_PDO_MySQL_On_SQLite which translates statements individually
+        // and doesn't accept multi-statement input.
+        $batch_max_bytes = 256 * 1024;
+        $batch_max_stmts = 100;
+        $batch_enabled = (strtolower((string)($options["target_engine"] ?? "mysql")) === "mysql");
+        $batch_sql = "";
+        $batch_queries = [];
+        $batch_first_stmt_no = 0;
+
+        $flush_batch = function () use (
+            &$batch_sql, &$batch_queries, &$batch_first_stmt_no,
+            &$pdo, &$stmt_count, &$statements_executed
+        ) {
+            if ($batch_sql === "") {
+                return;
+            }
+            try {
+                $pdo->exec($batch_sql);
+            } catch (PDOException $batch_e) {
+                // Pinpoint the failing statement by re-executing the batch
+                // one statement at a time. Slow path, but only fires when
+                // the batch already failed.
+                $local_stmt_no = $batch_first_stmt_no;
+                foreach ($batch_queries as $q) {
+                    $local_stmt_no++;
+                    try {
+                        $pdo->exec($q);
+                    } catch (PDOException $e) {
+                        $this->audit_log(
+                            sprintf(
+                                "SQL ERROR | stmt=%d | %s | query=%.200s",
+                                $local_stmt_no,
+                                $e->getMessage(),
+                                $q,
+                            ),
+                            true,
+                        );
+                        throw new RuntimeException(
+                            "SQL execution error at statement {$local_stmt_no}: " .
+                            $e->getMessage(),
+                        );
+                    }
+                }
+                // Re-execution succeeded individually — implausible, but we
+                // surface the original batch error so it isn't silently lost.
+                $this->audit_log(
+                    "BATCH ERROR re-ran cleanly | " . $batch_e->getMessage(),
+                    true,
+                );
+                throw new RuntimeException(
+                    "SQL batch execution error: " . $batch_e->getMessage()
+                );
+            }
+            $statements_executed += count($batch_queries);
+            $batch_sql = "";
+            $batch_queries = [];
+        };
+
+        $exec_one = function (string $query) use (&$pdo, &$stmt_count, &$statements_executed) {
+            try {
+                $pdo->exec($query);
+            } catch (PDOException $e) {
+                $this->audit_log(
+                    sprintf(
+                        "SQL ERROR | stmt=%d | %s | query=%.200s",
+                        $stmt_count,
+                        $e->getMessage(),
+                        $query,
+                    ),
+                    true,
+                );
+                throw new RuntimeException(
+                    "SQL execution error at statement {$stmt_count}: " .
+                    $e->getMessage(),
+                );
+            }
+            $statements_executed++;
+        };
+
         try {
             $chunk_size = 64 * 1024; // 64KB read chunks
 
@@ -5100,34 +5185,33 @@ class ImportClient
                         $query = $stmt_rewriter->rewrite($query);
                     }
 
-                    // Execute against target database
-                    try {
-                        $pdo->exec($query);
-                    } catch (PDOException $e) {
-                        $this->audit_log(
-                            sprintf(
-                                "SQL ERROR | stmt=%d | %s | query=%.200s",
-                                $stmt_count,
-                                $e->getMessage(),
-                                $query,
-                            ),
-                            true,
-                        );
-                        throw new RuntimeException(
-                            "SQL execution error at statement {$stmt_count}: " .
-                            $e->getMessage(),
-                        );
+                    if (!$batch_enabled) {
+                        $exec_one($query);
+                    } else {
+                        if ($batch_sql === "") {
+                            $batch_first_stmt_no = $stmt_count - 1;
+                        }
+                        $batch_sql .= $query . "\n";
+                        $batch_queries[] = $query;
+                        if (
+                            strlen($batch_sql) >= $batch_max_bytes
+                            || count($batch_queries) >= $batch_max_stmts
+                        ) {
+                            $flush_batch();
+                        }
                     }
-
-                    $statements_executed++;
                     $stmts_since_save++;
 
                     // Save state periodically. bytes_read is the file offset
                     // right after the last extracted query — NOT total_bytes_read,
                     // which includes bytes buffered in the query stream that haven't
-                    // formed a complete query yet. This ensures resumption starts at
-                    // the exact boundary between executed and un-executed queries.
+                    // formed a complete query yet. We must flush the in-flight
+                    // batch first so the cursor only ever advances past
+                    // already-executed bytes.
                     if ($stmts_since_save >= $save_every) {
+                        if ($batch_enabled) {
+                            $flush_batch();
+                        }
                         $this->state["apply"]["statements_executed"] = $statements_executed;
                         $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
                         $this->save_state($this->state);
@@ -5176,28 +5260,34 @@ class ImportClient
                     $query = $stmt_rewriter->rewrite($query);
                 }
 
-                try {
-                    $pdo->exec($query);
-                } catch (PDOException $e) {
-                    $this->audit_log(
-                        sprintf(
-                            "SQL ERROR | stmt=%d | %s | query=%.200s",
-                            $stmt_count,
-                            $e->getMessage(),
-                            $query,
-                        ),
-                        true,
-                    );
-                    throw new RuntimeException(
-                        "SQL execution error at statement {$stmt_count}: " .
-                        $e->getMessage(),
-                    );
+                if (!$batch_enabled) {
+                    $exec_one($query);
+                } else {
+                    if ($batch_sql === "") {
+                        $batch_first_stmt_no = $stmt_count - 1;
+                    }
+                    $batch_sql .= $query . ";\n";
+                    $batch_queries[] = $query;
+                    if (
+                        strlen($batch_sql) >= $batch_max_bytes
+                        || count($batch_queries) >= $batch_max_stmts
+                    ) {
+                        $flush_batch();
+                    }
                 }
-
-                $statements_executed++;
+            }
+            // Flush the final partial batch.
+            if ($batch_enabled) {
+                $flush_batch();
             }
 
             if ($this->shutdown_requested) {
+                // Flush the in-flight batch before recording progress, so
+                // bytes_read advances only past statements that actually
+                // landed in the target.
+                if ($batch_enabled) {
+                    $flush_batch();
+                }
                 // Save partial progress
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
