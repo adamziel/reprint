@@ -36,6 +36,15 @@ namespace WordPress\Reprint\Exporter {
 use InvalidArgumentException;
 use RuntimeException;
 
+// Composer's "files" autoload includes this file once per registered
+// path. In a monorepo where the same package is mirrored into vendor/
+// (e.g. tests/ pulls in vendor/wp-php-toolkit/reprint-exporter/src/utils.php
+// AND packages/reprint-exporter/src/utils.php), both copies are loaded.
+// Guard against redeclaration so only the first wins.
+if (function_exists(__NAMESPACE__ . '\\build_pdo_dsn')) {
+    return;
+}
+
 /**
  * Builds a PDO DSN string from a WordPress DB_HOST value.
  *
