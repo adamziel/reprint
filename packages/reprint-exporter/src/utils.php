@@ -1,21 +1,48 @@
 <?php
 /**
  * Shared utility functions used by both export.php and import.php.
+ *
+ * These helpers live in a namespace so they don't collide with global
+ * functions of the same name declared by third-party plugins or
+ * WordPress drop-ins. The package is loaded via Composer's "files"
+ * autoload, which means every host that pulls in this library (e.g.
+ * wpcomsh on WordPress.com) gets these symbols on every request —
+ * generic names like parse_size() or normalize_path() are guaranteed
+ * to clash sooner or later if they sit in the global namespace.
+ *
+ * The two str_* polyfills at the top stay global on purpose: they
+ * backfill PHP 7.4 built-ins, so callers expect to reach them via
+ * the global namespace without a use-statement.
  */
 
 // Polyfill for PHP 7.4 which lacks str_starts_with().
-if (!function_exists('str_starts_with')) {
-    function str_starts_with(string $haystack, string $needle): bool {
-        return $needle === '' || strncmp($haystack, $needle, strlen($needle)) === 0;
+namespace {
+    if (!function_exists('str_starts_with')) {
+        function str_starts_with(string $haystack, string $needle): bool {
+            return $needle === '' || strncmp($haystack, $needle, strlen($needle)) === 0;
+        }
+    }
+
+    // Polyfill for PHP 7.4 which lacks str_contains().
+    if (!function_exists('str_contains')) {
+        function str_contains(string $haystack, string $needle): bool {
+            return $needle === '' || strpos($haystack, $needle) !== false;
+        }
     }
 }
 
-// Polyfill for PHP 7.4 which lacks str_contains().
-if (!function_exists('str_contains')) {
-    function str_contains(string $haystack, string $needle): bool {
-        return $needle === '' || strpos($haystack, $needle) !== false;
-    }
-}
+namespace WordPress\Reprint\Exporter {
+
+use InvalidArgumentException;
+use RuntimeException;
+
+// Composer's "files" autoload includes this file once per registered
+// path. In a monorepo where the same package is mirrored into vendor/
+// (e.g. tests/ pulls in vendor/wp-php-toolkit/reprint-exporter/src/utils.php
+// AND packages/reprint-exporter/src/utils.php), both copies are loaded.
+// `return` from inside a bracketed namespace block does not abort the
+// whole file, so guard the declarations themselves.
+if (!function_exists(__NAMESPACE__ . '\\build_pdo_dsn')) {
 
 /**
  * Builds a PDO DSN string from a WordPress DB_HOST value.
@@ -195,4 +222,8 @@ function assert_valid_path(string $path, string $label = "path"): void
             );
         }
     }
+}
+
+} // !function_exists guard
+
 }

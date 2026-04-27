@@ -9,6 +9,12 @@
  * - Progress reporting via JSON lines to stdout
  * - Three-phase import: files, SQL, then file deltas
  */
+
+use function WordPress\Reprint\Exporter\assert_valid_path;
+use function WordPress\Reprint\Exporter\normalize_path;
+use function WordPress\Reprint\Exporter\parse_size;
+use function WordPress\Reprint\Exporter\path_is_within_root;
+
 error_reporting(E_ALL);
 ini_set("display_errors", "stderr");
 ini_set("display_startup_errors", 1);
