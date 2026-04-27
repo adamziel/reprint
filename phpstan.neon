@@ -4,6 +4,7 @@ includes:
 parameters:
     bootstrapFiles:
         - phpstan-bootstrap.php
+    stubFiles:
         - phpstan-stubs.php
     phpVersion: 70400
     level: 5
@@ -13,11 +14,11 @@ parameters:
         - reprint-exporter-wp
     excludePaths:
         analyseAndScan:
-            - packages/reprint-exporter/src/class-sqlite-driver-pdo.php
             - reprint-exporter-wp/wordpress/
             - reprint-exporter-wp/index.php
             - reprint-exporter-wp/vendor/
         analyse:
+            - packages/reprint-exporter/src/class-sqlite-driver-pdo.php
             - packages/reprint-importer/src/lib/mysql-query-stream/
             - reprint-exporter-wp/vendor/
     treatPhpDocTypesAsCertain: false
