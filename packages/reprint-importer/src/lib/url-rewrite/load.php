@@ -13,6 +13,7 @@ require_once __DIR__ . '/../mysql-query-stream/load.php';
 require_once __DIR__ . '/class-php-serialization-processor.php';
 require_once __DIR__ . '/class-json-string-iterator.php';
 require_once __DIR__ . '/class-base64-value-scanner.php';
+require_once __DIR__ . '/class-fast-insert-scanner.php';
 
 // Depend on the iterators above
 require_once __DIR__ . '/class-structured-data-url-rewriter.php';
