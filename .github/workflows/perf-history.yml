@@ -127,12 +127,8 @@ jobs:
           set -euo pipefail
           mkdir -p pages/data
           # Refresh static site files from trunk on every run, but never
-          # clobber the accumulated history.json on gh-pages.
+          # clobber the accumulated history.json that lives only on gh-pages.
           rsync -a --exclude='data/history.json' perf-site/ pages/
-          # First-time bootstrap: seed history from the version checked into trunk.
-          if [ ! -f pages/data/history.json ] && [ -f perf-site/data/history.json ]; then
-            cp perf-site/data/history.json pages/data/history.json
-          fi
           touch pages/.nojekyll
           node tests/e2e/benchmark/append-history.mjs
 
