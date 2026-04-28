@@ -417,6 +417,8 @@ function render_wizard(): void {
   .phase .name{font-size:14px}
   .phase .meta{font-size:12px;color:var(--muted);font-family:var(--mono)}
   @keyframes pulse{50%{opacity:.4}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #site-refresh{display:inline-flex;align-items:center;color:var(--accent-2);opacity:.85}
   .bar{height:6px;background:var(--panel-2);border-radius:999px;overflow:hidden;margin-top:14px}
   .bar > div{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2));width:0%;transition:width .25s}
   .log{margin-top:20px;padding:14px;background:#07080c;border:1px solid var(--border);border-radius:10px;font-family:var(--mono);font-size:12px;color:#c7cddb;max-height:260px;overflow:auto;white-space:pre-wrap}
@@ -466,12 +468,60 @@ function render_wizard(): void {
     <h2>Choose a site to clone</h2>
     <p class="desc">Atomic sites can be cloned with reprint. Simple WordPress.com sites are listed for reference but are dimmed and not selectable — they don't run wpcomsh's export endpoint. The exporter is enabled on the site you pick for a rolling 60-minute window.</p>
     <input type="search" id="site-filter" placeholder="Filter by name or URL…" autocomplete="off" class="hidden">
-    <div class="site-list" id="site-list"><p class="desc">Loading your sites…</p></div>
-    <p class="desc site-count hidden" id="site-count" style="margin:10px 0 0"></p>
+    <div class="site-list" id="site-list"><p class="desc" id="sites-loading">Loading your sites…</p></div>
+    <p class="desc site-count hidden" id="site-count" style="margin:10px 0 0;display:flex;align-items:center;gap:8px">
+      <span id="site-count-text"></span>
+      <span id="site-refresh" class="hidden" title="Refreshing site list from WordPress.com…">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 0.9s linear infinite">
+          <path d="M21 12a9 9 0 1 1-6.2-8.55"></path>
+          <path d="M21 4v5h-5"></path>
+        </svg>
+      </span>
+    </p>
     <div class="actions">
       <button class="primary" id="start-btn" disabled>Start import →</button>
       <span class="subtitle" id="start-hint"></span>
     </div>
+    <script>
+      // Synchronous cache hydrate. Placed AFTER all referenced
+      // elements (site-list, site-filter, site-count, site-count-text)
+      // so getElementById always succeeds. Renders minimal-HTML rows
+      // before the bottom-of-body JS upgrades them to interactive ones.
+      (function () {
+        try {
+          const key = 'reprint:sites:' + (window.__REPRINT_USER_ID__ || 'anon');
+          const raw = localStorage.getItem(key);
+          if (!raw) return;
+          const parsed = JSON.parse(raw);
+          const sites = parsed && parsed.sites;
+          if (!Array.isArray(sites) || !sites.length) return;
+          const sorted = sites.slice().sort((a, b) =>
+            (b.is_wpcom_atomic ? 1 : 0) - (a.is_wpcom_atomic ? 1 : 0));
+          const esc = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+          document.getElementById('site-list').innerHTML = sorted.map((s) => {
+            const atomic = !!s.is_wpcom_atomic;
+            const icon = s.icon && s.icon.img
+              ? '<img src="' + esc(s.icon.img) + '" alt="">'
+              : '<div class="site-icon">' + esc((s.name || '?')[0]) + '</div>';
+            const reason = atomic ? ''
+              : '<div class="reason">Reprint requires Atomic hosting — Simple WordPress.com sites can\'t be cloned.</div>';
+            return '<div class="site ' + (atomic ? '' : 'disabled') + '" data-pending="1">'
+              + icon
+              + '<div>'
+              +   '<div class="site-title">' + esc(s.name || s.URL || 'Untitled') + '</div>'
+              +   '<div class="site-url">' + esc(s.URL) + '</div>'
+              +   reason
+              + '</div>'
+              + '<span class="badge">' + (atomic ? 'Atomic' : 'Simple') + '</span>'
+              + '</div>';
+          }).join('');
+          document.getElementById('site-filter').classList.remove('hidden');
+          document.getElementById('site-count').classList.remove('hidden');
+          document.getElementById('site-count-text').textContent = sites.length + ' sites';
+          window.__REPRINT_CACHED_SITES__ = sites;
+        } catch (e) { console.warn('reprint cache hydrate failed:', e); }
+      })();
+    </script>
   </section>
 
   <!-- STEP 3 — Provision (server-side WP.com calls) -->
@@ -544,22 +594,56 @@ let selectedSiteUrl = null;
     pill.innerHTML = `${avatar}<span>Signed in as <strong>${name.replace(/</g,'&lt;')}</strong></span> · <a href="?action=logout">Not you?</a>`;
   } catch {}
 })();
+// Hoisted so the loadSites IIFE below isn't blocked by the TDZ.
+var ALL_SITES = [];
+function sitesFingerprint(sites) {
+  return (sites || [])
+    .map(s => `${s.ID}|${s.URL}|${s.name}|${s.is_wpcom_atomic ? 1 : 0}|${s.icon?.img || ''}`)
+    .sort()
+    .join('::');
+}
+
 (async function loadSites() {
   setStep(2);
+
+  // The inline <script> next to #site-list already painted the cached
+  // rows (or did nothing if no cache). Upgrade them to fully
+  // interactive ones, then refetch in the background.
+  const cacheKey = 'reprint:sites:' + (window.__REPRINT_USER_ID__ || 'anon');
+  const cachedSites = window.__REPRINT_CACHED_SITES__;
+  let renderedFingerprint = '';
+  if (Array.isArray(cachedSites) && cachedSites.length) {
+    renderSites(cachedSites);
+    renderedFingerprint = sitesFingerprint(cachedSites);
+    $('#site-refresh').classList.remove('hidden');
+  }
+
   try {
     const res = await fetch(UI_BASE + '?action=sites');
     if (res.status === 401) { location.href = UI_BASE + '?action=login'; return; }
     const data = await res.json();
-    const sites = data.sites || data; // depends on wpcom response shape
-    renderSites(Array.isArray(sites) ? sites : (sites?.sites || []));
+    const sites = Array.isArray(data) ? data : (data.sites || []);
+    try { localStorage.setItem(cacheKey, JSON.stringify({ sites, ts: Date.now() })); } catch {}
+    // Skip re-render when nothing meaningful changed — keeps the UI
+    // stable across the background refresh, no "jump" when fresh
+    // data arrives with the same sites.
+    const liveFingerprint = sitesFingerprint(sites);
+    if (liveFingerprint !== renderedFingerprint) {
+      renderSites(sites);
+    }
   } catch (e) {
-    $('#site-list').innerHTML = '<p class="desc" style="color:var(--err)">Failed to load sites: ' + e.message + '</p>';
+    if (!cachedSites) {
+      $('#site-list').innerHTML = '<p class="desc" style="color:var(--err)">Failed to load sites: ' + e.message + '</p>';
+    }
+    // If we had a cache, leave it on screen — better than wiping it.
+  } finally {
+    $('#site-refresh').classList.add('hidden');
   }
 })();
 <?php endif; ?>
 
-let ALL_SITES = [];
-
+// ALL_SITES is hoisted above the loadSites IIFE — declaring it again
+// here would shadow the assignment.
 function renderSites(sites) {
   // Atomic sites first (those are the importable ones), Simple sites
   // last so they don't crowd the picker. Within each group, keep the
@@ -578,8 +662,14 @@ function renderSites(sites) {
   }
   filter.classList.remove('hidden');
   count.classList.remove('hidden');
-  filter.addEventListener('input', applySiteFilter);
-  filter.focus();
+  // Bind the input listener once. Refocusing on every render would
+  // steal focus from the user mid-typing when the background refresh
+  // returns, so only focus on the very first call.
+  if (!filter.dataset.bound) {
+    filter.addEventListener('input', applySiteFilter);
+    filter.dataset.bound = '1';
+    filter.focus();
+  }
   applySiteFilter();
 }
 
@@ -596,7 +686,7 @@ function applySiteFilter() {
   } else {
     filtered.forEach(s => list.appendChild(renderSiteRow(s)));
   }
-  $('#site-count').textContent = q
+  $('#site-count-text').textContent = q
     ? `${filtered.length} of ${ALL_SITES.length} sites`
     : `${ALL_SITES.length} sites`;
 
@@ -743,7 +833,7 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
   // template literal as a PHP open tag.
   setPhase('preflight', 'active', 'wiping previous import…');
   await client.run({ code: '<' + "?php\n" + `
-    function _rrmdir($d) {
+    function _rrmdir($d, $keep_root = false) {
       if (!is_dir($d)) return;
       foreach (scandir($d) ?: [] as $e) {
         if ($e === '.' || $e === '..') continue;
@@ -751,13 +841,58 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
         if (is_link($p) || is_file($p)) @unlink($p);
         elseif (is_dir($p)) _rrmdir($p);
       }
-      @rmdir($d);
+      if (!$keep_root) @rmdir($d);
     }
+
+    // Stash Playground's SQLite integration before wiping /wordpress.
+    // It's NOT just db.php — db.php is a tiny drop-in that requires
+    // /wordpress/wp-content/plugins/sqlite-database-integration/load.php.
+    // Without that plugin tree restored after the wipe, db.php would
+    // fatal on the include and WP would fall back to MySQL with the
+    // imported wp-config's Atomic credentials, which can't connect,
+    // which shows the install wizard.
+    function _rcopy_pre(string $src, string $dst): void {
+      if (is_link($src)) {
+        $t = @readlink($src);
+        if ($t !== false) @symlink($t, $dst);
+        return;
+      }
+      if (is_file($src)) { @copy($src, $dst); return; }
+      if (is_dir($src)) {
+        @mkdir($dst, 0777, true);
+        foreach (scandir($src) ?: [] as $e) {
+          if ($e === '.' || $e === '..') continue;
+          _rcopy_pre($src . '/' . $e, $dst . '/' . $e);
+        }
+      }
+    }
+    _rrmdir('/tmp/saved-sqlite');
+    @mkdir('/tmp/saved-sqlite', 0777, true);
+    if (is_file('/wordpress/wp-content/db.php')) {
+      @copy('/wordpress/wp-content/db.php', '/tmp/saved-sqlite/db.php');
+    }
+    if (is_dir('/wordpress/wp-content/plugins/sqlite-database-integration')) {
+      _rcopy_pre(
+        '/wordpress/wp-content/plugins/sqlite-database-integration',
+        '/tmp/saved-sqlite/sqlite-database-integration'
+      );
+    }
+    if (is_dir('/wordpress/wp-content/mu-plugins/sqlite-database-integration')) {
+      _rcopy_pre(
+        '/wordpress/wp-content/mu-plugins/sqlite-database-integration',
+        '/tmp/saved-sqlite/mu-plugin-sqlite-database-integration'
+      );
+    }
+
     _rrmdir('/internal/shared/reprint-state');
     _rrmdir('/internal/shared/reprint-site');
     @unlink('/tmp/imported.sqlite');
     @mkdir('/internal/shared/reprint-state', 0777, true);
     @mkdir('/internal/shared/reprint-site',  0777, true);
+
+    // Wipe /wordpress contents (keep the mount point itself). Pull's
+    // flat-docroot stage will recreate it from the imported tree.
+    _rrmdir('/wordpress', true);
   ` });
 
   // ─── Single long phar run with live streaming via post_message_to_js.
@@ -824,6 +959,14 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
       // its own activation (symlinks + uploads-proxy mu-plugin) in JS
       // after the phar exits.
       '--runtime=none',
+      // Flatten the split-root Atomic layout (docroot at /srv/htdocs,
+      // ABSPATH at /wordpress/core/<ver>) directly into Playground's
+      // document root at /wordpress. /wordpress was wiped before the
+      // pull, so flat-docroot writes there cleanly. wp-admin and
+      // wp-includes get symlinked into the imported core tree under
+      // /internal/shared/reprint-site/, which stays alive for the
+      // session.
+      '--flatten-to=/wordpress',
     ];
     $argc = count($argv);
     @ob_implicit_flush(true);
@@ -1111,125 +1254,53 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
     }, 0);
   `;
   const activatePhp = '<' + "?php\n" + `
-    // Resolve the imported wp-content directory. The importer prefixes
-    // remote paths with "base64:<encoded>" in some preflight fields,
-    // and on wpcom Atomic the ABSPATH (wp_detect.roots[0].path) points
-    // at the shared /wordpress/core/<ver> tree which has no
-    // wp-content — wp-content lives under the document_root instead.
-    // Decode all candidate paths, try them in order, and fall back to
-    // a recursive scan of the imported tree.
-    $decode = function ($p) {
-      if (!is_string($p) || $p === '') return null;
-      if (strpos($p, 'base64:') === 0) {
-        $d = base64_decode(substr($p, 7), true);
-        return $d === false ? null : $d;
-      }
-      return $p;
-    };
-    $state = json_decode(file_get_contents('/internal/shared/reprint-state/.import-state.json'), true);
-    $pf = $state['preflight']['data'] ?? [];
-
-    // Try (in order):
-    //  1. preflight.runtime.document_root  → e.g. /srv/htdocs
-    //  2. dirname(database.wp.paths_urls.content_dir)  → parent of wp-content
-    //  3. wp_detect.roots[*]  → ABSPATH(s); only useful when ABSPATH == docroot
-    //  4. recursive scan for any directory named wp-content
-    $candidates = [];
-    $candidates[] = $decode($pf['runtime']['document_root'] ?? null);
-    $cd = $decode($pf['database']['wp']['paths_urls']['content_dir'] ?? null);
-    if ($cd) $candidates[] = rtrim(dirname($cd), '/');
-    foreach ($pf['wp_detect']['roots'] ?? [] as $r) {
-      $candidates[] = $decode($r['path'] ?? null);
-    }
-
-    $fs_root = '/internal/shared/reprint-site';
-    $remote_root = null;
-    foreach ($candidates as $rel) {
-      if (!$rel) continue;
-      $full = $fs_root . $rel;
-      if (is_dir($full . '/wp-content')) { $remote_root = $full; break; }
-    }
-    if (!$remote_root) {
-      // Fallback: scan for the deepest dir containing wp-content/.
-      $find = function ($dir) use (&$find) {
-        if (is_dir($dir . '/wp-content')) return $dir;
-        foreach (scandir($dir) ?: [] as $e) {
-          if ($e === '.' || $e === '..') continue;
-          $p = $dir . '/' . $e;
-          if (is_dir($p) && !is_link($p)) {
-            $r = $find($p);
-            if ($r !== null) return $r;
-          }
-        }
-        return null;
-      };
-      $remote_root = $find($fs_root);
-    }
-    if (!$remote_root || !is_dir($remote_root . '/wp-content')) {
-      echo json_encode([
-        'error' => 'no wp-content found in imported site',
-        'candidates_tried' => $candidates,
-        'fs_root' => $fs_root,
-      ]);
+    // Pull's flat-docroot stage wrote the imported site straight into
+    // /wordpress (we wiped it before the pull and passed
+    // --flatten-to=/wordpress). Activation is now just three small
+    // wiring steps: SQLite drop-in, SQLite database file, mu-plugin.
+    if (!is_dir('/wordpress/wp-content')) {
+      echo json_encode(['error' => '/wordpress/wp-content missing — flatten failed?']);
       exit(1);
     }
-    echo json_encode(['site_root' => $remote_root]) . "\n";
 
-    // Helpers: recursive remove + copy. We want /wordpress to end up
-    // containing exactly the imported site (no stale Playground core,
-    // no symlinks pointing into /internal/shared), so wipe & copy.
-    function _rrmdir(string $d): void {
-      if (!is_dir($d)) { @unlink($d); return; }
-      foreach (scandir($d) ?: [] as $e) {
-        if ($e === '.' || $e === '..') continue;
-        $p = $d . '/' . $e;
-        if (is_link($p) || is_file($p)) @unlink($p);
-        elseif (is_dir($p)) _rrmdir($p);
-      }
-      @rmdir($d);
-    }
-    function _rcopy(string $src, string $dst): int {
-      $count = 0;
-      if (is_file($src)) {
-        @copy($src, $dst);
-        return 1;
-      }
+    // 1. Restore Playground's SQLite integration. db.php is the thin
+    //    drop-in stub; sqlite-database-integration/ is the actual
+    //    plugin code db.php requires. Both were stashed in /tmp
+    //    before /wordpress got wiped.
+    function _rcopy_act(string $src, string $dst): void {
       if (is_link($src)) {
-        // Skip symlinks for safety — we want concrete files only.
-        return 0;
+        $t = @readlink($src);
+        if ($t !== false) { @unlink($dst); @symlink($t, $dst); }
+        return;
       }
+      if (is_file($src)) { @copy($src, $dst); return; }
       if (is_dir($src)) {
         @mkdir($dst, 0777, true);
         foreach (scandir($src) ?: [] as $e) {
           if ($e === '.' || $e === '..') continue;
-          $count += _rcopy($src . '/' . $e, $dst . '/' . $e);
+          _rcopy_act($src . '/' . $e, $dst . '/' . $e);
         }
       }
-      return $count;
+    }
+    if (is_file('/tmp/saved-sqlite/db.php')) {
+      @copy('/tmp/saved-sqlite/db.php', '/wordpress/wp-content/db.php');
+    }
+    if (is_dir('/tmp/saved-sqlite/sqlite-database-integration')) {
+      @mkdir('/wordpress/wp-content/plugins', 0777, true);
+      _rcopy_act(
+        '/tmp/saved-sqlite/sqlite-database-integration',
+        '/wordpress/wp-content/plugins/sqlite-database-integration'
+      );
+    }
+    if (is_dir('/tmp/saved-sqlite/mu-plugin-sqlite-database-integration')) {
+      @mkdir('/wordpress/wp-content/mu-plugins', 0777, true);
+      _rcopy_act(
+        '/tmp/saved-sqlite/mu-plugin-sqlite-database-integration',
+        '/wordpress/wp-content/mu-plugins/sqlite-database-integration'
+      );
     }
 
-    // 1. Save Playground's SQLite drop-in (db.php) — not part of the
-    //    imported site, so we'd lose it on the wipe. Tiny file (~3KB).
-    $db_drop_in = @file_get_contents('/wordpress/wp-content/db.php');
-
-    // 2. Wipe /wordpress entirely. Don't touch /wordpress itself
-    //    (mount root) — clear its contents.
-    foreach (scandir('/wordpress') ?: [] as $e) {
-      if ($e === '.' || $e === '..') continue;
-      $p = '/wordpress/' . $e;
-      if (is_link($p) || is_file($p)) @unlink($p);
-      elseif (is_dir($p)) _rrmdir($p);
-    }
-
-    // 3. Copy the imported site_root verbatim into /wordpress. After
-    //    this, wp-config.php / wp-admin / wp-includes / wp-content
-    //    are all real files at /wordpress/* — __DIR__ resolves there
-    //    cleanly, no symlink-resolution surprises.
-    $copied = _rcopy($remote_root, '/wordpress');
-
-    // 4. Wire up the SQLite database the phar populated. Move the
-    //    file (don't copy) — it's a single .sqlite file that can be
-    //    arbitrarily large.
+    // 2. Move the SQLite database the phar populated into place.
     @mkdir('/wordpress/wp-content/database', 0777, true);
     if (file_exists('/tmp/imported.sqlite')) {
       if (!@rename('/tmp/imported.sqlite', '/wordpress/wp-content/database/.ht.sqlite')) {
@@ -1238,22 +1309,16 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
       }
     }
 
-    // 5. Restore Playground's SQLite drop-in.
-    if (is_string($db_drop_in) && $db_drop_in !== '') {
-      file_put_contents('/wordpress/wp-content/db.php', $db_drop_in);
-    }
-
-    // 6. Re-drop the uploads-proxy mu-plugin (the wp-content we just
-    //    copied may have wiped a previous install). The mu-plugin
-    //    source is base64-encoded here so its $_SERVER / $req / $rel
-    //    references survive PHP's outer double-quoted string parsing.
+    // 3. Drop the uploads-proxy mu-plugin. Base64-encoded so the
+    //    $_SERVER / $req / $rel references in its source survive
+    //    PHP's outer double-quoted string parsing.
     @mkdir('/wordpress/wp-content/mu-plugins', 0777, true);
     file_put_contents(
       '/wordpress/wp-content/mu-plugins/0-reprint-uploads-proxy.php',
       base64_decode(${JSON.stringify(btoa(unescape(encodeURIComponent(proxyMuPlugin))))})
     );
 
-    echo json_encode(['copied' => $copied]) . "\n";
+    echo json_encode(['ok' => true]) . "\n";
   `;
   let actResult;
   try { actResult = await client.run({ code: activatePhp }); } catch (e) { actResult = { text: '', errors: e?.message || String(e), exitCode: -1 }; }
