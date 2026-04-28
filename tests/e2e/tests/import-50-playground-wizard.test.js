@@ -77,6 +77,9 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
     it('pull --flatten-to + SQLite completes successfully (matches wizard flags)', () => {
         const result = runImporter(importUrl(), tempDir, 'pull', {
             secret: getSiteSecret(site),
+            // pull internally runs preflight as its first stage, so
+            // skip the wrapper's auto-preflight to avoid running it twice.
+            skipPreflight: true,
             timeout: 180000,
             wallTimeout: 300000,
             extraArgs: [
