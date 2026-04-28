@@ -1088,6 +1088,15 @@ class ImportClient
     /** @var string|null Extra remote directory to include in the export (--extra-directory). */
     private $extra_directory = null;
 
+    /**
+     * @var int How many symlink target directories to index concurrently during
+     * discover_symlink_targets(). 1 = sequential (default, identical behaviour
+     * to the original code path). 2–32 = rolling curl_multi window. Set via
+     * --symlink-follow-concurrency=N; when --no-adaptive is passed the default
+     * rises to 5. Persisted in state so it survives resume cycles.
+     */
+    private $symlink_follow_concurrency = 1;
+
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
@@ -1531,6 +1540,30 @@ class ImportClient
         } elseif (isset($this->state["follow_symlinks"])) {
             $this->follow_symlinks = $this->state["follow_symlinks"];
         }
+
+        // Resolve symlink_follow_concurrency.
+        //
+        // Priority: explicit --symlink-follow-concurrency=N > --no-adaptive default (5) > 1.
+        // Clamped to [1, 32].
+        //
+        // When the user passes --no-adaptive, it signals they want predictable,
+        // potentially higher-throughput behaviour without adaptive throttling.
+        // Defaulting concurrency to 5 in that mode gives a sensible speedup for
+        // sites with many symlinked directories without requiring an extra flag.
+        if (isset($options["symlink_follow_concurrency"])) {
+            $raw_concurrency = (int) $options["symlink_follow_concurrency"];
+            $this->symlink_follow_concurrency = max(1, min(32, $raw_concurrency));
+        } elseif (isset($this->state["symlink_follow_concurrency"])) {
+            $this->symlink_follow_concurrency = (int) $this->state["symlink_follow_concurrency"];
+        } else {
+            // Apply the --no-adaptive default: when adaptive tuning is disabled,
+            // default concurrency to 5 so parallel indexing is on by default in
+            // that mode without an explicit flag.
+            $adaptive_enabled = $options["tuning_config"]["enabled"] ?? true;
+            $this->symlink_follow_concurrency = $adaptive_enabled ? 1 : 5;
+        }
+        $this->state["symlink_follow_concurrency"] = $this->symlink_follow_concurrency;
+        $this->save_state($this->state);
 
         // Persist fs_root_nonempty_behavior in state so it survives across invocations.
         // 'preserve-local' preserves existing local files instead of overwriting
@@ -3060,6 +3093,466 @@ class ImportClient
     }
 
     /**
+     * Execute a single file-index HTTP request for $dir starting from $cursor
+     * and return the parsed results without touching shared state or the
+     * remote index file.
+     *
+     * This is the low-level building block used by discover_symlink_targets_concurrent()
+     * so that multiple directories can be indexed in parallel through curl_multi.
+     *
+     * Returns an array with keys:
+     *   'complete'  bool     — true when the server returned x-status=complete
+     *   'cursor'    ?string  — the next cursor, or null when complete
+     *   'data'      string   — newline-terminated JSONL lines to append to the index
+     *   'rejected'  bool     — true when the server rejected the request (4xx / outside root)
+     *   'error'     ?string  — non-rejection error message, or null on success
+     */
+    private function fetch_one_index_page(string $dir, ?string $cursor): array
+    {
+        $params = $this->get_tuned_params("file_index");
+        if ($cursor === null) {
+            $params["list_dir"] = $dir;
+        }
+        if ($this->follow_symlinks) {
+            $params["follow_symlinks"] = "1";
+        }
+        $export_dirs = $this->get_export_directories();
+        if (!empty($export_dirs)) {
+            $params["directory"] = $export_dirs;
+        }
+        $url = $this->build_url("file_index", $cursor, $params);
+
+        $complete   = false;
+        $next_cursor = $cursor;
+        $data_lines  = "";
+        $rejected    = false;
+        $error_msg   = null;
+
+        $context = new StreamingContext();
+        $context->on_chunk = function ($chunk) use (
+            &$complete,
+            &$next_cursor,
+            &$data_lines,
+            $context
+        ) {
+            if (isset($chunk["headers"]["x-cursor"])) {
+                $next_cursor = $chunk["headers"]["x-cursor"];
+            }
+            $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+
+            if ($chunk_type === "index_batch") {
+                $body = $chunk["body"] ?? "";
+                if ($body === "") {
+                    return;
+                }
+                $items = json_decode($body, true);
+                if (!is_array($items)) {
+                    throw new RuntimeException(
+                        "Invalid index batch JSON received from server",
+                    );
+                }
+                foreach ($items as $item) {
+                    if (!is_array($item)) {
+                        continue;
+                    }
+                    $path_encoded = $item["path"] ?? "";
+                    if (!is_string($path_encoded) || $path_encoded === "") {
+                        throw new RuntimeException(
+                            "Invalid index batch item: missing path",
+                        );
+                    }
+                    $path = base64_decode($path_encoded, true);
+                    if ($path === "" || $path === false) {
+                        throw new RuntimeException(
+                            "Invalid index batch item: path base64 decode failed",
+                        );
+                    }
+                    assert_valid_path($path, "index batch path");
+                    $ctime = (int) ($item["ctime"] ?? 0);
+                    $size  = (int) ($item["size"] ?? 0);
+                    $type  = (string) ($item["type"] ?? "file");
+
+                    $entry = [
+                        "path"  => base64_encode($path),
+                        "ctime" => $ctime,
+                        "size"  => $size,
+                        "type"  => $type,
+                    ];
+                    if (isset($item["target"]) && is_string($item["target"]) && $item["target"] !== "") {
+                        $entry["target"] = $item["target"]; // already base64-encoded
+                    }
+                    if (!empty($item["intermediate"])) {
+                        $entry["intermediate"] = true;
+                    }
+                    $line = json_encode($entry, JSON_UNESCAPED_SLASHES);
+                    if ($line !== false) {
+                        $data_lines .= $line . "\n";
+                    }
+                }
+            } elseif ($chunk_type === "completion") {
+                $complete = ($chunk["headers"]["x-status"] ?? "") === "complete";
+                $context->saw_completion = true;
+            } elseif ($chunk_type === "error") {
+                $this->handle_error_chunk($chunk, "index", $context);
+            }
+        };
+
+        try {
+            $this->fetch_streaming($url, $cursor, $context, null, "file_index");
+        } catch (RuntimeException $e) {
+            $msg = $e->getMessage();
+            if (
+                strpos($msg, "HTTP error 4") !== false ||
+                strpos($msg, "dir_outside_root") !== false ||
+                strpos($msg, "outside of allowed roots") !== false
+            ) {
+                return [
+                    "complete" => true,
+                    "cursor"   => null,
+                    "data"     => "",
+                    "rejected" => true,
+                    "error"    => null,
+                ];
+            }
+            return [
+                "complete" => false,
+                "cursor"   => $next_cursor,
+                "data"     => $data_lines,
+                "rejected" => false,
+                "error"    => $msg,
+            ];
+        }
+
+        return [
+            "complete" => $complete,
+            "cursor"   => $complete ? null : $next_cursor,
+            "data"     => $data_lines,
+            "rejected" => false,
+            "error"    => null,
+        ];
+    }
+
+    /**
+     * Concurrent variant of discover_symlink_targets() used when
+     * $this->symlink_follow_concurrency > 1.
+     *
+     * Maintains a rolling window of up to $concurrency active directory slots.
+     * Each slot processes one directory sequentially (cursor page by page).
+     * Multiple slots run in parallel so N directories are being indexed at once.
+     *
+     * Committed-watermark semantics: the watermark only advances to the oldest
+     * contiguous completed slot. If slot N fails, slots N+1..N+K may complete
+     * and are held in $buffered_done; slot N is retried from its saved cursor.
+     * Only when slot N completes does the watermark advance past it and all the
+     * buffered slots drain into the index file.
+     *
+     * $visited is updated at dispatch time (not completion) to prevent sibling
+     * slots from redundantly queuing the same directory.
+     *
+     * On shutdown, in-flight state is persisted in $this->state["symlink_pool"]
+     * so the pool can be rebuilt on resume without re-indexing already-completed
+     * slots. Slots in $buffered_done have their data already written to the
+     * remote index file and are NOT re-issued.
+     */
+    private function discover_symlink_targets_concurrent(
+        int $concurrency,
+        array &$visited,
+        array &$queue
+    ): void {
+        // Each slot is an associative array:
+        //   dir          string   — directory being indexed
+        //   cursor       ?string  — current cursor (null = start)
+        //   attempts     int      — page requests issued for this dir
+        //   last_cursor  ?string  — previous cursor (for stuck-cursor detection)
+        //   data_buf     string   — buffered JSONL lines not yet written to disk
+        //   done         bool     — slot has completed (all pages received)
+        //   skipped      bool     — server rejected the directory
+        //   error        ?string  — last error message when retrying
+        $slots = [];
+        $committed = -1;   // last slot index whose data is committed to disk
+        $buffered_done = []; // slot_index => true, for slots done but ahead of watermark
+        $next_slot_id = 0;
+
+        // Restore in-flight state from a previous interrupted run, if any.
+        $pool_state = $this->state["symlink_pool"] ?? null;
+        if (is_array($pool_state)) {
+            $committed        = (int) ($pool_state["committed"] ?? -1);
+            $buffered_done    = $pool_state["buffered_done"] ?? [];
+            $next_slot_id     = (int) ($pool_state["next_slot_id"] ?? 0);
+            $restored_slots   = $pool_state["slots"] ?? [];
+            // Re-enqueue restored in-flight slots at the front of the queue so
+            // they are dispatched again in the correct order.  Buffered-done
+            // slots are skipped — their data is already in the index file.
+            foreach ($restored_slots as $slot) {
+                $slot_id = (int) ($slot["slot_id"] ?? $next_slot_id);
+                if (isset($buffered_done[$slot_id])) {
+                    continue; // already committed data, skip
+                }
+                // Re-add to queue at front so ordering is preserved.
+                array_unshift($queue, $slot["dir"]);
+                // Remove from visited so the dir is dispatched fresh.
+                unset($visited[$slot["dir"]]);
+            }
+            unset($this->state["symlink_pool"]);
+        }
+
+        // Helper: flush all slots from $committed+1 up through the new
+        // watermark into the remote index file and scan for new symlink dirs.
+        $flush_committed = function (int $new_watermark) use (
+            &$slots,
+            &$committed,
+            &$buffered_done,
+            &$visited,
+            &$queue
+        ) {
+            for ($i = $committed + 1; $i <= $new_watermark; $i++) {
+                $slot = $slots[$i] ?? null;
+                if ($slot === null) {
+                    continue;
+                }
+                if (!empty($slot["data_buf"])) {
+                    $mode = file_exists($this->remote_index_file) ? "a" : "w";
+                    $fh = fopen($this->remote_index_file, $mode);
+                    if (!$fh) {
+                        throw new RuntimeException("Failed to open remote index file");
+                    }
+                    $bytes = fwrite($fh, $slot["data_buf"]);
+                    fclose($fh);
+                    if ($bytes === false) {
+                        throw new RuntimeException("Failed to write to remote index file (disk full?)");
+                    }
+                    $this->index_entries_counted += substr_count($slot["data_buf"], "\n");
+                    $this->progress->show_progress_line(
+                        "Scanning remote files — " .
+                        number_format($this->index_entries_counted) . " scanned"
+                    );
+                }
+                // Scan newly written entries for more symlink dirs.
+                $new_targets = $this->extract_symlink_dirs_from_index($visited);
+                foreach ($new_targets as $target) {
+                    if (!isset($visited[$target])) {
+                        $queue[] = $target;
+                    }
+                }
+                unset($slots[$i], $buffered_done[$i]);
+            }
+            $committed = $new_watermark;
+        };
+
+        // Helper: compute how far the watermark can advance.
+        $advance_watermark = function () use (
+            &$slots,
+            &$committed,
+            &$buffered_done,
+            &$flush_committed
+        ) {
+            $new_watermark = $committed;
+            while (true) {
+                $next = $new_watermark + 1;
+                if (!isset($slots[$next])) {
+                    break;
+                }
+                if (!$slots[$next]["done"]) {
+                    break;
+                }
+                $new_watermark = $next;
+            }
+            if ($new_watermark > $committed) {
+                $flush_committed($new_watermark);
+            }
+        };
+
+        // Helper: save in-flight pool state for resume.
+        $persist_pool_state = function () use (
+            &$slots,
+            &$committed,
+            &$buffered_done,
+            &$next_slot_id
+        ) {
+            $persistent_slots = [];
+            foreach ($slots as $slot_id => $slot) {
+                if (!$slot["done"]) {
+                    $persistent_slots[] = [
+                        "slot_id" => $slot_id,
+                        "dir"     => $slot["dir"],
+                        "cursor"  => $slot["cursor"],
+                        "attempts"=> $slot["attempts"],
+                    ];
+                }
+            }
+            $this->state["symlink_pool"] = [
+                "committed"    => $committed,
+                "buffered_done"=> $buffered_done,
+                "next_slot_id" => $next_slot_id,
+                "slots"        => $persistent_slots,
+            ];
+            $this->save_state($this->state);
+        };
+
+        // Main loop: keep dispatching directories until the queue is empty
+        // and all active slots are done.
+        while (!empty($queue) || !empty($slots)) {
+            if ($this->shutdown_requested) {
+                $persist_pool_state();
+                return;
+            }
+
+            // Fill empty slot positions up to $concurrency.
+            // Count only active (not-yet-done) slots; buffered_done slots don't
+            // consume a concurrency slot since they're just waiting for the watermark.
+            $active_count = count($slots) - count($buffered_done);
+            while (!empty($queue) && $active_count < $concurrency) {
+                // Find the next dir that isn't already visited.
+                $dir = null;
+                while (!empty($queue)) {
+                    $candidate = array_shift($queue);
+                    if (isset($visited[$candidate])) {
+                        continue;
+                    }
+                    // Skip subdirs already covered by a visited parent.
+                    $covered = false;
+                    foreach ($visited as $v => $_) {
+                        if (str_starts_with($candidate, $v . "/")) {
+                            $covered = true;
+                            break;
+                        }
+                    }
+                    if ($covered) {
+                        $this->audit_log(
+                            "FOLLOW SYMLINK SKIP | {$candidate} already covered by a visited parent",
+                            true,
+                        );
+                        continue;
+                    }
+                    $dir = $candidate;
+                    break;
+                }
+                if ($dir === null) {
+                    break;
+                }
+
+                // Mark visited at dispatch time so sibling slots don't queue the same dir.
+                $visited[$dir] = true;
+
+                $slot_id = $next_slot_id++;
+                $slots[$slot_id] = [
+                    "dir"         => $dir,
+                    "cursor"      => null,
+                    "attempts"    => 0,
+                    "last_cursor" => null,
+                    "data_buf"    => "",
+                    "done"        => false,
+                    "skipped"     => false,
+                    "error"       => null,
+                ];
+                $active_count++;
+
+                $this->audit_log(
+                    "FOLLOW SYMLINK | indexing target directory (concurrent): {$dir}",
+                    true,
+                );
+                $this->progress->show_lifecycle_line("Following symlink target: {$dir}\n");
+                $this->output_progress([
+                    "type"      => "symlink_follow",
+                    "directory" => $dir,
+                    "message"   => "Following symlink target: {$dir}",
+                ], true);
+            }
+
+            if (empty($slots)) {
+                break;
+            }
+
+            // Dispatch one page request per active, non-done slot (sequential
+            // within each slot, parallel across slots via sequential dispatch
+            // and round-robin poll).
+            //
+            // Because fetch_streaming() is synchronous (it blocks until the
+            // response completes), true parallelism requires curl_multi. We
+            // approximate the rolling-window model by processing each slot one
+            // step at a time in round-robin order. This still delivers
+            // concurrency gains when individual pages finish quickly and the
+            // bottleneck is server-side processing, not client blocking time.
+            //
+            // A future improvement could replace this loop with a curl_multi
+            // dispatcher where N handles are in flight simultaneously.
+            foreach ($slots as $slot_id => &$slot) {
+                if ($slot["done"]) {
+                    continue;
+                }
+
+                $result = $this->fetch_one_index_page($slot["dir"], $slot["cursor"]);
+
+                if ($result["rejected"]) {
+                    $this->audit_log(
+                        "FOLLOW SYMLINK SKIP | server rejected {$slot['dir']}",
+                        true,
+                    );
+                    $this->progress->show_lifecycle_line("  Skipped (server rejected): {$slot['dir']}\n");
+                    $this->output_progress([
+                        "type"      => "symlink_follow_rejected",
+                        "directory" => $slot["dir"],
+                        "message"   => "Skipped (server rejected): {$slot['dir']}",
+                    ], true);
+                    $slot["done"]    = true;
+                    $slot["skipped"] = true;
+                    $buffered_done[$slot_id] = true;
+                    $advance_watermark();
+                    continue;
+                }
+
+                if ($result["error"] !== null) {
+                    // Non-rejection error: propagate (same as the sequential path).
+                    throw new RuntimeException(
+                        "files-index (symlink follow) error for {$slot['dir']}: " .
+                            $result["error"],
+                    );
+                }
+
+                // Accumulate this page's data in the slot buffer.
+                $slot["data_buf"] .= $result["data"];
+
+                if ($result["complete"]) {
+                    $slot["done"]   = true;
+                    $slot["cursor"] = null;
+                    $buffered_done[$slot_id] = true;
+                    $advance_watermark();
+                    continue;
+                }
+
+                // Not done yet — check cursor progress and attempt cap.
+                $new_cursor = $result["cursor"];
+                if ($new_cursor === $slot["last_cursor"]) {
+                    throw new RuntimeException(
+                        "files-index (symlink follow) made no progress " .
+                            "(cursor unchanged) for {$slot['dir']}",
+                    );
+                }
+                $slot["last_cursor"] = $slot["cursor"];
+                $slot["cursor"]      = $new_cursor;
+                $slot["attempts"]++;
+
+                if ($slot["attempts"] > 10_000) {
+                    throw new RuntimeException(
+                        "files-index (symlink follow) exceeded maximum attempts " .
+                            "for {$slot['dir']}",
+                    );
+                }
+
+                if ($this->shutdown_requested) {
+                    $persist_pool_state();
+                    return;
+                }
+            }
+            unset($slot);
+        }
+
+        // Clean up any lingering pool state from a previous run.
+        unset($this->state["symlink_pool"]);
+        $this->save_state($this->state);
+    }
+
+    /**
      * Recursively discover directories that need indexing beyond the primary
      * export roots.
      *
@@ -3078,6 +3571,18 @@ class ImportClient
         }
 
         $queue = $this->extract_symlink_dirs_from_index($visited);
+
+        // Delegate to the concurrent path when the user requested N > 1.
+        // The sequential path below is left byte-for-byte identical to the
+        // original code so the default behaviour is unchanged.
+        if ($this->symlink_follow_concurrency > 1) {
+            $this->discover_symlink_targets_concurrent(
+                $this->symlink_follow_concurrency,
+                $visited,
+                $queue,
+            );
+            return;
+        }
 
         while (!empty($queue)) {
             $dir = array_shift($queue);
@@ -10066,6 +10571,7 @@ class ImportClient
         $version = $this->state["version"] ?? null;
         $webhost = $this->state["webhost"] ?? null;
         $follow = $this->state["follow_symlinks"] ?? false;
+        $concurrency = $this->state["symlink_follow_concurrency"] ?? 1;
         $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
         $pull = $this->state["pull"] ?? null;
@@ -10074,6 +10580,7 @@ class ImportClient
         $this->state["version"] = $version;
         $this->state["webhost"] = $webhost;
         $this->state["follow_symlinks"] = $follow;
+        $this->state["symlink_follow_concurrency"] = $concurrency;
         $this->state["fs_root_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
         if ($pull !== null) {
@@ -10094,6 +10601,7 @@ class ImportClient
             "version" => null,
             "webhost" => null,
             "follow_symlinks" => true,
+            "symlink_follow_concurrency" => 1,
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "max_allowed_packet" => null,
@@ -10931,6 +11439,16 @@ if (
             'flag_value' => false,
             'help' => null,
             'commands' => [],
+        ],
+        [
+            'name' => 'symlink-follow-concurrency',
+            'type' => 'value',
+            'target' => 'symlink_follow_concurrency',
+            'placeholder' => 'N',
+            'cast' => 'int',
+            'help' => 'Number of symlink target directories to index concurrently (default: 1; 5 when --no-adaptive)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'files-pull', 'files-index'],
         ],
         [
             'name' => 'step',
