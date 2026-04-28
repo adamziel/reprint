@@ -32,6 +32,8 @@ import { ensureSite } from '../lib/site-setup.js';
 const EXTERNAL_ROOT = '/srv/e2e-bench-external';
 const SYMLINK_COUNT = 74;
 const DELAY_SECONDS = 5;
+const INFLIGHT_FILE = '/tmp/many-symlinks-bench-inflight.json';
+const MAX_INFLIGHT_FILE = '/tmp/many-symlinks-bench-max-inflight.txt';
 
 describe('Import: Symlink-follow concurrency benchmark', () => {
     const site = 'many-symlinks-bench';
@@ -64,19 +66,70 @@ describe('Import: Symlink-follow concurrency benchmark', () => {
                 }
 
                 // Drop a mu-plugin that sleeps DELAY_SECONDS on every
-                // export-API request. mu-plugins load before regular
+                // export-API request and tracks how many requests are
+                // in-flight at the same time. mu-plugins load before regular
                 // plugins, so the sleep fires before the exporter's
                 // ?reprint-api interceptor runs — but after WordPress has
                 // already accepted the request body, so HMAC verification
                 // sees the unmodified payload.
+                //
+                // The inflight counter is held in a flock'd JSON file. On
+                // entry we increment it and bump a max-observed gauge; on
+                // exit we decrement. Once the run finishes, the test reads
+                // the max-observed gauge and asserts that the concurrent
+                // run actually overlapped requests on the server. This is
+                // also the point at which we'd notice if php-fpm only ever
+                // hands out one worker — the server has to be able to serve
+                // up to 5 requests at a time for the benchmark to mean
+                // anything.
                 const muDir = join(siteDir, 'wp-content', 'mu-plugins');
                 mkdirSync(muDir, { recursive: true });
                 writeFileSync(
                     join(muDir, 'test-symlink-bench-delay.php'),
-                    `<?php\n` +
-                    `if (isset($_GET['reprint-api']) || isset($_GET['site-export-api'])) {\n` +
-                    `    sleep(${DELAY_SECONDS});\n` +
-                    `}\n`,
+                    [
+                        '<?php',
+                        `if (!isset($_GET['reprint-api']) && !isset($_GET['site-export-api'])) { return; }`,
+                        `$inflight_path = ${JSON.stringify(INFLIGHT_FILE)};`,
+                        `$max_path = ${JSON.stringify(MAX_INFLIGHT_FILE)};`,
+                        `$bump = function (int $delta) use ($inflight_path, $max_path) {`,
+                        `    $fh = fopen($inflight_path, 'c+');`,
+                        `    if ($fh === false) { return 0; }`,
+                        `    flock($fh, LOCK_EX);`,
+                        `    rewind($fh);`,
+                        `    $raw = stream_get_contents($fh);`,
+                        `    $cur = is_numeric(trim((string) $raw)) ? (int) trim((string) $raw) : 0;`,
+                        `    $cur += $delta;`,
+                        `    if ($cur < 0) { $cur = 0; }`,
+                        `    ftruncate($fh, 0);`,
+                        `    rewind($fh);`,
+                        `    fwrite($fh, (string) $cur);`,
+                        `    fflush($fh);`,
+                        `    if ($delta > 0) {`,
+                        `        $mh = fopen($max_path, 'c+');`,
+                        `        if ($mh !== false) {`,
+                        `            flock($mh, LOCK_EX);`,
+                        `            rewind($mh);`,
+                        `            $mr = stream_get_contents($mh);`,
+                        `            $max = is_numeric(trim((string) $mr)) ? (int) trim((string) $mr) : 0;`,
+                        `            if ($cur > $max) {`,
+                        `                ftruncate($mh, 0);`,
+                        `                rewind($mh);`,
+                        `                fwrite($mh, (string) $cur);`,
+                        `                fflush($mh);`,
+                        `            }`,
+                        `            flock($mh, LOCK_UN);`,
+                        `            fclose($mh);`,
+                        `        }`,
+                        `    }`,
+                        `    flock($fh, LOCK_UN);`,
+                        `    fclose($fh);`,
+                        `    return $cur;`,
+                        `};`,
+                        `$bump(1);`,
+                        `register_shutdown_function(function () use ($bump) { $bump(-1); });`,
+                        `sleep(${DELAY_SECONDS});`,
+                        '',
+                    ].join('\n'),
                 );
             },
         });
@@ -94,11 +147,34 @@ describe('Import: Symlink-follow concurrency benchmark', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
+    function resetInflightGauge() {
+        for (const path of [INFLIGHT_FILE, MAX_INFLIGHT_FILE]) {
+            try {
+                execSync(`sudo rm -f ${path}`);
+                execSync(`sudo touch ${path}`);
+                execSync(`sudo chmod 666 ${path}`);
+            } catch (_) {
+                // best effort
+            }
+        }
+    }
+
+    function readMaxInflight() {
+        try {
+            const raw = readFileSync(MAX_INFLIGHT_FILE, 'utf-8').trim();
+            return raw === '' ? 0 : parseInt(raw, 10);
+        } catch (_) {
+            return 0;
+        }
+    }
+
     function timeImport(tempDir, concurrency) {
         runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
             extraArgs: ['--abort'],
         });
+
+        resetInflightGauge();
 
         const start = Date.now();
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
@@ -112,10 +188,11 @@ describe('Import: Symlink-follow concurrency benchmark', () => {
             timeout: 720000,
         });
         const elapsedMs = Date.now() - start;
+        const maxInflight = readMaxInflight();
 
         assert.equal(result.exitCode, 0,
             `concurrency=${concurrency}: expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
-        return elapsedMs;
+        return { elapsedMs, maxInflight };
     }
 
     function assertAllPayloadsDownloaded(tempDir, concurrency) {
@@ -129,19 +206,30 @@ describe('Import: Symlink-follow concurrency benchmark', () => {
     }
 
     it('benchmarks symlink-follow concurrency=1 vs concurrency=5', () => {
-        const seqMs = timeImport(tempDirSequential, 1);
+        const seq = timeImport(tempDirSequential, 1);
         assertAllPayloadsDownloaded(tempDirSequential, 1);
 
-        const concMs = timeImport(tempDirConcurrent, 5);
+        const conc = timeImport(tempDirConcurrent, 5);
         assertAllPayloadsDownloaded(tempDirConcurrent, 5);
 
-        const speedup = (seqMs / concMs).toFixed(2);
+        const speedup = (seq.elapsedMs / conc.elapsedMs).toFixed(2);
         // eslint-disable-next-line no-console
         console.log(
             `\n[symlink-follow-concurrency benchmark] ${SYMLINK_COUNT} symlinks, ${DELAY_SECONDS}s server delay\n` +
-            `  concurrency=1: ${seqMs} ms\n` +
-            `  concurrency=5: ${concMs} ms\n` +
+            `  concurrency=1: ${seq.elapsedMs} ms (max in-flight on server: ${seq.maxInflight})\n` +
+            `  concurrency=5: ${conc.elapsedMs} ms (max in-flight on server: ${conc.maxInflight})\n` +
             `  speedup: ${speedup}x\n`,
+        );
+
+        // Sanity check on the server: with the concurrent client, the
+        // mu-plugin should observe more than one request in flight at the
+        // same time. If this fails the rolling window is still serializing
+        // — either client-side (round-robin instead of curl_multi) or
+        // server-side (php-fpm only handing out one worker). We expect
+        // the server to be able to serve up to 5 requests at a time.
+        assert.ok(
+            conc.maxInflight >= 2,
+            `concurrency=5: server only ever saw ${conc.maxInflight} request(s) in flight; expected >= 2`,
         );
     }, 1500000);
 });
