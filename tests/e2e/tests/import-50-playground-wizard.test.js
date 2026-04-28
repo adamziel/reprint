@@ -176,12 +176,22 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
         let mountDir;
 
         beforeAll(async () => {
-            // Stage the imported tree in a writable dir, since the
-            // import dir will get mutated by Playground (cookies,
-            // .htaccess updates, mu-plugin writes etc.) and we don't
-            // want subsequent assertions on importDir to be polluted.
+            // Stage the imported tree in a writable, self-contained
+            // dir for Playground to mount.
+            //
+            // dereference: true is critical here. flat-docroot's
+            // output contains absolute symlinks pointing at the raw
+            // pulled tree (wp-admin → /tmp/.../e2e-wpcloud-core/wp-admin
+            // etc. for the wpcloud-flatten fixture). cpSync with
+            // dereference:false would copy those symlinks verbatim;
+            // when Playground mounts the dir at /wordpress, the WASM
+            // VFS sees the symlinks but can't resolve their host-FS
+            // targets that live outside the mount. Resolving them at
+            // copy time turns mountDir into a normal flat WP install
+            // — which is what the deployed wizard achieves by copying
+            // recursively in its activation step.
             mountDir = join(tempDir, 'playground-mount');
-            cpSync(importDir, mountDir, { recursive: true, dereference: false });
+            cpSync(importDir, mountDir, { recursive: true, dereference: true });
 
             // Place the imported SQLite where Playground's auto-loaded
             // SQLite drop-in expects it (this is what the wizard does
@@ -191,16 +201,19 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
             copyFileSync(sqlitePath, join(dbDir, '.ht.sqlite'));
 
             const { runCLI } = await import('@wp-playground/cli');
+            // Mirror Studio's pull-reprint server flags: the imported
+            // tree IS the site, so SkipSqliteSetup keeps Playground
+            // from reinstalling the SQLite plugin on top of it, and
+            // followSymlinks lets the wp-admin / wp-includes symlinks
+            // produced by flat-docroot resolve.
             playgroundCli = await runCLI({
                 command: 'server',
                 port: 18745, // outside the 8081-8119 fixture range
                 skipBrowser: true,
                 quiet: true,
-                // The mount supplies WordPress + the imported site;
-                // setting wordpressInstallMode=do-not-attempt-installing
-                // tells boot not to download/install WP on top of it.
-                'wordpress-install-mode': 'do-not-attempt-installing',
                 wordpressInstallMode: 'do-not-attempt-installing',
+                skipSqliteSetup: true,
+                followSymlinks: true,
                 'mount-before-install': [{ hostPath: mountDir, vfsPath: '/wordpress' }],
                 php: '8.2',
                 // Tell the request handler that WP thinks it's at this
