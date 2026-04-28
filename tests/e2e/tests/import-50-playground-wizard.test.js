@@ -236,7 +236,9 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
         });
 
         it('responds with the imported site\'s blog title (no install wizard)', async () => {
-            const res = await fetch(serverUrl, { redirect: 'manual' });
+            // Playground's first request always 302s for the auto-login
+            // cookie handshake — fetch must follow redirects to reach WP.
+            const res = await fetch(serverUrl, { redirect: 'follow' });
             const body = await res.text();
             const headers = Object.fromEntries(res.headers.entries());
             const snippet = body.slice(0, 1000);
