@@ -1553,6 +1553,8 @@ class ImportClient
         if (isset($options["symlink_follow_concurrency"])) {
             $raw_concurrency = (int) $options["symlink_follow_concurrency"];
             $this->symlink_follow_concurrency = max(1, min(32, $raw_concurrency));
+            $this->state["symlink_follow_concurrency"] = $this->symlink_follow_concurrency;
+            $this->save_state($this->state);
         } elseif (isset($this->state["symlink_follow_concurrency"])) {
             $this->symlink_follow_concurrency = (int) $this->state["symlink_follow_concurrency"];
         } else {
@@ -1562,8 +1564,6 @@ class ImportClient
             $adaptive_enabled = $options["tuning_config"]["enabled"] ?? true;
             $this->symlink_follow_concurrency = $adaptive_enabled ? 1 : 5;
         }
-        $this->state["symlink_follow_concurrency"] = $this->symlink_follow_concurrency;
-        $this->save_state($this->state);
 
         // Persist fs_root_nonempty_behavior in state so it survives across invocations.
         // 'preserve-local' preserves existing local files instead of overwriting
@@ -3268,8 +3268,10 @@ class ImportClient
         //   done         bool     — slot has completed (all pages received)
         //   skipped      bool     — server rejected the directory
         //   error        ?string  — last error message when retrying
+        /** @var array<int, array{dir: string, cursor: ?string, attempts: int, last_cursor: ?string, data_buf: string, done: bool, skipped: bool, error: ?string}> $slots */
         $slots = [];
         $committed = -1;   // last slot index whose data is committed to disk
+        /** @var array<int, bool> $buffered_done */
         $buffered_done = []; // slot_index => true, for slots done but ahead of watermark
         $next_slot_id = 0;
 
@@ -3343,7 +3345,6 @@ class ImportClient
         $advance_watermark = function () use (
             &$slots,
             &$committed,
-            &$buffered_done,
             &$flush_committed
         ) {
             $new_watermark = $committed;
