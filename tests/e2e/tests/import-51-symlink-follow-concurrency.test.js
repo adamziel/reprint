@@ -30,9 +30,13 @@ const EXTERNAL_ROOT = '/srv/e2e-bench-external';
 const SYMLINK_COUNT = 74;
 const DELAY_SECONDS = 5;
 const ROUTER_PATH = '/tmp/many-symlinks-delay-router.php';
-// Port chosen out of the 81xx site-registry range to avoid clashing with the
-// nginx vhost that ensureSite spins up on the registered port for this site.
+// Delay server listens on this port and proxies every export-API request to
+// the real nginx vhost on the registered port (UPSTREAM_PORT), sleeping
+// DELAY_SECONDS first. We can't just intercept the request locally because
+// the export endpoint needs a fully-booted WordPress, which only nginx+
+// php-fpm provides.
 const DELAY_SERVER_PORT = 18120;
+const UPSTREAM_PORT = 8120;
 
 describe('Import: Symlink-follow concurrency benchmark', () => {
     const site = 'many-symlinks-bench';
@@ -41,23 +45,66 @@ describe('Import: Symlink-follow concurrency benchmark', () => {
     let delayServer = null;
 
     async function startDelayServer() {
-        // Router script for `php -S`: sleeps DELAY_SECONDS before dispatching
-        // any export-API request, but answers a /health probe immediately so
-        // the readiness wait below doesn't have to pay the sleep itself.
+        // Router script for `php -S`: sleeps DELAY_SECONDS on every export-API
+        // request and then proxies to the real nginx vhost on UPSTREAM_PORT.
+        // /health answers immediately so the readiness wait doesn't pay the
+        // sleep. Anything else is also proxied (without sleep) so the suite
+        // remains a faithful client of the real WordPress site.
         const router = `<?php
-if (($_SERVER['REQUEST_URI'] ?? '') === '/health') {
+$uri = $_SERVER['REQUEST_URI'] ?? '/';
+if ($uri === '/health') {
     echo 'ok';
     return true;
 }
-if (isset($_GET['reprint-api']) || isset($_GET['site-export-api'])) {
+$is_export_api = isset($_GET['reprint-api']) || isset($_GET['site-export-api']);
+if ($is_export_api) {
     sleep(${DELAY_SECONDS});
-    require __DIR__ . '/index.php';
+}
+$upstream = 'http://127.0.0.1:${UPSTREAM_PORT}' . $uri;
+$ch = curl_init($upstream);
+$headers = [];
+foreach (getallheaders() as $k => $v) {
+    if (strtolower($k) === 'host') continue;
+    if (strtolower($k) === 'content-length') continue;
+    $headers[] = $k . ': ' . $v;
+}
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+curl_setopt($ch, CURLOPT_HEADER, true);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_TIMEOUT, 600);
+if ($method !== 'GET' && $method !== 'HEAD') {
+    curl_setopt($ch, CURLOPT_POSTFIELDS, file_get_contents('php://input'));
+}
+$resp = curl_exec($ch);
+if ($resp === false) {
+    http_response_code(502);
+    echo 'proxy error: ' . curl_error($ch);
+    curl_close($ch);
     return true;
 }
-return false;
+$status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+$header_str = substr($resp, 0, $header_size);
+$body = substr($resp, $header_size);
+curl_close($ch);
+http_response_code($status);
+foreach (explode("\\r\\n", $header_str) as $line) {
+    if ($line === '' || stripos($line, 'HTTP/') === 0) continue;
+    $lower = strtolower($line);
+    if (strpos($lower, 'transfer-encoding:') === 0) continue;
+    if (strpos($lower, 'connection:') === 0) continue;
+    if (strpos($lower, 'content-length:') === 0) continue;
+    header($line, false);
+}
+echo $body;
+return true;
 `;
         writeFileSync(ROUTER_PATH, router);
 
+        // -t docroot is required by php -S even though our router proxies
+        // every request; point it at the plugin dir like test 31 does.
         const docroot = join(getSiteDir(site), 'wp-content', 'plugins', 'site-export');
         delayServer = spawn(
             'php',
