@@ -491,6 +491,15 @@ class Pull
             "message" => "Starting server at {$url}",
         ], true);
 
+        // Under web SAPIs the caller doesn't want the blocking passthru —
+        // they just want the artifacts. The reprint-ui wizard in
+        // Playground sets IMPORTER_WEB_ENTRY and expects pull to return
+        // after apply-runtime so it can serve the blueprint/download.
+        if (defined('IMPORTER_WEB_ENTRY')) {
+            $this->client->exit_code = 0;
+            return;
+        }
+
         passthru("bash " . escapeshellarg($start_sh), $exit_code);
         $this->client->exit_code = $exit_code;
     }

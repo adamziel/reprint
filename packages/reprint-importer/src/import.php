@@ -627,6 +627,19 @@ class AdaptiveTuner
      */
     public function get_request_params(string $endpoint): array
     {
+        // --no-adaptive turns the tuner off entirely. Contract:
+        //   • no max_execution_time / memory_threshold sent on requests
+        //     → server uses its own defaults (typically the highest
+        //       allowed values, e.g. 60s on wpcomsh)
+        //   • record_result returns sleep_seconds=0 and skips AIMD
+        //   • record_error skips backoff
+        // i.e. the importer becomes a passthrough that runs as fast
+        // as the server permits. Callers like the browser-hosted
+        // reprint-ui wizard depend on this to avoid artificial
+        // pauses inside a single Playground run.
+        if (empty($this->config["enabled"])) {
+            return [];
+        }
         $params = [
             "max_execution_time" => $this->config["max_execution_time"],
             "memory_threshold" => $this->config["memory_threshold"],
@@ -797,6 +810,19 @@ class AdaptiveTuner
      */
     public function record_error(string $endpoint, array $error): array
     {
+        // --no-adaptive disables the entire tuner: no AIMD size
+        // adjustments, no error backoff, no enforced sleep. The caller
+        // sees the raw error and decides what to do.
+        if (!$this->config["enabled"]) {
+            return [
+                "decision" => "disabled",
+                "http_code" => (int) ($error["http_code"] ?? 0),
+                "timeout" => (bool) ($error["timeout"] ?? false),
+                "curl_errno" => (int) ($error["curl_errno"] ?? 0),
+                "error_backoff_remaining" => 0,
+            ];
+        }
+
         $http_code = (int) ($error["http_code"] ?? 0);
         $timeout = (bool) ($error["timeout"] ?? false);
         $curl_errno = (int) ($error["curl_errno"] ?? 0);
@@ -10555,13 +10581,16 @@ function get_importer_version(): string {
 // IMPORTER_PHAR_ENTRY is defined by the phar stub and IMPORTER_WRAPPER_ENTRY is
 // defined by the repo/package wrapper scripts, so the guard also passes when
 // running as `php reprint.phar`, `php importer/import.php`, or the Composer bin.
+// IMPORTER_WEB_ENTRY lets a web-SAPI caller (e.g. the reprint-ui wizard running
+// inside WordPress Playground) invoke the importer with a hand-built $argv.
 if (
-    PHP_SAPI === "cli" &&
+    (PHP_SAPI === "cli" || defined('IMPORTER_WEB_ENTRY')) &&
     isset($argv) &&
     (
         realpath($argv[0] ?? "") === __FILE__ ||
         defined('IMPORTER_PHAR_ENTRY') ||
-        defined('IMPORTER_WRAPPER_ENTRY')
+        defined('IMPORTER_WRAPPER_ENTRY') ||
+        defined('IMPORTER_WEB_ENTRY')
     )
 ) {
     // Handle --version before anything else.
@@ -10680,7 +10709,7 @@ if (
             'type' => 'flag',
             'target' => 'tuning_config.enabled',
             'flag_value' => true,
-            'help' => 'Enable adaptive request tuning (default: on)',
+            'help' => 'Enable adaptive request tuning (default: on). When off, the importer omits max_execution_time/memory_threshold from requests and skips inter-request sleeps and AIMD/error backoff.',
             'help_section' => 'global',
             'commands' => [],
         ],
