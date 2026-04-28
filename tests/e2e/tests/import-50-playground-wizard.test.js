@@ -175,11 +175,15 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
             $opts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
 
             $user_count = (int) $db->query("SELECT COUNT(*) FROM wp_users")->fetchColumn();
+            $option_count = (int) $db->query("SELECT COUNT(*) FROM wp_options")->fetchColumn();
+            $term_count = (int) $db->query("SELECT COUNT(*) FROM wp_terms")->fetchColumn();
 
             echo json_encode([
                 'tables' => $tables,
                 'missing_required_tables' => $missing,
                 'wp_users_count' => $user_count,
+                'wp_options_count' => $option_count,
+                'wp_terms_count' => $term_count,
                 'options' => $opts,
             ]);
         `;
@@ -204,7 +208,23 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
             `wp_users has ${data.wp_users_count} rows — WP needs at least 1 to consider itself installed`,
         );
 
-        // 3. Critical wp_options rows.
+        // 3. Row-count sanity check. A bare `wp core install` writes
+        //    150+ rows to wp_options and 2+ to wp_terms. If the dump
+        //    got truncated mid-stream — the user's reported failure mode
+        //    where db-apply reported "complete" but later tables had
+        //    no data — these counts collapse to a handful. Catches
+        //    silent partial-import regressions that table existence
+        //    alone wouldn't.
+        assert.ok(
+            data.wp_options_count >= 50,
+            `wp_options has only ${data.wp_options_count} rows — dump likely truncated mid-stream (fresh WP install has 150+)`,
+        );
+        assert.ok(
+            data.wp_terms_count >= 1,
+            `wp_terms has ${data.wp_terms_count} rows — fresh WP install seeds at least the "Uncategorized" category`,
+        );
+
+        // 4. Critical wp_options rows.
         assert.ok(data.options.siteurl, `wp_options.siteurl missing — got: ${JSON.stringify(data.options)}`);
         assert.ok(data.options.home, 'wp_options.home missing');
         assert.ok(data.options.blogname, 'wp_options.blogname missing');
