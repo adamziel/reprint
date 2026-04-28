@@ -219,25 +219,27 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
         });
 
         it('responds with the imported site\'s blog title (no install wizard)', async () => {
-            const res = await fetch(serverUrl);
+            const res = await fetch(serverUrl, { redirect: 'manual' });
             const body = await res.text();
-            assert.equal(res.status, 200, `Expected 200, got ${res.status}`);
-            // The install wizard contains the literal "Welcome" header
-            // and a "language selection" form. If we see those, the
-            // SQLite drop-in didn't see the imported DB and WP fell
-            // back to "blog not installed" — exactly the bug we keep
-            // hitting in the deployed wizard.
+            const headers = Object.fromEntries(res.headers.entries());
+            const snippet = body.slice(0, 1000);
+            assert.equal(
+                res.status, 200,
+                `Expected 200 from ${serverUrl}, got ${res.status}\nheaders: ${JSON.stringify(headers)}\nbody[0..1000]:\n${snippet}`,
+            );
+            // The install wizard contains a redirect to install.php
+            // and a "Welcome" page that asks for a language. If we see
+            // those, the SQLite drop-in didn't see the imported DB and
+            // WP fell back to "blog not installed" — exactly the bug
+            // we keep hitting in the deployed wizard.
             assert.ok(
                 !/install\.php|Welcome to the famous/i.test(body),
-                'WordPress is showing the install wizard — DB not picked up',
+                `WordPress is showing the install wizard — DB not picked up.\nbody[0..1000]:\n${snippet}`,
             );
-            // Sanity check: the imported site's blogname should appear.
-            // We don't know the exact value, but a fresh WP fixture
-            // sets it to "Test Site" or similar; just assert it's
-            // not empty and not the default WP install body.
+            // Sanity check: the response should be a real WP page.
             assert.ok(
                 /<title>[^<]+<\/title>/i.test(body),
-                'No <title> tag in response — WP didn\'t render the front page',
+                `No <title> tag in response — WP didn't render the front page.\nbody[0..1000]:\n${snippet}`,
             );
         });
     });
