@@ -453,7 +453,9 @@ function render_wizard(): void {
     <h2>Connect your WordPress.com account</h2>
     <p class="desc">We'll redirect you to WordPress.com to authorize Reprint.
       This lets us list your sites and temporarily enable the reprint exporter
-      on the one you choose. No secrets leave this browser.</p>
+      on the one you choose. Your access token is kept in an HTTP-only session
+      cookie on this site only — nothing is written to a database, and it's
+      gone the moment you close the tab or click "Sign out".</p>
     <div class="actions">
       <a href="?action=login"><button class="primary">Sign in with WordPress.com →</button></a>
     </div>
@@ -462,7 +464,7 @@ function render_wizard(): void {
   <!-- STEP 2 — Pick site -->
   <section class="card <?= $authed ? '' : 'hidden' ?>" id="card-2">
     <h2>Choose a site to clone</h2>
-    <p class="desc">These are the Atomic &amp; WordPress.com sites you can access. The reprint exporter gets enabled only on the site you pick, for a rolling 60-minute window.</p>
+    <p class="desc">Atomic sites can be cloned with reprint. Simple WordPress.com sites are listed for reference but are dimmed and not selectable — they don't run wpcomsh's export endpoint. The exporter is enabled on the site you pick for a rolling 60-minute window.</p>
     <input type="search" id="site-filter" placeholder="Filter by name or URL…" autocomplete="off" class="hidden">
     <div class="site-list" id="site-list"><p class="desc">Loading your sites…</p></div>
     <p class="desc site-count hidden" id="site-count" style="margin:10px 0 0"></p>
@@ -559,7 +561,14 @@ let selectedSiteUrl = null;
 let ALL_SITES = [];
 
 function renderSites(sites) {
-  ALL_SITES = sites || [];
+  // Atomic sites first (those are the importable ones), Simple sites
+  // last so they don't crowd the picker. Within each group, keep the
+  // server-given order (recently active first).
+  ALL_SITES = (sites || []).slice().sort((a, b) => {
+    const aA = a.is_wpcom_atomic ? 1 : 0;
+    const bA = b.is_wpcom_atomic ? 1 : 0;
+    return bA - aA;
+  });
   const list = $('#site-list');
   const filter = $('#site-filter');
   const count = $('#site-count');
@@ -722,19 +731,32 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
   }
 
   // Reserve a SEPARATE docroot for the import, NOT /wordpress (which
-  // already has the freshly-booted WP and would trip the phar's
-  // "target directory is not empty" guard). The activation step at
-  // the end mounts the imported wp-content into /wordpress/wp-content.
-  // Open tag is split so PHP doesn't treat the JS template literal
-  // as PHP itself.
+  // already has the freshly-booted WP). The activation step at the
+  // end wipes /wordpress and copies the imported tree over it, so
+  // pull-time and Playground-default files never coexist.
+  //
+  // Recursive wipe of any leftover from a prior import in this same
+  // Playground session — @rmdir only deletes empty dirs, so without
+  // this the phar's preserve-local mode walks the prior 30k files
+  // and "skips" each one (file_exists per file ≈ 6+ minutes in WASM).
+  // Open tag split keeps PHP's tokenizer from treating the JS
+  // template literal as a PHP open tag.
+  setPhase('preflight', 'active', 'wiping previous import…');
   await client.run({ code: '<' + "?php\n" + `
+    function _rrmdir($d) {
+      if (!is_dir($d)) return;
+      foreach (scandir($d) ?: [] as $e) {
+        if ($e === '.' || $e === '..') continue;
+        $p = $d . '/' . $e;
+        if (is_link($p) || is_file($p)) @unlink($p);
+        elseif (is_dir($p)) _rrmdir($p);
+      }
+      @rmdir($d);
+    }
+    _rrmdir('/internal/shared/reprint-state');
+    _rrmdir('/internal/shared/reprint-site');
+    @unlink('/tmp/imported.sqlite');
     @mkdir('/internal/shared/reprint-state', 0777, true);
-    @mkdir('/internal/shared/reprint-site',  0777, true);
-    // Wipe any state from a previous failed run so the phar starts
-    // fresh — leftover state files would cause "no cursor found"
-    // errors on subsequent attempts.
-    foreach (glob('/internal/shared/reprint-state/.*') ?: [] as $f) { if (is_file($f)) @unlink($f); }
-    @rmdir('/internal/shared/reprint-site');
     @mkdir('/internal/shared/reprint-site',  0777, true);
   ` });
 
@@ -778,7 +800,10 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
       // imported site over it, and we want the DB intact afterwards.
       '--target-sqlite-path=/tmp/imported.sqlite',
       '--new-site-url=https://playground.wordpress.net',
-      '--on-fs-root-nonempty=preserve-local',
+      // No preserve-local: we already nuked /internal/shared/reprint-site
+      // before invoking the phar, so fs-root is provably empty.
+      // preserve-local would otherwise stat 30k+ files at ~10ms each.
+      '--on-fs-root-nonempty=error',
       // --no-adaptive turns off the request-budget tuner entirely;
       // when set, the phar omits max_execution_time / memory_threshold
       // from outgoing requests and the server uses its own defaults.
@@ -1219,11 +1244,13 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
     }
 
     // 6. Re-drop the uploads-proxy mu-plugin (the wp-content we just
-    //    copied may have wiped a previous install).
+    //    copied may have wiped a previous install). The mu-plugin
+    //    source is base64-encoded here so its $_SERVER / $req / $rel
+    //    references survive PHP's outer double-quoted string parsing.
     @mkdir('/wordpress/wp-content/mu-plugins', 0777, true);
     file_put_contents(
       '/wordpress/wp-content/mu-plugins/0-reprint-uploads-proxy.php',
-      ${JSON.stringify(proxyMuPlugin)}
+      base64_decode(${JSON.stringify(btoa(unescape(encodeURIComponent(proxyMuPlugin))))})
     );
 
     echo json_encode(['copied' => $copied]) . "\n";
@@ -1270,6 +1297,9 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
           '--secret=' . ${JSON.stringify(secret)},
           '--state-dir=/internal/shared/reprint-state',
           '--fs-root=/internal/shared/reprint-site',
+          // fs-root has the essential-files import; preserve-local is
+          // OK here because skipped-earlier only walks the (much
+          // smaller) skip list, not the full 30k+ tree.
           '--on-fs-root-nonempty=preserve-local',
           '--no-adaptive',
           '--filter=skipped-earlier',
