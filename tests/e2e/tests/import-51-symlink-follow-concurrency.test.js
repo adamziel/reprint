@@ -1,15 +1,15 @@
 /**
  * Test 51: Symlink-follow concurrency benchmark.
  *
- * Sets up a site with many directory symlinks pointing to external targets
- * outside the site root, then runs `files-sync --follow-symlinks` twice:
- * once with --symlink-follow-concurrency=1 (sequential, the default) and
- * once with --symlink-follow-concurrency=5 (rolling window of 5).
+ * Stands up 74 directory symlinks pointing outside the site root, then runs
+ * `files-sync --follow-symlinks` twice against an export server that sleeps
+ * 5 seconds before responding to every export-API request. The first run uses
+ * --symlink-follow-concurrency=1 (sequential, the default), the second uses
+ * =5 (rolling window of 5). Both must download every payload; the test logs
+ * both wall-clock durations so you can see the speedup.
  *
- * The test asserts both runs complete and download every external file,
- * and prints both wall-clock durations so you can see the speedup. Per-link
- * latency dominates this workload (each link is a directory with one tiny
- * file), so a rolling window of 5 should finish materially faster.
+ * With per-request latency dominating the workload, sequential should take
+ * roughly 74×5s ≈ 370s and concurrent-5 should take roughly ⌈74/5⌉×5s ≈ 75s.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -27,43 +27,54 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 const EXTERNAL_ROOT = '/srv/e2e-bench-external';
-const SYMLINK_COUNT = 30;
+const SYMLINK_COUNT = 74;
+const DELAY_SECONDS = 5;
+const ROUTER_PATH = '/tmp/many-symlinks-delay-router.php';
 
 describe('Import: Symlink-follow concurrency benchmark', () => {
     const site = 'many-symlinks-bench';
     let tempDirSequential;
     let tempDirConcurrent;
-    let fallbackApiServer = null;
+    let delayServer = null;
 
-    async function ensureApiReachable() {
-        const apiUrl = getSiteUrl(site);
-        try {
-            await fetch(apiUrl, { method: 'GET' });
-            return;
-        } catch (_) {
-            // Same fallback pattern as import-31-follow-symlinks.test.js:
-            // when the configured port isn't exposed, fall back to PHP's
-            // built-in server pointed at the plugin directory.
-        }
+    async function startDelayServer() {
+        // Router script for `php -S`: sleeps DELAY_SECONDS before dispatching
+        // any export-API request, but answers a /health probe immediately so
+        // the readiness wait below doesn't have to pay the sleep itself.
+        const router = `<?php
+if (($_SERVER['REQUEST_URI'] ?? '') === '/health') {
+    echo 'ok';
+    return true;
+}
+if (isset($_GET['reprint-api']) || isset($_GET['site-export-api'])) {
+    sleep(${DELAY_SECONDS});
+    require __DIR__ . '/index.php';
+    return true;
+}
+return false;
+`;
+        writeFileSync(ROUTER_PATH, router);
 
-        const fsRoot = join(getSiteDir(site), 'wp-content', 'plugins', 'site-export');
-        fallbackApiServer = spawn('php', ['-S', '127.0.0.1:8120', '-t', fsRoot], {
-            stdio: 'ignore',
-        });
+        const docroot = join(getSiteDir(site), 'wp-content', 'plugins', 'site-export');
+        delayServer = spawn(
+            'php',
+            ['-S', '127.0.0.1:8120', '-t', docroot, ROUTER_PATH],
+            { stdio: 'ignore' },
+        );
 
         const deadline = Date.now() + 15000;
         while (Date.now() < deadline) {
-            if (fallbackApiServer.exitCode !== null) {
-                throw new Error(`Fallback API server exited early with code ${fallbackApiServer.exitCode}`);
+            if (delayServer.exitCode !== null) {
+                throw new Error(`Delay server exited early with code ${delayServer.exitCode}`);
             }
             try {
-                await fetch(apiUrl, { method: 'GET' });
-                return;
+                const r = await fetch('http://127.0.0.1:8120/health');
+                if (r.ok) return;
             } catch (_) {
                 await sleep(100);
             }
         }
-        throw new Error('Timed out waiting for many-symlinks-bench API server on 127.0.0.1:8120');
+        throw new Error('Timed out waiting for delay server on 127.0.0.1:8120');
     }
 
     beforeAll(async () => {
@@ -92,7 +103,10 @@ describe('Import: Symlink-follow concurrency benchmark', () => {
                 }
             },
         });
-        await ensureApiReachable();
+
+        // Always use the delay server, even if nginx is configured for
+        // this port — the whole point of the test is the artificial latency.
+        await startDelayServer();
 
         tempDirSequential = createTempDir('e2e-many-symlinks-seq');
         tempDirConcurrent = createTempDir('e2e-many-symlinks-conc');
@@ -101,8 +115,8 @@ describe('Import: Symlink-follow concurrency benchmark', () => {
     afterAll(() => {
         cleanupTempDir(tempDirSequential);
         cleanupTempDir(tempDirConcurrent);
-        if (fallbackApiServer && fallbackApiServer.exitCode === null) {
-            fallbackApiServer.kill('SIGTERM');
+        if (delayServer && delayServer.exitCode === null) {
+            delayServer.kill('SIGTERM');
         }
     });
 
@@ -123,7 +137,8 @@ describe('Import: Symlink-follow concurrency benchmark', () => {
                 '--follow-symlinks',
                 `--symlink-follow-concurrency=${concurrency}`,
             ],
-            timeout: 300000,
+            // Sequential: 74 × 5s ≈ 370s plus overhead. Give it 12 minutes.
+            timeout: 720000,
         });
         const elapsedMs = Date.now() - start;
 
@@ -152,10 +167,10 @@ describe('Import: Symlink-follow concurrency benchmark', () => {
         const speedup = (seqMs / concMs).toFixed(2);
         // eslint-disable-next-line no-console
         console.log(
-            `\n[symlink-follow-concurrency benchmark] ${SYMLINK_COUNT} symlinks\n` +
+            `\n[symlink-follow-concurrency benchmark] ${SYMLINK_COUNT} symlinks, ${DELAY_SECONDS}s server delay\n` +
             `  concurrency=1: ${seqMs} ms\n` +
             `  concurrency=5: ${concMs} ms\n` +
             `  speedup: ${speedup}x\n`,
         );
-    }, 600000);
+    }, 1500000);
 });
