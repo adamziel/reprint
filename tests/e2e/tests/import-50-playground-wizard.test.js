@@ -58,6 +58,11 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
     let tempDir;
     let importDir;     // what flat-docroot writes to (= wizard's /wordpress)
     let sqlitePath;    // where db-apply puts the SQLite (= wizard's /internal/shared/imported.sqlite)
+    // Align the SQL's siteurl/home rewrite with the URL Playground will
+    // serve under in this test, so WP doesn't issue a canonical
+    // redirect on the front-page check.
+    const PLAYGROUND_PORT = 18745;
+    const PLAYGROUND_URL = `http://127.0.0.1:${PLAYGROUND_PORT}`;
 
     beforeAll(async () => {
         await ensureSite(site);
@@ -86,7 +91,7 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
                 '--target-engine=sqlite',
                 `--target-sqlite-path=${sqlitePath}`,
                 `--flatten-to=${importDir}`,
-                '--new-site-url=https://playground.wordpress.net',
+                `--new-site-url=${PLAYGROUND_URL}`,
                 '--runtime=none',
                 '--no-adaptive',
             ],
@@ -156,16 +161,15 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
         assert.ok(opts.home, 'wp_options.home missing');
         assert.ok(opts.blogname, 'wp_options.blogname missing');
 
-        // The wizard passes --new-site-url=https://playground.wordpress.net
-        // which makes pull rewrite siteurl/home in the dump. Confirm it
-        // actually happened — if it didn't, WP would redirect every
-        // request to the source domain.
+        // --new-site-url should have rewritten the source URLs to the
+        // local Playground URL. If it didn't, WP would redirect every
+        // request back to the source domain.
         assert.ok(
-            opts.siteurl.includes('playground.wordpress.net'),
+            opts.siteurl.includes('127.0.0.1') && opts.siteurl.includes(String(PLAYGROUND_PORT)),
             `siteurl was not rewritten by --new-site-url; got: ${opts.siteurl}`,
         );
         assert.ok(
-            opts.home.includes('playground.wordpress.net'),
+            opts.home.includes('127.0.0.1') && opts.home.includes(String(PLAYGROUND_PORT)),
             `home was not rewritten by --new-site-url; got: ${opts.home}`,
         );
     });
@@ -208,7 +212,7 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
             // produced by flat-docroot resolve.
             playgroundCli = await runCLI({
                 command: 'server',
-                port: 18745, // outside the 8081-8119 fixture range
+                port: PLAYGROUND_PORT, // outside the 8081-8119 fixture range
                 skipBrowser: true,
                 quiet: true,
                 wordpressInstallMode: 'do-not-attempt-installing',
@@ -220,7 +224,7 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
                 // origin — matches the --new-site-url we passed to pull,
                 // so wp_options.siteurl agrees with what WP sees, and
                 // we don't get an immediate redirect on the front page.
-                'site-url': 'https://playground.wordpress.net',
+                'site-url': PLAYGROUND_URL,
             });
             serverUrl = playgroundCli.serverUrl;
         }, 180000);
