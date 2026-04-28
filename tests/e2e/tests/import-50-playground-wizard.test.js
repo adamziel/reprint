@@ -190,12 +190,15 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
             const { runCLI } = await import('@wp-playground/cli');
             playgroundCli = await runCLI({
                 command: 'server',
-                port: 0, // auto-pick a free port
+                port: 18745, // outside the 8081-8119 fixture range
                 skipBrowser: true,
                 quiet: true,
-                mode: 'mount-only',
-                mount: [{ hostPath: mountDir, vfsPath: '/wordpress' }],
-                'site-url': 'http://playground.test',
+                // The mount supplies WordPress + the imported site;
+                // setting wordpressInstallMode=do-not-attempt-installing
+                // tells boot not to download/install WP on top of it.
+                'wordpress-install-mode': 'do-not-attempt-installing',
+                wordpressInstallMode: 'do-not-attempt-installing',
+                'mount-before-install': [{ hostPath: mountDir, vfsPath: '/wordpress' }],
                 php: '8.2',
             });
             serverUrl = playgroundCli.serverUrl;
