@@ -35,7 +35,13 @@ const DELAY_SECONDS = 5;
 const INFLIGHT_FILE = '/tmp/many-symlinks-bench-inflight.json';
 const MAX_INFLIGHT_FILE = '/tmp/many-symlinks-bench-max-inflight.txt';
 
-describe('Import: Symlink-follow concurrency benchmark', () => {
+// Skip under Playground CLI's WASM PHP — the exporter exhausts the
+// 256MB WASM memory budget on a 74-symlink site, and the benchmark is
+// about wall-clock dispatch on the importer side, not WASM compatibility.
+const isPlaygroundCli = (process.env.PHP_BINARY || '').includes('playground-php');
+const describeOrSkip = isPlaygroundCli ? describe.skip : describe;
+
+describeOrSkip('Import: Symlink-follow concurrency benchmark', () => {
     const site = 'many-symlinks-bench';
     let tempDirSequential;
     let tempDirConcurrent;
