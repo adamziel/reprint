@@ -844,49 +844,15 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
       if (!$keep_root) @rmdir($d);
     }
 
-    // Stash Playground's SQLite integration before wiping /wordpress.
-    // It's NOT just db.php — db.php is a tiny drop-in that requires
-    // /wordpress/wp-content/plugins/sqlite-database-integration/load.php.
-    // Without that plugin tree restored after the wipe, db.php would
-    // fatal on the include and WP would fall back to MySQL with the
-    // imported wp-config's Atomic credentials, which can't connect,
-    // which shows the install wizard.
-    function _rcopy_pre(string $src, string $dst): void {
-      if (is_link($src)) {
-        $t = @readlink($src);
-        if ($t !== false) @symlink($t, $dst);
-        return;
-      }
-      if (is_file($src)) { @copy($src, $dst); return; }
-      if (is_dir($src)) {
-        @mkdir($dst, 0777, true);
-        foreach (scandir($src) ?: [] as $e) {
-          if ($e === '.' || $e === '..') continue;
-          _rcopy_pre($src . '/' . $e, $dst . '/' . $e);
-        }
-      }
-    }
-    _rrmdir('/tmp/saved-sqlite');
-    @mkdir('/tmp/saved-sqlite', 0777, true);
-    if (is_file('/wordpress/wp-content/db.php')) {
-      @copy('/wordpress/wp-content/db.php', '/tmp/saved-sqlite/db.php');
-    }
-    if (is_dir('/wordpress/wp-content/plugins/sqlite-database-integration')) {
-      _rcopy_pre(
-        '/wordpress/wp-content/plugins/sqlite-database-integration',
-        '/tmp/saved-sqlite/sqlite-database-integration'
-      );
-    }
-    if (is_dir('/wordpress/wp-content/mu-plugins/sqlite-database-integration')) {
-      _rcopy_pre(
-        '/wordpress/wp-content/mu-plugins/sqlite-database-integration',
-        '/tmp/saved-sqlite/mu-plugin-sqlite-database-integration'
-      );
-    }
-
+    // Playground's WASM build loads its SQLite integration via
+    // auto_prepend_file from /internal/, *before* wp-config.php runs.
+    // So nothing in /wordpress needs to survive the wipe — wpdb gets
+    // wired up to SQLite either way, and the integration reads from
+    // <WP_CONTENT_DIR>/database/.ht.sqlite which we'll populate during
+    // activation.
     _rrmdir('/internal/shared/reprint-state');
     _rrmdir('/internal/shared/reprint-site');
-    @unlink('/tmp/imported.sqlite');
+    @unlink('/internal/shared/imported.sqlite');
     @mkdir('/internal/shared/reprint-state', 0777, true);
     @mkdir('/internal/shared/reprint-site',  0777, true);
 
@@ -930,10 +896,10 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
       '--state-dir=/internal/shared/reprint-state',
       '--fs-root=/internal/shared/reprint-site',
       '--target-engine=sqlite',
-      // Write the SQLite DB to /tmp instead of straight into
-      // /wordpress — activation wipes /wordpress before copying the
-      // imported site over it, and we want the DB intact afterwards.
-      '--target-sqlite-path=/tmp/imported.sqlite',
+      // Write the SQLite DB to /internal/shared (persistent across
+      // client.run calls in this session) instead of /tmp, which can
+      // get reset between PHP contexts in Playground's WASM VFS.
+      '--target-sqlite-path=/internal/shared/imported.sqlite',
       '--new-site-url=https://playground.wordpress.net',
       // No preserve-local: we already nuked /internal/shared/reprint-site
       // before invoking the phar, so fs-root is provably empty.
@@ -1222,6 +1188,33 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
     return;
   }
 
+  // wp-config neutralizer that removes hardcoded path defines from
+  // the imported wp-config.php. Atomic sites bake in
+  //   define('WP_CONTENT_DIR', '/srv/htdocs/wp-content')
+  // and similar host-specific paths. In the WASM VFS those paths
+  // don't exist, so WP's SQLite drop-in reads from the wrong place
+  // and the install wizard pops up. Comment out anything that
+  // hardcodes a path so WP derives them from ABSPATH=/wordpress/.
+  //
+  // Built as a plain JS string (NOT a template literal) and base64-
+  // encoded before reaching PHP — the regex backslashes survive
+  // JS->PHP transit, and the $vars inside PHP single-quoted strings
+  // stay literal (no double-quote interpolation traps).
+  const wpConfigNeutralizePhp =
+    "$cfg_path = '/wordpress/wp-config.php';\n" +
+    "if (is_file($cfg_path)) {\n" +
+    "    $cfg = file_get_contents($cfg_path);\n" +
+    "    $orig = $cfg;\n" +
+    "    $names = ['ABSPATH','WP_CONTENT_DIR','WP_CONTENT_URL','WP_TEMP_DIR',\n" +
+    "              'WPMU_PLUGIN_DIR','WPMU_PLUGIN_URL','WP_PLUGIN_DIR','WP_PLUGIN_URL',\n" +
+    "              'WP_LANG_DIR','WP_HOME','WP_SITEURL','COOKIE_DOMAIN'];\n" +
+    "    foreach ($names as $n) {\n" +
+    "        $pattern = '/^[\\\\s]*(define\\\\s*\\\\(\\\\s*[\\\\\\'\\\"]' . preg_quote($n, '/') . '[\\\\\\'\\\"][^)]*\\\\)\\\\s*;)/m';\n" +
+    "        $cfg = preg_replace($pattern, '// reprint-ui neutralized: $1', $cfg);\n" +
+    "    }\n" +
+    "    if ($cfg !== $orig) file_put_contents($cfg_path, $cfg);\n" +
+    "}\n";
+
   // ─── Activation: symlink wp-content/* from the imported docroot
   // into /wordpress/wp-content so the booted Playground sees the
   // imported plugins/themes/uploads. db-apply already wrote the SQL
@@ -1263,53 +1256,32 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
       exit(1);
     }
 
-    // 1. Restore Playground's SQLite integration. db.php is the thin
-    //    drop-in stub; sqlite-database-integration/ is the actual
-    //    plugin code db.php requires. Both were stashed in /tmp
-    //    before /wordpress got wiped.
-    function _rcopy_act(string $src, string $dst): void {
-      if (is_link($src)) {
-        $t = @readlink($src);
-        if ($t !== false) { @unlink($dst); @symlink($t, $dst); }
-        return;
-      }
-      if (is_file($src)) { @copy($src, $dst); return; }
-      if (is_dir($src)) {
-        @mkdir($dst, 0777, true);
-        foreach (scandir($src) ?: [] as $e) {
-          if ($e === '.' || $e === '..') continue;
-          _rcopy_act($src . '/' . $e, $dst . '/' . $e);
-        }
-      }
-    }
-    if (is_file('/tmp/saved-sqlite/db.php')) {
-      @copy('/tmp/saved-sqlite/db.php', '/wordpress/wp-content/db.php');
-    }
-    if (is_dir('/tmp/saved-sqlite/sqlite-database-integration')) {
-      @mkdir('/wordpress/wp-content/plugins', 0777, true);
-      _rcopy_act(
-        '/tmp/saved-sqlite/sqlite-database-integration',
-        '/wordpress/wp-content/plugins/sqlite-database-integration'
-      );
-    }
-    if (is_dir('/tmp/saved-sqlite/mu-plugin-sqlite-database-integration')) {
-      @mkdir('/wordpress/wp-content/mu-plugins', 0777, true);
-      _rcopy_act(
-        '/tmp/saved-sqlite/mu-plugin-sqlite-database-integration',
-        '/wordpress/wp-content/mu-plugins/sqlite-database-integration'
-      );
-    }
-
-    // 2. Move the SQLite database the phar populated into place.
+    // 1. Move the SQLite database the phar populated into place.
     @mkdir('/wordpress/wp-content/database', 0777, true);
-    if (file_exists('/tmp/imported.sqlite')) {
-      if (!@rename('/tmp/imported.sqlite', '/wordpress/wp-content/database/.ht.sqlite')) {
-        @copy('/tmp/imported.sqlite', '/wordpress/wp-content/database/.ht.sqlite');
-        @unlink('/tmp/imported.sqlite');
+    $src_db = '/internal/shared/imported.sqlite';
+    $dst_db = '/wordpress/wp-content/database/.ht.sqlite';
+    $sqlite_size = is_file($src_db) ? filesize($src_db) : 0;
+    if ($sqlite_size > 0) {
+      if (!@rename($src_db, $dst_db)) {
+        @copy($src_db, $dst_db);
+        @unlink($src_db);
       }
     }
+    echo json_encode([
+      'sqlite_src_size' => $sqlite_size,
+      'sqlite_dst_size' => is_file($dst_db) ? filesize($dst_db) : 0,
+    ]) . "\n";
 
-    // 3. Drop the uploads-proxy mu-plugin. Base64-encoded so the
+    // 1b. Neutralize hardcoded path defines in the imported wp-config.
+    //     Atomic sites have define('WP_CONTENT_DIR', '/srv/htdocs/...')
+    //     which makes WP's SQLite drop-in look in the wrong place and
+    //     fall into the install wizard. Run the snippet via eval +
+    //     base64 so the regex backslashes don't get eaten by JS or
+    //     by PHP's double-quoted string parsing.
+    eval(base64_decode(${JSON.stringify(btoa(unescape(encodeURIComponent(wpConfigNeutralizePhp))))}));
+    echo json_encode(['wp_config_neutralized' => true]) . "\n";
+
+    // 2. Drop the uploads-proxy mu-plugin. Base64-encoded so the
     //    $_SERVER / $req / $rel references in its source survive
     //    PHP's outer double-quoted string parsing.
     @mkdir('/wordpress/wp-content/mu-plugins', 0777, true);

@@ -151,35 +151,74 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
             `imported.sqlite is only ${size} bytes — expected ≥ ~64KB for a populated WP DB`,
         );
 
-        // Query wp_options directly via PDO — this bypasses wpdb so
-        // we're checking the raw imported data, not WP's interpretation.
+        // Inspect the imported SQLite via PDO. Three things this catches:
+        //   1. The SQLite file exists at all.
+        //   2. The schema is COMPLETE — every table WordPress requires
+        //      to consider itself installed. Missing wp_users is the
+        //      classic "imported the data but install wizard still
+        //      shows up" symptom (db-apply bailed partway through, or
+        //      the source's dump was truncated, or the SQLite
+        //      translator dropped a CREATE TABLE).
+        //   3. wp_users has at least one row — wpdb's
+        //      is_blog_installed() returns false on an empty users
+        //      table even if wp_options.siteurl exists.
         const script = `
             $db = new PDO('sqlite:' . $argv[1]);
             $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            $stmt = $db->prepare(
-                "SELECT option_name, option_value FROM wp_options "
-                . "WHERE option_name IN ('siteurl','home','blogname','template','active_plugins')"
-            );
+            // List of WP tables that exist in any default 6.x install.
+            $required = ['wp_users','wp_usermeta','wp_options','wp_posts','wp_postmeta','wp_terms','wp_termmeta','wp_term_taxonomy','wp_term_relationships','wp_comments','wp_commentmeta','wp_links'];
+            $tables = $db->query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_wp\\_sqlite\\_%' ESCAPE '\\\\' ORDER BY name")->fetchAll(PDO::FETCH_COLUMN);
+            $missing = array_values(array_diff($required, $tables));
+
+            $stmt = $db->prepare("SELECT option_name, option_value FROM wp_options WHERE option_name IN ('siteurl','home','blogname')");
             $stmt->execute();
-            echo json_encode($stmt->fetchAll(PDO::FETCH_KEY_PAIR));
+            $opts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+
+            $user_count = (int) $db->query("SELECT COUNT(*) FROM wp_users")->fetchColumn();
+
+            echo json_encode([
+                'tables' => $tables,
+                'missing_required_tables' => $missing,
+                'wp_users_count' => $user_count,
+                'options' => $opts,
+            ]);
         `;
         const out = execFileSync(PHP_BINARY, ['-r', script, sqlitePath], { encoding: 'utf-8' });
-        const opts = JSON.parse(out);
+        const data = JSON.parse(out);
 
-        assert.ok(opts.siteurl, `wp_options.siteurl missing — got: ${JSON.stringify(opts)}`);
-        assert.ok(opts.home, 'wp_options.home missing');
-        assert.ok(opts.blogname, 'wp_options.blogname missing');
+        // 1. Schema completeness — this is the assertion that catches
+        //    the "missing tables → install wizard" regression.
+        assert.deepEqual(
+            data.missing_required_tables, [],
+            `Imported SQLite is missing required WP tables: ${JSON.stringify(data.missing_required_tables)}.\n` +
+            `WP would consider itself uninstalled and serve the install wizard.\n` +
+            `All tables present: ${JSON.stringify(data.tables)}`,
+        );
+
+        // 2. wp_users must have at least one row, otherwise WP's
+        //    is_blog_installed() returns false even with a complete
+        //    schema. wp_users for a fresh source install has 1 row
+        //    (the admin user); copying a real site brings >= 1.
+        assert.ok(
+            data.wp_users_count >= 1,
+            `wp_users has ${data.wp_users_count} rows — WP needs at least 1 to consider itself installed`,
+        );
+
+        // 3. Critical wp_options rows.
+        assert.ok(data.options.siteurl, `wp_options.siteurl missing — got: ${JSON.stringify(data.options)}`);
+        assert.ok(data.options.home, 'wp_options.home missing');
+        assert.ok(data.options.blogname, 'wp_options.blogname missing');
 
         // --new-site-url should have rewritten the source URLs to the
         // local Playground URL. If it didn't, WP would redirect every
         // request back to the source domain.
         assert.ok(
-            opts.siteurl.includes('127.0.0.1') && opts.siteurl.includes(String(PLAYGROUND_PORT)),
-            `siteurl was not rewritten by --new-site-url; got: ${opts.siteurl}`,
+            data.options.siteurl.includes('127.0.0.1') && data.options.siteurl.includes(String(PLAYGROUND_PORT)),
+            `siteurl was not rewritten by --new-site-url; got: ${data.options.siteurl}`,
         );
         assert.ok(
-            opts.home.includes('127.0.0.1') && opts.home.includes(String(PLAYGROUND_PORT)),
-            `home was not rewritten by --new-site-url; got: ${opts.home}`,
+            data.options.home.includes('127.0.0.1') && data.options.home.includes(String(PLAYGROUND_PORT)),
+            `home was not rewritten by --new-site-url; got: ${data.options.home}`,
         );
     });
 
@@ -268,24 +307,54 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
             const res = await fetch(serverUrl, { redirect: 'follow' });
             const body = await res.text();
             const headers = Object.fromEntries(res.headers.entries());
-            const snippet = body.slice(0, 1000);
+            const snippet = body.slice(0, 1500);
             assert.equal(
                 res.status, 200,
-                `Expected 200 from ${serverUrl}, got ${res.status}\nheaders: ${JSON.stringify(headers)}\nbody[0..1000]:\n${snippet}`,
+                `Expected 200 from ${serverUrl}, got ${res.status}\nheaders: ${JSON.stringify(headers)}\nbody[0..1500]:\n${snippet}`,
             );
-            // The install wizard contains a redirect to install.php
-            // and a "Welcome" page that asks for a language. If we see
-            // those, the SQLite drop-in didn't see the imported DB and
-            // WP fell back to "blog not installed" — exactly the bug
-            // we keep hitting in the deployed wizard.
+
+            // Hard rejection of the install wizard. WP redirects /
+            // straight to /wp-admin/install.php when is_blog_installed()
+            // is false, so the front-page response or a redirect chain
+            // ending in install.php is the regression. Multiple
+            // signals to maximise coverage of WP versions / themes /
+            // languages.
             assert.ok(
-                !/install\.php|Welcome to the famous/i.test(body),
-                `WordPress is showing the install wizard — DB not picked up.\nbody[0..1000]:\n${snippet}`,
+                !/install\.php/i.test(body),
+                `Response references install.php — WP thinks it isn't installed.\nbody[0..1500]:\n${snippet}`,
             );
-            // Sanity check: the response should be a real WP page.
             assert.ok(
-                /<title>[^<]+<\/title>/i.test(body),
-                `No <title> tag in response — WP didn't render the front page.\nbody[0..1000]:\n${snippet}`,
+                !/wp-admin\/setup-config\.php|installation\s+process|Welcome to the famous/i.test(body),
+                `Install wizard markup detected.\nbody[0..1500]:\n${snippet}`,
+            );
+
+            // Positive signal: WP actually rendered a front page. We
+            // pull the source site's blogname from the imported SQLite
+            // and assert it appears verbatim in the rendered HTML
+            // (default themes put it in <title> and many places in the
+            // header). This catches "WP booted but rendered an empty
+            // / unrelated page" cases.
+            const blognameScript = `
+                $db = new PDO('sqlite:' . $argv[1]);
+                $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                echo $db->query("SELECT option_value FROM wp_options WHERE option_name='blogname'")
+                    ->fetchColumn();
+            `;
+            const blogname = execFileSync(
+                PHP_BINARY, ['-r', blognameScript, sqlitePath],
+                { encoding: 'utf-8' },
+            ).trim();
+            assert.ok(blogname, 'Could not read blogname from imported SQLite');
+
+            // The blogname might be HTML-escaped in the response (e.g.
+            // & → &amp;) — assert one of the two forms is there.
+            const blognameHtml = blogname
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            assert.ok(
+                body.includes(blogname) || body.includes(blognameHtml),
+                `Imported blogname "${blogname}" not found in WP response — WP probably booted an unrelated page.\nbody[0..1500]:\n${snippet}`,
             );
         });
     });
