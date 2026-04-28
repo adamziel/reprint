@@ -203,6 +203,11 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
                 wordpressInstallMode: 'do-not-attempt-installing',
                 'mount-before-install': [{ hostPath: mountDir, vfsPath: '/wordpress' }],
                 php: '8.2',
+                // Tell the request handler that WP thinks it's at this
+                // origin — matches the --new-site-url we passed to pull,
+                // so wp_options.siteurl agrees with what WP sees, and
+                // we don't get an immediate redirect on the front page.
+                'site-url': 'https://playground.wordpress.net',
             });
             serverUrl = playgroundCli.serverUrl;
         }, 180000);
