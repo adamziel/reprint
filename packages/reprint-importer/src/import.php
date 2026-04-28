@@ -3093,21 +3093,18 @@ class ImportClient
     }
 
     /**
-     * Execute a single file-index HTTP request for $dir starting from $cursor
-     * and return the parsed results without touching shared state or the
-     * remote index file.
+     * Build a non-blocking cURL handle for a file_index page request.
      *
-     * This is the low-level building block used by discover_symlink_targets_concurrent()
-     * so that multiple directories can be indexed in parallel through curl_multi.
+     * The handle's HEADERFUNCTION captures the multipart boundary and the
+     * WRITEFUNCTION accumulates the body into $slot_buf['body']. Caller
+     * adds the handle to a curl_multi handle, drives it to completion, and
+     * then feeds $slot_buf into parse_index_response_body() to extract the
+     * data lines and next cursor.
      *
-     * Returns an array with keys:
-     *   'complete'  bool     — true when the server returned x-status=complete
-     *   'cursor'    ?string  — the next cursor, or null when complete
-     *   'data'      string   — newline-terminated JSONL lines to append to the index
-     *   'rejected'  bool     — true when the server rejected the request (4xx / outside root)
-     *   'error'     ?string  — non-rejection error message, or null on success
+     * Mirrors the URL building, header set, and HMAC signing of
+     * fetch_streaming() so the request is byte-equivalent on the wire.
      */
-    private function fetch_one_index_page(string $dir, ?string $cursor): array
+    private function prepare_index_curl_handle(string $dir, ?string $cursor, array &$slot_buf)
     {
         $params = $this->get_tuned_params("file_index");
         if ($cursor === null) {
@@ -3122,11 +3119,72 @@ class ImportClient
         }
         $url = $this->build_url("file_index", $cursor, $params);
 
-        $complete   = false;
-        $next_cursor = $cursor;
+        $ch = curl_init($url);
+        reprint_apply_curl_proxy_from_env($ch);
+
+        $headers = [
+            ...$this->get_base_headers("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+            "Upgrade-Insecure-Requests: 1",
+            "Sec-Fetch-Dest: document",
+            "Sec-Fetch-Mode: navigate",
+            "Sec-Fetch-Site: none",
+            "Sec-Fetch-User: ?1",
+        ];
+        if ($cursor) {
+            $headers[] = "X-Export-Cursor: {$cursor}";
+        }
+        array_push($headers, ...$this->get_hmac_headers(""));
+
+        $slot_buf["body"]     = "";
+        $slot_buf["boundary"] = null;
+
+        curl_setopt_array($ch, [
+            CURLOPT_FOLLOWLOCATION  => false,
+            CURLOPT_LOW_SPEED_LIMIT => 1,
+            CURLOPT_LOW_SPEED_TIME  => 300,
+            CURLOPT_ENCODING        => "gzip, deflate",
+            CURLOPT_HTTPHEADER      => $headers,
+            CURLOPT_HEADERFUNCTION  => function ($ch, $line) use (&$slot_buf) {
+                $len = strlen($line);
+                if ($slot_buf["boundary"] === null && stripos($line, "Content-Type:") === 0) {
+                    $pos = stripos($line, "boundary=");
+                    if ($pos !== false) {
+                        $b = trim(substr($line, $pos + 9));
+                        if ($b !== "" && $b[0] === '"') {
+                            $end = strpos($b, '"', 1);
+                            if ($end !== false) {
+                                $b = substr($b, 1, $end - 1);
+                            }
+                        } else {
+                            $end = strcspn($b, ";,\r\n \t");
+                            $b   = substr($b, 0, $end);
+                        }
+                        if ($b !== "") {
+                            $slot_buf["boundary"] = $b;
+                        }
+                    }
+                }
+                return $len;
+            },
+            CURLOPT_WRITEFUNCTION => function ($ch, $data) use (&$slot_buf) {
+                $slot_buf["body"] .= $data;
+                return strlen($data);
+            },
+        ]);
+
+        return $ch;
+    }
+
+    /**
+     * Parse a buffered file_index multipart response and return the same
+     * shape as fetch_one_index_page():
+     *   complete bool, cursor ?string, data string, rejected bool, error ?string.
+     */
+    private function parse_index_response_body(array $slot_buf): array
+    {
+        $complete    = false;
+        $next_cursor = null;
         $data_lines  = "";
-        $rejected    = false;
-        $error_msg   = null;
 
         $context = new StreamingContext();
         $context->on_chunk = function ($chunk) use (
@@ -3179,7 +3237,7 @@ class ImportClient
                         "type"  => $type,
                     ];
                     if (isset($item["target"]) && is_string($item["target"]) && $item["target"] !== "") {
-                        $entry["target"] = $item["target"]; // already base64-encoded
+                        $entry["target"] = $item["target"];
                     }
                     if (!empty($item["intermediate"])) {
                         $entry["intermediate"] = true;
@@ -3197,29 +3255,54 @@ class ImportClient
             }
         };
 
+        $boundary = $slot_buf["boundary"] ?? null;
+        $body     = $slot_buf["body"] ?? "";
+
+        if ($boundary === null && strncmp($body, "--boundary-", 11) === 0) {
+            $eol = strpos($body, "\n");
+            if ($eol !== false) {
+                $line = rtrim(substr($body, 0, $eol), "\r\n");
+                if (strncmp($line, "--boundary-", 11) === 0) {
+                    $boundary = substr($line, 2);
+                }
+            }
+        }
+
+        if ($boundary === null) {
+            return [
+                "complete" => false,
+                "cursor"   => null,
+                "data"     => "",
+                "rejected" => false,
+                "error"    => "Missing multipart boundary in response",
+            ];
+        }
+
         try {
-            $this->fetch_streaming($url, $cursor, $context, null, "file_index");
+            $current_chunk = null;
+            $parser = new MultipartStreamParser(
+                $boundary,
+                $this->make_chunk_handler($context, $current_chunk),
+            );
+            $parser->feed($body);
         } catch (RuntimeException $e) {
             $msg = $e->getMessage();
-            if (
-                strpos($msg, "HTTP error 4") !== false ||
-                strpos($msg, "dir_outside_root") !== false ||
-                strpos($msg, "outside of allowed roots") !== false
-            ) {
-                return [
-                    "complete" => true,
-                    "cursor"   => null,
-                    "data"     => "",
-                    "rejected" => true,
-                    "error"    => null,
-                ];
-            }
             return [
                 "complete" => false,
                 "cursor"   => $next_cursor,
                 "data"     => $data_lines,
                 "rejected" => false,
                 "error"    => $msg,
+            ];
+        }
+
+        if (!$context->saw_completion) {
+            return [
+                "complete" => false,
+                "cursor"   => $next_cursor,
+                "data"     => $data_lines,
+                "rejected" => false,
+                "error"    => "Missing completion chunk in response",
             ];
         }
 
@@ -3390,10 +3473,52 @@ class ImportClient
             $this->save_state($this->state);
         };
 
+        // curl_multi-driven main loop: each in-flight slot owns one cURL
+        // handle on the shared multi handle, so up to $concurrency requests
+        // are truly in flight on the wire at the same time.
+        $mh = curl_multi_init();
+        // $handles_by_slot maps slot_id => cURL handle (CurlHandle on PHP 8+,
+        // resource on PHP 7.4). PHPStan can't always resolve CurlHandle, so
+        // the type is annotated as mixed.
+        /** @var array<int, mixed> $handles_by_slot */
+        $handles_by_slot = [];
+        /** @var array<int, array{body: string, boundary: ?string}> $slot_bufs */
+        $slot_bufs = [];
+
+        $cleanup_multi = function () use (&$mh, &$handles_by_slot) {
+            foreach ($handles_by_slot as $h) {
+                @curl_multi_remove_handle($mh, $h);
+                @curl_close($h);
+            }
+            $handles_by_slot = [];
+            if ($mh !== null) {
+                @curl_multi_close($mh);
+                $mh = null;
+            }
+        };
+
+        $attach_request = function (int $slot_id) use (
+            &$slots,
+            &$handles_by_slot,
+            &$slot_bufs,
+            &$mh
+        ) {
+            $slot = &$slots[$slot_id];
+            $slot_bufs[$slot_id] = ["body" => "", "boundary" => null];
+            $ch = $this->prepare_index_curl_handle(
+                $slot["dir"],
+                $slot["cursor"],
+                $slot_bufs[$slot_id],
+            );
+            $handles_by_slot[$slot_id] = $ch;
+            curl_multi_add_handle($mh, $ch);
+        };
+
         // Main loop: keep dispatching directories until the queue is empty
         // and all active slots are done.
         while (!empty($queue) || !empty($slots)) {
             if ($this->shutdown_requested) {
+                $cleanup_multi();
                 $persist_pool_state();
                 return;
             }
@@ -3458,35 +3583,72 @@ class ImportClient
                     "directory" => $dir,
                     "message"   => "Following symlink target: {$dir}",
                 ], true);
+
+                // Attach the new slot's first page request to the multi
+                // handle so it can race in parallel with the others.
+                $attach_request($slot_id);
             }
 
-            if (empty($slots)) {
+            // Re-attach any slot that finished a page in the previous
+            // iteration but still has more cursor pages to fetch.
+            foreach ($slots as $slot_id => $s) {
+                if ($s["done"] || isset($handles_by_slot[$slot_id])) {
+                    continue;
+                }
+                $attach_request($slot_id);
+            }
+
+            if (empty($handles_by_slot)) {
                 break;
             }
 
-            // Dispatch one page request per active, non-done slot (sequential
-            // within each slot, parallel across slots via sequential dispatch
-            // and round-robin poll).
-            //
-            // Because fetch_streaming() is synchronous (it blocks until the
-            // response completes), true parallelism requires curl_multi. We
-            // approximate the rolling-window model by processing each slot one
-            // step at a time in round-robin order. This still delivers
-            // concurrency gains when individual pages finish quickly and the
-            // bottleneck is server-side processing, not client blocking time.
-            //
-            // A future improvement could replace this loop with a curl_multi
-            // dispatcher where N handles are in flight simultaneously.
-            foreach ($slots as $slot_id => &$slot) {
-                if ($slot["done"]) {
+            // Drive the multi handle until at least one transfer completes.
+            do {
+                $status = curl_multi_exec($mh, $running);
+            } while ($status === CURLM_CALL_MULTI_PERFORM);
+            if ($running > 0) {
+                curl_multi_select($mh, 1.0);
+                $this->progress->tick_spinner();
+            }
+
+            // Drain any finished transfers.
+            while (($info = curl_multi_info_read($mh)) !== false) {
+                if ($info["msg"] !== CURLMSG_DONE) {
                     continue;
                 }
+                $finished = $info["handle"];
 
-                $result = $this->fetch_one_index_page($slot["dir"], $slot["cursor"]);
+                $slot_id = null;
+                foreach ($handles_by_slot as $sid => $h) {
+                    if ($h === $finished) {
+                        $slot_id = $sid;
+                        break;
+                    }
+                }
 
-                if ($result["rejected"]) {
+                $errno     = curl_errno($finished);
+                $err_msg   = curl_error($finished);
+                $http_code = (int) curl_getinfo($finished, CURLINFO_HTTP_CODE);
+                @curl_multi_remove_handle($mh, $finished);
+                @curl_close($finished);
+                if ($slot_id === null) {
+                    continue;
+                }
+                unset($handles_by_slot[$slot_id]);
+
+                $slot = &$slots[$slot_id];
+
+                if ($errno !== 0) {
+                    $cleanup_multi();
+                    throw new RuntimeException(
+                        "files-index (symlink follow) curl error for {$slot['dir']}: " .
+                            $err_msg,
+                    );
+                }
+
+                if ($http_code >= 400 && $http_code < 500) {
                     $this->audit_log(
-                        "FOLLOW SYMLINK SKIP | server rejected {$slot['dir']}",
+                        "FOLLOW SYMLINK SKIP | server rejected {$slot['dir']} (HTTP {$http_code})",
                         true,
                     );
                     $this->progress->show_lifecycle_line("  Skipped (server rejected): {$slot['dir']}\n");
@@ -3498,32 +3660,54 @@ class ImportClient
                     $slot["done"]    = true;
                     $slot["skipped"] = true;
                     $buffered_done[$slot_id] = true;
+                    unset($slot_bufs[$slot_id]);
+                    unset($slot);
                     $advance_watermark();
                     continue;
                 }
-
-                if ($result["error"] !== null) {
-                    // Non-rejection error: propagate (same as the sequential path).
+                if ($http_code !== 200) {
+                    $cleanup_multi();
                     throw new RuntimeException(
-                        "files-index (symlink follow) error for {$slot['dir']}: " .
-                            $result["error"],
+                        "files-index (symlink follow) HTTP {$http_code} for {$slot['dir']}",
                     );
                 }
 
-                // Accumulate this page's data in the slot buffer.
-                $slot["data_buf"] .= $result["data"];
+                $parsed = $this->parse_index_response_body($slot_bufs[$slot_id]);
+                unset($slot_bufs[$slot_id]);
 
-                if ($result["complete"]) {
+                if ($parsed["error"] !== null) {
+                    $msg = $parsed["error"];
+                    if (
+                        strpos($msg, "dir_outside_root") !== false ||
+                        strpos($msg, "outside of allowed roots") !== false
+                    ) {
+                        $slot["done"]    = true;
+                        $slot["skipped"] = true;
+                        $buffered_done[$slot_id] = true;
+                        unset($slot);
+                        $advance_watermark();
+                        continue;
+                    }
+                    $cleanup_multi();
+                    throw new RuntimeException(
+                        "files-index (symlink follow) error for {$slot['dir']}: {$msg}",
+                    );
+                }
+
+                $slot["data_buf"] .= $parsed["data"];
+
+                if ($parsed["complete"]) {
                     $slot["done"]   = true;
                     $slot["cursor"] = null;
                     $buffered_done[$slot_id] = true;
+                    unset($slot);
                     $advance_watermark();
                     continue;
                 }
 
-                // Not done yet — check cursor progress and attempt cap.
-                $new_cursor = $result["cursor"];
+                $new_cursor = $parsed["cursor"];
                 if ($new_cursor === $slot["last_cursor"]) {
+                    $cleanup_multi();
                     throw new RuntimeException(
                         "files-index (symlink follow) made no progress " .
                             "(cursor unchanged) for {$slot['dir']}",
@@ -3532,21 +3716,19 @@ class ImportClient
                 $slot["last_cursor"] = $slot["cursor"];
                 $slot["cursor"]      = $new_cursor;
                 $slot["attempts"]++;
-
                 if ($slot["attempts"] > 10_000) {
+                    $cleanup_multi();
                     throw new RuntimeException(
                         "files-index (symlink follow) exceeded maximum attempts " .
                             "for {$slot['dir']}",
                     );
                 }
-
-                if ($this->shutdown_requested) {
-                    $persist_pool_state();
-                    return;
-                }
+                unset($slot);
+                // Slot will be re-attached at the top of the next outer iteration.
             }
-            unset($slot);
         }
+
+        $cleanup_multi();
 
         // Clean up any lingering pool state from a previous run.
         unset($this->state["symlink_pool"]);
