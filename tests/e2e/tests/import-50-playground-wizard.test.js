@@ -197,6 +197,24 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
             mountDir = join(tempDir, 'playground-mount');
             cpSync(importDir, mountDir, { recursive: true, dereference: true });
 
+            // Neutralize hardcoded path defines in the imported
+            // wp-config.php. The wpcloud-flatten fixture's wp-config
+            // has e.g. WP_CONTENT_DIR=/tmp/e2e-wpcloud-wpcontent/wp-content
+            // — a host path that doesn't exist inside Playground's
+            // WASM VFS. WP would then mkdir that nonexistent dir and
+            // bail. Comment out anything that hardcodes a layout
+            // path so WP falls back to deriving them from ABSPATH=
+            // /wordpress/. (Real Atomic-site wp-configs need the same
+            // treatment in the deployed wizard — this is what the
+            // wizard's activation step does in PHP.)
+            const cfgPath = join(mountDir, 'wp-config.php');
+            const cfg = readFileSync(cfgPath, 'utf-8');
+            const neutralized = cfg.replace(
+                /^[ \t]*define\s*\(\s*['"](?:ABSPATH|WP_CONTENT_DIR|WP_CONTENT_URL|WP_TEMP_DIR|WPMU_PLUGIN_DIR|WPMU_PLUGIN_URL|WP_PLUGIN_DIR|WP_PLUGIN_URL|WP_LANG_DIR|WP_HOME|WP_SITEURL|COOKIE_DOMAIN)['"][^)]*\)\s*;.*$/gm,
+                '// import-50 neutralized: $&',
+            );
+            writeFileSync(cfgPath, neutralized);
+
             // Place the imported SQLite where Playground's auto-loaded
             // SQLite drop-in expects it (this is what the wizard does
             // in its activation step).
