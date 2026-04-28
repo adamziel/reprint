@@ -30,6 +30,9 @@ const EXTERNAL_ROOT = '/srv/e2e-bench-external';
 const SYMLINK_COUNT = 74;
 const DELAY_SECONDS = 5;
 const ROUTER_PATH = '/tmp/many-symlinks-delay-router.php';
+// Port chosen out of the 81xx site-registry range to avoid clashing with the
+// nginx vhost that ensureSite spins up on the registered port for this site.
+const DELAY_SERVER_PORT = 18120;
 
 describe('Import: Symlink-follow concurrency benchmark', () => {
     const site = 'many-symlinks-bench';
@@ -58,7 +61,7 @@ return false;
         const docroot = join(getSiteDir(site), 'wp-content', 'plugins', 'site-export');
         delayServer = spawn(
             'php',
-            ['-S', '127.0.0.1:8120', '-t', docroot, ROUTER_PATH],
+            ['-S', `127.0.0.1:${DELAY_SERVER_PORT}`, '-t', docroot, ROUTER_PATH],
             { stdio: 'ignore' },
         );
 
@@ -68,13 +71,13 @@ return false;
                 throw new Error(`Delay server exited early with code ${delayServer.exitCode}`);
             }
             try {
-                const r = await fetch('http://127.0.0.1:8120/health');
+                const r = await fetch(`http://127.0.0.1:${DELAY_SERVER_PORT}/health`);
                 if (r.ok) return;
             } catch (_) {
                 await sleep(100);
             }
         }
-        throw new Error('Timed out waiting for delay server on 127.0.0.1:8120');
+        throw new Error(`Timed out waiting for delay server on 127.0.0.1:${DELAY_SERVER_PORT}`);
     }
 
     beforeAll(async () => {
@@ -121,7 +124,7 @@ return false;
     });
 
     function importUrl() {
-        return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
+        return `${getSiteUrl(site, DELAY_SERVER_PORT)}&directory=${getSiteDir(site)}`;
     }
 
     function timeImport(tempDir, concurrency) {
