@@ -54,7 +54,17 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', { timeout: 360000 }, () => {
-    const site = 'wpcloud-flatten';
+    // Use the 'basic' fixture rather than 'wpcloud-flatten' even
+    // though the latter better mirrors a real WP Cloud site's split
+    // root: tests 38 and 46 expect the wpcloud-flatten fixture set
+    // up with their own afterCreate (creating /tmp/e2e-wpcloud-core
+    // + __wp__ symlinks). ensureSite's marker file means whichever
+    // test runs first decides how the fixture is shaped, and a
+    // bare ensureSite('wpcloud-flatten') here shapes it as a
+    // regular WP install — breaking test 38's split-root
+    // assertions. Sticking to 'basic' avoids the cross-test
+    // contention; split-root coverage stays with test 38.
+    const site = 'basic';
     let tempDir;
     let importDir;     // what flat-docroot writes to (= wizard's /wordpress)
     let sqlitePath;    // where db-apply puts the SQLite (= wizard's /internal/shared/imported.sqlite)
@@ -103,27 +113,26 @@ describe('Wizard flow: pull → flatten → SQLite — playground-ready clone', 
     });
 
     it('flattened dir has the files WordPress needs to boot', () => {
-        // Real top-level files (NOT symlinks — __DIR__ / dirname(__FILE__)
-        // resolution depends on these living at the destination path).
+        // Real top-level files at the destination — these need to live
+        // at the flattened path so __DIR__ / dirname(__FILE__) resolves
+        // there.
         for (const f of ['wp-config.php', 'wp-load.php', 'index.php']) {
             const p = join(importDir, f);
             assert.ok(existsSync(p), `${f} missing in flattened dir at ${p}`);
         }
 
-        // wp-admin and wp-includes should be symlinks into the imported
-        // core tree (this is what flat-docroot does for split-root sites).
+        // wp-admin and wp-includes resolve through symlinks (split-root
+        // case) or are real dirs (basic fixture). Either way they must
+        // exist and contain a recognisable WP file. (The symlink shape
+        // is exercised separately by test 38 with the wpcloud-flatten
+        // fixture.)
         for (const dir of ['wp-admin', 'wp-includes']) {
             const p = join(importDir, dir);
             assert.ok(existsSync(p), `${dir} missing in flattened dir`);
-            assert.ok(
-                lstatSync(p).isSymbolicLink(),
-                `${dir} should be a symlink (flat-docroot's split-root output)`,
-            );
-            // The symlink should resolve to a directory with real WP files.
             const expectedFile = dir === 'wp-admin' ? 'admin.php' : 'version.php';
             assert.ok(
                 existsSync(join(p, expectedFile)),
-                `${dir} symlink doesn't resolve to a usable WP dir (${expectedFile} missing)`,
+                `${dir} doesn't contain ${expectedFile}`,
             );
         }
 
