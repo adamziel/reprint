@@ -292,9 +292,17 @@ async function runImport() {
   }
 
   if (activateResult.status !== 'complete') {
-    const err = (activateResult.data && activateResult.data.error) || 'unknown';
+    const data = activateResult.data || {};
+    const err = data.error || 'unknown';
     setPhase('apply_runtime', 'error', err.slice(0, 80));
     showError('Activation failed: ' + err);
+    if (data.row_counts) {
+      logLine('row counts: ' + JSON.stringify(data.row_counts), 'err');
+    }
+    if (data.audit_log_tail) {
+      logLine('--- audit log tail ---', 'err');
+      logLine(data.audit_log_tail, 'err');
+    }
     return;
   }
 
@@ -485,7 +493,32 @@ function run_local_activation(): array {
     }
     $sqlite_size = is_file($dst) ? filesize($dst) : 0;
 
-    // 2. Drop the uploads-proxy mu-plugin so missing /wp-content/uploads/*
+    // 2. Validate the SQLite actually has WordPress data. A bare
+    //    393KB file means WP_PDO_MySQL_On_SQLite created its
+    //    information_schema scaffolding but db-apply never landed
+    //    any data — we must NOT report success or the user clicks
+    //    "Open the imported site" and lands on the install wizard.
+    $row_counts = ['wp_users' => 0, 'wp_options' => 0, 'wp_posts' => 0];
+    $sqlite_error = null;
+    if ($sqlite_size > 0) {
+        try {
+            $pdo = new PDO('sqlite:' . $dst);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            foreach (array_keys($row_counts) as $tbl) {
+                try {
+                    $row_counts[$tbl] = (int) $pdo->query("SELECT COUNT(*) FROM \"$tbl\"")->fetchColumn();
+                } catch (Throwable $te) {
+                    $row_counts[$tbl] = 'TABLE MISSING';
+                }
+            }
+        } catch (Throwable $e) {
+            $sqlite_error = $e->getMessage();
+        }
+    }
+    $has_real_data = is_int($row_counts['wp_options']) && $row_counts['wp_options'] >= 5
+                  && is_int($row_counts['wp_users']) && $row_counts['wp_users'] >= 1;
+
+    // 3. Drop the uploads-proxy mu-plugin so missing /wp-content/uploads/*
     //    requests redirect back to the source site, keeping media live
     //    until uploads are fetched locally. The source origin is
     //    baked into the importer page by /reprint.php?action=blueprint.
@@ -511,11 +544,40 @@ function run_local_activation(): array {
         file_put_contents('/wordpress/wp-content/mu-plugins/0-reprint-uploads-proxy.php', $mu);
     }
 
+    // Pull the tail of the audit log so the JS can show *why* the
+    // import failed when it did. Without this, a partial db-apply
+    // is a black box: the wizard reports the empty-schema SQLite as
+    // "ok" and the user lands on the install wizard.
+    $audit_tail = '';
+    $audit_log = '/internal/shared/reprint-state/.import-audit.log';
+    if (is_file($audit_log)) {
+        $size = filesize($audit_log);
+        $offset = max(0, $size - 4000);
+        $fh = @fopen($audit_log, 'r');
+        if ($fh) {
+            @fseek($fh, $offset);
+            $audit_tail = (string) fread($fh, 4000);
+            fclose($fh);
+        }
+    }
+
+    $error = null;
+    if ($sqlite_error !== null) {
+        $error = 'Could not open the imported SQLite: ' . $sqlite_error;
+    } elseif ($sqlite_size === 0) {
+        $error = 'SQLite was not produced by the importer';
+    } elseif (!$has_real_data) {
+        $error = 'db-apply did not land any data (wp_options=' . json_encode($row_counts['wp_options'])
+              . ', wp_users=' . json_encode($row_counts['wp_users']) . ')';
+    }
+
     return [
-        'ok' => $sqlite_size > 0,
+        'ok' => $error === null,
         'sqlite_size' => $sqlite_size,
         'source_origin' => $source_origin,
-        'error' => $sqlite_size > 0 ? null : 'SQLite was not produced by the importer',
+        'row_counts' => $row_counts,
+        'audit_log_tail' => $audit_tail,
+        'error' => $error,
     ];
 }
 
