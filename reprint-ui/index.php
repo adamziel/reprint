@@ -373,14 +373,42 @@ function action_blueprint(): void {
 
     $origin = reprint_site_origin();
 
+    // Credentials arrive as query params on this endpoint URL. URL
+    // fragments would be safer (browser-only) but they don't survive
+    // the parent→iframe transition that Playground uses to load the
+    // landing page. Both this server and playground.wordpress.net
+    // are operated by Automattic, so the leak surface is bounded;
+    // the secret is a 60-minute rotating HMAC for one site anyway.
+    $api    = (string) ($_GET['api'] ?? '');
+    $secret = (string) ($_GET['secret'] ?? '');
+    $source = (string) ($_GET['source'] ?? '');
+
     // The importer page is shipped as a sibling file in this directory.
-    // We inline its source verbatim so the Blueprint is fully self-
-    // describing (one URL, no secondary fetches besides the phar).
+    // We inline its source verbatim and prepend a constants block that
+    // bakes in the credentials, so the Blueprint is fully self-describing
+    // (one URL, no secondary fetches besides the phar).
     $importer_php = (string) @file_get_contents(__DIR__ . '/reprint-import.php');
     if ($importer_php === '') {
         http_response_code(500);
         echo json_encode(['error' => 'reprint-import.php missing on the wizard server']);
         return;
+    }
+    if ($api !== '' && $secret !== '') {
+        // Important: don't emit a closing PHP tag here. The importer
+        // file's own opening tag is stripped below, so we need to STAY
+        // in PHP mode through the stitched result — otherwise the rest
+        // of the file (docblock, function defs) leaks out as HTML.
+        $consts = "<?php\n"
+            . "// Injected by /reprint.php?action=blueprint at fetch time.\n"
+            . "if (!defined('REPRINT_API_URL'))       define('REPRINT_API_URL', "       . var_export($api, true)    . ");\n"
+            . "if (!defined('REPRINT_SECRET'))        define('REPRINT_SECRET', "        . var_export($secret, true) . ");\n"
+            . "if (!defined('REPRINT_SOURCE_ORIGIN')) define('REPRINT_SOURCE_ORIGIN', " . var_export($source, true) . ");\n"
+            . "\n";
+        // Strip the importer's own opening tag so we can stitch it
+        // after our consts block. preg_replace with limit=1 keeps this
+        // tolerant if the file ever starts with whitespace or a UTF-8 BOM.
+        $importer_php = preg_replace('/^<\?php\s*/', '', $importer_php, 1);
+        $importer_php = $consts . $importer_php;
     }
 
     // Pre-define DB and path constants so Atomic / wpcomstaging
@@ -910,23 +938,28 @@ function goToPlayground({ api_url, secret, site_url }) {
   setPhase('handoff', 'active', 'opening Playground…');
   logLine('Handing off to Playground (this tab will navigate)…', 'info');
 
-  const blueprintUrl = location.origin + UI_BASE + '?action=blueprint';
   const sourceOrigin = (function () {
     try { return new URL(site_url).origin; } catch { return ''; }
   })();
 
-  const hash = new URLSearchParams({
+  // Credentials travel as query params on the blueprint URL itself.
+  // We tried fragments first — but Playground's outer page strips the
+  // hash before the iframe loads, so the importer page (running inside
+  // the iframe) couldn't see them. The blueprint endpoint reads these
+  // server-side and bakes the values into the importer page literal.
+  // Both this host and playground.wordpress.net are Automattic-operated,
+  // and the secret is a 60-minute rotating HMAC bound to one site, so
+  // the slight access-log exposure is acceptable.
+  const blueprintQuery = new URLSearchParams({
+    action: 'blueprint',
     api: api_url,
     secret: secret,
     source: sourceOrigin,
   }).toString();
+  const blueprintUrl = location.origin + UI_BASE + '?' + blueprintQuery;
 
-  // Playground's URL contract: ?blueprint-url=<https-url> + a hash.
-  // The hash survives the browser navigation and is only readable by
-  // JS inside the iframe — exactly what we want for the secret.
   const playgroundUrl = 'https://playground.wordpress.net/'
-    + '?blueprint-url=' + encodeURIComponent(blueprintUrl)
-    + '#' + hash;
+    + '?blueprint-url=' + encodeURIComponent(blueprintUrl);
 
   // Brief visible delay so the user sees the "opening Playground…"
   // state before the page navigates away. Otherwise the wizard just
