@@ -397,6 +397,18 @@ function stream_pull(): void {
         unset($GLOBALS['wpdb']);
     }
 
+    // Tell the phar's curl helper to skip TLS peer verification when
+    // running here. Playground's web build does TLS in a JS library
+    // that ships its own CA store; if the source's cert is signed by
+    // a CA that store doesn't recognise (e.g. Let's Encrypt's newer
+    // ECDSA intermediates), every HTTPS request out of the phar
+    // dies with "TLS alert received: Fatal UnknownCa" before we get
+    // to the body. Skipping verification is acceptable here: the
+    // user's browser is the actual transport, the user explicitly
+    // typed the source URL into the wizard, and the import secret
+    // is a 60-minute rotating HMAC bound to that one site.
+    putenv('REPRINT_INSECURE_TLS=1');
+
     // Let the phar's progress writer hit php://output directly. With
     // implicit_flush=1 each fwrite turns into an HTTP chunk — assuming
     // Playground's request handler propagates partial bodies. If it
