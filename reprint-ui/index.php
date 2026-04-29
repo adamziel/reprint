@@ -1188,32 +1188,50 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
     return;
   }
 
-  // wp-config neutralizer that removes hardcoded path defines from
-  // the imported wp-config.php. Atomic sites bake in
+  // Pre-empt the source's wp-config.php path defines via a Playground
+  // preload file. Atomic sites bake in
   //   define('WP_CONTENT_DIR', '/srv/htdocs/wp-content')
-  // and similar host-specific paths. In the WASM VFS those paths
-  // don't exist, so WP's SQLite drop-in reads from the wrong place
-  // and the install wizard pops up. Comment out anything that
-  // hardcodes a path so WP derives them from ABSPATH=/wordpress/.
+  // and similar host-specific paths in their wp-config.php. Those
+  // paths don't exist in Playground's WASM VFS, so the SQLite drop-in
+  // would read from the wrong place and the install wizard pops up.
   //
-  // Built as a plain JS string (NOT a template literal) and base64-
-  // encoded before reaching PHP — the regex backslashes survive
-  // JS->PHP transit, and the $vars inside PHP single-quoted strings
-  // stay literal (no double-quote interpolation traps).
-  const wpConfigNeutralizePhp =
-    "$cfg_path = '/wordpress/wp-config.php';\n" +
-    "if (is_file($cfg_path)) {\n" +
-    "    $cfg = file_get_contents($cfg_path);\n" +
-    "    $orig = $cfg;\n" +
-    "    $names = ['ABSPATH','WP_CONTENT_DIR','WP_CONTENT_URL','WP_TEMP_DIR',\n" +
-    "              'WPMU_PLUGIN_DIR','WPMU_PLUGIN_URL','WP_PLUGIN_DIR','WP_PLUGIN_URL',\n" +
-    "              'WP_LANG_DIR','WP_HOME','WP_SITEURL','COOKIE_DOMAIN'];\n" +
-    "    foreach ($names as $n) {\n" +
-    "        $pattern = '/^[\\\\s]*(define\\\\s*\\\\(\\\\s*[\\\\\\'\\\"]' . preg_quote($n, '/') . '[\\\\\\'\\\"][^)]*\\\\)\\\\s*;)/m';\n" +
-    "        $cfg = preg_replace($pattern, '// reprint-ui neutralized: $1', $cfg);\n" +
-    "    }\n" +
-    "    if ($cfg !== $orig) file_put_contents($cfg_path, $cfg);\n" +
-    "}\n";
+  // PHP's define() is idempotent — once a constant is set, subsequent
+  // define() calls are no-ops. Playground's auto_prepend mechanism
+  // runs files from /internal/shared/preload/*.php before any request
+  // (including before wp-config.php loads). So if our preload defines
+  // these constants first, the source's wp-config define() calls
+  // become no-ops regardless of how they're written: plain define(),
+  // @define(), `if (!defined()) define()`, multi-line, or whatever
+  // exotic syntax the host uses. This is more reliable than trying
+  // to regex-strip the defines from wp-config.php — that approach
+  // breaks on any syntax we didn't anticipate.
+  // The "<" + "?php" split prevents PHP from re-opening a tag here:
+  // this whole file is served as PHP, so the literal opener inside
+  // an HTML/JS string would put the parser back into PHP mode and
+  // 500 the page.
+  const pathPreloadPhp =
+    "<" + "?php\n" +
+    "// Pre-empt path defines so the imported wp-config can't point them\n" +
+    "// at host filesystem paths that don't exist in the WASM VFS.\n" +
+    "if (!defined('ABSPATH'))         define('ABSPATH', '/wordpress/');\n" +
+    "if (!defined('WP_CONTENT_DIR'))  define('WP_CONTENT_DIR', '/wordpress/wp-content');\n" +
+    "if (!defined('WP_PLUGIN_DIR'))   define('WP_PLUGIN_DIR', '/wordpress/wp-content/plugins');\n" +
+    "if (!defined('WPMU_PLUGIN_DIR')) define('WPMU_PLUGIN_DIR', '/wordpress/wp-content/mu-plugins');\n" +
+    "if (!defined('WP_LANG_DIR'))     define('WP_LANG_DIR', '/wordpress/wp-content/languages');\n" +
+    "if (!defined('WP_TEMP_DIR'))     define('WP_TEMP_DIR', '/tmp');\n" +
+    "// Atomic / wpcomstaging wp-config relies on the host injecting\n" +
+    "// DB credentials and never defines DB_* constants. In Playground\n" +
+    "// there's no host injection, so the SQLite drop-in bails with\n" +
+    "// 'database name was not set' and \\$wpdb->dbh stays null. SQLite\n" +
+    "// only uses DB_NAME as an information_schema label; the other\n" +
+    "// DB_* values are ignored. Define safe defaults so the drop-in\n" +
+    "// can connect.\n" +
+    "if (!defined('DB_NAME'))         define('DB_NAME', 'wordpress');\n" +
+    "if (!defined('DB_USER'))         define('DB_USER', 'wordpress');\n" +
+    "if (!defined('DB_PASSWORD'))     define('DB_PASSWORD', 'wordpress');\n" +
+    "if (!defined('DB_HOST'))         define('DB_HOST', 'localhost');\n" +
+    "if (!defined('DB_CHARSET'))      define('DB_CHARSET', 'utf8mb4');\n" +
+    "if (!defined('DB_COLLATE'))      define('DB_COLLATE', '');\n";
 
   // ─── Activation: symlink wp-content/* from the imported docroot
   // into /wordpress/wp-content so the booted Playground sees the
@@ -1272,14 +1290,18 @@ async function runImportInPlayground({ api_url, secret, site_url }) {
       'sqlite_dst_size' => is_file($dst_db) ? filesize($dst_db) : 0,
     ]) . "\n";
 
-    // 1b. Neutralize hardcoded path defines in the imported wp-config.
-    //     Atomic sites have define('WP_CONTENT_DIR', '/srv/htdocs/...')
-    //     which makes WP's SQLite drop-in look in the wrong place and
-    //     fall into the install wizard. Run the snippet via eval +
-    //     base64 so the regex backslashes don't get eaten by JS or
-    //     by PHP's double-quoted string parsing.
-    eval(base64_decode(${JSON.stringify(btoa(unescape(encodeURIComponent(wpConfigNeutralizePhp))))}));
-    echo json_encode(['wp_config_neutralized' => true]) . "\n";
+    // 1b. Drop a preload file that pre-defines path constants. Loaded
+    //     by Playground's auto_prepend before any request — including
+    //     before wp-config.php. PHP's define() is idempotent, so the
+    //     source's wp-config(.php) define() calls turn into no-ops and
+    //     WP_CONTENT_DIR stays at /wordpress/wp-content (where we put
+    //     the SQLite). Path-agnostic — survives any wp-config syntax.
+    @mkdir('/internal/shared/preload', 0777, true);
+    file_put_contents(
+      '/internal/shared/preload/01-reprint-paths.php',
+      base64_decode(${JSON.stringify(btoa(unescape(encodeURIComponent(pathPreloadPhp))))})
+    );
+    echo json_encode(['paths_preload_written' => true]) . "\n";
 
     // 2. Drop the uploads-proxy mu-plugin. Base64-encoded so the
     //    $_SERVER / $req / $rel references in its source survive
