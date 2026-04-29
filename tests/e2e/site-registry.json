@@ -127,6 +127,9 @@
     },
     "many-symlinks-bench": {
       "port": 8122
+    },
+    "symlink-resume": {
+      "port": 8121
     }
   }
 }
