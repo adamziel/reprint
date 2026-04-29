@@ -17,12 +17,12 @@
  */
 
 if (($_GET['action'] ?? '') === 'run') {
-    stream_pull();
-    exit;
-}
-
-if (($_GET['action'] ?? '') === 'activate') {
-    finish_activate();
+    // One-shot endpoint: streams the pull, then runs the local
+    // activation (move SQLite into place + drop the uploads-proxy
+    // mu-plugin) inside the SAME request — so the JS only needs one
+    // fetch. Splitting them previously caused the second POST to
+    // 302 inside Playground's request handler before our code ran.
+    stream_pull_and_activate();
     exit;
 }
 
@@ -229,7 +229,10 @@ async function runImport() {
   setPhase('preflight', 'active', 'starting…');
   setPhase('files', 'active', 'queued');
   setPhase('database', 'active', 'queued');
-  logLine('→ reprint pull (streaming)', 'info');
+  logLine('→ reprint pull (this can take a few minutes)', 'info');
+
+  let activateResult = null;
+  let sawAnyEvent = false;
 
   try {
     const fd = new FormData();
@@ -239,60 +242,81 @@ async function runImport() {
     const res = await fetch('/reprint-import.php?action=run', { method: 'POST', body: fd });
     if (!res.ok) throw new Error('HTTP ' + res.status);
 
-    // Stream NDJSON. Playground's request handler may buffer until
-    // the script ends; either way we drain whatever lands in the body.
+    // Drain NDJSON. Playground's request handler tends to buffer the
+    // body until the PHP script ends, so don't assume we'll see
+    // events live — but the loop is the same either way.
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    const consumeLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      sawAnyEvent = true;
+      try {
+        const ev = JSON.parse(trimmed);
+        if (ev && ev.type === 'activate') {
+          activateResult = ev;
+          return;
+        }
+        handleEvent(ev);
+      } catch {
+        // Non-JSON line — surface it in the log so PHP errors etc.
+        // don't disappear silently.
+        logLine(trimmed, 'err');
+      }
+    };
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let nl;
       while ((nl = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, nl).trim();
+        consumeLine(buffer.slice(0, nl));
         buffer = buffer.slice(nl + 1);
-        if (!line) continue;
-        try { handleEvent(JSON.parse(line)); }
-        catch { logLine(line); }
       }
     }
-    if (buffer.trim()) {
-      try { handleEvent(JSON.parse(buffer.trim())); }
-      catch { logLine(buffer.trim()); }
-    }
+    consumeLine(buffer);
   } catch (e) {
     showError('Import failed: ' + e.message);
     return;
   }
 
-  // Activation step — wires the imported SQLite into Playground's WP.
-  setPhase('apply_runtime', 'active', 'finalising…');
-  let activate;
-  try {
-    const r = await fetch('/reprint-import.php?action=activate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source_origin: source }),
-    });
-    activate = await r.json();
-  } catch (e) {
-    showError('Activation failed: ' + e.message);
+  if (!sawAnyEvent) {
+    showError('The importer returned an empty response. Check the browser console for errors and try again.');
     return;
   }
 
-  if (activate && activate.error) {
-    setPhase('apply_runtime', 'error', activate.error.slice(0, 80));
-    showError('Activation: ' + activate.error);
+  if (!activateResult) {
+    showError('Pull finished without an activation event — the import probably failed before completing. Open the network tab to see the raw response.');
     return;
   }
 
-  setPhase('apply_runtime', 'done', 'ok');
+  if (activateResult.status !== 'complete') {
+    const err = (activateResult.data && activateResult.data.error) || 'unknown';
+    setPhase('apply_runtime', 'error', err.slice(0, 80));
+    showError('Activation failed: ' + err);
+    return;
+  }
+
+  // The pull stream may have buffered, in which case our phase rows
+  // never moved past 'queued'. Mark them all done now so the user
+  // can see the import landed.
+  ['preflight', 'files', 'database'].forEach((p) => setPhase(p, 'done', 'ok'));
+  setPhase('apply_runtime', 'done', 'sqlite ' + (activateResult.data.sqlite_size || 0) + ' B');
   $('#overall-bar').style.width = '100%';
   $('#subtitle').textContent = 'Done — your site is ready.';
   const btn = $('#open-site');
   btn.classList.remove('hidden');
-  btn.onclick = () => { window.location.href = '/'; };
+  btn.onclick = () => {
+    // Inside Playground, the iframe URL is something like
+    // /scope:funny-name/reprint-import.php. Going to '/' would jump
+    // out to playground.wordpress.net's home page instead of the
+    // imported site. Strip the file off our own pathname instead so
+    // we land on the iframe's own site root.
+    const here = window.location.pathname;
+    const slash = here.lastIndexOf('/');
+    window.location.href = (slash >= 0 ? here.slice(0, slash + 1) : '/') + window.location.search;
+  };
 }
 
 window.addEventListener('DOMContentLoaded', runImport);
@@ -302,6 +326,17 @@ window.addEventListener('DOMContentLoaded', runImport);
 <?php }
 
 // ─────────────────────────────────────────────────────────────────
+
+function stream_pull_and_activate(): void {
+    stream_pull();
+    // Activation step: emit a single ndjson event so the JS can react.
+    $activate = run_local_activation();
+    echo json_encode([
+        'type' => 'activate',
+        'status' => $activate['ok'] ? 'complete' : 'error',
+        'data' => $activate,
+    ]) . "\n";
+}
 
 function stream_pull(): void {
     @ini_set('display_errors', '0');
@@ -378,13 +413,9 @@ function stream_pull(): void {
     }
 }
 
-function finish_activate(): void {
-    header('Content-Type: application/json');
-    header('Cache-Control: no-store');
-
+function run_local_activation(): array {
     if (!is_dir('/wordpress/wp-content')) {
-        echo json_encode(['error' => '/wordpress/wp-content missing — flatten failed?']);
-        return;
+        return ['ok' => false, 'error' => '/wordpress/wp-content missing after pull'];
     }
 
     // 1. Move the imported SQLite into WP's expected location.
@@ -398,27 +429,15 @@ function finish_activate(): void {
             @unlink($src);
         }
     }
+    $sqlite_size = is_file($dst) ? filesize($dst) : 0;
 
     // 2. Drop the uploads-proxy mu-plugin so missing /wp-content/uploads/*
     //    requests redirect back to the source site, keeping media live
-    //    until uploads are fetched locally.
-    @mkdir('/wordpress/wp-content/mu-plugins', 0777, true);
-    $params = json_decode(file_get_contents('php://input') ?: '[]', true);
-    $source_origin = '';
-    // The source_origin lives in the URL fragment (JS-only); JS passes
-    // it through via POST body when triggering activation.
-    // Fall back to wp_options.siteurl from the imported DB if missing.
-    if (is_array($params) && !empty($params['source_origin'])) {
-        $source_origin = (string) $params['source_origin'];
-    } elseif (is_file($dst)) {
-        try {
-            $pdo = new PDO('sqlite:' . $dst);
-            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            // Source URL is captured in the audit log too, but post-rewrite
-            // wp_options.siteurl points at the new (Playground) URL.
-        } catch (Throwable $e) { /* fall through */ }
-    }
+    //    until uploads are fetched locally. The source origin is
+    //    baked into the importer page by /reprint.php?action=blueprint.
+    $source_origin = defined('REPRINT_SOURCE_ORIGIN') ? (string) REPRINT_SOURCE_ORIGIN : '';
     if ($source_origin !== '') {
+        @mkdir('/wordpress/wp-content/mu-plugins', 0777, true);
         $mu = "<?php\n"
             . "// Reprint uploads proxy — redirect missing /wp-content/uploads/*\n"
             . "// requests to the source site so media keeps rendering until\n"
@@ -438,11 +457,12 @@ function finish_activate(): void {
         file_put_contents('/wordpress/wp-content/mu-plugins/0-reprint-uploads-proxy.php', $mu);
     }
 
-    echo json_encode([
-        'ok' => true,
-        'sqlite_size' => is_file($dst) ? filesize($dst) : 0,
+    return [
+        'ok' => $sqlite_size > 0,
+        'sqlite_size' => $sqlite_size,
         'source_origin' => $source_origin,
-    ]);
+        'error' => $sqlite_size > 0 ? null : 'SQLite was not produced by the importer',
+    ];
 }
 
 function _reprint_self_origin(): string {
