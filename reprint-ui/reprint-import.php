@@ -531,7 +531,69 @@ function run_local_activation(): array {
     $has_real_data = is_int($row_counts['wp_options']) && $row_counts['wp_options'] >= 5
                   && is_int($row_counts['wp_users']) && $row_counts['wp_users'] >= 1;
 
-    // 3. Drop the uploads-proxy mu-plugin so missing /wp-content/uploads/*
+    // 3. Atomic plugins/themes ship under a versioned subdir
+    //    (/wordpress/plugins/jetpack/15.8-a.7/jetpack.php), but WP
+    //    looks for /wp-content/plugins/jetpack/jetpack.php — without
+    //    the version segment. flat-docroot symlinks the parent dir
+    //    in, leaving WP unable to find any plugin or theme entry
+    //    points and the iframe spamming 404s on .../static/...
+    //    assets. Walk the top-level entries in plugins/, themes/ and
+    //    mu-plugins/, and when a directory contains exactly one
+    //    versioned subdirectory, retarget the symlink (or move
+    //    contents) so WP sees the plugin's PHP file directly.
+    foreach (['plugins', 'themes', 'mu-plugins'] as $sub) {
+        $dir = '/wordpress/wp-content/' . $sub;
+        if (!is_dir($dir)) {
+            continue;
+        }
+        $entries = @scandir($dir) ?: [];
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $entry_path = $dir . '/' . $entry;
+            // Resolve symlinks to the real target so we can inspect.
+            $real = is_link($entry_path) ? @readlink($entry_path) : $entry_path;
+            if ($real === false || !is_dir($entry_path)) {
+                continue;
+            }
+            $children = @scandir($entry_path) ?: [];
+            $children = array_values(array_filter(
+                $children,
+                fn($c) => $c !== '.' && $c !== '..'
+            ));
+            // Atomic versioned plugin layout: a single child that's a
+            // directory and looks like a version (digits and dots,
+            // optionally with a hyphenated suffix like 15.8-a.7).
+            if (
+                count($children) === 1
+                && is_dir($entry_path . '/' . $children[0])
+                && preg_match('/^\d+(\.\d+)*([\-+][\w.+]+)?$/', $children[0])
+            ) {
+                $version_target = $entry_path . '/' . $children[0];
+                $resolved = @realpath($version_target);
+                if ($resolved && is_dir($resolved)) {
+                    if (is_link($entry_path)) {
+                        @unlink($entry_path);
+                    } else {
+                        // It's a real directory, can't re-symlink in place
+                        // without removing it. The version is one level
+                        // down — symlink it INSIDE entry_path is risky,
+                        // so move children up.
+                        foreach (@scandir($resolved) ?: [] as $vc) {
+                            if ($vc === '.' || $vc === '..') continue;
+                            @rename($resolved . '/' . $vc, $entry_path . '/' . $vc);
+                        }
+                        @rmdir($resolved);
+                        continue;
+                    }
+                    @symlink($resolved, $entry_path);
+                }
+            }
+        }
+    }
+
+    // 4. Drop the uploads-proxy mu-plugin so missing /wp-content/uploads/*
     //    requests redirect back to the source site, keeping media live
     //    until uploads are fetched locally. The source origin is
     //    baked into the importer page by /reprint.php?action=blueprint.
