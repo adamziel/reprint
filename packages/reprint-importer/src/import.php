@@ -97,6 +97,20 @@ function reprint_apply_curl_proxy_from_env($ch): ?string {
  * ignored by the WASM curl build.
  */
 function reprint_apply_curl_ca_bundle($ch): ?string {
+    // Insecure-TLS escape hatch for environments where neither
+    // CURLOPT_CAINFO nor any other knob persuades the TLS layer to
+    // trust the source's cert — notably WordPress Playground in the
+    // browser, where networking goes through a JS TLS library running
+    // inside the page (not libcurl's TLS) and that library may have
+    // a CA store that pre-dates the Let's Encrypt intermediate the
+    // source's cert is signed by. The wizard sets this env when it
+    // hands off; we never set it for any other caller.
+    if (getenv('REPRINT_INSECURE_TLS') === '1') {
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        return '(insecure)';
+    }
+
     static $resolved = null;
     if ($resolved === null) {
         $resolved = false;
