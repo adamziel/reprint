@@ -391,11 +391,21 @@ function stream_pull(): void {
     // proxy's lazy loader hits a "class WP_Parser_Grammar already
     // declared" fatal mid-import. We don't need $wpdb during the
     // import — the phar drives a separate WP_PDO_MySQL_On_SQLite
-    // connection — so just clear the proxy so it can't fire.
-    if (isset($GLOBALS['wpdb']) && is_object($GLOBALS['wpdb'])
-        && get_class($GLOBALS['wpdb']) === 'Playground_SQLite_Integration_Loader') {
-        unset($GLOBALS['wpdb']);
-    }
+    // connection — so swap the proxy for a benign stdClass so any
+    // chance reference to $wpdb resolves to "an object exists" and
+    // the lazy loader can never fire. Plain unset() would trigger
+    // "$wpdb global is not initialized" warnings from the SQLite
+    // driver's information-schema reconstructor mid-import.
+    // Always overwrite $wpdb with a stdClass stub. If it was set to
+    // Playground_SQLite_Integration_Loader (the local CLI build's
+    // proxy class) we MUST replace it; if it was set to something
+    // else (any other Playground build), still safer to replace
+    // because we don't want any lazy loader firing mid-import; if
+    // it wasn't set at all, the reconstructor needs *something*
+    // there to skip its warning. The phar drives its own
+    // WP_PDO_MySQL_On_SQLite connection — nothing during import
+    // needs the real wpdb.
+    $GLOBALS['wpdb'] = new \stdClass();
 
     // Tell the phar's curl helper to skip TLS peer verification when
     // running here. Playground's web build does TLS in a JS library
