@@ -385,9 +385,24 @@ function action_blueprint(): void {
 
     // Pre-define DB and path constants so Atomic / wpcomstaging
     // wp-config.php files (which expect host-injected DB creds) can
-    // boot inside Playground. Auto-prepended before wp-config runs;
-    // PHP's define() is idempotent so the source's own define()
-    // calls turn into no-ops regardless of how they're written.
+    // boot inside Playground. Auto-prepended before wp-config runs.
+    //
+    // The DB_* defines need a guard that PHP's `if (!defined())`
+    // alone can't provide: Playground's stock wp-config-sample.php
+    // defines DB_NAME / DB_USER / DB_PASSWORD / DB_HOST / DB_CHARSET /
+    // DB_COLLATE *unconditionally* (that's what wp-config-sample looks
+    // like out of the box). If we predefine them and that wp-config
+    // is still in place, every define() in wp-config raises a
+    // "Constant ... already defined" warning that gets emitted to the
+    // browser before headers — and Playground's redirect handler
+    // chokes on the leading text. So gate the DB_* defines on whether
+    // the live /wordpress/wp-config.php still has its own define()s
+    // for them. Atomic / wpcomstaging wp-configs (the ones that need
+    // our help) don't — Atomic's host injects DB creds at runtime —
+    // so once the importer rewrites wp-config we step in. While the
+    // stock Playground wp-config is still there, we stay out of the
+    // way and let it set DB_*. Path constants (ABSPATH, WP_CONTENT_DIR,
+    // etc.) are already guarded inside wp-config so they're safe.
     $preload_php = "<?php\n"
         . "// Reprint preload — pre-empts Atomic wp-config defines.\n"
         . "if (!defined('ABSPATH'))         define('ABSPATH', '/wordpress/');\n"
@@ -397,14 +412,23 @@ function action_blueprint(): void {
         . "if (!defined('WP_LANG_DIR'))     define('WP_LANG_DIR', '/wordpress/wp-content/languages');\n"
         . "if (!defined('WP_TEMP_DIR'))     define('WP_TEMP_DIR', '/tmp');\n"
         . "// Atomic wp-configs assume the host injects DB_*; without\n"
-        . "// these the SQLite drop-in bails with empty DB_NAME and \$wpdb->dbh\n"
-        . "// stays null — straight to the install wizard despite a populated DB.\n"
-        . "if (!defined('DB_NAME'))         define('DB_NAME', 'wordpress');\n"
-        . "if (!defined('DB_USER'))         define('DB_USER', 'wordpress');\n"
-        . "if (!defined('DB_PASSWORD'))     define('DB_PASSWORD', 'wordpress');\n"
-        . "if (!defined('DB_HOST'))         define('DB_HOST', 'localhost');\n"
-        . "if (!defined('DB_CHARSET'))      define('DB_CHARSET', 'utf8mb4');\n"
-        . "if (!defined('DB_COLLATE'))      define('DB_COLLATE', '');\n";
+        . "// these the SQLite drop-in bails with empty DB_NAME and\n"
+        . "// \$wpdb->dbh stays null — straight to the install wizard\n"
+        . "// despite a populated DB. But we must NOT predefine these\n"
+        . "// while Playground's stock wp-config-sample.php is still\n"
+        . "// in place — its unconditional define() calls would then\n"
+        . "// warn-spam the browser before headers. So skip if the live\n"
+        . "// wp-config.php still defines them itself.\n"
+        . "if (is_file('/wordpress/wp-config.php')\n"
+        . "    && strpos(@file_get_contents('/wordpress/wp-config.php'), \"define( 'DB_NAME'\") === false\n"
+        . "    && strpos(@file_get_contents('/wordpress/wp-config.php'), \"define('DB_NAME'\") === false) {\n"
+        . "    if (!defined('DB_NAME'))         define('DB_NAME', 'wordpress');\n"
+        . "    if (!defined('DB_USER'))         define('DB_USER', 'wordpress');\n"
+        . "    if (!defined('DB_PASSWORD'))     define('DB_PASSWORD', 'wordpress');\n"
+        . "    if (!defined('DB_HOST'))         define('DB_HOST', 'localhost');\n"
+        . "    if (!defined('DB_CHARSET'))      define('DB_CHARSET', 'utf8mb4');\n"
+        . "    if (!defined('DB_COLLATE'))      define('DB_COLLATE', '');\n"
+        . "}\n";
 
     $blueprint = [
         'landingPage' => '/reprint-import.php',
@@ -557,9 +581,13 @@ function render_wizard(): void {
     <h2>Connect your WordPress.com account</h2>
     <p class="desc">We'll redirect you to WordPress.com to authorize Reprint.
       This lets us list your sites and temporarily enable the reprint exporter
-      on the one you choose. Your access token is kept in an HTTP-only session
-      cookie on this site only — nothing is written to a database, and it's
-      gone the moment you close the tab or click "Sign out".</p>
+      on the one you choose. Your access token is kept in a session cookie on
+      this site only (HttpOnly + encrypted with AES-256-GCM, never written to
+      a database). The cookie has no expiry — it sticks around until you
+      click "Sign out" or your browser drops session cookies. Most browsers
+      drop them on quit, but if you've enabled "continue where you left off"
+      (Chrome) or have multiple windows open (Firefox), they can persist
+      across restarts. "Sign out" is the only guarantee.</p>
     <div class="actions">
       <a href="?action=login"><button class="primary">Sign in with WordPress.com →</button></a>
     </div>

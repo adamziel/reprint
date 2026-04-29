@@ -438,6 +438,15 @@ function finish_activate(): void {
 }
 
 function _reprint_self_origin(): string {
+    // Playground defines WP_HOME / WP_SITEURL early (via auto_prepend's
+    // consts.json loader) to its full session URL — including the
+    // /<random-slug>/ path segment that scopes each user's playground.
+    // We need that prefix in --new-site-url so the SQL rewriter
+    // points wp_options.siteurl/home at the URL the iframe is
+    // actually serving, not just scheme://host. Without the prefix WP
+    // canonical-redirects every request and the user gets a loop.
+    if (defined('WP_HOME')) return rtrim((string) constant('WP_HOME'), '/');
+    if (defined('WP_SITEURL')) return rtrim((string) constant('WP_SITEURL'), '/');
     $scheme = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
     $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
     return "$scheme://$host";
