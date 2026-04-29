@@ -117,6 +117,12 @@ function render_ui(): void { ?>
 </div>
 
 <script>
+// Credentials baked in by /reprint.php?action=blueprint at fetch time.
+// JSON-encoded so values survive any quoting hazard in the URL.
+window.__REPRINT_API_URL__       = <?= json_encode(defined('REPRINT_API_URL') ? REPRINT_API_URL : '') ?>;
+window.__REPRINT_SECRET__        = <?= json_encode(defined('REPRINT_SECRET') ? REPRINT_SECRET : '') ?>;
+window.__REPRINT_SOURCE_ORIGIN__ = <?= json_encode(defined('REPRINT_SOURCE_ORIGIN') ? REPRINT_SOURCE_ORIGIN : '') ?>;
+
 const $ = (s) => document.querySelector(s);
 function logLine(text, cls) {
   const el = $('#log');
@@ -208,13 +214,15 @@ function handleEvent(ev) {
 }
 
 async function runImport() {
-  const params = new URLSearchParams(window.location.hash.slice(1));
-  const apiUrl = params.get('api');
-  const secret = params.get('secret');
-  const source = params.get('source') || '';
+  // Credentials are baked into the page server-side by the wizard's
+  // ?action=blueprint endpoint. We read them via tiny PHP echoes into
+  // window globals, set just before this script runs.
+  const apiUrl = window.__REPRINT_API_URL__ || '';
+  const secret = window.__REPRINT_SECRET__ || '';
+  const source = window.__REPRINT_SOURCE_ORIGIN__ || '';
 
   if (!apiUrl || !secret) {
-    showError('Missing api_url or secret in URL fragment. Re-launch from the wizard.');
+    showError('Missing api_url or secret. Re-launch from the wizard so the blueprint can be re-built with credentials.');
     return;
   }
 
