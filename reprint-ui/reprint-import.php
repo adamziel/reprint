@@ -328,14 +328,19 @@ window.addEventListener('DOMContentLoaded', runImport);
 // ─────────────────────────────────────────────────────────────────
 
 function stream_pull_and_activate(): void {
+    // The phar's CLI entry-point exit(0)s at the end of `pull`, so any
+    // code after stream_pull() returns is dead. Register the
+    // activation as a shutdown function instead — it runs whether
+    // the phar exits cleanly, throws, or returns.
+    register_shutdown_function(function () {
+        $activate = run_local_activation();
+        echo json_encode([
+            'type' => 'activate',
+            'status' => !empty($activate['ok']) ? 'complete' : 'error',
+            'data' => $activate,
+        ]) . "\n";
+    });
     stream_pull();
-    // Activation step: emit a single ndjson event so the JS can react.
-    $activate = run_local_activation();
-    echo json_encode([
-        'type' => 'activate',
-        'status' => $activate['ok'] ? 'complete' : 'error',
-        'data' => $activate,
-    ]) . "\n";
 }
 
 function stream_pull(): void {
@@ -349,8 +354,14 @@ function stream_pull(): void {
     header('Cache-Control: no-cache');
     header('X-Accel-Buffering: no');
 
+    // Credentials come from POST body (the wizard's JS submits them as
+    // form data) but fall back to the constants baked in by
+    // /reprint.php?action=blueprint, so direct curl-style invocations
+    // work too.
     $api = (string) ($_POST['api_url'] ?? '');
     $secret = (string) ($_POST['secret'] ?? '');
+    if ($api === '' && defined('REPRINT_API_URL'))     { $api    = (string) REPRINT_API_URL; }
+    if ($secret === '' && defined('REPRINT_SECRET'))   { $secret = (string) REPRINT_SECRET; }
     if ($api === '' || $secret === '') {
         echo json_encode(['type' => 'error', 'message' => 'missing api_url/secret']) . "\n";
         return;
@@ -370,6 +381,21 @@ function stream_pull(): void {
     if (!defined('STDOUT')) define('STDOUT', fopen('php://output', 'w'));
     if (!defined('STDERR')) define('STDERR', fopen('php://output', 'w'));
     if (!defined('STDIN'))  define('STDIN',  fopen('php://memory', 'r'));
+
+    // Disarm Playground's $wpdb proxy. Its 0-sqlite.php auto-prepend
+    // installs a Playground_SQLite_Integration_Loader that lazy-loads
+    // /internal/shared/sqlite-database-integration on first access.
+    // The phar bundles its own copy of the same project at a different
+    // path (phar://.../lib/sqlite-database-integration), so once the
+    // phar loads its copy and anything later touches $wpdb, the
+    // proxy's lazy loader hits a "class WP_Parser_Grammar already
+    // declared" fatal mid-import. We don't need $wpdb during the
+    // import — the phar drives a separate WP_PDO_MySQL_On_SQLite
+    // connection — so just clear the proxy so it can't fire.
+    if (isset($GLOBALS['wpdb']) && is_object($GLOBALS['wpdb'])
+        && get_class($GLOBALS['wpdb']) === 'Playground_SQLite_Integration_Loader') {
+        unset($GLOBALS['wpdb']);
+    }
 
     // Let the phar's progress writer hit php://output directly. With
     // implicit_flush=1 each fwrite turns into an HTTP chunk — assuming
@@ -399,6 +425,12 @@ function stream_pull(): void {
         // to the source site so media still renders. Users can opt
         // into a follow-up files-pull --filter=skipped-earlier later.
         '--filter=essential-files',
+        // /wordpress already has Playground's fresh WP install. The
+        // flat-docroot stage symlinks the imported tree on top, and
+        // refuses to clobber existing files unless we say so. We do
+        // — the install is empty/disposable, the imported site is
+        // what the user actually wants to see.
+        '--force',
     ];
     $argc = count($argv);
 
