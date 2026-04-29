@@ -78,6 +78,53 @@ function reprint_apply_curl_proxy_from_env($ch): ?string {
 }
 
 /**
+ * Apply a CA bundle to the cURL handle, looking in this order:
+ *   1. The REPRINT_CA_BUNDLE environment variable (caller override).
+ *   2. The CA bundle WordPress ships at wp-includes/certificates/ca-bundle.crt
+ *      (present whenever the importer runs alongside a WP install — most
+ *      notably WordPress Playground, where curl's compile-time CAfile
+ *      points at /etc/ssl/certs/ca-certificates.crt and that path doesn't
+ *      exist in the WASM filesystem).
+ *   3. The OS-standard locations a typical curl install picks up by
+ *      default — /etc/ssl/certs/ca-certificates.crt etc. — only set
+ *      explicitly here when those files exist, so we don't override
+ *      curl's working defaults on systems where they're already wired up.
+ *
+ * Without this, curl in Playground fails every HTTPS request with
+ * "error setting certificate verify locations: CAfile: /etc/ssl/certs/...".
+ * Per-handle CURLOPT_CAINFO is the only knob that works there because
+ * curl.cainfo / openssl.cafile are PHP_INI_SYSTEM and CURL_CA_BUNDLE is
+ * ignored by the WASM curl build.
+ */
+function reprint_apply_curl_ca_bundle($ch): ?string {
+    static $resolved = null;
+    if ($resolved === null) {
+        $resolved = false;
+        $candidates = [];
+        $env = getenv('REPRINT_CA_BUNDLE');
+        if (is_string($env) && $env !== '') {
+            $candidates[] = $env;
+        }
+        $candidates[] = '/wordpress/wp-includes/certificates/ca-bundle.crt';
+        $candidates[] = '/etc/ssl/certs/ca-certificates.crt';
+        $candidates[] = '/etc/pki/tls/certs/ca-bundle.crt';
+        $candidates[] = '/etc/ssl/cert.pem';
+        $candidates[] = '/usr/local/etc/openssl/cert.pem';
+        foreach ($candidates as $p) {
+            if (is_file($p) && is_readable($p)) {
+                $resolved = $p;
+                break;
+            }
+        }
+    }
+    if ($resolved === false) {
+        return null;
+    }
+    curl_setopt($ch, CURLOPT_CAINFO, $resolved);
+    return $resolved;
+}
+
+/**
  * The wire-protocol version this importer speaks.
  *
  * Both the export plugin (server) and the importer (client) are deployed
@@ -4743,8 +4790,25 @@ class ImportClient
             );
         }
 
+        // The bundled wp-pdo-mysql-on-sqlite.php require_onces a fixed
+        // set of class files relative to its own dirname. When the host
+        // already loaded a *different* copy of those same classes
+        // (notably WordPress Playground's auto_prepend, which preloads
+        // /internal/shared/sqlite-database-integration), each class
+        // declaration in the bundled tree throws a fatal "name already
+        // in use". The require_once path-guard doesn't help because the
+        // two trees live at different paths. Skip the loader entirely
+        // when the host's copy is already in memory — both trees expose
+        // the same class names, so the existing instance is fine.
         $driver_loader = resolve_sqlite_integration_path("/wp-pdo-mysql-on-sqlite.php");
         $polyfills = resolve_sqlite_integration_path("/php-polyfills.php");
+        if (
+            class_exists("WP_PDO_MySQL_On_SQLite", false) &&
+            class_exists("WP_Parser_Grammar", false)
+        ) {
+            $driver_loader = null;
+            $polyfills = null;
+        }
 
         if ($target_path !== ':memory:') {
             $target_dir = dirname($target_path);
@@ -4757,8 +4821,8 @@ class ImportClient
             }
         }
 
-        require_once $polyfills;
-        require_once $driver_loader;
+        if ($polyfills !== null)     { require_once $polyfills; }
+        if ($driver_loader !== null) { require_once $driver_loader; }
 
         $dsn = sprintf(
             "mysql-on-sqlite:path=%s;dbname=%s",
@@ -9428,6 +9492,7 @@ class ImportClient
 
         $ch = curl_init($url);
         reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
 
         $headers = [
             ...$this->get_base_headers("application/json"),
@@ -9549,6 +9614,7 @@ class ImportClient
 
         $ch = curl_init($url);
         reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
 
         $parser = null;
         $current_chunk = null;
