@@ -319,7 +319,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-adamziel/update-wp-php-toolkit",
+            "version": "dev-adamziel/reprint-web-ui-v2-playground-handoff",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
@@ -360,7 +360,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-importer",
-            "version": "dev-adamziel/update-wp-php-toolkit",
+            "version": "dev-adamziel/reprint-web-ui-v2-playground-handoff",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-importer",
