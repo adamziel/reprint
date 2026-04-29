@@ -3665,7 +3665,11 @@ class ImportClient
                 $this->progress->tick_spinner();
             }
 
-            // Drain any finished transfers.
+            // Drain any finished transfers. Errors are queued in
+            // $pending_error so other transfers that completed in the
+            // same drain pass still get buffered into sidecars before
+            // the outer try/catch persists state and re-throws.
+            $pending_error = null;
             while (($info = curl_multi_info_read($mh)) !== false) {
                 if ($info["msg"] !== CURLMSG_DONE) {
                     continue;
@@ -3693,11 +3697,13 @@ class ImportClient
                 $slot = &$slots[$slot_id];
 
                 if ($errno !== 0) {
-                    $cleanup_multi();
-                    throw new RuntimeException(
+                    unset($slot_bufs[$slot_id]);
+                    $pending_error = $pending_error ?? new RuntimeException(
                         "files-index (symlink follow) curl error for {$slot['dir']}: " .
                             $err_msg,
                     );
+                    unset($slot);
+                    continue;
                 }
 
                 if ($http_code >= 400 && $http_code < 500) {
@@ -3722,10 +3728,12 @@ class ImportClient
                     continue;
                 }
                 if ($http_code !== 200) {
-                    $cleanup_multi();
-                    throw new RuntimeException(
+                    unset($slot_bufs[$slot_id]);
+                    $pending_error = $pending_error ?? new RuntimeException(
                         "files-index (symlink follow) HTTP {$http_code} for {$slot['dir']}",
                     );
+                    unset($slot);
+                    continue;
                 }
 
                 $parsed = $this->parse_index_response_body($slot_bufs[$slot_id]);
@@ -3746,10 +3754,11 @@ class ImportClient
                         $advance_watermark();
                         continue;
                     }
-                    $cleanup_multi();
-                    throw new RuntimeException(
+                    $pending_error = $pending_error ?? new RuntimeException(
                         "files-index (symlink follow) error for {$slot['dir']}: {$msg}",
                     );
+                    unset($slot);
+                    continue;
                 }
 
                 $slot["data_buf"] .= $parsed["data"];
@@ -3769,24 +3778,30 @@ class ImportClient
 
                 $new_cursor = $parsed["cursor"];
                 if ($new_cursor === $slot["last_cursor"]) {
-                    $cleanup_multi();
-                    throw new RuntimeException(
+                    $pending_error = $pending_error ?? new RuntimeException(
                         "files-index (symlink follow) made no progress " .
                             "(cursor unchanged) for {$slot['dir']}",
                     );
+                    unset($slot);
+                    continue;
                 }
                 $slot["last_cursor"] = $slot["cursor"];
                 $slot["cursor"]      = $new_cursor;
                 $slot["attempts"]++;
                 if ($slot["attempts"] > 10_000) {
-                    $cleanup_multi();
-                    throw new RuntimeException(
+                    $pending_error = $pending_error ?? new RuntimeException(
                         "files-index (symlink follow) exceeded maximum attempts " .
                             "for {$slot['dir']}",
                     );
+                    unset($slot);
+                    continue;
                 }
                 unset($slot);
                 // Slot will be re-attached at the top of the next outer iteration.
+            }
+
+            if ($pending_error !== null) {
+                throw $pending_error;
             }
         }
         } catch (RuntimeException $e) {
