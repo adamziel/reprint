@@ -520,16 +520,28 @@ function run_local_activation(): array {
 }
 
 function _reprint_self_origin(): string {
-    // Playground defines WP_HOME / WP_SITEURL early (via auto_prepend's
-    // consts.json loader) to its full session URL — including the
-    // /<random-slug>/ path segment that scopes each user's playground.
-    // We need that prefix in --new-site-url so the SQL rewriter
-    // points wp_options.siteurl/home at the URL the iframe is
-    // actually serving, not just scheme://host. Without the prefix WP
-    // canonical-redirects every request and the user gets a loop.
-    if (defined('WP_HOME')) return rtrim((string) constant('WP_HOME'), '/');
-    if (defined('WP_SITEURL')) return rtrim((string) constant('WP_SITEURL'), '/');
-    $scheme = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    return "$scheme://$host";
+    // Return ONLY scheme + host — no path segment, even when
+    // Playground sets WP_HOME / WP_SITEURL to its full session URL
+    // (e.g. https://playground.wordpress.net/scope:ambitious-cozy-town).
+    // Playground prepends that scope segment to every browser URL on
+    // its own; storing it in wp_options.siteurl/home as well doubles
+    // the scope on every asset link (/scope:foo/scope:foo/wp-content/...
+    // → 404). Stripping the path leaves siteurl=https://playground.wordpress.net,
+    // assets resolve to /wp-content/..., Playground's request rewrite
+    // strips the leading /scope:foo, and WP serves them just fine.
+    $url = '';
+    if (defined('WP_HOME')) {
+        $url = (string) constant('WP_HOME');
+    } elseif (defined('WP_SITEURL')) {
+        $url = (string) constant('WP_SITEURL');
+    } else {
+        $scheme = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
+        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $url = "$scheme://$host";
+    }
+    $parts = parse_url($url);
+    $scheme = $parts['scheme'] ?? 'https';
+    $host = $parts['host'] ?? 'localhost';
+    $port = isset($parts['port']) ? ':' . $parts['port'] : '';
+    return "$scheme://$host$port";
 }
