@@ -694,6 +694,14 @@ class AdaptiveTuner
      */
     public function get_request_params(string $endpoint): array
     {
+        // --no-adaptive means "let the server decide everything" — no
+        // tuning hints, no per-request overrides. Returning an empty
+        // array keeps max_execution_time / memory_threshold /
+        // batch-size knobs out of the export.php URL entirely.
+        if (!$this->config["enabled"]) {
+            return [];
+        }
+
         $params = [
             "max_execution_time" => $this->config["max_execution_time"],
             "memory_threshold" => $this->config["memory_threshold"],
