@@ -3569,6 +3569,13 @@ class ImportClient
         // state before re-throwing — that way slots N+1..N+K that already
         // completed live on as sidecars + buffered_done entries, and the
         // next run only re-issues slot N from its saved cursor.
+        //
+        // When a slot reports an error we record it in $errored and stop
+        // dispatching new work, but we keep draining the multi handle
+        // until every in-flight slot settles. That gives the slots that
+        // were already racing alongside the failing one a chance to
+        // complete and write their sidecars before we throw.
+        $errored = [];
         try {
         while (!empty($queue) || !empty($slots)) {
             if ($this->shutdown_requested) {
@@ -3577,11 +3584,14 @@ class ImportClient
                 return;
             }
 
-            // Fill empty slot positions up to $concurrency.
+            // Fill empty slot positions up to $concurrency. Stop pulling
+            // new directories once any slot has errored — we want to drain
+            // the in-flight ones cleanly so their data lands in sidecars,
+            // but adding more work would just race the imminent throw.
             // Count only active (not-yet-done) slots; buffered_done slots don't
             // consume a concurrency slot since they're just waiting for the watermark.
             $active_count = count($slots) - count($buffered_done);
-            while (!empty($queue) && $active_count < $concurrency) {
+            while (empty($errored) && !empty($queue) && $active_count < $concurrency) {
                 // Find the next dir that isn't already visited.
                 $dir = null;
                 while (!empty($queue)) {
@@ -3644,9 +3654,15 @@ class ImportClient
             }
 
             // Re-attach any slot that finished a page in the previous
-            // iteration but still has more cursor pages to fetch.
+            // iteration but still has more cursor pages to fetch. Skip
+            // errored slots — they'll resume from their saved cursor on
+            // the next run; right now we just want the in-flight ones to
+            // drain cleanly.
             foreach ($slots as $slot_id => $s) {
-                if ($s["done"] || isset($handles_by_slot[$slot_id])) {
+                if ($s["done"] || isset($handles_by_slot[$slot_id]) || isset($errored[$slot_id])) {
+                    continue;
+                }
+                if (!empty($errored)) {
                     continue;
                 }
                 $attach_request($slot_id);
@@ -3665,11 +3681,11 @@ class ImportClient
                 $this->progress->tick_spinner();
             }
 
-            // Drain any finished transfers. Errors are queued in
-            // $pending_error so other transfers that completed in the
-            // same drain pass still get buffered into sidecars before
-            // the outer try/catch persists state and re-throws.
-            $pending_error = null;
+            // Drain any finished transfers. Errors are recorded in
+            // $errored (slot_id => message) so the outer loop stops
+            // dispatching new work but keeps draining the multi handle —
+            // that way slots already racing alongside the failing one
+            // get to finish and write their sidecars before we throw.
             while (($info = curl_multi_info_read($mh)) !== false) {
                 if ($info["msg"] !== CURLMSG_DONE) {
                     continue;
@@ -3698,10 +3714,7 @@ class ImportClient
 
                 if ($errno !== 0) {
                     unset($slot_bufs[$slot_id]);
-                    $pending_error = $pending_error ?? new RuntimeException(
-                        "files-index (symlink follow) curl error for {$slot['dir']}: " .
-                            $err_msg,
-                    );
+                    $errored[$slot_id] = "files-index (symlink follow) curl error for {$slot['dir']}: " . $err_msg;
                     unset($slot);
                     continue;
                 }
@@ -3729,9 +3742,7 @@ class ImportClient
                 }
                 if ($http_code !== 200) {
                     unset($slot_bufs[$slot_id]);
-                    $pending_error = $pending_error ?? new RuntimeException(
-                        "files-index (symlink follow) HTTP {$http_code} for {$slot['dir']}",
-                    );
+                    $errored[$slot_id] = "files-index (symlink follow) HTTP {$http_code} for {$slot['dir']}";
                     unset($slot);
                     continue;
                 }
@@ -3754,9 +3765,7 @@ class ImportClient
                         $advance_watermark();
                         continue;
                     }
-                    $pending_error = $pending_error ?? new RuntimeException(
-                        "files-index (symlink follow) error for {$slot['dir']}: {$msg}",
-                    );
+                    $errored[$slot_id] = "files-index (symlink follow) error for {$slot['dir']}: {$msg}";
                     unset($slot);
                     continue;
                 }
@@ -3778,10 +3787,8 @@ class ImportClient
 
                 $new_cursor = $parsed["cursor"];
                 if ($new_cursor === $slot["last_cursor"]) {
-                    $pending_error = $pending_error ?? new RuntimeException(
-                        "files-index (symlink follow) made no progress " .
-                            "(cursor unchanged) for {$slot['dir']}",
-                    );
+                    $errored[$slot_id] = "files-index (symlink follow) made no progress " .
+                        "(cursor unchanged) for {$slot['dir']}";
                     unset($slot);
                     continue;
                 }
@@ -3789,10 +3796,8 @@ class ImportClient
                 $slot["cursor"]      = $new_cursor;
                 $slot["attempts"]++;
                 if ($slot["attempts"] > 10_000) {
-                    $pending_error = $pending_error ?? new RuntimeException(
-                        "files-index (symlink follow) exceeded maximum attempts " .
-                            "for {$slot['dir']}",
-                    );
+                    $errored[$slot_id] = "files-index (symlink follow) exceeded maximum attempts " .
+                        "for {$slot['dir']}";
                     unset($slot);
                     continue;
                 }
@@ -3800,8 +3805,12 @@ class ImportClient
                 // Slot will be re-attached at the top of the next outer iteration.
             }
 
-            if ($pending_error !== null) {
-                throw $pending_error;
+            // Once an error has been recorded and every in-flight transfer
+            // has settled, throw — the outer try/catch persists state and
+            // re-raises. By this point any sibling slots that were going
+            // to succeed have written their sidecars.
+            if (!empty($errored) && empty($handles_by_slot)) {
+                throw new RuntimeException(reset($errored));
             }
         }
         } catch (RuntimeException $e) {
