@@ -717,28 +717,26 @@ PHP;
 }
 
 function _reprint_self_origin(): string {
-    // Return ONLY scheme + host — no path segment, even when
-    // Playground sets WP_HOME / WP_SITEURL to its full session URL
-    // (e.g. https://playground.wordpress.net/scope:ambitious-cozy-town).
-    // Playground prepends that scope segment to every browser URL on
-    // its own; storing it in wp_options.siteurl/home as well doubles
-    // the scope on every asset link (/scope:foo/scope:foo/wp-content/...
-    // → 404). Stripping the path leaves siteurl=https://playground.wordpress.net,
-    // assets resolve to /wp-content/..., Playground's request rewrite
-    // strips the leading /scope:foo, and WP serves them just fine.
-    $url = '';
+    // Use Playground's full session URL — including the
+    // /scope:<slug>/ path segment — verbatim. Playground's PHP
+    // request handler defines WP_HOME / WP_SITEURL to this value,
+    // and WordPress runs option_home / option_siteurl through
+    // _config_wp_home() / _config_wp_siteurl(), so home_url() and
+    // site_url() always return the full scope-prefixed URL at
+    // runtime regardless of what we put in wp_options. If we
+    // pass anything different to --new-site-url, reprint's
+    // StructuredDataUrlRewriter writes one form into post content
+    // and serialized options while runtime URL generation uses
+    // another — half the links get the scope prefix and the other
+    // half don't. Returning WP_HOME unmodified keeps every URL the
+    // imported site emits consistent with the iframe it's running in.
     if (defined('WP_HOME')) {
-        $url = (string) constant('WP_HOME');
-    } elseif (defined('WP_SITEURL')) {
-        $url = (string) constant('WP_SITEURL');
-    } else {
-        $scheme = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
-        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-        $url = "$scheme://$host";
+        return rtrim((string) constant('WP_HOME'), '/');
     }
-    $parts = parse_url($url);
-    $scheme = $parts['scheme'] ?? 'https';
-    $host = $parts['host'] ?? 'localhost';
-    $port = isset($parts['port']) ? ':' . $parts['port'] : '';
-    return "$scheme://$host$port";
+    if (defined('WP_SITEURL')) {
+        return rtrim((string) constant('WP_SITEURL'), '/');
+    }
+    $scheme = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    return "$scheme://$host";
 }
