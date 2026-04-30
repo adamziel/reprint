@@ -625,6 +625,54 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "3b5556dd014a6006542e94a1fa7b88cd3f8018d4",
+      "shortSha": "3b5556d",
+      "date": "2026-04-30T19:02:22+02:00",
+      "message": "Bump wp-php-toolkit packages to ^0.7.0 (#187)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.5",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 75.76055899999847,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 4005.3867299999984,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 111945.667353,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 39192.95743099999,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 50.45359499999904,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
