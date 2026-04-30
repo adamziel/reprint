@@ -684,8 +684,18 @@ function run_local_activation(): array {
 add_filter('jetpack_implode_frontend_css', '__return_false');
 add_filter('jetpack_force_disable_site_accelerator', '__return_true');
 
-// Redirect missing uploads to the source site so media keeps rendering
+// Stream missing uploads from the source so media keeps rendering
 // until reprint files-pull --filter=skipped-earlier downloads them.
+//
+// We have to PROXY here, not 302 to the source. Playground's
+// service worker post-processes Location headers to keep the iframe
+// in scope: a Location pointing at https://adamadam.blog/wp-content/...
+// gets rewritten to https://adamadam.blog/scope:foo/wp-content/...
+// Browser follows that, the SW re-intercepts because the path still
+// contains /wp-content/uploads/, this hook fires again, and we 302
+// in a loop until ERR_TOO_MANY_REDIRECTS. Streaming the file body
+// from PHP lets the browser see one same-origin response with the
+// image bytes — no redirect for the SW to mangle.
 \$source = $source_origin_php;
 if (\$source !== '') {
     add_action('init', function () use (\$source) {
@@ -697,7 +707,48 @@ if (\$source !== '') {
         \$rel = substr(\$path, \$pos);
         \$local = WP_CONTENT_DIR . substr(\$rel, strlen('/wp-content'));
         if (file_exists(\$local)) return;
-        header('Location: ' . \$source . \$rel, true, 302);
+
+        \$remote = \$source . \$rel;
+        \$ch = curl_init(\$remote);
+        \$captured_headers = array();
+        curl_setopt_array(\$ch, array(
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_HEADERFUNCTION => function (\$ch, \$header) use (&\$captured_headers) {
+                \$len = strlen(\$header);
+                \$line = trim(\$header);
+                if (\$line === '') return \$len;
+                // Forward content-type, content-length, cache-control,
+                // expires, etag, last-modified — skip everything else
+                // so we don't leak transfer-encoding / connection /
+                // server identity from the source.
+                \$lower = strtolower(\$line);
+                foreach (array('content-type:','content-length:','cache-control:','expires:','etag:','last-modified:') as \$prefix) {
+                    if (strpos(\$lower, \$prefix) === 0) {
+                        \$captured_headers[] = \$line;
+                        break;
+                    }
+                }
+                return \$len;
+            },
+        ));
+        \$body = curl_exec(\$ch);
+        \$http = (int) curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
+        curl_close(\$ch);
+
+        if (\$body === false || \$http < 200 || \$http >= 400) {
+            status_header(404);
+            header('Content-Type: text/plain');
+            echo "Upload not available locally and source fetch failed (HTTP {\$http}).";
+            exit;
+        }
+
+        status_header(\$http);
+        foreach (\$captured_headers as \$h) {
+            header(\$h);
+        }
+        echo \$body;
         exit;
     }, 0);
 }
