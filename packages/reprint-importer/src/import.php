@@ -11847,7 +11847,23 @@ if (
         $client = new ImportClient($remote_url, $state_dir, $fs_root);
         $client->audit_log_argv($command, $argv);
         $client->run($options ?? []);
-        exit($client->exit_code);
+        // EXIT_AFTER_IMPORT controls whether we hand control back to
+        // the caller after pull returns. Default true: standard CLI
+        // invocations (reprint pull, the phar bin, e2e tests) get the
+        // exit() they expect. Embedders that include the phar from a
+        // web SAPI — the Playground wizard in reprint-import.php is
+        // the live case — define EXIT_AFTER_IMPORT=false so cleanup
+        // logic can run AFTER pull, in the same try/catch scope as
+        // the include. Without that knob the bare exit() jumps the
+        // embedder's stack and forces it to wire activation through
+        // register_shutdown_function, where exceptions have no
+        // channel to surface as ndjson events. Stash the exit code on
+        // a global so the embedder can read it.
+        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = (int) $client->exit_code;
+        if (!defined('EXIT_AFTER_IMPORT') || EXIT_AFTER_IMPORT) {
+            exit($client->exit_code);
+        }
+        return;
     } catch (\Throwable $e) {
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
         $error_code = isset($client) ? $client->last_error_code : null;
@@ -11867,6 +11883,13 @@ if (
             }
             fwrite(STDERR, $json . "\n");
         }
-        exit(1);
+        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = 1;
+        if (!defined('EXIT_AFTER_IMPORT') || EXIT_AFTER_IMPORT) {
+            exit(1);
+        }
+        // When EXIT_AFTER_IMPORT is false we still want the embedder
+        // to see the failure — re-throw so its try/catch around
+        // `include $phar` can surface a proper `{type:'error'}` event.
+        throw $e;
     }
 }
