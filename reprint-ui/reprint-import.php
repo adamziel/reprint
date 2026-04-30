@@ -311,6 +311,13 @@ async function runImport() {
   // can see the import landed.
   ['preflight', 'files', 'database'].forEach((p) => setPhase(p, 'done', 'ok'));
   setPhase('apply_runtime', 'done', 'sqlite ' + (activateResult.data.sqlite_size || 0) + ' B');
+
+  // Activation reported success but logged warnings — surface them
+  // so the user can see (and report) anything we recovered from
+  // rather than silently swallowed.
+  if (Array.isArray(activateResult.data.warnings) && activateResult.data.warnings.length) {
+    activateResult.data.warnings.forEach((w) => logLine('warning: ' + w, 'err'));
+  }
   $('#overall-bar').style.width = '100%';
   $('#subtitle').textContent = 'Done — your site is ready.';
   const btn = $('#open-site');
@@ -336,19 +343,20 @@ window.addEventListener('DOMContentLoaded', runImport);
 // ─────────────────────────────────────────────────────────────────
 
 function stream_pull_and_activate(): void {
-    // The phar's CLI entry-point exit(0)s at the end of `pull`, so any
-    // code after stream_pull() returns is dead. Register the
-    // activation as a shutdown function instead — it runs whether
-    // the phar exits cleanly, throws, or returns.
-    register_shutdown_function(function () {
-        $activate = run_local_activation();
-        echo json_encode([
-            'type' => 'activate',
-            'status' => !empty($activate['ok']) ? 'complete' : 'error',
-            'data' => $activate,
-        ]) . "\n";
-    });
+    // The phar honours IMPORTER_NO_EXIT and returns control after
+    // pull, so we run activation in the same try/catch scope as the
+    // include — exceptions surface as proper {type:'error'} ndjson
+    // events instead of disappearing into a shutdown handler.
+    if (!defined('IMPORTER_NO_EXIT')) {
+        define('IMPORTER_NO_EXIT', true);
+    }
     stream_pull();
+    $activate = run_local_activation();
+    echo json_encode([
+        'type' => 'activate',
+        'status' => !empty($activate['ok']) ? 'complete' : 'error',
+        'data' => $activate,
+    ]) . "\n";
 }
 
 function stream_pull(): void {
@@ -456,7 +464,7 @@ function stream_pull(): void {
         '--target-engine=sqlite',
         '--target-sqlite-path=/internal/shared/imported.sqlite',
         '--flatten-to=/wordpress',
-        '--new-site-url=' . _reprint_self_origin(),
+        '--new-site-url=' . _reprint_canonical_site_url(),
         // The web Playground iframe doesn't have a runtime= adapter
         // (no host-FS mounts, no start.sh). Skip apply-runtime; we do
         // a lightweight activation step ourselves on completion.
@@ -489,6 +497,8 @@ function stream_pull(): void {
 }
 
 function run_local_activation(): array {
+    $warnings = [];
+
     if (!is_dir('/wordpress/wp-content')) {
         return ['ok' => false, 'error' => '/wordpress/wp-content missing after pull'];
     }
@@ -506,25 +516,40 @@ function run_local_activation(): array {
     }
     $sqlite_size = is_file($dst) ? filesize($dst) : 0;
 
-    // 1a. Deactivate page-optimize in wp_options.active_plugins.
-    //
-    //     Why: page-optimize concat-css.php builds the <link href> for
-    //     each enqueued stylesheet via cache_bust_mtime( $path, $siteurl ),
-    //     which does literally "$siteurl . $path". $path is the URL
-    //     path of the stylesheet (e.g. /scope:foo/wp-content/...) and
-    //     $siteurl is the WP site URL (https://playground.wordpress.net/scope:foo).
-    //     The plugin assumes siteurl has no path component, so when
-    //     it does have one — Playground's case — the resulting href
-    //     doubles the /scope:foo/ segment and every concat'd
-    //     stylesheet 404s. The plugin's bundling endpoint
-    //     /_static/?<base64> only works on Atomic anyway, so just
-    //     drop it from active_plugins. WP enqueues each asset
-    //     directly and the URLs come out single-scoped.
+    // 2. Open the imported SQLite once. Both the active_plugins
+    //    UPDATE below and the row-count probe share the same
+    //    handle so any future PRAGMA / function setup lives in one
+    //    place. PDO closes when the variable goes out of scope.
+    $pdo = null;
+    $sqlite_error = null;
     if ($sqlite_size > 0) {
         try {
             $pdo = new PDO('sqlite:' . $dst);
             $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            $cur = $pdo->query("SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'")->fetchColumn();
+        } catch (Throwable $e) {
+            $sqlite_error = $e->getMessage();
+        }
+    }
+
+    // 3. Deactivate page-optimize in wp_options.active_plugins.
+    //
+    //    page-optimize concat-css.php builds the <link href> for
+    //    each enqueued stylesheet via cache_bust_mtime( $path, $siteurl ),
+    //    which does literally "$siteurl . $path". $path is the URL
+    //    path of the stylesheet (e.g. /scope:foo/wp-content/...) and
+    //    $siteurl is the WP site URL
+    //    (https://playground.wordpress.net/scope:foo). The plugin
+    //    assumes siteurl has no path component, so when it does have
+    //    one — Playground's case — the resulting href doubles the
+    //    /scope:foo/ segment and every concat'd stylesheet 404s.
+    //    The plugin's bundling endpoint /_static/?<base64> only
+    //    works on Atomic anyway, so drop it (and wpcomsh) from
+    //    active_plugins. WP then enqueues each asset directly.
+    if ($pdo !== null) {
+        try {
+            $cur = $pdo->query(
+                "SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'"
+            )->fetchColumn();
             if (is_string($cur) && $cur !== '') {
                 $plugins = @unserialize($cur);
                 if (is_array($plugins)) {
@@ -534,100 +559,42 @@ function run_local_activation(): array {
                                 && strpos($p, 'wpcomsh/') !== 0);
                     }));
                     if (count($filtered) !== count($plugins)) {
-                        $stmt = $pdo->prepare("UPDATE wp_options SET option_value = :v WHERE option_name = 'active_plugins'");
+                        $stmt = $pdo->prepare(
+                            "UPDATE wp_options SET option_value = :v WHERE option_name = 'active_plugins'"
+                        );
                         $stmt->execute([':v' => serialize($filtered)]);
                     }
                 }
             }
-        } catch (Throwable $e) { /* non-fatal — surface via row_counts */ }
+        } catch (Throwable $e) {
+            // Surface as a warning rather than swallowing — if the
+            // UPDATE failed and the user lands on a site whose
+            // page-optimize is still active, we want them to see why.
+            $warnings[] = 'page-optimize/wpcomsh deactivation failed: ' . $e->getMessage();
+        }
     }
 
-    // 2. Validate the SQLite actually has WordPress data. A bare
+    // 4. Validate the SQLite actually has WordPress data. A bare
     //    393KB file means WP_PDO_MySQL_On_SQLite created its
     //    information_schema scaffolding but db-apply never landed
     //    any data — we must NOT report success or the user clicks
     //    "Open the imported site" and lands on the install wizard.
     $row_counts = ['wp_users' => 0, 'wp_options' => 0, 'wp_posts' => 0];
-    $sqlite_error = null;
-    if ($sqlite_size > 0) {
-        try {
-            $pdo = new PDO('sqlite:' . $dst);
-            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            foreach (array_keys($row_counts) as $tbl) {
-                try {
-                    $row_counts[$tbl] = (int) $pdo->query("SELECT COUNT(*) FROM \"$tbl\"")->fetchColumn();
-                } catch (Throwable $te) {
-                    $row_counts[$tbl] = 'TABLE MISSING';
-                }
+    if ($pdo !== null) {
+        foreach (array_keys($row_counts) as $tbl) {
+            try {
+                $row_counts[$tbl] = (int) $pdo->query("SELECT COUNT(*) FROM \"$tbl\"")->fetchColumn();
+            } catch (Throwable $te) {
+                $row_counts[$tbl] = 'TABLE MISSING';
             }
-        } catch (Throwable $e) {
-            $sqlite_error = $e->getMessage();
         }
     }
     $has_real_data = is_int($row_counts['wp_options']) && $row_counts['wp_options'] >= 5
                   && is_int($row_counts['wp_users']) && $row_counts['wp_users'] >= 1;
 
-    // 3. Atomic plugins/themes ship under a versioned subdir
-    //    (/wordpress/plugins/jetpack/15.8-a.7/jetpack.php), but WP
-    //    looks for /wp-content/plugins/jetpack/jetpack.php — without
-    //    the version segment. flat-docroot symlinks the parent dir
-    //    in, leaving WP unable to find any plugin or theme entry
-    //    points and the iframe spamming 404s on .../static/...
-    //    assets. Walk the top-level entries in plugins/, themes/ and
-    //    mu-plugins/, and when a directory contains exactly one
-    //    versioned subdirectory, retarget the symlink (or move
-    //    contents) so WP sees the plugin's PHP file directly.
-    foreach (['plugins', 'themes', 'mu-plugins'] as $sub) {
-        $dir = '/wordpress/wp-content/' . $sub;
-        if (!is_dir($dir)) {
-            continue;
-        }
-        $entries = @scandir($dir) ?: [];
-        foreach ($entries as $entry) {
-            if ($entry === '.' || $entry === '..') {
-                continue;
-            }
-            $entry_path = $dir . '/' . $entry;
-            // Resolve symlinks to the real target so we can inspect.
-            $real = is_link($entry_path) ? @readlink($entry_path) : $entry_path;
-            if ($real === false || !is_dir($entry_path)) {
-                continue;
-            }
-            $children = @scandir($entry_path) ?: [];
-            $children = array_values(array_filter(
-                $children,
-                fn($c) => $c !== '.' && $c !== '..'
-            ));
-            // Atomic versioned plugin layout: a single child that's a
-            // directory and looks like a version (digits and dots,
-            // optionally with a hyphenated suffix like 15.8-a.7).
-            if (
-                count($children) === 1
-                && is_dir($entry_path . '/' . $children[0])
-                && preg_match('/^\d+(\.\d+)*([\-+][\w.+]+)?$/', $children[0])
-            ) {
-                $version_target = $entry_path . '/' . $children[0];
-                $resolved = @realpath($version_target);
-                if ($resolved && is_dir($resolved)) {
-                    if (is_link($entry_path)) {
-                        @unlink($entry_path);
-                    } else {
-                        // It's a real directory, can't re-symlink in place
-                        // without removing it. The version is one level
-                        // down — symlink it INSIDE entry_path is risky,
-                        // so move children up.
-                        foreach (@scandir($resolved) ?: [] as $vc) {
-                            if ($vc === '.' || $vc === '..') continue;
-                            @rename($resolved . '/' . $vc, $entry_path . '/' . $vc);
-                        }
-                        @rmdir($resolved);
-                        continue;
-                    }
-                    @symlink($resolved, $entry_path);
-                }
-            }
-        }
-    }
+    // (Atomic versioned-plugin/theme directory collapse used to live
+    //  here, but it's the importer's flat-docroot stage's job — see
+    //  ImportClient::flatten_collapse_versioned_dirs() in import.php.)
 
     // 4. Drop a mu-plugin that wires the imported site to Playground's
     //    iframe URL handling:
@@ -687,15 +654,19 @@ add_filter('jetpack_force_disable_site_accelerator', '__return_true');
 // Stream missing uploads from the source so media keeps rendering
 // until reprint files-pull --filter=skipped-earlier downloads them.
 //
-// We have to PROXY here, not 302 to the source. Playground's
-// service worker post-processes Location headers to keep the iframe
-// in scope: a Location pointing at https://adamadam.blog/wp-content/...
-// gets rewritten to https://adamadam.blog/scope:foo/wp-content/...
-// Browser follows that, the SW re-intercepts because the path still
+// We PROXY here, not 302 to the source. Playground's service worker
+// post-processes Location headers to keep the iframe in scope, so a
+// Location pointing at https://adamadam.blog/wp-content/... comes
+// back as https://adamadam.blog/scope:foo/wp-content/...; the
+// browser follows it, the SW re-intercepts because the path still
 // contains /wp-content/uploads/, this hook fires again, and we 302
-// in a loop until ERR_TOO_MANY_REDIRECTS. Streaming the file body
-// from PHP lets the browser see one same-origin response with the
-// image bytes — no redirect for the SW to mangle.
+// in a loop until ERR_TOO_MANY_REDIRECTS.
+//
+// Streaming the body through PHP — chunk by chunk via
+// CURLOPT_WRITEFUNCTION — keeps memory bounded for big media (the
+// browser sees a single same-origin response with the image bytes,
+// no redirect for the SW to mangle, and we never load a 100MB video
+// into PHP memory before the first byte hits the wire).
 \$source = $source_origin_php;
 if (\$source !== '') {
     add_action('init', function () use (\$source) {
@@ -710,45 +681,65 @@ if (\$source !== '') {
 
         \$remote = \$source . \$rel;
         \$ch = curl_init(\$remote);
-        \$captured_headers = array();
-        curl_setopt_array(\$ch, array(
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_HEADERFUNCTION => function (\$ch, \$header) use (&\$captured_headers) {
-                \$len = strlen(\$header);
-                \$line = trim(\$header);
-                if (\$line === '') return \$len;
-                // Forward content-type, content-length, cache-control,
-                // expires, etag, last-modified — skip everything else
-                // so we don't leak transfer-encoding / connection /
-                // server identity from the source.
-                \$lower = strtolower(\$line);
-                foreach (array('content-type:','content-length:','cache-control:','expires:','etag:','last-modified:') as \$prefix) {
-                    if (strpos(\$lower, \$prefix) === 0) {
-                        \$captured_headers[] = \$line;
-                        break;
-                    }
-                }
-                return \$len;
-            },
-        ));
-        \$body = curl_exec(\$ch);
-        \$http = (int) curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
-        curl_close(\$ch);
-
-        if (\$body === false || \$http < 200 || \$http >= 400) {
-            status_header(404);
+        if (\$ch === false) {
+            status_header(502);
             header('Content-Type: text/plain');
-            echo "Upload not available locally and source fetch failed (HTTP {\$http}).";
+            echo 'curl_init failed';
             exit;
         }
-
-        status_header(\$http);
-        foreach (\$captured_headers as \$h) {
-            header(\$h);
+        \$status_emitted = false;
+        \$emit_status = function (\$ch, \$header) use (&\$status_emitted) {
+            // First call into HEADERFUNCTION on a 2xx response — flush
+            // status + the small forwarded header set so the body
+            // chunks coming through WRITEFUNCTION can stream straight
+            // to the wire.
+            if (\$status_emitted) return;
+            \$status_emitted = true;
+            \$http = (int) curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
+            if (\$http >= 200 && \$http < 400) {
+                status_header(\$http);
+            }
+        };
+        try {
+            curl_setopt_array(\$ch, array(
+                CURLOPT_RETURNTRANSFER => false,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_HEADERFUNCTION => function (\$ch, \$header) use (\$emit_status) {
+                    \$len = strlen(\$header);
+                    \$line = trim(\$header);
+                    if (\$line === '') return \$len;
+                    \$lower = strtolower(\$line);
+                    foreach (array('content-type:','content-length:','cache-control:','expires:','etag:','last-modified:') as \$prefix) {
+                        if (strpos(\$lower, \$prefix) === 0) {
+                            \$emit_status(\$ch, \$header);
+                            header(\$line);
+                            break;
+                        }
+                    }
+                    return \$len;
+                },
+                CURLOPT_WRITEFUNCTION => function (\$ch, \$chunk) {
+                    echo \$chunk;
+                    return strlen(\$chunk);
+                },
+            ));
+            \$ok = curl_exec(\$ch);
+            \$http = (int) curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
+            \$err = curl_error(\$ch);
+            if (!\$status_emitted) {
+                // Fetch failed or server returned 4xx/5xx before any
+                // forwardable header arrived — emit a 404 explicitly
+                // rather than letting WP fall through to its own
+                // template (which would try to load styles and recurse).
+                status_header(404);
+                header('Content-Type: text/plain');
+                echo 'Upload not available locally and source fetch failed (HTTP ', \$http, ')';
+                if (\$err !== '') echo ': ', \$err;
+            }
+        } finally {
+            curl_close(\$ch);
         }
-        echo \$body;
         exit;
     }, 0);
 }
@@ -791,24 +782,29 @@ PHP;
         'source_origin' => $source_origin,
         'row_counts' => $row_counts,
         'audit_log_tail' => $audit_tail,
+        'warnings' => $warnings,
         'error' => $error,
     ];
 }
 
-function _reprint_self_origin(): string {
-    // Use Playground's full session URL — including the
-    // /scope:<slug>/ path segment — verbatim. Playground's PHP
-    // request handler defines WP_HOME / WP_SITEURL to this value,
-    // and WordPress runs option_home / option_siteurl through
-    // _config_wp_home() / _config_wp_siteurl(), so home_url() and
-    // site_url() always return the full scope-prefixed URL at
-    // runtime regardless of what we put in wp_options. If we
-    // pass anything different to --new-site-url, reprint's
-    // StructuredDataUrlRewriter writes one form into post content
-    // and serialized options while runtime URL generation uses
-    // another — half the links get the scope prefix and the other
-    // half don't. Returning WP_HOME unmodified keeps every URL the
-    // imported site emits consistent with the iframe it's running in.
+/**
+ * The canonical URL the imported site will be served from inside
+ * Playground — including the /scope:<slug>/ path segment. Returns
+ * the full URL, NOT just scheme+host (so "origin" would be a
+ * misleading name): Playground's PHP request handler defines
+ * WP_HOME and WP_SITEURL to this value, and WordPress runs
+ * option_home / option_siteurl through _config_wp_home() /
+ * _config_wp_siteurl(), so home_url() and site_url() always return
+ * the full scope-prefixed URL at runtime regardless of what we put
+ * in wp_options. Passing anything different to --new-site-url
+ * makes reprint's StructuredDataUrlRewriter rewrite post content
+ * and serialized options against one base while runtime URL
+ * generation uses another — half the links get the scope prefix
+ * and the other half don't. Returning WP_HOME verbatim keeps every
+ * URL the imported site emits consistent with the iframe it's
+ * running in.
+ */
+function _reprint_canonical_site_url(): string {
     if (defined('WP_HOME')) {
         return rtrim((string) constant('WP_HOME'), '/');
     }

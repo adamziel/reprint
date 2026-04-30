@@ -4529,12 +4529,30 @@ class ImportClient
             }
         }
 
+        // Phase 3: Collapse Atomic-style versioned plugin/theme dirs.
+        //
+        // Atomic ships shared plugins/themes under a versioned subdir:
+        //   /wordpress/plugins/jetpack/15.8-a.7/jetpack.php
+        //   /wordpress/themes/twentytwentyfour/2.4/style.css
+        // WordPress, however, looks up entry points without the version
+        // segment — /wp-content/plugins/jetpack/jetpack.php — so the
+        // imported tree on its own gives WP nothing to load and every
+        // .../static/* asset 404s. After Phase 2 has placed the
+        // plugins/themes/mu-plugins symlinks into the flattened
+        // wp-content, scan the top-level entries: when one resolves to
+        // a directory containing exactly one child that looks like a
+        // version (digits and dots, optionally with a hyphenated
+        // suffix), retarget the symlink one level deeper so WP sees
+        // the entry-point file at the expected path.
+        $collapsed = $this->flatten_collapse_versioned_dirs($flatten_to);
+
         $this->audit_log(
             sprintf(
-                "FLAT-DOCUMENT-ROOT | Complete: %d created, %d refreshed, %d force-replaced",
+                "FLAT-DOCUMENT-ROOT | Complete: %d created, %d refreshed, %d force-replaced, %d versioned-collapsed",
                 $created,
                 $refreshed,
                 $forced,
+                $collapsed,
             ),
             true,
         );
@@ -4551,6 +4569,7 @@ class ImportClient
             "created" => $created,
             "refreshed" => $refreshed,
             "force_replaced" => $forced,
+            "versioned_collapsed" => $collapsed,
         ];
         if (!$this->progress->is_quiet_lifecycle()) {
             fwrite($this->progress_fd, json_encode($result) . "\n");
@@ -4608,6 +4627,75 @@ class ImportClient
      * parent directory to the source, so it works regardless of CWD and
      * survives directory moves.
      */
+    /**
+     * Walk plugins/, themes/ and mu-plugins/ under the flattened
+     * wp-content and, when a top-level entry resolves to a directory
+     * containing exactly one child that looks like a version (digits
+     * and dots, optional hyphenated suffix like 15.8-a.7), retarget
+     * the symlink one level deeper. This fixes Atomic's shared
+     * plugin/theme layout where WordPress's entry-point lookup
+     * (/wp-content/plugins/<plugin>/<plugin>.php) doesn't match the
+     * imported on-disk path (/wordpress/plugins/<plugin>/<version>/<plugin>.php).
+     *
+     * @return int Number of entries collapsed.
+     */
+    private function flatten_collapse_versioned_dirs(string $flatten_to): int
+    {
+        $count = 0;
+        foreach (["plugins", "themes", "mu-plugins"] as $sub) {
+            $dir = $flatten_to . "/wp-content/" . $sub;
+            if (!is_dir($dir)) {
+                continue;
+            }
+            $entries = @scandir($dir) ?: [];
+            foreach ($entries as $entry) {
+                if ($entry === "." || $entry === "..") {
+                    continue;
+                }
+                $entry_path = $dir . "/" . $entry;
+                if (!is_dir($entry_path)) {
+                    continue;
+                }
+                $children = @scandir($entry_path) ?: [];
+                $children = array_values(array_filter(
+                    $children,
+                    function ($c) { return $c !== "." && $c !== ".."; }
+                ));
+                if (count($children) !== 1) {
+                    continue;
+                }
+                $child = $children[0];
+                if (!is_dir($entry_path . "/" . $child)) {
+                    continue;
+                }
+                if (!preg_match('/^\d+(\.\d+)*([\-+][\w.+]+)?$/', $child)) {
+                    continue;
+                }
+                $version_target = $entry_path . "/" . $child;
+                $resolved = @realpath($version_target);
+                if (!$resolved || !is_dir($resolved)) {
+                    continue;
+                }
+                if (is_link($entry_path)) {
+                    @unlink($entry_path);
+                    @symlink($resolved, $entry_path);
+                } else {
+                    // Real directory: move children up one level.
+                    foreach (@scandir($resolved) ?: [] as $vc) {
+                        if ($vc === "." || $vc === "..") continue;
+                        @rename($resolved . "/" . $vc, $entry_path . "/" . $vc);
+                    }
+                    @rmdir($resolved);
+                }
+                $this->audit_log(
+                    "FLAT-DOCUMENT-ROOT | Collapsed versioned dir: {$entry_path}/{$child} → {$entry_path}",
+                );
+                $count++;
+            }
+        }
+        return $count;
+    }
+
     private function flatten_place_symlink(
         string $source,
         string $target,
@@ -11847,7 +11935,19 @@ if (
         $client = new ImportClient($remote_url, $state_dir, $fs_root);
         $client->audit_log_argv($command, $argv);
         $client->run($options ?? []);
-        exit($client->exit_code);
+        // IMPORTER_NO_EXIT lets an embedder (e.g. the Playground wizard
+        // in reprint-import.php) include the phar from a web SAPI and
+        // run cleanup logic AFTER pull returns, in the same try/catch
+        // scope as the include. Without it, the bare exit() here jumps
+        // the embedder's stack and forces it to wire activation through
+        // register_shutdown_function — where exceptions have no channel
+        // to surface as ndjson events. Stash the exit code on a global
+        // so the embedder can read it.
+        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = (int) $client->exit_code;
+        if (!defined('IMPORTER_NO_EXIT') || !IMPORTER_NO_EXIT) {
+            exit($client->exit_code);
+        }
+        return;
     } catch (\Throwable $e) {
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
         $error_code = isset($client) ? $client->last_error_code : null;
@@ -11867,6 +11967,13 @@ if (
             }
             fwrite(STDERR, $json . "\n");
         }
-        exit(1);
+        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = 1;
+        if (!defined('IMPORTER_NO_EXIT') || !IMPORTER_NO_EXIT) {
+            exit(1);
+        }
+        // When IMPORTER_NO_EXIT is set we still want the embedder to
+        // see the failure — re-throw so its try/catch around `include
+        // $phar` can surface a proper `{type:'error'}` event.
+        throw $e;
     }
 }
