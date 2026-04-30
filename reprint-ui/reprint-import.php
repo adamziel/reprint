@@ -630,24 +630,19 @@ function run_local_activation(): array {
     $mu = <<<PHP
 <?php
 // Reprint Playground glue — installed by /reprint.php?action=blueprint.
-
-// Strip the /scope:<slug>/ Playground prepends to WP_HOME / WP_SITEURL.
-// Without this every plugin_dir_url() etc. comes out as
-// https://playground.wordpress.net/scope:foo/wp-content/... which
-// Playground's request rewrite can't unprefix (the colon breaks the
-// regex), so PHP 404s every static asset.
-foreach (array('option_home', 'option_siteurl', 'pre_option_home', 'pre_option_siteurl') as \$f) {
-    add_filter(\$f, function (\$value) {
-        if (!is_string(\$value) || \$value === '' || \$value === false) return \$value;
-        \$parts = parse_url(\$value);
-        if (empty(\$parts['scheme']) || empty(\$parts['host'])) return \$value;
-        \$port = isset(\$parts['port']) ? ':' . \$parts['port'] : '';
-        return \$parts['scheme'] . '://' . \$parts['host'] . \$port;
-    }, 999);
-}
+//
+// Earlier we filtered option_home / option_siteurl down to scheme://host
+// to dodge a doubled /scope:<slug>/ in asset URLs — but stripping the
+// scope from home_url() also strips it from <a href> links, so every
+// click navigates out of the iframe scope and lands on Playground's
+// "Page not found" page. The Atomic-versioned-plugin layout fix in
+// the activation step already collapses the path mismatch that was
+// behind the visible doubling, so we leave WP's URL output alone now.
 
 // Disable page-optimize's CSS/JS concat — its bundles live at
-// /_static/?<base64-deflate-list> on Atomic and 404 anywhere else.
+// /_static/?<base64-deflate-list> on Atomic and 404 anywhere else,
+// because the route handler that decodes them only ships in wpcomsh's
+// runtime infrastructure.
 if (!defined('WPCOM_DO_NOT_USE_PAGE_OPTIMIZE')) {
     define('WPCOM_DO_NOT_USE_PAGE_OPTIMIZE', true);
 }
@@ -656,7 +651,7 @@ add_filter('jetpack_force_disable_site_accelerator', '__return_true');
 add_filter('option_page_optimize_css_concat', '__return_false');
 add_filter('option_page_optimize_js_concat', '__return_false');
 add_action('plugins_loaded', function () {
-    // Defensive: drop any /_static/ rewrite rules pageoptimize installed.
+    // Defensive: drop any /_static/ rewrite hooks pageoptimize installed.
     remove_all_filters('page_optimize_load_assets');
     remove_all_actions('page_optimize_load_assets');
 }, 0);
