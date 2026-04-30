@@ -593,31 +593,96 @@ function run_local_activation(): array {
         }
     }
 
-    // 4. Drop the uploads-proxy mu-plugin so missing /wp-content/uploads/*
-    //    requests redirect back to the source site, keeping media live
-    //    until uploads are fetched locally. The source origin is
-    //    baked into the importer page by /reprint.php?action=blueprint.
+    // 4. Drop a mu-plugin that wires the imported site to Playground's
+    //    iframe URL handling:
+    //
+    //    a. Strip the /scope:<slug>/ path Playground bakes into WP_HOME
+    //       and WP_SITEURL via defineConstant(). With it, plugin_dir_url()
+    //       et al. emit https://playground.wordpress.net/scope:foo/wp-content/...
+    //       — single scope, ABSOLUTE URLs. The browser fetches them
+    //       fine, but Playground's request rewrite rule
+    //       (^(/[_0-9a-zA-Z-]+)?(/wp-(content|admin|includes)/...))
+    //       can't strip the leading /scope:foo because the colon falls
+    //       outside [_0-9a-zA-Z-], so PHP gets the request with the
+    //       scope still attached and serves /scope:foo/wp-content/...
+    //       which doesn't exist in the VFS → 404. By filtering
+    //       option_home / option_siteurl down to scheme://host (no
+    //       path), WP emits URLs like playground.wordpress.net/wp-content/...
+    //       and Playground's static-asset handler resolves them
+    //       directly against /wordpress.
+    //
+    //    b. wpcomsh / page-optimize on Atomic register a /_static/?<base64>
+    //       endpoint that concatenates and minifies CSS/JS bundles at
+    //       runtime. Outside Atomic that endpoint doesn't exist, so
+    //       every bundle 404s. Page-optimize hooks its bundler at
+    //       wp_default_styles / wp_default_scripts; filtering
+    //       'jetpack_implode_frontend_css' to false and disabling
+    //       page-optimize via the WPCOM_DO_NOT_USE_PAGE_OPTIMIZE
+    //       constant skips the bundling entirely so WP enqueues each
+    //       asset directly.
+    //
+    //    c. Redirect missing /wp-content/uploads/* requests back to
+    //       the source site so media keeps rendering until the user
+    //       downloads uploads locally.
     $source_origin = defined('REPRINT_SOURCE_ORIGIN') ? (string) REPRINT_SOURCE_ORIGIN : '';
-    if ($source_origin !== '') {
-        @mkdir('/wordpress/wp-content/mu-plugins', 0777, true);
-        $mu = "<?php\n"
-            . "// Reprint uploads proxy — redirect missing /wp-content/uploads/*\n"
-            . "// requests to the source site so media keeps rendering until\n"
-            . "// the uploads are downloaded locally.\n"
-            . "add_action('init', function () {\n"
-            . "  \$req = \$_SERVER['REQUEST_URI'] ?? '';\n"
-            . "  if (strpos(\$req, '/wp-content/uploads/') === false) return;\n"
-            . "  \$path = parse_url(\$req, PHP_URL_PATH) ?: '';\n"
-            . "  \$pos = strpos(\$path, '/wp-content/uploads/');\n"
-            . "  if (\$pos === false) return;\n"
-            . "  \$rel = substr(\$path, \$pos);\n"
-            . "  \$local = WP_CONTENT_DIR . substr(\$rel, strlen('/wp-content'));\n"
-            . "  if (file_exists(\$local)) return;\n"
-            . "  header('Location: ' . " . var_export($source_origin, true) . " . \$rel, true, 302);\n"
-            . "  exit;\n"
-            . "}, 0);\n";
-        file_put_contents('/wordpress/wp-content/mu-plugins/0-reprint-uploads-proxy.php', $mu);
-    }
+    @mkdir('/wordpress/wp-content/mu-plugins', 0777, true);
+    $source_origin_php = var_export($source_origin, true);
+    $mu = <<<PHP
+<?php
+// Reprint Playground glue — installed by /reprint.php?action=blueprint.
+
+// Strip the /scope:<slug>/ Playground prepends to WP_HOME / WP_SITEURL.
+// Without this every plugin_dir_url() etc. comes out as
+// https://playground.wordpress.net/scope:foo/wp-content/... which
+// Playground's request rewrite can't unprefix (the colon breaks the
+// regex), so PHP 404s every static asset.
+foreach (array('option_home', 'option_siteurl', 'pre_option_home', 'pre_option_siteurl') as \$f) {
+    add_filter(\$f, function (\$value) {
+        if (!is_string(\$value) || \$value === '' || \$value === false) return \$value;
+        \$parts = parse_url(\$value);
+        if (empty(\$parts['scheme']) || empty(\$parts['host'])) return \$value;
+        \$port = isset(\$parts['port']) ? ':' . \$parts['port'] : '';
+        return \$parts['scheme'] . '://' . \$parts['host'] . \$port;
+    }, 999);
+}
+
+// Disable page-optimize's CSS/JS concat — its bundles live at
+// /_static/?<base64-deflate-list> on Atomic and 404 anywhere else.
+if (!defined('WPCOM_DO_NOT_USE_PAGE_OPTIMIZE')) {
+    define('WPCOM_DO_NOT_USE_PAGE_OPTIMIZE', true);
+}
+add_filter('jetpack_implode_frontend_css', '__return_false');
+add_filter('jetpack_force_disable_site_accelerator', '__return_true');
+add_filter('option_page_optimize_css_concat', '__return_false');
+add_filter('option_page_optimize_js_concat', '__return_false');
+add_action('plugins_loaded', function () {
+    // Defensive: drop any /_static/ rewrite rules pageoptimize installed.
+    remove_all_filters('page_optimize_load_assets');
+    remove_all_actions('page_optimize_load_assets');
+}, 0);
+
+// Redirect missing uploads to the source site so media keeps rendering
+// until reprint files-pull --filter=skipped-earlier downloads them.
+\$source = $source_origin_php;
+if (\$source !== '') {
+    add_action('init', function () use (\$source) {
+        \$req = \$_SERVER['REQUEST_URI'] ?? '';
+        if (strpos(\$req, '/wp-content/uploads/') === false) return;
+        \$path = parse_url(\$req, PHP_URL_PATH) ?: '';
+        \$pos = strpos(\$path, '/wp-content/uploads/');
+        if (\$pos === false) return;
+        \$rel = substr(\$path, \$pos);
+        \$local = WP_CONTENT_DIR . substr(\$rel, strlen('/wp-content'));
+        if (file_exists(\$local)) return;
+        header('Location: ' . \$source . \$rel, true, 302);
+        exit;
+    }, 0);
+}
+PHP;
+    file_put_contents('/wordpress/wp-content/mu-plugins/0-reprint-playground-glue.php', $mu);
+    // Old name from the previous activation; remove if present so we
+    // don't double-register the uploads proxy.
+    @unlink('/wordpress/wp-content/mu-plugins/0-reprint-uploads-proxy.php');
 
     // Pull the tail of the audit log so the JS can show *why* the
     // import failed when it did. Without this, a partial db-apply
