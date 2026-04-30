@@ -639,6 +639,34 @@ function run_local_activation(): array {
 // the activation step already collapses the path mismatch that was
 // behind the visible doubling, so we leave WP's URL output alone now.
 
+// Some path through Playground's URL rewriting doubles the
+// /scope:<slug>/ prefix on a subset of asset URLs (gutenberg/static
+// CSS in particular: /scope:foo/scope:foo/wp-content/plugins/...
+// 404s, while /scope:foo/wp-includes/... resolves fine). The exact
+// emitter is buried in either Playground's HTML rewriter or
+// wpcomsh's static-asset filters, and chasing each individual
+// emitter has been a losing game. So as a last-mile fix, run a
+// final-output regex over the response body that collapses any
+// "/scope:<slug>/scope:<slug>/" into a single "/scope:<slug>/".
+// The regex requires the second segment to literally repeat the
+// first via a backreference, so it can't accidentally chew up
+// unrelated paths that happen to start with "/scope:".
+add_action('init', function () {
+    if (php_sapi_name() === 'cli' || defined('DOING_CRON') || defined('DOING_AJAX')) {
+        return;
+    }
+    if (headers_sent()) {
+        return;
+    }
+    ob_start(function (\$buffer) {
+        return preg_replace(
+            '#(/scope:[a-z0-9-]+)\1(?=/)#i',
+            '\1',
+            \$buffer
+        );
+    });
+}, 0);
+
 // Disable page-optimize's CSS/JS concat — its bundles live at
 // /_static/?<base64-deflate-list> on Atomic and 404 anywhere else,
 // because the route handler that decodes them only ships in wpcomsh's
