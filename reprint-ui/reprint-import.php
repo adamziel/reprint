@@ -506,6 +506,42 @@ function run_local_activation(): array {
     }
     $sqlite_size = is_file($dst) ? filesize($dst) : 0;
 
+    // 1a. Deactivate page-optimize in wp_options.active_plugins.
+    //
+    //     Why: page-optimize concat-css.php builds the <link href> for
+    //     each enqueued stylesheet via cache_bust_mtime( $path, $siteurl ),
+    //     which does literally "$siteurl . $path". $path is the URL
+    //     path of the stylesheet (e.g. /scope:foo/wp-content/...) and
+    //     $siteurl is the WP site URL (https://playground.wordpress.net/scope:foo).
+    //     The plugin assumes siteurl has no path component, so when
+    //     it does have one — Playground's case — the resulting href
+    //     doubles the /scope:foo/ segment and every concat'd
+    //     stylesheet 404s. The plugin's bundling endpoint
+    //     /_static/?<base64> only works on Atomic anyway, so just
+    //     drop it from active_plugins. WP enqueues each asset
+    //     directly and the URLs come out single-scoped.
+    if ($sqlite_size > 0) {
+        try {
+            $pdo = new PDO('sqlite:' . $dst);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $cur = $pdo->query("SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'")->fetchColumn();
+            if (is_string($cur) && $cur !== '') {
+                $plugins = @unserialize($cur);
+                if (is_array($plugins)) {
+                    $filtered = array_values(array_filter($plugins, function ($p) {
+                        return !is_string($p)
+                            || (strpos($p, 'page-optimize/') !== 0
+                                && strpos($p, 'wpcomsh/') !== 0);
+                    }));
+                    if (count($filtered) !== count($plugins)) {
+                        $stmt = $pdo->prepare("UPDATE wp_options SET option_value = :v WHERE option_name = 'active_plugins'");
+                        $stmt->execute([':v' => serialize($filtered)]);
+                    }
+                }
+            }
+        } catch (Throwable $e) { /* non-fatal — surface via row_counts */ }
+    }
+
     // 2. Validate the SQLite actually has WordPress data. A bare
     //    393KB file means WP_PDO_MySQL_On_SQLite created its
     //    information_schema scaffolding but db-apply never landed
@@ -639,50 +675,14 @@ function run_local_activation(): array {
 // the activation step already collapses the path mismatch that was
 // behind the visible doubling, so we leave WP's URL output alone now.
 
-// Some path through Playground's URL rewriting doubles the
-// /scope:<slug>/ prefix on a subset of asset URLs (gutenberg/static
-// CSS in particular: /scope:foo/scope:foo/wp-content/plugins/...
-// 404s, while /scope:foo/wp-includes/... resolves fine). The exact
-// emitter is buried in either Playground's HTML rewriter or
-// wpcomsh's static-asset filters, and chasing each individual
-// emitter has been a losing game. So as a last-mile fix, run a
-// final-output regex over the response body that collapses any
-// "/scope:<slug>/scope:<slug>/" into a single "/scope:<slug>/".
-// The regex requires the second segment to literally repeat the
-// first via a backreference, so it can't accidentally chew up
-// unrelated paths that happen to start with "/scope:".
-add_action('init', function () {
-    if (php_sapi_name() === 'cli' || defined('DOING_CRON') || defined('DOING_AJAX')) {
-        return;
-    }
-    if (headers_sent()) {
-        return;
-    }
-    ob_start(function (\$buffer) {
-        return preg_replace(
-            '#(/scope:[a-z0-9-]+)\1(?=/)#i',
-            '\1',
-            \$buffer
-        );
-    });
-}, 0);
-
-// Disable page-optimize's CSS/JS concat — its bundles live at
-// /_static/?<base64-deflate-list> on Atomic and 404 anywhere else,
-// because the route handler that decodes them only ships in wpcomsh's
-// runtime infrastructure.
-if (!defined('WPCOM_DO_NOT_USE_PAGE_OPTIMIZE')) {
-    define('WPCOM_DO_NOT_USE_PAGE_OPTIMIZE', true);
-}
+// Page-optimize is deactivated at import time (see run_local_activation
+// in reprint-import.php) — its concat-css/js URL builder can't cope
+// with Playground's siteurl having a /scope:<slug>/ path component
+// and emits doubled-prefix hrefs that 404. Belt-and-braces: also
+// disable Jetpack's frontend CSS imploder (same family of asset
+// bundling that needs Atomic-side route handlers to serve bundles).
 add_filter('jetpack_implode_frontend_css', '__return_false');
 add_filter('jetpack_force_disable_site_accelerator', '__return_true');
-add_filter('option_page_optimize_css_concat', '__return_false');
-add_filter('option_page_optimize_js_concat', '__return_false');
-add_action('plugins_loaded', function () {
-    // Defensive: drop any /_static/ rewrite hooks pageoptimize installed.
-    remove_all_filters('page_optimize_load_assets');
-    remove_all_actions('page_optimize_load_assets');
-}, 0);
 
 // Redirect missing uploads to the source site so media keeps rendering
 // until reprint files-pull --filter=skipped-earlier downloads them.
