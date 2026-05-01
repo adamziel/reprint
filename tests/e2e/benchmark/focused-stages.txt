@@ -3,8 +3,7 @@
 # Both the PR build and the trunk baseline run the same set, so the
 # table shows two like-for-like wall-time numbers per row.
 #
-# This PR streams multipart file bodies directly to disk, so the
-# relevant scenario is a single oversized multipart part — the
-# per-stage details include importer peak memory, which is the
-# real signal for the streaming change.
-files-pull-large-part-peak-memory
+# This PR pulls public uploads directly from the source web server
+# / CDN, so the relevant scenario is a single public-uploads pull
+# with paths_urls.uploads.baseurl present.
+files-pull-public-uploads

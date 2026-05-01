@@ -35,6 +35,7 @@ const FILE_BENCH_SIZE_MB = Number(process.env.BENCH_FILE_SIZE_MB || 24);
 const FILE_BENCH_SIZE = FILE_BENCH_SIZE_MB * 1024 * 1024;
 const FILE_BENCH_TUNED_CHUNK_SIZE = 16 * 1024 * 1024;
 const FILE_BENCH_RELATIVE_PATH = `test-data/bench-random-${FILE_BENCH_SIZE_MB}mb.bin`;
+const FILE_BENCH_UPLOAD_RELATIVE_PATH = `wp-content/uploads/bench/bench-random-${FILE_BENCH_SIZE_MB}mb.bin`;
 const IMPORT_DB = 'e2e_bench_pull';
 // Seed enough posts/postmeta to make db-pull and db-apply dominate wall-clock
 // (the default WP install has ~1 post). Mirrors the dataset shape used in
@@ -218,6 +219,7 @@ async function ensureFileBenchSite() {
 
     const siteDir = getSiteDir(FILE_BENCH_SITE);
     const filePath = join(siteDir, FILE_BENCH_RELATIVE_PATH);
+    const uploadFilePath = join(siteDir, FILE_BENCH_UPLOAD_RELATIVE_PATH);
     const needsFile = !existsSync(filePath) || statSync(filePath).size !== FILE_BENCH_SIZE;
     if (needsFile) {
         console.log(`Creating ${fmtBytes(FILE_BENCH_SIZE)} random file for file-transfer benchmark...`);
@@ -227,7 +229,16 @@ async function ensureFileBenchSite() {
         execSync(`sudo chown nginx:nginx ${JSON.stringify(filePath)}`);
     }
 
-    return { site: FILE_BENCH_SITE, siteDir, filePath };
+    const needsUploadFile = !existsSync(uploadFilePath) || statSync(uploadFilePath).size !== FILE_BENCH_SIZE;
+    if (needsUploadFile) {
+        console.log(`Creating ${fmtBytes(FILE_BENCH_SIZE)} random upload for public-upload benchmark...`);
+        execSync(`sudo mkdir -p ${JSON.stringify(dirname(uploadFilePath))}`);
+        execSync(`sudo rm -f ${JSON.stringify(uploadFilePath)}`);
+        execSync(`sudo dd if=/dev/urandom of=${JSON.stringify(uploadFilePath)} bs=1M count=${FILE_BENCH_SIZE_MB} status=none`);
+        execSync(`sudo chown nginx:nginx ${JSON.stringify(uploadFilePath)}`);
+    }
+
+    return { site: FILE_BENCH_SITE, siteDir, filePath, uploadFilePath };
 }
 
 async function runFileFetchScenario({ stage, site, filePath, params = {}, details = {} }) {
@@ -400,6 +411,73 @@ function runPreflightForSite(site, stateDir) {
     throw lastErr;
 }
 
+function readUploadsBaseUrl(stateDir) {
+    const statePath = join(stateDir, '.import-state.json');
+    if (!existsSync(statePath)) return '';
+    const state = JSON.parse(readFileSync(statePath, 'utf-8'));
+    return state.preflight?.data?.database?.wp?.paths_urls?.uploads?.baseurl || '';
+}
+
+function runPublicUploadsFilePull({ site, stateDir, uploadFilePath, uploadsBaseUrl }) {
+    const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
+    const args = [
+        IMPORTER_PATH,
+        'files-pull',
+        url,
+        `--state-dir=${stateDir}`,
+        `--fs-root=${fsRootDir(stateDir)}`,
+        `--secret=${getSiteSecret(site)}`,
+        '--duty=1',
+        '--max-exec=60',
+    ];
+
+    const start = performance.now();
+    let attempts = 0;
+    let lastErr = null;
+    while (true) {
+        attempts += 1;
+        try {
+            execFileSync(PHP_BINARY, args, {
+                timeout: 900_000,
+                encoding: 'utf-8',
+                maxBuffer: 64 * 1024 * 1024,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            return {
+                stage: 'files-pull-public-uploads',
+                elapsedMs: performance.now() - start,
+                attempts,
+                ok: true,
+                details: {
+                    condition: 'files-pull public wp-content/uploads file',
+                    upload: fmtBytes(statSync(uploadFilePath).size),
+                    uploads_baseurl: uploadsBaseUrl ? 'present' : 'missing',
+                },
+            };
+        } catch (e) {
+            lastErr = e;
+            const exitCode = e.status === null ? -1 : (e.status || 1);
+            if (exitCode === 2 && attempts < 50) {
+                continue;
+            }
+            return {
+                stage: 'files-pull-public-uploads',
+                elapsedMs: performance.now() - start,
+                attempts,
+                ok: false,
+                exitCode,
+                stderr: (lastErr.stderr || '').toString().slice(-2000),
+                stdout: (lastErr.stdout || '').toString().slice(-2000),
+                details: {
+                    condition: 'files-pull public wp-content/uploads file',
+                    upload: fmtBytes(statSync(uploadFilePath).size),
+                    uploads_baseurl: uploadsBaseUrl ? 'present' : 'missing',
+                },
+            };
+        }
+    }
+}
+
 function renderMarkdown(results, meta) {
     const total = results.reduce((s, r) => s + r.elapsedMs, 0);
     const lines = [];
@@ -538,6 +616,27 @@ async function main() {
         });
         results.push(largePartPull);
         console.log(`   ${largePartPull.ok ? 'ok' : 'FAIL'} in ${fmtMs(largePartPull.elapsedMs)} (${fmtDetails(largePartPull.details)})`);
+    }
+
+    if (shouldRun('files-pull-public-uploads')) {
+        if (!fileBench) {
+            console.log(`Provisioning site: ${FILE_BENCH_SITE}`);
+            fileBench = await ensureFileBenchSite();
+        }
+        const publicUploadsStateDir = join(tmpdir(), `bench-public-uploads-${Date.now()}`);
+        mkdirSync(publicUploadsStateDir, { recursive: true });
+        mkdirSync(fsRootDir(publicUploadsStateDir), { recursive: true });
+        runPreflightForSite(fileBench.site, publicUploadsStateDir);
+        const uploadsBaseUrl = readUploadsBaseUrl(publicUploadsStateDir);
+        console.log('-> files-pull-public-uploads');
+        const publicUploadsPull = runPublicUploadsFilePull({
+            site: fileBench.site,
+            stateDir: publicUploadsStateDir,
+            uploadFilePath: fileBench.uploadFilePath,
+            uploadsBaseUrl,
+        });
+        results.push(publicUploadsPull);
+        console.log(`   ${publicUploadsPull.ok ? 'ok' : 'FAIL'} in ${fmtMs(publicUploadsPull.elapsedMs)} (${fmtDetails(publicUploadsPull.details)})`);
     }
 
     const phpVersion = execFileSync(PHP_BINARY, ['-r', 'echo PHP_VERSION;'], { encoding: 'utf-8' }).trim();
