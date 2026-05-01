@@ -1,7 +1,9 @@
 /**
- * Combine PR and trunk bench results into a single markdown table with
- * per-stage deltas. Reads bench-pr.json and bench-trunk.json, writes
- * bench-results.md.
+ * Combine PR and baseline bench results into a single markdown table with
+ * per-stage deltas. Reads bench-pr.json and bench-base.json (legacy:
+ * bench-trunk.json), writes bench-results.md. The baseline label defaults
+ * to "trunk" but can be overridden with BASELINE_LABEL — that's how stacked
+ * PRs report their incremental impact against the parent branch.
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
@@ -10,9 +12,9 @@ function fmtMs(ms) {
     return `${(ms / 1000).toFixed(2)} s`;
 }
 
-function fmtDelta(prMs, trunkMs) {
-    const diff = prMs - trunkMs;
-    const pct = trunkMs > 0 ? (diff / trunkMs) * 100 : 0;
+function fmtDelta(prMs, baseMs) {
+    const diff = prMs - baseMs;
+    const pct = baseMs > 0 ? (diff / baseMs) * 100 : 0;
     const sign = diff >= 0 ? '+' : '';
     const abs = `${sign}${fmtMs(Math.abs(diff)).replace(/^/, diff < 0 ? '-' : '')}`;
     // Simple visual cue: 🟢 ≥10% faster, 🔴 ≥10% slower, ⚪ otherwise.
@@ -32,8 +34,9 @@ function fmtDetails(details) {
 }
 
 const prPath = process.env.PR_JSON || 'bench-pr.json';
-const trunkPath = process.env.TRUNK_JSON || 'bench-trunk.json';
+const basePath = process.env.BASE_JSON || process.env.TRUNK_JSON || 'bench-base.json';
 const outPath = process.env.OUT_MD || 'bench-results.md';
+const baselineLabel = process.env.BASELINE_LABEL || 'trunk';
 
 if (!existsSync(prPath)) {
     console.error(`Missing PR results: ${prPath}`);
@@ -41,7 +44,10 @@ if (!existsSync(prPath)) {
 }
 
 const pr = JSON.parse(readFileSync(prPath, 'utf-8'));
-const trunk = existsSync(trunkPath) ? JSON.parse(readFileSync(trunkPath, 'utf-8')) : null;
+const baseExists = existsSync(basePath)
+    ? basePath
+    : (existsSync('bench-trunk.json') ? 'bench-trunk.json' : null);
+const base = baseExists ? JSON.parse(readFileSync(baseExists, 'utf-8')) : null;
 
 const lines = [];
 lines.push(`## Pull pipeline performance — \`${pr.meta.site}\``);
@@ -54,27 +60,30 @@ lines.push('');
 }
 lines.push('');
 
-if (trunk) {
-    lines.push('| Stage | PR | trunk | Δ | Status | Details |');
+if (base) {
+    lines.push('');
+    lines.push(`Comparing this PR against \`${baselineLabel}\`. For a stacked PR, that's the parent branch — so the deltas show this PR's incremental impact, not the whole stack.`);
+    lines.push('');
+    lines.push(`| Stage | PR | ${baselineLabel} | Δ | Status | Details |`);
     lines.push('|---|---:|---:|---:|---|---|');
-    const trunkByStage = Object.fromEntries(trunk.results.map((r) => [r.stage, r]));
+    const baseByStage = Object.fromEntries(base.results.map((r) => [r.stage, r]));
     let prTotal = 0;
-    let trunkTotal = 0;
+    let baseTotal = 0;
     for (const r of pr.results) {
-        const t = trunkByStage[r.stage];
+        const t = baseByStage[r.stage];
         prTotal += r.elapsedMs;
-        if (t) trunkTotal += t.elapsedMs;
+        if (t) baseTotal += t.elapsedMs;
         const delta = t ? fmtDelta(r.elapsedMs, t.elapsedMs) : '—';
         const status = r.ok ? '✓' : '✗ exit ' + r.exitCode;
         const details = [
             fmtDetails(r.details),
-            t && fmtDetails(t.details) ? `trunk: ${fmtDetails(t.details)}` : '',
+            t && fmtDetails(t.details) ? `${baselineLabel}: ${fmtDetails(t.details)}` : '',
         ].filter(Boolean).join('<br>');
         lines.push(`| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${t ? fmtMs(t.elapsedMs) : '—'} | ${delta} | ${status} | ${details} |`);
     }
-    lines.push(`| **Total** | **${fmtMs(prTotal)}** | **${fmtMs(trunkTotal)}** | **${fmtDelta(prTotal, trunkTotal)}** | | |`);
+    lines.push(`| **Total** | **${fmtMs(prTotal)}** | **${fmtMs(baseTotal)}** | **${fmtDelta(prTotal, baseTotal)}** | | |`);
 } else {
-    lines.push('_Trunk baseline unavailable — showing PR numbers only._');
+    lines.push(`_${baselineLabel} baseline unavailable — showing PR numbers only._`);
     lines.push('');
     lines.push('| Stage | Wall time | Resume attempts | Status | Details |');
     lines.push('|---|---:|---:|---|---|');
