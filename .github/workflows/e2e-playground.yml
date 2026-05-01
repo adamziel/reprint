@@ -49,6 +49,15 @@ jobs:
 
       # The export side still needs real PHP-FPM + nginx.
       # Use PHP 8.2 for the server; the importer will use Playground CLI's PHP 8.0.
+      # PHP comes from the runner's pre-cached toolcache via this
+      # action; we don't try to apt-install ondrej/php ourselves
+      # because every Launchpad endpoint flakes regularly.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
+          coverage: none
+
       - name: Setup infrastructure
         run: tests/e2e/ci/setup-infrastructure.sh "8.2"
 

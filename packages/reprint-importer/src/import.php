@@ -78,6 +78,46 @@ function reprint_apply_curl_proxy_from_env($ch): ?string {
 }
 
 /**
+ * Mirror PHP's `openssl.cafile` ini value onto the cURL handle as
+ * `CURLOPT_CAINFO` — workaround for WordPress Playground, where the
+ * WASM curl build doesn't honor `curl.cainfo` / `openssl.cafile`
+ * (both are PHP_INI_SYSTEM, and curl can't see PHP-level ini values
+ * anyway). Reading the ini value in PHP and passing the path via a
+ * per-handle option is the only knob that works there.
+ *
+ * No-op when `openssl.cafile` is empty (the typical Linux case —
+ * curl uses its compile-time default). When it's set and points at
+ * a readable file, we mirror it; if `curl.cainfo` was also set to
+ * the same path PHP's curl extension already applied it to the
+ * handle, so the per-handle setopt is a benign re-set.
+ *
+ * TODO: remove once https://github.com/WordPress/wordpress-playground
+ * resolves `openssl.cafile` natively inside its WASM curl bundle.
+ */
+function reprint_apply_curl_ca_bundle($ch): ?string {
+    // Insecure-TLS escape hatch for environments where neither
+    // CURLOPT_CAINFO nor any other knob persuades the TLS layer to
+    // trust the source's cert — notably WordPress Playground in the
+    // browser, where networking goes through a JS TLS library running
+    // inside the page (not libcurl's TLS) and that library may have
+    // a CA store that pre-dates the Let's Encrypt intermediate the
+    // source's cert is signed by. The wizard sets this env when it
+    // hands off; we never set it for any other caller.
+    if (getenv('REPRINT_INSECURE_TLS') === '1') {
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        return '(insecure)';
+    }
+
+    $cafile = (string) ini_get('openssl.cafile');
+    if ($cafile === '' || !is_readable($cafile)) {
+        return null;
+    }
+    curl_setopt($ch, CURLOPT_CAINFO, $cafile);
+    return $cafile;
+}
+
+/**
  * The wire-protocol version this importer speaks.
  *
  * Both the export plugin (server) and the importer (client) are deployed
@@ -633,6 +673,14 @@ class AdaptiveTuner
      */
     public function get_request_params(string $endpoint): array
     {
+        // --no-adaptive means "let the server decide everything" — no
+        // tuning hints, no per-request overrides. Returning an empty
+        // array keeps max_execution_time / memory_threshold /
+        // batch-size knobs out of the export.php URL entirely.
+        if (!$this->config["enabled"]) {
+            return [];
+        }
+
         $params = [
             "max_execution_time" => $this->config["max_execution_time"],
             "memory_threshold" => $this->config["memory_threshold"],
@@ -4743,8 +4791,25 @@ class ImportClient
             );
         }
 
+        // The bundled wp-pdo-mysql-on-sqlite.php require_onces a fixed
+        // set of class files relative to its own dirname. When the host
+        // already loaded a *different* copy of those same classes
+        // (notably WordPress Playground's auto_prepend, which preloads
+        // /internal/shared/sqlite-database-integration), each class
+        // declaration in the bundled tree throws a fatal "name already
+        // in use". The require_once path-guard doesn't help because the
+        // two trees live at different paths. Skip the loader entirely
+        // when the host's copy is already in memory — both trees expose
+        // the same class names, so the existing instance is fine.
         $driver_loader = resolve_sqlite_integration_path("/wp-pdo-mysql-on-sqlite.php");
         $polyfills = resolve_sqlite_integration_path("/php-polyfills.php");
+        if (
+            class_exists("WP_PDO_MySQL_On_SQLite", false) &&
+            class_exists("WP_Parser_Grammar", false)
+        ) {
+            $driver_loader = null;
+            $polyfills = null;
+        }
 
         if ($target_path !== ':memory:') {
             $target_dir = dirname($target_path);
@@ -4757,8 +4822,8 @@ class ImportClient
             }
         }
 
-        require_once $polyfills;
-        require_once $driver_loader;
+        if ($polyfills !== null)     { require_once $polyfills; }
+        if ($driver_loader !== null) { require_once $driver_loader; }
 
         $dsn = sprintf(
             "mysql-on-sqlite:path=%s;dbname=%s",
@@ -5260,6 +5325,17 @@ class ImportClient
                     $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
                 }
 
+                // Drop plugins whose URL builders break when the site
+                // URL has a non-/ path segment (e.g. WordPress Playground's
+                // /scope:<slug>/ iframe scope).
+                $deactivated = $this->deactivate_path_incompatible_plugins(
+                    $pdo,
+                    (string) ($options["new_site_url"] ?? ""),
+                );
+                foreach ($deactivated as $basename) {
+                    $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
+                }
+
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
@@ -5301,9 +5377,6 @@ class ImportClient
      * active_plugins option. Runs at the end of db-apply while the PDO
      * connection is still open.
      *
-     * Requires `$pdo` to support `FROM_BASE64()` — native on MySQL 5.6+,
-     * registered on SQLite by create_sqlite_target_pdo().
-     *
      * @return string[]  Plugin basenames actually removed.
      */
     private function deactivate_host_plugins(PDO $pdo): array
@@ -5320,10 +5393,63 @@ class ImportClient
             }
         }
 
+        return $this->deactivate_plugins_by_dir($pdo, $plugin_dirs, "host-specific");
+    }
+
+    /**
+     * Deactivate plugins whose URL builders break when the new site URL
+     * has a non-/ path segment.
+     *
+     * page-optimize's concat-css/js builds asset URLs by concatenating
+     * `$siteurl . $path`, which produces doubled prefixes (e.g.
+     * `/scope:abc/scope:abc/wp-content/...`) when `$siteurl` already
+     * carries a path component like WordPress Playground's
+     * `/scope:<slug>/` iframe scope.
+     *
+     * wpcomsh has the same shape but lives on WP Cloud, where
+     * WpcloudHostAnalyzer's paths_to_remove already feeds it through
+     * deactivate_host_plugins().
+     *
+     * Skipped when the new site URL is empty or has no path beyond `/`.
+     *
+     * @return string[]  Plugin basenames actually removed.
+     */
+    private function deactivate_path_incompatible_plugins(PDO $pdo, string $new_site_url): array
+    {
+        if ($new_site_url === "") {
+            return [];
+        }
+        $path = parse_url($new_site_url, PHP_URL_PATH);
+        if ($path === null || $path === "" || $path === "/") {
+            return [];
+        }
+
+        return $this->deactivate_plugins_by_dir(
+            $pdo,
+            ['page-optimize'],
+            "path-incompatible siteurl",
+        );
+    }
+
+    /**
+     * Remove plugin entries whose basename starts with one of $plugin_dirs
+     * from the `active_plugins` option in the target database.
+     *
+     * Requires `$pdo` to support `FROM_BASE64()` — native on MySQL 5.6+,
+     * registered on SQLite by create_sqlite_target_pdo().
+     *
+     * @param string[] $plugin_dirs  Plugin directory names to match against
+     *                               each `active_plugins` entry's basename.
+     * @param string   $reason       Short label used in audit log messages.
+     * @return string[]              Plugin basenames actually removed.
+     */
+    private function deactivate_plugins_by_dir(PDO $pdo, array $plugin_dirs, string $reason): array
+    {
         if (empty($plugin_dirs)) {
             return [];
         }
 
+        $preflight_data = $this->state["preflight"]["data"] ?? [];
         $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
         // Quote the table name to prevent SQL injection from a crafted prefix.
         $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
@@ -5346,19 +5472,19 @@ class ImportClient
             return [];
         }
 
-        // List plugins to deactivate based on the removed directories.
+        // Partition active_plugins entries against the directory list.
         $deactivated_plugins = [];
         $retained_plugins = [];
         while ($processor->next_value()) {
             $basename = $processor->get_value();
-            $is_host_specific = false;
+            $is_match = false;
             foreach ($plugin_dirs as $dir) {
                 if (strpos($basename, $dir . '/') === 0) {
-                    $is_host_specific = true;
+                    $is_match = true;
                     break;
                 }
             }
-            if ($is_host_specific) {
+            if ($is_match) {
                 $deactivated_plugins[] = $basename;
             } else {
                 $retained_plugins[] = $basename;
@@ -5366,7 +5492,7 @@ class ImportClient
         }
 
         if (empty($deactivated_plugins)) {
-            $this->audit_log("DB-APPLY | no host-specific plugins found in active_plugins");
+            $this->audit_log("DB-APPLY | no {$reason} plugins found in active_plugins");
             return [];
         }
 
@@ -5383,7 +5509,7 @@ class ImportClient
 
         $this->audit_log(
             "DB-APPLY | updated active_plugins (" .
-            count($deactivated_plugins) . " plugin(s) removed)",
+            count($deactivated_plugins) . " {$reason} plugin(s) removed)",
         );
 
         return $deactivated_plugins;
@@ -9428,6 +9554,7 @@ class ImportClient
 
         $ch = curl_init($url);
         reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
 
         $headers = [
             ...$this->get_base_headers("application/json"),
@@ -9549,6 +9676,7 @@ class ImportClient
 
         $ch = curl_init($url);
         reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
 
         $parser = null;
         $current_chunk = null;
@@ -11759,7 +11887,23 @@ if (
         $client = new ImportClient($remote_url, $state_dir, $fs_root);
         $client->audit_log_argv($command, $argv);
         $client->run($options ?? []);
-        exit($client->exit_code);
+        // EXIT_AFTER_IMPORT controls whether we hand control back to
+        // the caller after pull returns. Default true: standard CLI
+        // invocations (reprint pull, the phar bin, e2e tests) get the
+        // exit() they expect. Embedders that include the phar from a
+        // web SAPI — the Playground wizard in reprint-import.php is
+        // the live case — define EXIT_AFTER_IMPORT=false so cleanup
+        // logic can run AFTER pull, in the same try/catch scope as
+        // the include. Without that knob the bare exit() jumps the
+        // embedder's stack and forces it to wire activation through
+        // register_shutdown_function, where exceptions have no
+        // channel to surface as ndjson events. Stash the exit code on
+        // a global so the embedder can read it.
+        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = (int) $client->exit_code;
+        if (!defined('EXIT_AFTER_IMPORT') || EXIT_AFTER_IMPORT) {
+            exit($client->exit_code);
+        }
+        return;
     } catch (\Throwable $e) {
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
         $error_code = isset($client) ? $client->last_error_code : null;
@@ -11779,6 +11923,13 @@ if (
             }
             fwrite(STDERR, $json . "\n");
         }
-        exit(1);
+        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = 1;
+        if (!defined('EXIT_AFTER_IMPORT') || EXIT_AFTER_IMPORT) {
+            exit(1);
+        }
+        // When EXIT_AFTER_IMPORT is false we still want the embedder
+        // to see the failure — re-throw so its try/catch around
+        // `include $phar` can surface a proper `{type:'error'}` event.
+        throw $e;
     }
 }
