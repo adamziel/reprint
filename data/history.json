@@ -769,6 +769,60 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "83c95e07232fc5c6d7a2f9c69a9a0bc40798c2e1",
+      "shortSha": "83c95e0",
+      "date": "2026-05-02T01:41:56+02:00",
+      "message": "[codex] Guard file fetch fallback chunk size (#193)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.5",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 101.84645200000159,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 3389.3713370000005,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 86683.36962700001,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 33756.041956999994,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 70.75244700000621,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 3833.9192230000044,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
