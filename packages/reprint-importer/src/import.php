@@ -5346,6 +5346,17 @@ class ImportClient
                     $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
                 }
 
+                // Drop plugins whose URL builders break when the site
+                // URL has a non-/ path segment (e.g. WordPress Playground's
+                // /scope:<slug>/ iframe scope).
+                $deactivated = $this->deactivate_path_incompatible_plugins(
+                    $pdo,
+                    (string) ($options["new_site_url"] ?? ""),
+                );
+                foreach ($deactivated as $basename) {
+                    $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
+                }
+
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
@@ -5387,9 +5398,6 @@ class ImportClient
      * active_plugins option. Runs at the end of db-apply while the PDO
      * connection is still open.
      *
-     * Requires `$pdo` to support `FROM_BASE64()` — native on MySQL 5.6+,
-     * registered on SQLite by create_sqlite_target_pdo().
-     *
      * @return string[]  Plugin basenames actually removed.
      */
     private function deactivate_host_plugins(PDO $pdo): array
@@ -5406,10 +5414,63 @@ class ImportClient
             }
         }
 
+        return $this->deactivate_plugins_by_dir($pdo, $plugin_dirs, "host-specific");
+    }
+
+    /**
+     * Deactivate plugins whose URL builders break when the new site URL
+     * has a non-/ path segment.
+     *
+     * page-optimize's concat-css/js builds asset URLs by concatenating
+     * `$siteurl . $path`, which produces doubled prefixes (e.g.
+     * `/scope:abc/scope:abc/wp-content/...`) when `$siteurl` already
+     * carries a path component like WordPress Playground's
+     * `/scope:<slug>/` iframe scope.
+     *
+     * wpcomsh has the same shape but lives on WP Cloud, where
+     * WpcloudHostAnalyzer's paths_to_remove already feeds it through
+     * deactivate_host_plugins().
+     *
+     * Skipped when the new site URL is empty or has no path beyond `/`.
+     *
+     * @return string[]  Plugin basenames actually removed.
+     */
+    private function deactivate_path_incompatible_plugins(PDO $pdo, string $new_site_url): array
+    {
+        if ($new_site_url === "") {
+            return [];
+        }
+        $path = parse_url($new_site_url, PHP_URL_PATH);
+        if ($path === null || $path === "" || $path === "/") {
+            return [];
+        }
+
+        return $this->deactivate_plugins_by_dir(
+            $pdo,
+            ['page-optimize'],
+            "path-incompatible siteurl",
+        );
+    }
+
+    /**
+     * Remove plugin entries whose basename starts with one of $plugin_dirs
+     * from the `active_plugins` option in the target database.
+     *
+     * Requires `$pdo` to support `FROM_BASE64()` — native on MySQL 5.6+,
+     * registered on SQLite by create_sqlite_target_pdo().
+     *
+     * @param string[] $plugin_dirs  Plugin directory names to match against
+     *                               each `active_plugins` entry's basename.
+     * @param string   $reason       Short label used in audit log messages.
+     * @return string[]              Plugin basenames actually removed.
+     */
+    private function deactivate_plugins_by_dir(PDO $pdo, array $plugin_dirs, string $reason): array
+    {
         if (empty($plugin_dirs)) {
             return [];
         }
 
+        $preflight_data = $this->state["preflight"]["data"] ?? [];
         $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
         // Quote the table name to prevent SQL injection from a crafted prefix.
         $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
@@ -5432,19 +5493,19 @@ class ImportClient
             return [];
         }
 
-        // List plugins to deactivate based on the removed directories.
+        // Partition active_plugins entries against the directory list.
         $deactivated_plugins = [];
         $retained_plugins = [];
         while ($processor->next_value()) {
             $basename = $processor->get_value();
-            $is_host_specific = false;
+            $is_match = false;
             foreach ($plugin_dirs as $dir) {
                 if (strpos($basename, $dir . '/') === 0) {
-                    $is_host_specific = true;
+                    $is_match = true;
                     break;
                 }
             }
-            if ($is_host_specific) {
+            if ($is_match) {
                 $deactivated_plugins[] = $basename;
             } else {
                 $retained_plugins[] = $basename;
@@ -5452,7 +5513,7 @@ class ImportClient
         }
 
         if (empty($deactivated_plugins)) {
-            $this->audit_log("DB-APPLY | no host-specific plugins found in active_plugins");
+            $this->audit_log("DB-APPLY | no {$reason} plugins found in active_plugins");
             return [];
         }
 
@@ -5469,7 +5530,7 @@ class ImportClient
 
         $this->audit_log(
             "DB-APPLY | updated active_plugins (" .
-            count($deactivated_plugins) . " plugin(s) removed)",
+            count($deactivated_plugins) . " {$reason} plugin(s) removed)",
         );
 
         return $deactivated_plugins;
