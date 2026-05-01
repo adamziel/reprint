@@ -653,15 +653,19 @@ add_filter('jetpack_force_disable_site_accelerator', '__return_true');
 // Stream missing uploads from the source so media keeps rendering
 // until reprint files-pull --filter=skipped-earlier downloads them.
 //
-// We have to PROXY here, not 302 to the source. Playground's
-// service worker post-processes Location headers to keep the iframe
-// in scope: a Location pointing at https://adamadam.blog/wp-content/...
-// gets rewritten to https://adamadam.blog/scope:foo/wp-content/...
-// Browser follows that, the SW re-intercepts because the path still
+// We PROXY here, not 302 to the source. Playground's service worker
+// post-processes Location headers to keep the iframe in scope, so a
+// Location pointing at https://adamadam.blog/wp-content/... comes
+// back as https://adamadam.blog/scope:foo/wp-content/...; the
+// browser follows it, the SW re-intercepts because the path still
 // contains /wp-content/uploads/, this hook fires again, and we 302
-// in a loop until ERR_TOO_MANY_REDIRECTS. Streaming the file body
-// from PHP lets the browser see one same-origin response with the
-// image bytes — no redirect for the SW to mangle.
+// in a loop until ERR_TOO_MANY_REDIRECTS.
+//
+// Streaming the body through PHP — chunk by chunk via
+// CURLOPT_WRITEFUNCTION — keeps memory bounded for big media (the
+// browser sees a single same-origin response with the image bytes,
+// no redirect for the SW to mangle, and we never load a 100MB video
+// into PHP memory before the first byte hits the wire).
 \$source = $source_origin_php;
 if (\$source !== '') {
     add_action('init', function () use (\$source) {
@@ -676,45 +680,67 @@ if (\$source !== '') {
 
         \$remote = \$source . \$rel;
         \$ch = curl_init(\$remote);
-        \$captured_headers = array();
-        curl_setopt_array(\$ch, array(
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_HEADERFUNCTION => function (\$ch, \$header) use (&\$captured_headers) {
-                \$len = strlen(\$header);
-                \$line = trim(\$header);
-                if (\$line === '') return \$len;
-                // Forward content-type, content-length, cache-control,
-                // expires, etag, last-modified — skip everything else
-                // so we don't leak transfer-encoding / connection /
-                // server identity from the source.
-                \$lower = strtolower(\$line);
-                foreach (array('content-type:','content-length:','cache-control:','expires:','etag:','last-modified:') as \$prefix) {
-                    if (strpos(\$lower, \$prefix) === 0) {
-                        \$captured_headers[] = \$line;
-                        break;
-                    }
-                }
-                return \$len;
-            },
-        ));
-        \$body = curl_exec(\$ch);
-        \$http = (int) curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
-        curl_close(\$ch);
-
-        if (\$body === false || \$http < 200 || \$http >= 400) {
-            status_header(404);
+        if (\$ch === false) {
+            status_header(502);
             header('Content-Type: text/plain');
-            echo "Upload not available locally and source fetch failed (HTTP {\$http}).";
+            echo 'curl_init failed';
             exit;
         }
-
-        status_header(\$http);
-        foreach (\$captured_headers as \$h) {
-            header(\$h);
+        \$status_emitted = false;
+        \$emit_status = function (\$ch) use (&\$status_emitted) {
+            if (\$status_emitted) return;
+            \$status_emitted = true;
+            \$http = (int) curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
+            if (\$http >= 200 && \$http < 400) {
+                status_header(\$http);
+            }
+        };
+        try {
+            curl_setopt_array(\$ch, array(
+                CURLOPT_RETURNTRANSFER => false,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_HEADERFUNCTION => function (\$ch, \$header) use (\$emit_status) {
+                    \$len = strlen(\$header);
+                    \$line = trim(\$header);
+                    if (\$line === '') return \$len;
+                    // Forward content-type, content-length, cache-control,
+                    // expires, etag, last-modified — skip everything else
+                    // so we don't leak transfer-encoding / connection /
+                    // server identity from the source.
+                    \$lower = strtolower(\$line);
+                    foreach (array('content-type:','content-length:','cache-control:','expires:','etag:','last-modified:') as \$prefix) {
+                        if (strpos(\$lower, \$prefix) === 0) {
+                            \$emit_status(\$ch);
+                            header(\$line);
+                            break;
+                        }
+                    }
+                    return \$len;
+                },
+                // Stream each libcurl chunk straight to the wire so a
+                // 100MB video doesn't sit in PHP memory.
+                CURLOPT_WRITEFUNCTION => function (\$ch, \$chunk) {
+                    echo \$chunk;
+                    return strlen(\$chunk);
+                },
+            ));
+            curl_exec(\$ch);
+            \$http = (int) curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
+            \$err = curl_error(\$ch);
+            if (!\$status_emitted) {
+                // Fetch failed or server returned 4xx/5xx before any
+                // forwardable header arrived — emit a 404 explicitly
+                // rather than letting WP fall through to its own
+                // template (which would try to load styles and recurse).
+                status_header(404);
+                header('Content-Type: text/plain');
+                echo 'Upload not available locally and source fetch failed (HTTP ', \$http, ')';
+                if (\$err !== '') echo ': ', \$err;
+            }
+        } finally {
+            curl_close(\$ch);
         }
-        echo \$body;
         exit;
     }, 0);
 }

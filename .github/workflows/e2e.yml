@@ -51,6 +51,15 @@ jobs:
         with:
           node-version: "20"
 
+      # PHP comes from the runner's pre-cached toolcache via this
+      # action; we don't try to apt-install ondrej/php ourselves
+      # because every Launchpad endpoint flakes regularly.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
+          coverage: none
+
       - name: Setup infrastructure
         run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.php }}"
 
