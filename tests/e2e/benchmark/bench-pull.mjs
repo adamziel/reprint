@@ -17,18 +17,23 @@
  * roughly constant across stages and across PRs — so deltas remain
  * meaningful even though absolute numbers carry that overhead.
  */
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync, execSync } from 'node:child_process';
+import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { createConnection } from 'mysql2/promise';
 import { ensureSite } from '../lib/site-setup.js';
+import { HmacClient } from '../lib/hmac-client.js';
 import {
     getSiteUrl, getSiteSecret, getSiteDir, fsRootDir,
 } from '../lib/test-helpers.js';
 
 const SITE = 'large-directory';
+const FILE_BENCH_SITE = 'large-single-file';
+const FILE_BENCH_SIZE_MB = Number(process.env.BENCH_FILE_SIZE_MB || 24);
+const FILE_BENCH_SIZE = FILE_BENCH_SIZE_MB * 1024 * 1024;
+const FILE_BENCH_RELATIVE_PATH = `test-data/bench-random-${FILE_BENCH_SIZE_MB}mb.bin`;
 const IMPORT_DB = 'e2e_bench_pull';
 // Seed enough posts/postmeta to make db-pull and db-apply dominate wall-clock
 // (the default WP install has ~1 post). Mirrors the dataset shape used in
@@ -176,6 +181,84 @@ function fmtMs(ms) {
     return `${(ms / 1000).toFixed(2)} s`;
 }
 
+function fmtBytes(bytes) {
+    if (!Number.isFinite(bytes)) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function fmtDetails(details) {
+    if (!details || typeof details !== 'object') return '';
+    return Object.entries(details)
+        .filter(([, value]) => value !== null && value !== undefined && value !== '')
+        .map(([key, value]) => `${key}=${String(value).replaceAll('|', '/')}`)
+        .join('<br>');
+}
+
+async function ensureFileBenchSite() {
+    await ensureSite(FILE_BENCH_SITE, { files: 'none' });
+
+    const siteDir = getSiteDir(FILE_BENCH_SITE);
+    const filePath = join(siteDir, FILE_BENCH_RELATIVE_PATH);
+    const needsFile = !existsSync(filePath) || statSync(filePath).size !== FILE_BENCH_SIZE;
+    if (needsFile) {
+        console.log(`Creating ${fmtBytes(FILE_BENCH_SIZE)} random file for file-transfer benchmark...`);
+        execSync(`sudo mkdir -p ${JSON.stringify(dirname(filePath))}`);
+        execSync(`sudo rm -f ${JSON.stringify(filePath)}`);
+        execSync(`sudo dd if=/dev/urandom of=${JSON.stringify(filePath)} bs=1M count=${FILE_BENCH_SIZE_MB} status=none`);
+        execSync(`sudo chown nginx:nginx ${JSON.stringify(filePath)}`);
+    }
+
+    return { site: FILE_BENCH_SITE, siteDir, filePath };
+}
+
+async function runFileFetchScenario({ stage, site, filePath, params = {}, details = {} }) {
+    const fileListJson = JSON.stringify([filePath]);
+    const formData = new FormData();
+    formData.append(
+        'file_list',
+        new Blob([fileListJson], { type: 'application/json' }),
+        'file_list.json',
+    );
+
+    const url = new URL(getSiteUrl(site));
+    url.searchParams.set('endpoint', 'file_fetch');
+    url.searchParams.set('directory', getSiteDir(site));
+    for (const [key, value] of Object.entries(params)) {
+        url.searchParams.set(key, String(value));
+    }
+
+    const client = new HmacClient(getSiteSecret(site));
+    const headers = client.getAuthHeaders(fileListJson);
+
+    const start = performance.now();
+    const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers,
+        body: formData,
+    });
+    const body = Buffer.from(await response.arrayBuffer());
+    const elapsedMs = performance.now() - start;
+    const contentType = response.headers.get('content-type') || '';
+    const ok = response.ok && contentType.includes('multipart/mixed');
+
+    return {
+        stage,
+        elapsedMs,
+        attempts: 1,
+        ok,
+        exitCode: ok ? null : response.status,
+        details: {
+            ...details,
+            file: fmtBytes(FILE_BENCH_SIZE),
+            chunk_size: params.chunk_size ? fmtBytes(Number(params.chunk_size)) : 'omitted',
+            encoding: response.headers.get('content-encoding') || 'identity',
+            response: fmtBytes(body.length),
+        },
+    };
+}
+
 function renderMarkdown(results, meta) {
     const total = results.reduce((s, r) => s + r.elapsedMs, 0);
     const lines = [];
@@ -183,12 +266,12 @@ function renderMarkdown(results, meta) {
     lines.push('');
     lines.push(`Site: \`${SITE}\` · ${meta.fileCount} files · ${meta.seedPosts.toLocaleString('en-US')} posts · ${meta.seedPostmeta.toLocaleString('en-US')} postmeta · PHP \`${meta.phpVersion}\``);
     lines.push('');
-    lines.push('| Stage | Wall time | Resume attempts | Status |');
-    lines.push('|---|---:|---:|---|');
+    lines.push('| Stage | Wall time | Resume attempts | Status | Details |');
+    lines.push('|---|---:|---:|---|---|');
     for (const r of results) {
-        lines.push(`| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${r.attempts} | ${r.ok ? '✓' : '✗ exit ' + r.exitCode} |`);
+        lines.push(`| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${r.attempts} | ${r.ok ? '✓' : '✗ exit ' + r.exitCode} | ${fmtDetails(r.details)} |`);
     }
-    lines.push(`| **Total** | **${fmtMs(total)}** | | |`);
+    lines.push(`| **Total** | **${fmtMs(total)}** | | | |`);
     lines.push('');
     return lines.join('\n');
 }
@@ -248,10 +331,24 @@ async function main() {
         }
     }
 
+    console.log(`Provisioning site: ${FILE_BENCH_SITE}`);
+    const fileBench = await ensureFileBenchSite();
+    console.log('-> file-fetch-untuned-random');
+    const untunedFetch = await runFileFetchScenario({
+        stage: 'file-fetch-untuned-random',
+        site: fileBench.site,
+        filePath: fileBench.filePath,
+        details: {
+            condition: 'file_fetch without chunk_size',
+        },
+    });
+    results.push(untunedFetch);
+    console.log(`   ${untunedFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(untunedFetch.elapsedMs)} (${fmtDetails(untunedFetch.details)})`);
+
     const phpVersion = execFileSync(PHP_BINARY, ['-r', 'echo PHP_VERSION;'], { encoding: 'utf-8' }).trim();
     const meta = {
         site: SITE,
-        fileCount: '2,000+',
+        fileCount: '2,000+ plus targeted file-transfer scenarios',
         seedPosts: SEED_POSTS,
         seedPostmeta: SEED_POSTMETA,
         phpVersion,

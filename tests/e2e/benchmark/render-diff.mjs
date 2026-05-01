@@ -23,6 +23,14 @@ function fmtDelta(prMs, trunkMs) {
     return `${marker} ${abs} (${sign}${pct.toFixed(1)}%)`;
 }
 
+function fmtDetails(details) {
+    if (!details || typeof details !== 'object') return '';
+    return Object.entries(details)
+        .filter(([, value]) => value !== null && value !== undefined && value !== '')
+        .map(([key, value]) => `${key}=${String(value).replaceAll('|', '/')}`)
+        .join('<br>');
+}
+
 const prPath = process.env.PR_JSON || 'bench-pr.json';
 const trunkPath = process.env.TRUNK_JSON || 'bench-trunk.json';
 const outPath = process.env.OUT_MD || 'bench-results.md';
@@ -47,8 +55,8 @@ lines.push('');
 lines.push('');
 
 if (trunk) {
-    lines.push('| Stage | PR | trunk | Δ | Status |');
-    lines.push('|---|---:|---:|---:|---|');
+    lines.push('| Stage | PR | trunk | Δ | Status | Details |');
+    lines.push('|---|---:|---:|---:|---|---|');
     const trunkByStage = Object.fromEntries(trunk.results.map((r) => [r.stage, r]));
     let prTotal = 0;
     let trunkTotal = 0;
@@ -58,20 +66,24 @@ if (trunk) {
         if (t) trunkTotal += t.elapsedMs;
         const delta = t ? fmtDelta(r.elapsedMs, t.elapsedMs) : '—';
         const status = r.ok ? '✓' : '✗ exit ' + r.exitCode;
-        lines.push(`| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${t ? fmtMs(t.elapsedMs) : '—'} | ${delta} | ${status} |`);
+        const details = [
+            fmtDetails(r.details),
+            t && fmtDetails(t.details) ? `trunk: ${fmtDetails(t.details)}` : '',
+        ].filter(Boolean).join('<br>');
+        lines.push(`| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${t ? fmtMs(t.elapsedMs) : '—'} | ${delta} | ${status} | ${details} |`);
     }
-    lines.push(`| **Total** | **${fmtMs(prTotal)}** | **${fmtMs(trunkTotal)}** | **${fmtDelta(prTotal, trunkTotal)}** | |`);
+    lines.push(`| **Total** | **${fmtMs(prTotal)}** | **${fmtMs(trunkTotal)}** | **${fmtDelta(prTotal, trunkTotal)}** | | |`);
 } else {
     lines.push('_Trunk baseline unavailable — showing PR numbers only._');
     lines.push('');
-    lines.push('| Stage | Wall time | Resume attempts | Status |');
-    lines.push('|---|---:|---:|---|');
+    lines.push('| Stage | Wall time | Resume attempts | Status | Details |');
+    lines.push('|---|---:|---:|---|---|');
     let total = 0;
     for (const r of pr.results) {
         total += r.elapsedMs;
-        lines.push(`| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${r.attempts} | ${r.ok ? '✓' : '✗ exit ' + r.exitCode} |`);
+        lines.push(`| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${r.attempts} | ${r.ok ? '✓' : '✗ exit ' + r.exitCode} | ${fmtDetails(r.details)} |`);
     }
-    lines.push(`| **Total** | **${fmtMs(total)}** | | |`);
+    lines.push(`| **Total** | **${fmtMs(total)}** | | | |`);
 }
 
 lines.push('');
