@@ -458,7 +458,7 @@ function stream_pull(): void {
         '--target-engine=sqlite',
         '--target-sqlite-path=/internal/shared/imported.sqlite',
         '--flatten-to=/wordpress',
-        '--new-site-url=' . _reprint_self_origin(),
+        '--new-site-url=' . _reprint_canonical_site_url(),
         // The web Playground iframe doesn't have a runtime= adapter
         // (no host-FS mounts, no start.sh). Skip apply-runtime; we do
         // a lightweight activation step ourselves on completion.
@@ -797,20 +797,24 @@ PHP;
     ];
 }
 
-function _reprint_self_origin(): string {
-    // Use Playground's full session URL — including the
-    // /scope:<slug>/ path segment — verbatim. Playground's PHP
-    // request handler defines WP_HOME / WP_SITEURL to this value,
-    // and WordPress runs option_home / option_siteurl through
-    // _config_wp_home() / _config_wp_siteurl(), so home_url() and
-    // site_url() always return the full scope-prefixed URL at
-    // runtime regardless of what we put in wp_options. If we
-    // pass anything different to --new-site-url, reprint's
-    // StructuredDataUrlRewriter writes one form into post content
-    // and serialized options while runtime URL generation uses
-    // another — half the links get the scope prefix and the other
-    // half don't. Returning WP_HOME unmodified keeps every URL the
-    // imported site emits consistent with the iframe it's running in.
+/**
+ * The canonical URL the imported site will be served from inside
+ * Playground — including the /scope:<slug>/ path segment. Returns
+ * the full URL, NOT just scheme+host (so "origin" would be a
+ * misleading name): Playground's PHP request handler defines
+ * WP_HOME and WP_SITEURL to this value, and WordPress runs
+ * option_home / option_siteurl through _config_wp_home() /
+ * _config_wp_siteurl(), so home_url() and site_url() always return
+ * the full scope-prefixed URL at runtime regardless of what we put
+ * in wp_options. Passing anything different to --new-site-url
+ * makes reprint's StructuredDataUrlRewriter rewrite post content
+ * and serialized options against one base while runtime URL
+ * generation uses another — half the links get the scope prefix
+ * and the other half don't. Returning WP_HOME verbatim keeps every
+ * URL the imported site emits consistent with the iframe it's
+ * running in.
+ */
+function _reprint_canonical_site_url(): string {
     if (defined('WP_HOME')) {
         return rtrim((string) constant('WP_HOME'), '/');
     }
