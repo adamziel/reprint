@@ -8,13 +8,6 @@
  * for local `php -S` testing).
  */
 
-if (!defined('REPRINT_BOOTSTRAPPED')) {
-    define('REPRINT_BOOTSTRAPPED', true);
-}
-
-if (!defined('REPRINT_UI_DIR')) {
-    define('REPRINT_UI_DIR', __DIR__);
-}
 if (!defined('REPRINT_UI_URL_BASE')) {
     // The path prefix under which the wizard is served.
     define('REPRINT_UI_URL_BASE', '/reprint.php');
@@ -165,21 +158,3 @@ function reprint_find_wp_load(): ?string {
     return null;
 }
 
-/** Root directory under which per-job artifacts live. Publicly readable. */
-function reprint_jobs_root(): string {
-    $candidates = [
-        ($_SERVER['DOCUMENT_ROOT'] ?? '') . '/wp-content/uploads/reprint-jobs',
-        '/srv/htdocs/wp-content/uploads/reprint-jobs',
-        sys_get_temp_dir() . '/reprint-jobs',
-    ];
-    foreach ($candidates as $dir) {
-        if ($dir && @mkdir($dir, 0775, true) || is_dir($dir)) {
-            return $dir;
-        }
-    }
-    return sys_get_temp_dir() . '/reprint-jobs';
-}
-
-function reprint_jobs_url_base(): string {
-    return reprint_site_origin() . '/wp-content/uploads/reprint-jobs';
-}

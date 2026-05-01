@@ -85,10 +85,11 @@ function reprint_apply_curl_proxy_from_env($ch): ?string {
  * anyway). Reading the ini value in PHP and passing the path via a
  * per-handle option is the only knob that works there.
  *
- * On any runtime that already wires its CA bundle into curl's
- * defaults, `openssl.cafile` is empty and this function leaves the
- * handle untouched — overriding could swap a working CApath setup
- * for a stale single-file bundle.
+ * No-op when `openssl.cafile` is empty (the typical Linux case —
+ * curl uses its compile-time default). When it's set and points at
+ * a readable file, we mirror it; if `curl.cainfo` was also set to
+ * the same path PHP's curl extension already applied it to the
+ * handle, so the per-handle setopt is a benign re-set.
  *
  * TODO: remove once https://github.com/WordPress/wordpress-playground
  * resolves `openssl.cafile` natively inside its WASM curl bundle.
@@ -108,14 +109,8 @@ function reprint_apply_curl_ca_bundle($ch): ?string {
         return '(insecure)';
     }
 
-    // If `curl.cainfo` is set in php.ini, PHP's curl extension already
-    // applies it to every handle on init — leave it alone. Only fall
-    // back to openssl.cafile when curl doesn't have its own pointer.
-    if ((string) ini_get('curl.cainfo') !== '') {
-        return null;
-    }
     $cafile = (string) ini_get('openssl.cafile');
-    if ($cafile === '') {
+    if ($cafile === '' || !is_readable($cafile)) {
         return null;
     }
     curl_setopt($ch, CURLOPT_CAINFO, $cafile);
