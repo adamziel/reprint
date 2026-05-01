@@ -6170,6 +6170,9 @@ class ImportClient
                     $this->append_download_list(
                         $remote["path"],
                         $target_handle,
+                        $remote["ctime"],
+                        $remote["size"],
+                        $remote["type"],
                     );
                 }
                 $local_after = $local["path"];
@@ -6186,7 +6189,13 @@ class ImportClient
                     $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
                         ? $skipped_handle
                         : $download_handle;
-                    $this->append_download_list($remote["path"], $target_handle);
+                    $this->append_download_list(
+                        $remote["path"],
+                        $target_handle,
+                        $remote["ctime"],
+                        $remote["size"],
+                        $remote["type"],
+                    );
                 }
             }
 
@@ -6296,6 +6305,7 @@ class ImportClient
         $cursor = $fetch_state["cursor"] ?? null;
 
         $batch_entries = (int) ($fetch_state["batch_entries"] ?? 0);
+        $fallback_entries = (int) ($fetch_state["fallback_entries"] ?? $batch_entries);
 
         if ($batch_file === null || !file_exists($batch_file)) {
             $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
@@ -6306,15 +6316,41 @@ class ImportClient
             $batch_offset = $batch["offset"];
             $next_offset = $batch["next_offset"];
             $batch_entries = $batch["entries"];
+            $fallback_entries = $batch["fallback_entries"];
             $cursor = null;
             $this->state[$state_key] = [
                 "offset" => $batch_offset,
                 "next_offset" => $next_offset,
                 "batch_file" => $batch_file,
                 "batch_entries" => $batch_entries,
+                "fallback_entries" => $fallback_entries,
                 "cursor" => null,
             ];
             $this->save_state($this->state);
+        }
+
+        if ($batch_entries > 0 && $fallback_entries === 0) {
+            if (file_exists($batch_file)) {
+                @unlink($batch_file);
+                $this->audit_log("FILE DELETE | {$batch_file} | direct upload batch complete");
+            }
+
+            $this->finalize_index_updates();
+
+            if ($this->download_list_done !== null) {
+                $this->download_list_done += $batch_entries;
+            }
+            $this->files_imported = 0;
+
+            $this->state[$state_key] = [
+                "offset" => $next_offset,
+                "next_offset" => $next_offset,
+                "batch_file" => null,
+                "cursor" => null,
+            ];
+            $this->save_state($this->state);
+
+            return $next_offset >= filesize($list_file);
         }
 
         $post_data = [
@@ -6368,7 +6404,7 @@ class ImportClient
      *
      * @param string $list_file Path to the JSONL download list.
      * @param int    $offset    Byte offset into the download list file.
-     * @return array{file: string, offset: int, next_offset: int, entries: int}|null
+     * @return array{file: string, offset: int, next_offset: int, entries: int, fallback_entries: int}|null
      *         The temp file path, byte offsets, and entry count, or null if
      *         no paths remain.
      */
@@ -6409,9 +6445,10 @@ class ImportClient
         // accumulate them into the JSON array until we approach the size limit.
         // The download list supports two formats:
         //   - A bare JSON string:   "/path/to/file"
-        //   - A JSON object:        {"path": "<base64-encoded path>"}
+        //   - A JSON object:        {"path": "<base64-encoded path>", "ctime": 0, "size": 0, "type": "file"}
         $bytes = 0;
         $entries = 0;
+        $fallback_entries = 0;
         $first = true;
         fwrite($out, "[");
         $bytes = 1;
@@ -6428,15 +6465,32 @@ class ImportClient
                 continue;
             }
             $decoded = json_decode($line, true);
+            $entry = null;
             if (is_string($decoded)) {
                 $path = $decoded;
             } elseif (is_array($decoded) && isset($decoded["path"])) {
                 $path = base64_decode($decoded["path"]);
+                if (is_string($path) && $path !== "") {
+                    $entry = [
+                        "path" => $path,
+                        "ctime" => isset($decoded["ctime"]) ? (int) $decoded["ctime"] : null,
+                        "size" => isset($decoded["size"]) ? (int) $decoded["size"] : null,
+                        "type" => isset($decoded["type"]) ? (string) $decoded["type"] : "file",
+                    ];
+                }
             } else {
                 continue;
             }
             if (!is_string($path) || $path === "") {
                 continue;
+            }
+            if ($entry === null) {
+                $entry = [
+                    "path" => $path,
+                    "ctime" => null,
+                    "size" => null,
+                    "type" => "file",
+                ];
             }
             $json_path = json_encode(
                 $path,
@@ -6448,31 +6502,33 @@ class ImportClient
             $prefix = $first ? "" : ",";
             $chunk = $prefix . $json_path;
             $needed = $bytes + strlen($chunk) + 1; // +1 for closing bracket
+            $oversized_first_entry = $first && $needed > $limit;
 
             // Would this entry push us over the limit?
-            if (!$first && $needed > $limit) {
+            if ($entries > 0 && $needed > $limit) {
                 // Rewind to the start of this line so the next batch picks it up.
                 fseek($handle, $line_start);
                 break;
             }
-            if ($first && $needed > $limit) {
-                // Still write at least one entry even if it exceeds the limit,
-                // otherwise we'd loop forever on a single long path.
-                if (fwrite($out, $chunk) === false) {
-                    throw new RuntimeException("Failed to write fetch batch file (disk full?)");
-                }
+
+            $entries++;
+            if ($this->try_download_public_upload($entry)) {
                 $bytes += strlen($chunk);
-                $entries++;
-                $first = false;
-                break;
+                if ($oversized_first_entry) {
+                    break;
+                }
+                continue;
             }
 
             if (fwrite($out, $chunk) === false) {
                 throw new RuntimeException("Failed to write fetch batch file (disk full?)");
             }
             $bytes += strlen($chunk);
-            $entries++;
+            $fallback_entries++;
             $first = false;
+            if ($oversized_first_entry) {
+                break;
+            }
         }
         fwrite($out, "]");
         $bytes += 1;
@@ -6481,8 +6537,8 @@ class ImportClient
         fclose($handle);
         fclose($out);
 
-        // An empty batch (just "[]") means we've exhausted the download list.
-        if ($bytes <= 2) {
+        // No consumed entries means we've exhausted the download list.
+        if ($entries === 0) {
             @unlink($tmp);
             return null;
         }
@@ -6492,6 +6548,7 @@ class ImportClient
             "offset" => $offset,
             "next_offset" => $next_offset,
             "entries" => $entries,
+            "fallback_entries" => $fallback_entries,
         ];
     }
 
@@ -6547,13 +6604,211 @@ class ImportClient
         return strpos($path, "wp-content/uploads/") !== false;
     }
 
+    private function get_uploads_baseurl(): ?string
+    {
+        $paths_urls = $this->state["preflight"]["data"]["database"]["wp"]["paths_urls"] ?? null;
+        if (!is_array($paths_urls)) {
+            return null;
+        }
+        $baseurl = $paths_urls["uploads"]["baseurl"] ?? null;
+        if (!is_string($baseurl) || $baseurl === "") {
+            return null;
+        }
+        return rtrim($baseurl, "/");
+    }
+
+    private function get_uploads_relative_path(string $path): ?string
+    {
+        $uploads_basedir = $this->get_uploads_basedir();
+        if ($uploads_basedir !== null) {
+            if (strpos($path, $uploads_basedir) !== 0) {
+                return null;
+            }
+            $relative = substr($path, strlen($uploads_basedir));
+            return $relative === false ? null : ltrim($relative, "/");
+        }
+
+        $needle = "wp-content/uploads/";
+        $pos = strpos($path, $needle);
+        if ($pos === false) {
+            return null;
+        }
+        return substr($path, $pos + strlen($needle));
+    }
+
+    private function public_upload_url_for_path(string $path): ?string
+    {
+        $baseurl = $this->get_uploads_baseurl();
+        if ($baseurl === null) {
+            return null;
+        }
+
+        $relative = $this->get_uploads_relative_path($path);
+        if ($relative === null || $relative === "") {
+            return null;
+        }
+
+        $segments = array_map("rawurlencode", explode("/", $relative));
+        return $baseurl . "/" . implode("/", $segments);
+    }
+
+    /**
+     * Try to download a public upload directly from the source web server/CDN.
+     *
+     * Returns false whenever the path cannot be mapped to uploads.baseurl or
+     * the public download does not exactly match the exported size; callers
+     * then fall back to file_fetch through WordPress/PHP.
+     */
+    private function try_download_public_upload(array $entry): bool
+    {
+        $path = $entry["path"] ?? null;
+        if (!is_string($path) || $path === "") {
+            return false;
+        }
+
+        if (($entry["type"] ?? "file") !== "file") {
+            return false;
+        }
+
+        $ctime = $entry["ctime"] ?? null;
+        $size = $entry["size"] ?? null;
+        if (!is_int($ctime) || $ctime <= 0 || !is_int($size) || $size < 0) {
+            return false;
+        }
+
+        $url = $this->public_upload_url_for_path($path);
+        if ($url === null) {
+            return false;
+        }
+
+        try {
+            $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        } catch (RuntimeException $e) {
+            $this->audit_log(
+                "Public upload download skipped for invalid path '{$path}': " . $e->getMessage(),
+                true,
+            );
+            return false;
+        }
+
+        $dir = dirname($local_path);
+        try {
+            if (!is_dir($dir)) {
+                $this->ensure_directory_path($dir);
+            }
+        } catch (PreserveLocalSkipException $e) {
+            $this->audit_log($e->getMessage(), true);
+            $this->emit_skip_progress($path);
+            return true;
+        }
+
+        if (
+            (file_exists($local_path) || is_link($local_path)) &&
+            is_dir($local_path) &&
+            !is_link($local_path)
+        ) {
+            if (!$this->remove_local_path_without_following_symlinks($local_path)) {
+                $this->audit_log("Public upload download could not replace directory: {$path}", true);
+                return false;
+            }
+        }
+
+        $tmp = $local_path . ".reprint-download-" . getmypid() . "-" . str_replace(".", "", uniqid("", true));
+        $handle = fopen($tmp, "wb");
+        if (!$handle) {
+            $this->audit_log("Public upload download could not open temp file: {$tmp}", true);
+            return false;
+        }
+
+        $this->audit_log("HTTP_REQUEST | GET | {$url} | public_upload_path={$path}", false);
+
+        $ch = curl_init($url);
+        reprint_apply_curl_proxy_from_env($ch);
+        curl_setopt_array($ch, [
+            CURLOPT_FILE => $handle,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 5,
+            CURLOPT_CONNECTTIMEOUT => 30,
+            CURLOPT_LOW_SPEED_LIMIT => 1,
+            CURLOPT_LOW_SPEED_TIME => 300,
+            CURLOPT_HTTPHEADER => [
+                "User-Agent: " . ($this->state["user_agent"] ?? self::USER_AGENTS[0]),
+                "Accept: */*",
+                "Accept-Encoding: identity",
+                "Cache-Control: no-cache",
+                "Pragma: no-cache",
+            ],
+            CURLOPT_FAILONERROR => false,
+            CURLOPT_NOPROGRESS => false,
+            CURLOPT_PROGRESSFUNCTION =>
+                function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
+                    $this->progress->tick_spinner();
+                    return 0;
+                },
+        ]);
+
+        $ok = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $error = curl_error($ch);
+        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        fclose($handle);
+
+        clearstatcache(true, $tmp);
+        $actual_size = is_file($tmp) ? filesize($tmp) : false;
+        if ($ok !== true || $errno !== 0 || $http_code !== 200 || $actual_size !== $size) {
+            @unlink($tmp);
+            $this->audit_log(
+                sprintf(
+                    "Public upload download fallback | path=%s | http=%d | errno=%d | size=%s/%d | error=%s",
+                    $path,
+                    $http_code,
+                    $errno,
+                    $actual_size === false ? "missing" : (string) $actual_size,
+                    $size,
+                    $error,
+                ),
+                false,
+            );
+            return false;
+        }
+
+        if (!rename($tmp, $local_path)) {
+            @unlink($tmp);
+            $this->audit_log("Public upload download could not move temp file into place: {$path}", true);
+            return false;
+        }
+
+        touch($local_path, $ctime);
+        $this->upsert_index_entry($path, $ctime, $size, "file");
+        $this->files_imported++;
+        $this->clear_volatile_file($path);
+        $this->audit_log("Public upload downloaded: {$path}", false);
+
+        return true;
+    }
+
     /**
      * Append a path to the download list file.
      */
-    private function append_download_list(string $path, $handle): void
+    private function append_download_list(
+        string $path,
+        $handle,
+        ?int $ctime = null,
+        ?int $size = null,
+        string $type = "file"
+    ): void
     {
+        $entry = ["path" => base64_encode($path)];
+        if ($ctime !== null) {
+            $entry["ctime"] = $ctime;
+        }
+        if ($size !== null) {
+            $entry["size"] = $size;
+        }
+        $entry["type"] = $type;
         $line = json_encode(
-            ["path" => base64_encode($path)],
+            $entry,
             JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
@@ -10115,12 +10370,16 @@ class ImportClient
                 "offset" => 0,
                 "next_offset" => 0,
                 "batch_file" => null,
+                "batch_entries" => 0,
+                "fallback_entries" => 0,
                 "cursor" => null,
             ],
             "fetch_skipped" => [
                 "offset" => 0,
                 "next_offset" => 0,
                 "batch_file" => null,
+                "batch_entries" => 0,
+                "fallback_entries" => 0,
                 "cursor" => null,
             ],
             // Crash recovery: track in-progress file downloads
@@ -10199,6 +10458,12 @@ class ImportClient
         }
         $fetch = array_intersect_key($fetch, $defaults["fetch"]);
         $state["fetch"] = array_merge($defaults["fetch"], $fetch);
+        $fetch_skipped = $state["fetch_skipped"] ?? [];
+        if (!is_array($fetch_skipped)) {
+            $fetch_skipped = [];
+        }
+        $fetch_skipped = array_intersect_key($fetch_skipped, $defaults["fetch_skipped"]);
+        $state["fetch_skipped"] = array_merge($defaults["fetch_skipped"], $fetch_skipped);
         $tuning = $state["tuning"] ?? [];
         if (!is_array($tuning)) {
             $tuning = [];
