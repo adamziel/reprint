@@ -330,6 +330,16 @@ async function main() {
         `--output-dir=${runtimeOutDir}`,
     ];
 
+    // Optional stage filter — when BENCH_STAGES is set (comma-separated
+    // list of stage names), only those stages run on both sides of the
+    // PR-vs-trunk comparison. This is how each PR limits its perf comment
+    // to the single scenario it actually changes.
+    const stageFilter = (process.env.BENCH_STAGES || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const shouldRun = (name) => stageFilter.length === 0 || stageFilter.includes(name);
+
     const stages = [
         { name: 'preflight', extra: [] },
         { name: 'files-pull', extra: [] },
@@ -341,6 +351,7 @@ async function main() {
 
     const results = [];
     for (const { name, extra, includeUrl } of stages) {
+        if (!shouldRun(name)) continue;
         console.log(`-> ${name}`);
         const r = runStage(name, stateDir, extra, { includeUrl });
         results.push(r);
@@ -351,34 +362,43 @@ async function main() {
         }
     }
 
-    console.log(`Provisioning site: ${FILE_BENCH_SITE}`);
-    const fileBench = await ensureFileBenchSite();
-    console.log('-> file-fetch-untuned-random');
-    const untunedFetch = await runFileFetchScenario({
-        stage: 'file-fetch-untuned-random',
-        site: fileBench.site,
-        filePath: fileBench.filePath,
-        details: {
-            condition: 'file_fetch without chunk_size',
-        },
-    });
-    results.push(untunedFetch);
-    console.log(`   ${untunedFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(untunedFetch.elapsedMs)} (${fmtDetails(untunedFetch.details)})`);
+    const fileFetchScenarios = ['file-fetch-untuned-random', 'file-fetch-binary-compression'];
+    let fileBench = null;
+    if (fileFetchScenarios.some(shouldRun)) {
+        console.log(`Provisioning site: ${FILE_BENCH_SITE}`);
+        fileBench = await ensureFileBenchSite();
+    }
 
-    console.log('-> file-fetch-binary-compression');
-    const binaryCompressionFetch = await runFileFetchScenario({
-        stage: 'file-fetch-binary-compression',
-        site: fileBench.site,
-        filePath: fileBench.filePath,
-        params: {
-            chunk_size: FILE_BENCH_TUNED_CHUNK_SIZE,
-        },
-        details: {
-            condition: 'random binary file_fetch with tuned chunk_size',
-        },
-    });
-    results.push(binaryCompressionFetch);
-    console.log(`   ${binaryCompressionFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(binaryCompressionFetch.elapsedMs)} (${fmtDetails(binaryCompressionFetch.details)})`);
+    if (shouldRun('file-fetch-untuned-random')) {
+        console.log('-> file-fetch-untuned-random');
+        const untunedFetch = await runFileFetchScenario({
+            stage: 'file-fetch-untuned-random',
+            site: fileBench.site,
+            filePath: fileBench.filePath,
+            details: {
+                condition: 'file_fetch without chunk_size',
+            },
+        });
+        results.push(untunedFetch);
+        console.log(`   ${untunedFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(untunedFetch.elapsedMs)} (${fmtDetails(untunedFetch.details)})`);
+    }
+
+    if (shouldRun('file-fetch-binary-compression')) {
+        console.log('-> file-fetch-binary-compression');
+        const binaryCompressionFetch = await runFileFetchScenario({
+            stage: 'file-fetch-binary-compression',
+            site: fileBench.site,
+            filePath: fileBench.filePath,
+            params: {
+                chunk_size: FILE_BENCH_TUNED_CHUNK_SIZE,
+            },
+            details: {
+                condition: 'random binary file_fetch with tuned chunk_size',
+            },
+        });
+        results.push(binaryCompressionFetch);
+        console.log(`   ${binaryCompressionFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(binaryCompressionFetch.elapsedMs)} (${fmtDetails(binaryCompressionFetch.details)})`);
+    }
 
     const phpVersion = execFileSync(PHP_BINARY, ['-r', 'echo PHP_VERSION;'], { encoding: 'utf-8' }).trim();
     const meta = {

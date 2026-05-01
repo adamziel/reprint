@@ -34,7 +34,7 @@ function fmtDetails(details) {
 }
 
 const prPath = process.env.PR_JSON || 'bench-pr.json';
-const basePath = process.env.BASE_JSON || process.env.TRUNK_JSON || 'bench-base.json';
+const basePath = process.env.TRUNK_JSON || 'bench-trunk.json';
 const outPath = process.env.OUT_MD || 'bench-results.md';
 const baselineLabel = process.env.BASELINE_LABEL || 'trunk';
 
@@ -44,10 +44,7 @@ if (!existsSync(prPath)) {
 }
 
 const pr = JSON.parse(readFileSync(prPath, 'utf-8'));
-const baseExists = existsSync(basePath)
-    ? basePath
-    : (existsSync('bench-trunk.json') ? 'bench-trunk.json' : null);
-const base = baseExists ? JSON.parse(readFileSync(baseExists, 'utf-8')) : null;
+const base = existsSync(basePath) ? JSON.parse(readFileSync(basePath, 'utf-8')) : null;
 
 const lines = [];
 lines.push(`## Pull pipeline performance — \`${pr.meta.site}\``);
@@ -61,8 +58,6 @@ lines.push('');
 lines.push('');
 
 if (base) {
-    lines.push('');
-    lines.push(`Comparing this PR against \`${baselineLabel}\`. For a stacked PR, that's the parent branch — so the deltas show this PR's incremental impact, not the whole stack.`);
     lines.push('');
     lines.push(`| Stage | PR | ${baselineLabel} | Δ | Status | Details |`);
     lines.push('|---|---:|---:|---:|---|---|');
