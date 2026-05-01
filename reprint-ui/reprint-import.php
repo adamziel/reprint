@@ -336,19 +336,21 @@ window.addEventListener('DOMContentLoaded', runImport);
 // ─────────────────────────────────────────────────────────────────
 
 function stream_pull_and_activate(): void {
-    // The phar's CLI entry-point exit(0)s at the end of `pull`, so any
-    // code after stream_pull() returns is dead. Register the
-    // activation as a shutdown function instead — it runs whether
-    // the phar exits cleanly, throws, or returns.
-    register_shutdown_function(function () {
-        $activate = run_local_activation();
-        echo json_encode([
-            'type' => 'activate',
-            'status' => !empty($activate['ok']) ? 'complete' : 'error',
-            'data' => $activate,
-        ]) . "\n";
-    });
+    // The phar checks EXIT_AFTER_IMPORT; setting it to false makes
+    // it return control after pull instead of exit()ing. We run
+    // activation in the same try/catch scope as the include, so
+    // exceptions surface as proper {type:'error'} ndjson events
+    // instead of disappearing into a shutdown handler.
+    if (!defined('EXIT_AFTER_IMPORT')) {
+        define('EXIT_AFTER_IMPORT', false);
+    }
     stream_pull();
+    $activate = run_local_activation();
+    echo json_encode([
+        'type' => 'activate',
+        'status' => !empty($activate['ok']) ? 'complete' : 'error',
+        'data' => $activate,
+    ]) . "\n";
 }
 
 function stream_pull(): void {
