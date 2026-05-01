@@ -78,23 +78,20 @@ function reprint_apply_curl_proxy_from_env($ch): ?string {
 }
 
 /**
- * Apply a CA bundle to the cURL handle, looking in this order:
- *   1. The REPRINT_CA_BUNDLE environment variable (caller override).
- *   2. The CA bundle WordPress ships at wp-includes/certificates/ca-bundle.crt
- *      (present whenever the importer runs alongside a WP install — most
- *      notably WordPress Playground, where curl's compile-time CAfile
- *      points at /etc/ssl/certs/ca-certificates.crt and that path doesn't
- *      exist in the WASM filesystem).
- *   3. The OS-standard locations a typical curl install picks up by
- *      default — /etc/ssl/certs/ca-certificates.crt etc. — only set
- *      explicitly here when those files exist, so we don't override
- *      curl's working defaults on systems where they're already wired up.
+ * Mirror PHP's `openssl.cafile` ini value onto the cURL handle as
+ * `CURLOPT_CAINFO` — workaround for WordPress Playground, where the
+ * WASM curl build doesn't honor `curl.cainfo` / `openssl.cafile`
+ * (both are PHP_INI_SYSTEM, and curl can't see PHP-level ini values
+ * anyway). Reading the ini value in PHP and passing the path via a
+ * per-handle option is the only knob that works there.
  *
- * Without this, curl in Playground fails every HTTPS request with
- * "error setting certificate verify locations: CAfile: /etc/ssl/certs/...".
- * Per-handle CURLOPT_CAINFO is the only knob that works there because
- * curl.cainfo / openssl.cafile are PHP_INI_SYSTEM and CURL_CA_BUNDLE is
- * ignored by the WASM curl build.
+ * On any runtime that already wires its CA bundle into curl's
+ * defaults, `openssl.cafile` is empty and this function leaves the
+ * handle untouched — overriding could swap a working CApath setup
+ * for a stale single-file bundle.
+ *
+ * TODO: remove once https://github.com/WordPress/wordpress-playground
+ * resolves `openssl.cafile` natively inside its WASM curl bundle.
  */
 function reprint_apply_curl_ca_bundle($ch): ?string {
     // Insecure-TLS escape hatch for environments where neither
@@ -111,31 +108,18 @@ function reprint_apply_curl_ca_bundle($ch): ?string {
         return '(insecure)';
     }
 
-    static $resolved = null;
-    if ($resolved === null) {
-        $resolved = false;
-        $candidates = [];
-        $env = getenv('REPRINT_CA_BUNDLE');
-        if (is_string($env) && $env !== '') {
-            $candidates[] = $env;
-        }
-        $candidates[] = '/wordpress/wp-includes/certificates/ca-bundle.crt';
-        $candidates[] = '/etc/ssl/certs/ca-certificates.crt';
-        $candidates[] = '/etc/pki/tls/certs/ca-bundle.crt';
-        $candidates[] = '/etc/ssl/cert.pem';
-        $candidates[] = '/usr/local/etc/openssl/cert.pem';
-        foreach ($candidates as $p) {
-            if (is_file($p) && is_readable($p)) {
-                $resolved = $p;
-                break;
-            }
-        }
-    }
-    if ($resolved === false) {
+    // If `curl.cainfo` is set in php.ini, PHP's curl extension already
+    // applies it to every handle on init — leave it alone. Only fall
+    // back to openssl.cafile when curl doesn't have its own pointer.
+    if ((string) ini_get('curl.cainfo') !== '') {
         return null;
     }
-    curl_setopt($ch, CURLOPT_CAINFO, $resolved);
-    return $resolved;
+    $cafile = (string) ini_get('openssl.cafile');
+    if ($cafile === '') {
+        return null;
+    }
+    curl_setopt($ch, CURLOPT_CAINFO, $cafile);
+    return $cafile;
 }
 
 /**
