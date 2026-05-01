@@ -9251,8 +9251,9 @@ class ImportClient
      * Build the multipart chunk handler callback shared by both parser
      * creation sites inside fetch_streaming.
      *
-     * The callback accumulates "body" events into $current_chunk and emits
-     * completed chunks to $context->on_chunk on "complete" events.
+     * File parts are forwarded as body data arrives so large files are written
+     * to disk incrementally. Non-file parts are still accumulated until
+     * complete because they are small metadata/progress JSON payloads.
      */
     private function make_chunk_handler(
         StreamingContext $context,
@@ -9260,10 +9261,37 @@ class ImportClient
     ): callable {
         return function ($event) use ($context, &$current_chunk) {
             if ($event["type"] === "body") {
-                // Accumulate body data in current chunk
+                $headers = $event["headers"];
+                $chunk_type = $headers["x-chunk-type"] ?? "";
+                if ($chunk_type === "file") {
+                    if (!$current_chunk) {
+                        $current_chunk = [
+                            "headers" => $headers,
+                            "body_streamed" => true,
+                            "started" => false,
+                        ];
+                    }
+
+                    if ($context->on_chunk) {
+                        $stream_headers = $headers;
+                        if (!empty($current_chunk["started"])) {
+                            $stream_headers["x-first-chunk"] = "0";
+                        }
+                        // The parser emits a separate complete event after the
+                        // last body bytes, so close/index the file from there.
+                        $stream_headers["x-last-chunk"] = "0";
+                        ($context->on_chunk)([
+                            "headers" => $stream_headers,
+                            "body" => $event["data"],
+                        ]);
+                    }
+                    $current_chunk["started"] = true;
+                    return;
+                }
+
                 if (!$current_chunk) {
                     $current_chunk = [
-                        "headers" => $event["headers"],
+                        "headers" => $headers,
                         "body" => $event["data"],
                     ];
                 } else {
@@ -9272,19 +9300,30 @@ class ImportClient
                         $event["data"];
                 }
             } elseif ($event["type"] === "complete") {
-                // Chunk complete - emit to handler
-                if ($current_chunk) {
+                $headers = $event["headers"];
+                $chunk_type = $headers["x-chunk-type"] ?? "";
+                if ($chunk_type === "file" && !empty($current_chunk["body_streamed"])) {
+                    if ($context->on_chunk) {
+                        $close_headers = $headers;
+                        $close_headers["x-first-chunk"] = "0";
+                        ($context->on_chunk)([
+                            "headers" => $close_headers,
+                            "body" => "",
+                        ]);
+                    }
+                } elseif ($current_chunk) {
+                    // Chunk complete - emit to handler
                     if ($context->on_chunk) {
                         ($context->on_chunk)(
                             $current_chunk,
                         );
                     }
-                } elseif ($event["headers"]) {
+                } elseif ($headers) {
                     // No body data - emit just headers
                     if ($context->on_chunk) {
                         ($context->on_chunk)([
                             "headers" =>
-                                $event["headers"],
+                                $headers,
                             "body" => "",
                         ]);
                     }
