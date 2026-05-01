@@ -15,34 +15,22 @@ FPM_SOCKET="/run/php/e2e.sock"
 echo "=== Setting up infrastructure with PHP ${PHP_VERSION} ==="
 
 # ---------- PHP ----------
-echo "=== Installing PHP ${PHP_VERSION} ==="
-# `add-apt-repository ppa:ondrej/php` hits api.launchpad.net through
-# launchpadlib (lazr.restfulclient) before it ever touches apt — to
-# query "publish_debug_symbols" on the PPA object. That endpoint is
-# flaky and times out routinely, failing every matrix job at once.
-# Same story for keyserver.ubuntu.com / keys.openpgp.org as fallback
-# fetch sources — both have observed CI-job-killing outages.
+echo "=== Setting up PHP ${PHP_VERSION} ==="
+# Every Launchpad-side endpoint we've relied on has had CI-killing
+# outages this week:
+#   - api.launchpad.net (used by `add-apt-repository`, behind launchpadlib)
+#   - keyserver.ubuntu.com / keys.openpgp.org (key fetch fallbacks)
+#   - ppa.launchpadcontent.net (the apt repo itself, network unreachable)
 #
-# Skip the network entirely: ship the PPA signing key in-tree as a
-# binary apt keyring (already dearmored) and write the apt source
-# list ourselves. ppa.launchpadcontent.net (the apt repo itself,
-# served by the runner's regional mirrors) has been reliable;
-# api.launchpad.net and the keyservers are not.
-ONDREJ_PPA_KEYRING_SRC="${SCRIPT_DIR}/keyrings/ondrej-php.gpg"
-ONDREJ_PPA_KEYRING="/etc/apt/keyrings/ondrej-php.gpg"
-ONDREJ_PPA_LIST="/etc/apt/sources.list.d/ondrej-php.list"
-UBUNTU_CODENAME="$(lsb_release -cs)"
-
-sudo install -d -m 0755 /etc/apt/keyrings
-sudo install -m 0644 "${ONDREJ_PPA_KEYRING_SRC}" "${ONDREJ_PPA_KEYRING}"
-
-echo "deb [signed-by=${ONDREJ_PPA_KEYRING}] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${UBUNTU_CODENAME} main" \
-    | sudo tee "${ONDREJ_PPA_LIST}" >/dev/null
-
-sudo apt-get update -qq
-sudo apt-get install -y \
-    "php${PHP_VERSION}-cli" "php${PHP_VERSION}-fpm" \
-    "php${PHP_VERSION}-mysql" "php${PHP_VERSION}-mbstring" "php${PHP_VERSION}-curl" "php${PHP_VERSION}-xml" "php${PHP_VERSION}-zip" "php${PHP_VERSION}-sqlite3"
+# We now expect the workflow to install PHP via shivammathur/setup-php,
+# which uses the runner's pre-cached toolcache and doesn't go
+# through Launchpad. If `php${PHP_VERSION}` isn't on PATH after that,
+# it's a workflow misconfiguration rather than something this script
+# should paper over.
+if ! command -v "php${PHP_VERSION}" >/dev/null 2>&1; then
+    echo "php${PHP_VERSION} not found on PATH — install it via shivammathur/setup-php in the workflow before calling this script." >&2
+    exit 1
+fi
 
 # Make sure the 'php' CLI command uses the version we just installed
 sudo update-alternatives --set php "/usr/bin/php${PHP_VERSION}"

@@ -46,14 +46,20 @@ jobs:
           git clone --no-local host src-historical
           (cd src-historical && git fetch origin '+refs/heads/trunk:refs/remotes/origin/trunk')
 
-      # Don't add shivammathur/setup-php here — it adds the ondrej PPA with a
-      # different Signed-By keyring than setup-infrastructure.sh, which makes
-      # apt-get update fail later. setup-infrastructure.sh installs PHP 8.5
-      # itself, and composer is preinstalled on ubuntu-22.04 runners.
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      # PHP comes from the runner's pre-cached toolcache via this
+      # action; we don't try to apt-install ondrej/php ourselves
+      # because every Launchpad endpoint flakes regularly. The
+      # script below detects PHP is already on PATH and skips its
+      # apt install path.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
+          coverage: none
 
       - name: Setup infrastructure
         working-directory: host
