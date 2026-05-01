@@ -33,6 +33,7 @@ const SITE = 'large-directory';
 const FILE_BENCH_SITE = 'large-single-file';
 const FILE_BENCH_SIZE_MB = Number(process.env.BENCH_FILE_SIZE_MB || 24);
 const FILE_BENCH_SIZE = FILE_BENCH_SIZE_MB * 1024 * 1024;
+const FILE_BENCH_TUNED_CHUNK_SIZE = 16 * 1024 * 1024;
 const FILE_BENCH_RELATIVE_PATH = `test-data/bench-random-${FILE_BENCH_SIZE_MB}mb.bin`;
 const IMPORT_DB = 'e2e_bench_pull';
 // Seed enough posts/postmeta to make db-pull and db-apply dominate wall-clock
@@ -363,6 +364,21 @@ async function main() {
     });
     results.push(untunedFetch);
     console.log(`   ${untunedFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(untunedFetch.elapsedMs)} (${fmtDetails(untunedFetch.details)})`);
+
+    console.log('-> file-fetch-binary-compression');
+    const binaryCompressionFetch = await runFileFetchScenario({
+        stage: 'file-fetch-binary-compression',
+        site: fileBench.site,
+        filePath: fileBench.filePath,
+        params: {
+            chunk_size: FILE_BENCH_TUNED_CHUNK_SIZE,
+        },
+        details: {
+            condition: 'random binary file_fetch with tuned chunk_size',
+        },
+    });
+    results.push(binaryCompressionFetch);
+    console.log(`   ${binaryCompressionFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(binaryCompressionFetch.elapsedMs)} (${fmtDetails(binaryCompressionFetch.details)})`);
 
     const phpVersion = execFileSync(PHP_BINARY, ['-r', 'echo PHP_VERSION;'], { encoding: 'utf-8' }).trim();
     const meta = {
