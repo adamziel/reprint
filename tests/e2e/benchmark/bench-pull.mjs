@@ -196,6 +196,22 @@ function fmtDetails(details) {
         .join('<br>');
 }
 
+function summarizeMultipart(body, contentType) {
+    const match = contentType.match(/boundary="?([^";\s]+)"?/);
+    if (!match) {
+        return { multipart_parts: 0, file_parts: 0 };
+    }
+    const delimiter = `--${match[1]}`;
+    const parts = body.toString('binary')
+        .split(delimiter)
+        .filter((part) => part.includes('\r\n\r\n'));
+
+    return {
+        multipart_parts: parts.length,
+        file_parts: parts.filter((part) => /x-chunk-type:\s*file/i.test(part)).length,
+    };
+}
+
 async function ensureFileBenchSite() {
     await ensureSite(FILE_BENCH_SITE, { files: 'none' });
 
@@ -242,6 +258,7 @@ async function runFileFetchScenario({ stage, site, filePath, params = {}, detail
     const elapsedMs = performance.now() - start;
     const contentType = response.headers.get('content-type') || '';
     const ok = response.ok && contentType.includes('multipart/mixed');
+    const multipart = summarizeMultipart(body, contentType);
 
     return {
         stage,
@@ -255,6 +272,8 @@ async function runFileFetchScenario({ stage, site, filePath, params = {}, detail
             chunk_size: params.chunk_size ? fmtBytes(Number(params.chunk_size)) : 'omitted',
             encoding: response.headers.get('content-encoding') || 'identity',
             response: fmtBytes(body.length),
+            file_parts: multipart.file_parts,
+            multipart_parts: multipart.multipart_parts,
         },
     };
 }
