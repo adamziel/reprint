@@ -508,42 +508,6 @@ function run_local_activation(): array {
     }
     $sqlite_size = is_file($dst) ? filesize($dst) : 0;
 
-    // 1a. Deactivate page-optimize in wp_options.active_plugins.
-    //
-    //     Why: page-optimize concat-css.php builds the <link href> for
-    //     each enqueued stylesheet via cache_bust_mtime( $path, $siteurl ),
-    //     which does literally "$siteurl . $path". $path is the URL
-    //     path of the stylesheet (e.g. /scope:foo/wp-content/...) and
-    //     $siteurl is the WP site URL (https://playground.wordpress.net/scope:foo).
-    //     The plugin assumes siteurl has no path component, so when
-    //     it does have one — Playground's case — the resulting href
-    //     doubles the /scope:foo/ segment and every concat'd
-    //     stylesheet 404s. The plugin's bundling endpoint
-    //     /_static/?<base64> only works on Atomic anyway, so just
-    //     drop it from active_plugins. WP enqueues each asset
-    //     directly and the URLs come out single-scoped.
-    if ($sqlite_size > 0) {
-        try {
-            $pdo = new PDO('sqlite:' . $dst);
-            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            $cur = $pdo->query("SELECT option_value FROM wp_options WHERE option_name = 'active_plugins'")->fetchColumn();
-            if (is_string($cur) && $cur !== '') {
-                $plugins = @unserialize($cur);
-                if (is_array($plugins)) {
-                    $filtered = array_values(array_filter($plugins, function ($p) {
-                        return !is_string($p)
-                            || (strpos($p, 'page-optimize/') !== 0
-                                && strpos($p, 'wpcomsh/') !== 0);
-                    }));
-                    if (count($filtered) !== count($plugins)) {
-                        $stmt = $pdo->prepare("UPDATE wp_options SET option_value = :v WHERE option_name = 'active_plugins'");
-                        $stmt->execute([':v' => serialize($filtered)]);
-                    }
-                }
-            }
-        } catch (Throwable $e) { /* non-fatal — surface via row_counts */ }
-    }
-
     // 2. Validate the SQLite actually has WordPress data. A bare
     //    393KB file means WP_PDO_MySQL_On_SQLite created its
     //    information_schema scaffolding but db-apply never landed
@@ -677,12 +641,12 @@ function run_local_activation(): array {
 // the activation step already collapses the path mismatch that was
 // behind the visible doubling, so we leave WP's URL output alone now.
 
-// Page-optimize is deactivated at import time (see run_local_activation
-// in reprint-import.php) — its concat-css/js URL builder can't cope
-// with Playground's siteurl having a /scope:<slug>/ path component
-// and emits doubled-prefix hrefs that 404. Belt-and-braces: also
-// disable Jetpack's frontend CSS imploder (same family of asset
-// bundling that needs Atomic-side route handlers to serve bundles).
+// page-optimize is deactivated at db-apply time by reprint's
+// deactivate_path_incompatible_plugins() — its concat-css/js URL
+// builder doubles Playground's /scope:<slug>/ prefix into hrefs
+// that 404. Belt-and-braces: also disable Jetpack's frontend CSS
+// imploder (same family of asset bundling that needs Atomic-side
+// route handlers).
 add_filter('jetpack_implode_frontend_css', '__return_false');
 add_filter('jetpack_force_disable_site_accelerator', '__return_true');
 
