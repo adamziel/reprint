@@ -45,6 +45,22 @@ class BasicFileSyncTest extends FileSyncProducerTestBase
         $this->assertTrue($chunks[0]['is_last_chunk']);
     }
 
+    public function testDefaultChunkSizeIsFiveMegabytes()
+    {
+        $dir = $this->createTestDirectory('default-chunk-size', [
+            'test.txt' => 'Hello, World!'
+        ]);
+
+        $sync = new \FileTreeProducer($dir, [
+            'paths' => $this->enumerateFiles($dir),
+        ]);
+        $property = new \ReflectionProperty(\FileTreeProducer::class, 'chunk_size');
+        $property->setAccessible(true);
+
+        $this->assertSame(5 * 1024 * 1024, \FileTreeProducer::DEFAULT_CHUNK_SIZE);
+        $this->assertSame(5 * 1024 * 1024, $property->getValue($sync));
+    }
+
     public function testSyncMultipleFiles()
     {
         $dir = $this->createTestDirectory('multiple-files', [
