@@ -7,6 +7,8 @@
  */
 class FileTreeProducer
 {
+    public const DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024;
+
     const PHASE_STREAMING = "streaming";
     const PHASE_FINISHED = "finished";
 
@@ -54,7 +56,7 @@ class FileTreeProducer
     public function __construct($directories, array $options = [])
     {
         $this->directories = $this->normalize_directories($directories);
-        $this->chunk_size = $options["chunk_size"] ?? 5 * 1024 * 1024;
+        $this->chunk_size = $options["chunk_size"] ?? self::DEFAULT_CHUNK_SIZE;
         $this->index_only = $options["index_only"] ?? false;
 
         if (!isset($options["paths"]) || !is_array($options["paths"])) {

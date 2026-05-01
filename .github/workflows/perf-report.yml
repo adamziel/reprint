@@ -30,12 +30,12 @@ jobs:
           path: reprint.phar
 
   build-trunk-phar:
-    name: Build reprint.phar (trunk)
+    name: Build reprint.phar (baseline)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: trunk
+          ref: ${{ github.base_ref }}
           submodules: true
 
       - uses: shivammathur/setup-php@v2
@@ -62,6 +62,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          submodules: true
+
+      - name: Checkout base-branch exporter baseline
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.base_ref }}
+          path: trunk-exporter
           submodules: true
 
       - name: Download PR phar
@@ -95,6 +102,11 @@ jobs:
       - name: Setup test sites
         run: tests/e2e/setup.sh
 
+      - name: Install trunk exporter dependencies
+        run: |
+          composer install --no-dev --no-interaction --prefer-dist --working-dir=trunk-exporter
+          composer install --no-dev --no-interaction --prefer-dist --working-dir=trunk-exporter/reprint-exporter-wp
+
       - name: Install e2e dependencies
         working-directory: tests/e2e
         run: npm install
@@ -113,22 +125,32 @@ jobs:
           BENCH_LABEL: pr
           BENCH_JSON_OUT: bench-pr.json
           BENCH_MD_OUT: bench-pr.md
+          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}
         run: node benchmark/bench-pull.mjs
 
-      - name: Bench trunk
+      - name: Reset benchmark sites before trunk
+        run: |
+          sudo rm -rf /srv/e2e-sites/large-directory /srv/e2e-sites/large-single-file
+          sudo rm -f /tmp/e2e-site-large-directory.lock /tmp/e2e-site-large-single-file.lock
+
+      - name: Bench baseline
         working-directory: tests/e2e
         env:
           IMPORTER_PATH: ${{ github.workspace }}/phars/trunk/reprint.phar
-          BENCH_LABEL: trunk
-          BENCH_JSON_OUT: bench-trunk.json
-          BENCH_MD_OUT: bench-trunk.md
-        # Don't fail the whole job if trunk's bench fails — we still want
-        # to publish the PR's numbers.
+          BENCH_LABEL: ${{ github.base_ref }}
+          BENCH_JSON_OUT: bench-base.json
+          BENCH_MD_OUT: bench-base.md
+          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}/trunk-exporter
+        # Don't fail the whole job if the baseline bench fails — we still
+        # want to publish the PR's numbers.
         continue-on-error: true
         run: node benchmark/bench-pull.mjs
 
-      - name: Render PR vs. trunk diff
+      - name: Render PR vs. baseline diff
         working-directory: tests/e2e
+        env:
+          BASE_JSON: bench-base.json
+          BASELINE_LABEL: ${{ github.base_ref }}
         run: node benchmark/render-diff.mjs
 
       - name: Upload benchmark artifacts
@@ -138,7 +160,7 @@ jobs:
           name: pull-pipeline-bench
           path: |
             tests/e2e/bench-pr.json
-            tests/e2e/bench-trunk.json
+            tests/e2e/bench-base.json
             tests/e2e/bench-results.md
           if-no-files-found: ignore
 

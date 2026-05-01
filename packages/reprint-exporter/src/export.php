@@ -3343,7 +3343,7 @@ function endpoint_file_fetch(
         $paths[] = $path;
     }
 
-    $chunk_size = $config["chunk_size"] ?? 5 * 1024 * 1024;
+    $chunk_size = $config["chunk_size"] ?? FileTreeProducer::DEFAULT_CHUNK_SIZE;
     $chunk_size = require_int_range(
         "chunk_size",
         (int) $chunk_size,
