@@ -20,28 +20,21 @@ echo "=== Installing PHP ${PHP_VERSION} ==="
 # launchpadlib (lazr.restfulclient) before it ever touches apt — to
 # query "publish_debug_symbols" on the PPA object. That endpoint is
 # flaky and times out routinely, failing every matrix job at once.
-# Skip the API entirely by writing the apt source and key directly:
-# the apt repo lives at ppa.launchpadcontent.net (which is reliable),
-# and the signing key is well-known and stable.
-ONDREJ_PPA_KEY_FINGERPRINT="14AA40EC0831756756D7F66C4F4EA0AAE5267A6C"
+# Same story for keyserver.ubuntu.com / keys.openpgp.org as fallback
+# fetch sources — both have observed CI-job-killing outages.
+#
+# Skip the network entirely: ship the PPA signing key in-tree as a
+# binary apt keyring (already dearmored) and write the apt source
+# list ourselves. ppa.launchpadcontent.net (the apt repo itself,
+# served by the runner's regional mirrors) has been reliable;
+# api.launchpad.net and the keyservers are not.
+ONDREJ_PPA_KEYRING_SRC="${SCRIPT_DIR}/keyrings/ondrej-php.gpg"
 ONDREJ_PPA_KEYRING="/etc/apt/keyrings/ondrej-php.gpg"
 ONDREJ_PPA_LIST="/etc/apt/sources.list.d/ondrej-php.list"
 UBUNTU_CODENAME="$(lsb_release -cs)"
 
 sudo install -d -m 0755 /etc/apt/keyrings
-# Try a couple of mirrors before giving up — keyserver.ubuntu.com
-# can also have transient failures, but it's served from a
-# different infra than api.launchpad.net.
-for url in \
-    "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${ONDREJ_PPA_KEY_FINGERPRINT}" \
-    "https://keys.openpgp.org/vks/v1/by-fingerprint/${ONDREJ_PPA_KEY_FINGERPRINT}" \
-; do
-    if curl -fsSL --max-time 30 "${url}" | sudo gpg --dearmor --yes -o "${ONDREJ_PPA_KEYRING}"; then
-        break
-    fi
-    echo "Failed to fetch ondrej/php signing key from ${url}" >&2
-done
-test -s "${ONDREJ_PPA_KEYRING}"
+sudo install -m 0644 "${ONDREJ_PPA_KEYRING_SRC}" "${ONDREJ_PPA_KEYRING}"
 
 echo "deb [signed-by=${ONDREJ_PPA_KEYRING}] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${UBUNTU_CODENAME} main" \
     | sudo tee "${ONDREJ_PPA_LIST}" >/dev/null
