@@ -110,17 +110,18 @@ class ResourceBudget
 $streaming_context = null;
 
 /**
- * Initializes a multipart/mixed streaming response with gzip compression.
+ * Initializes a multipart/mixed streaming response, optionally with gzip compression.
  *
  * Every streaming endpoint needs the same setup: a unique boundary, the
- * Content-Type header, a GzipOutputStream, and the global $streaming_context
- * so error handlers can emit structured error chunks mid-stream.
+ * Content-Type header, an output stream, and the global $streaming_context so
+ * error handlers can emit structured error chunks mid-stream.
  *
  * @param bool $require_headers If true, throws when headers were already sent
  *                              (use for endpoints that can't degrade gracefully).
+ * @param bool $gzip If true, emit Content-Encoding: gzip and compress the body.
  * @return array{gz: GzipOutputStream, boundary: string}
  */
-function begin_multipart_stream(bool $require_headers = false): array
+function begin_multipart_stream(bool $require_headers = false, bool $gzip = true): array
 {
     global $streaming_context;
 
@@ -160,7 +161,7 @@ function begin_multipart_stream(bool $require_headers = false): array
         @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
     }
 
-    $gz = new GzipOutputStream($can_send_headers);
+    $gz = new GzipOutputStream($can_send_headers && $gzip);
     $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
     return $streaming_context;
@@ -2174,7 +2175,7 @@ function endpoint_preflight(array $config): array
 }
 
 /**
- * Streams file chunks from a producer as gzipped multipart/mixed.
+ * Streams file chunks from a producer as multipart/mixed.
  */
 function stream_file_producer(
     $producer,
@@ -2183,7 +2184,7 @@ function stream_file_producer(
 ): array {
     prepare_streaming_response();
 
-    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(false, false);
 
     // E2E test hook: after gzip stream initialization (file producer)
     if (getenv('SITE_EXPORT_TEST_MODE')) {
