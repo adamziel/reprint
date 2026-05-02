@@ -21,30 +21,129 @@ final class FileFetchCompressionTest extends TestCase
         parent::tearDown();
     }
 
-    public function testFileFetchStreamsIdentityEncodedMultipart(): void
+    public function testFileFetchUsesIdentityForBinaryPaths(): void
     {
         $siteDir = $this->tempDir . '/site';
         mkdir($siteDir, 0755, true);
-        $filePath = $siteDir . '/hello.txt';
-        file_put_contents($filePath, 'file-fetch-body');
+        $filePath = $siteDir . '/photo.jpg';
+        file_put_contents($filePath, 'pretend-jpeg-bytes');
 
-        $listPath = $this->tempDir . '/file-list.json';
-        file_put_contents($listPath, json_encode([$filePath], JSON_THROW_ON_ERROR));
-
-        $stdout = $this->runFileFetch([
-            'directory' => $siteDir,
-            'file_list_path' => $listPath,
-        ]);
+        $stdout = $this->runFileFetch($siteDir, [$filePath]);
 
         $this->assertStringStartsWith('--boundary-', $stdout);
-        $this->assertFalse(@gzdecode($stdout), 'file_fetch output should not be gzip framed');
-        $this->assertStringContainsString('file-fetch-body', $stdout);
+        $this->assertFalse(@gzdecode($stdout), 'binary file_fetch should not be gzip framed');
+        $this->assertStringContainsString('pretend-jpeg-bytes', $stdout);
     }
 
-    private function runFileFetch(array $config): string
+    public function testFileFetchUsesGzipForTextOnlyPaths(): void
     {
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $filePath = $siteDir . '/style.css';
+        // Use repetitive content so gzip output is unambiguously smaller than input.
+        file_put_contents($filePath, str_repeat("body { color: red; }\n", 200));
+
+        $stdout = $this->runFileFetch($siteDir, [$filePath]);
+
+        // gzip framing means the response starts with the deflate magic bytes,
+        // not the multipart boundary — the boundary lives inside the
+        // compressed stream.
+        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2), 'text-only file_fetch should be gzip framed');
+        $decoded = gzdecode($stdout);
+        $this->assertNotFalse($decoded, 'gzip body should decode');
+        $this->assertStringStartsWith('--boundary-', $decoded);
+        $this->assertStringContainsString('body { color: red; }', $decoded);
+    }
+
+    public function testFileFetchFallsBackToIdentityWhenAnyPathIsBinary(): void
+    {
+        // Mixed batches must err on the side of identity: response-level
+        // Content-Encoding can't be flipped per part, so a single binary
+        // in the list disables gzip for the whole response. This preserves
+        // the binary fast path the importer just shipped — the alternative
+        // (gzip the whole thing) would re-introduce the buffer-stall
+        // behavior we're explicitly avoiding.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $textPath = $siteDir . '/style.css';
+        $binaryPath = $siteDir . '/photo.jpg';
+        file_put_contents($textPath, str_repeat("body { color: red; }\n", 200));
+        file_put_contents($binaryPath, 'pretend-jpeg-bytes');
+
+        $stdout = $this->runFileFetch($siteDir, [$textPath, $binaryPath]);
+
+        $this->assertStringStartsWith('--boundary-', $stdout);
+        $this->assertFalse(@gzdecode($stdout), 'mixed batch should fall back to identity');
+        $this->assertStringContainsString('body { color: red; }', $stdout);
+        $this->assertStringContainsString('pretend-jpeg-bytes', $stdout);
+    }
+
+    public function testFileFetchTreatsExtensionlessFilesAsCompressible(): void
+    {
+        // .htaccess, LICENSE, README, etc. — pathinfo() reports an empty
+        // extension for these, but they're text files in practice, so we
+        // gzip them. Important specifically for WordPress: `.htaccess`
+        // ships in nearly every site and is plain text.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $filePath = $siteDir . '/.htaccess';
+        file_put_contents($filePath, str_repeat("RewriteRule ^index\\.php$ - [L]\n", 200));
+
+        $stdout = $this->runFileFetch($siteDir, [$filePath]);
+
+        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2), '.htaccess should be gzip framed');
+        $decoded = gzdecode($stdout);
+        $this->assertNotFalse($decoded);
+        $this->assertStringContainsString('RewriteRule', $decoded);
+    }
+
+    /**
+     * @dataProvider pathExtensionCases
+     */
+    public function testPathExtensionClassifier(string $path, bool $expected): void
+    {
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+        $this->assertSame($expected, path_extension_is_compressible($path), "classifier for $path");
+    }
+
+    public static function pathExtensionCases(): array
+    {
+        return [
+            'php source' => ['/site/wp-content/plugins/foo/foo.php', true],
+            'js source' => ['/site/script.js', true],
+            'css' => ['/site/style.css', true],
+            'json config' => ['/site/composer.json', true],
+            'sql dump' => ['/site/dump.sql', true],
+            'pot translation' => ['/site/lang/en.pot', true],
+            'svg vector' => ['/site/logo.svg', true],
+            '.htaccess no extension' => ['/site/.htaccess', true],
+            'README' => ['/site/README', true],
+            'jpeg upload' => ['/site/uploads/photo.jpg', false],
+            'png upload' => ['/site/uploads/icon.png', false],
+            'webp upload' => ['/site/uploads/banner.webp', false],
+            'mp4 video' => ['/site/uploads/clip.mp4', false],
+            'mp3 audio' => ['/site/uploads/podcast.mp3', false],
+            'woff2 font' => ['/site/fonts/inter.woff2', false],
+            'pdf doc' => ['/site/uploads/brochure.pdf', false],
+            'zip archive' => ['/site/backup.zip', false],
+            'random binary' => ['/site/uploads/blob.bin', false],
+            'gzipped already' => ['/site/dump.sql.gz', false],
+            // Case-insensitive — uploads with screaming extensions are real.
+            'uppercase JPG' => ['/site/uploads/PHOTO.JPG', false],
+            'mixed-case Css' => ['/site/Style.Css', true],
+        ];
+    }
+
+    private function runFileFetch(string $siteDir, array $paths): string
+    {
+        $listPath = $this->tempDir . '/file-list.json';
+        file_put_contents($listPath, json_encode($paths, JSON_THROW_ON_ERROR));
+
         $configPath = $this->tempDir . '/config.json';
-        file_put_contents($configPath, json_encode($config, JSON_THROW_ON_ERROR));
+        file_put_contents($configPath, json_encode([
+            'directory' => $siteDir,
+            'file_list_path' => $listPath,
+        ], JSON_THROW_ON_ERROR));
 
         $scriptPath = $this->tempDir . '/run-file-fetch.php';
         file_put_contents(

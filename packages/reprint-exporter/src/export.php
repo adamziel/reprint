@@ -2180,11 +2180,12 @@ function endpoint_preflight(array $config): array
 function stream_file_producer(
     $producer,
     ResourceBudget $budget,
-    array $config = []
+    array $config = [],
+    bool $gzip = false
 ): array {
     prepare_streaming_response();
 
-    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(false, false);
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(false, $gzip);
 
     // E2E test hook: after gzip stream initialization (file producer)
     if (getenv('SITE_EXPORT_TEST_MODE')) {
@@ -3365,7 +3366,85 @@ function endpoint_file_fetch(
         $producer,
         $budget,
         $config,
+        file_fetch_paths_should_gzip($paths),
     );
+}
+
+/**
+ * Decides whether to gzip a file_fetch multipart response based on the path
+ * list it will carry.
+ *
+ * Encoding is set per response (Content-Encoding is a response-level header),
+ * so we have to commit before any byte is sent. The trade-off for any given
+ * path:
+ *   - Text-y bodies (PHP/JS/CSS/JSON/SQL/etc.) compress well; gzip is a clear
+ *     win on both wire size and total wall time.
+ *   - Image/video/audio/font/archive bodies are already compressed; gzip
+ *     adds CPU and, more importantly, response-buffering stalls (the gzip
+ *     stream withholds bytes from the wire until block boundaries, so any
+ *     intermediary that buffers — nginx with fastcgi_buffering on, for
+ *     example — sits waiting on the byte stream while server-side bytes pile
+ *     up) without producing meaningful size reduction.
+ *
+ * The whitelist is the conservative direction: gzip only when every path in
+ * the request has a known-compressible extension. A single binary in the
+ * batch flips the whole response to identity, which preserves the "binary
+ * fast path" the importer just shipped.
+ */
+function file_fetch_paths_should_gzip(array $paths): bool
+{
+    if ($paths === []) {
+        return false;
+    }
+    foreach ($paths as $path) {
+        if (!is_string($path) || !path_extension_is_compressible($path)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Returns true if a path's basename suggests text content gzip will shrink.
+ *
+ * Files with no extension (`.htaccess`, `LICENSE`, `README`, dotfiles) are
+ * treated as text by convention — that's almost always how they're stored
+ * in WordPress installs.
+ */
+function path_extension_is_compressible(string $path): bool
+{
+    $basename = basename($path);
+    if ($basename === '') {
+        return false;
+    }
+    // Dotfiles like .htaccess / .env / .gitignore have no "real" extension —
+    // pathinfo() reports the part after the leading dot as the extension,
+    // but they're text by convention. Treat the whole class as compressible.
+    if ($basename[0] === '.' && strpos($basename, '.', 1) === false) {
+        return true;
+    }
+    $ext = strtolower((string) pathinfo($basename, PATHINFO_EXTENSION));
+    // Files with truly no extension (LICENSE, README, Makefile) — treat as text.
+    if ($ext === '') {
+        return true;
+    }
+    static $compressible = [
+        // Source / markup
+        'php', 'phtml', 'phar', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+        'css', 'scss', 'sass', 'less',
+        'html', 'htm', 'xml', 'xsl', 'xslt', 'svg',
+        'vue', 'astro', 'twig', 'mustache', 'hbs', 'liquid',
+        // Data / config
+        'json', 'jsonl', 'yaml', 'yml', 'toml', 'csv', 'tsv',
+        'sql', 'ini', 'conf', 'cfg', 'env', 'properties',
+        // Docs / plain text
+        'md', 'markdown', 'txt', 'log', 'rst', 'adoc',
+        // Translations / feeds / captions
+        'pot', 'po', 'rss', 'atom', 'srt', 'vtt', 'webvtt',
+        // Misc text-y
+        'sh', 'bash', 'patch', 'diff',
+    ];
+    return in_array($ext, $compressible, true);
 }
 
 /**
