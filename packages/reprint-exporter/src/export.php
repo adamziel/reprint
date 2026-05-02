@@ -110,17 +110,18 @@ class ResourceBudget
 $streaming_context = null;
 
 /**
- * Initializes a multipart/mixed streaming response with gzip compression.
+ * Initializes a multipart/mixed streaming response, optionally with gzip compression.
  *
  * Every streaming endpoint needs the same setup: a unique boundary, the
- * Content-Type header, a GzipOutputStream, and the global $streaming_context
- * so error handlers can emit structured error chunks mid-stream.
+ * Content-Type header, an output stream, and the global $streaming_context so
+ * error handlers can emit structured error chunks mid-stream.
  *
  * @param bool $require_headers If true, throws when headers were already sent
  *                              (use for endpoints that can't degrade gracefully).
+ * @param bool $gzip If true, emit Content-Encoding: gzip and compress the body.
  * @return array{gz: GzipOutputStream, boundary: string}
  */
-function begin_multipart_stream(bool $require_headers = false): array
+function begin_multipart_stream(bool $require_headers = false, bool $gzip = true): array
 {
     global $streaming_context;
 
@@ -160,7 +161,7 @@ function begin_multipart_stream(bool $require_headers = false): array
         @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
     }
 
-    $gz = new GzipOutputStream($can_send_headers);
+    $gz = new GzipOutputStream($can_send_headers && $gzip);
     $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
     return $streaming_context;
@@ -2174,16 +2175,17 @@ function endpoint_preflight(array $config): array
 }
 
 /**
- * Streams file chunks from a producer as gzipped multipart/mixed.
+ * Streams file chunks from a producer as multipart/mixed.
  */
 function stream_file_producer(
     $producer,
     ResourceBudget $budget,
-    array $config = []
+    array $config = [],
+    bool $gzip = false
 ): array {
     prepare_streaming_response();
 
-    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(false, $gzip);
 
     // E2E test hook: after gzip stream initialization (file producer)
     if (getenv('SITE_EXPORT_TEST_MODE')) {
@@ -3364,7 +3366,180 @@ function endpoint_file_fetch(
         $producer,
         $budget,
         $config,
+        file_fetch_paths_should_gzip($paths),
     );
+}
+
+/**
+ * Decides whether to gzip a file_fetch multipart response based on the path
+ * list it will carry.
+ *
+ * Encoding is set per response (Content-Encoding is a response-level header),
+ * so we have to commit before any byte is sent. The trade-off for any given
+ * path:
+ *   - Text-y bodies (PHP/JS/CSS/JSON/SQL/etc.) compress well; gzip is a clear
+ *     win on both wire size and total wall time.
+ *   - Image/video/audio/font/archive bodies are already compressed; gzip
+ *     adds CPU and, more importantly, response-buffering stalls (the gzip
+ *     stream withholds bytes from the wire until block boundaries, so any
+ *     intermediary that buffers — nginx with fastcgi_buffering on, for
+ *     example — sits waiting on the byte stream while server-side bytes pile
+ *     up) without producing meaningful size reduction.
+ *
+ * The whitelist is the conservative direction: gzip only when every path in
+ * the request has a known-compressible extension. A single binary in the
+ * batch flips the whole response to identity, which preserves the "binary
+ * fast path" the importer just shipped.
+ */
+function file_fetch_paths_should_gzip(array $paths): bool
+{
+    if ($paths === []) {
+        return false;
+    }
+    foreach ($paths as $path) {
+        if (!is_string($path)) {
+            return false;
+        }
+        $ext = path_extension_compressibility($path);
+        if ($ext === 'no') {
+            return false;
+        }
+        if ($ext === 'unknown') {
+            // Extension didn't match a known-text or known-binary list. Peek
+            // at the first 64 bytes and let the bytes decide. Cheap (one
+            // open/read/close per file) and means we don't have to grow the
+            // whitelist every time a plugin invents a new template suffix.
+            if (!path_head_looks_like_text($path)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * Returns true if a path's basename suggests text content gzip will shrink.
+ *
+ * Files with no extension (`.htaccess`, `LICENSE`, `README`, dotfiles) are
+ * treated as text by convention — that's almost always how they're stored
+ * in WordPress installs.
+ */
+function path_extension_is_compressible(string $path): bool
+{
+    return path_extension_compressibility($path) === 'yes';
+}
+
+/**
+ * Three-state classifier for a path's extension.
+ *
+ *   - 'yes'     known text-y extension (or dotfile / extensionless name).
+ *   - 'no'      known binary/already-compressed extension.
+ *   - 'unknown' neither list matches; caller may probe the file bytes.
+ */
+function path_extension_compressibility(string $path): string
+{
+    $basename = basename($path);
+    if ($basename === '') {
+        return 'no';
+    }
+    // Dotfiles like .htaccess / .env / .gitignore have no "real" extension —
+    // pathinfo() reports the part after the leading dot as the extension,
+    // but they're text by convention. Treat the whole class as compressible.
+    if ($basename[0] === '.' && strpos($basename, '.', 1) === false) {
+        return 'yes';
+    }
+    $ext = strtolower((string) pathinfo($basename, PATHINFO_EXTENSION));
+    // Files with truly no extension (LICENSE, README, Makefile) — treat as text.
+    if ($ext === '') {
+        return 'yes';
+    }
+    static $compressible = [
+        // Source / markup
+        'php', 'phtml', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+        'css', 'scss', 'sass', 'less',
+        'html', 'htm', 'xml', 'xsl', 'xslt', 'svg',
+        'vue', 'astro', 'twig', 'mustache', 'hbs', 'liquid',
+        // Data / config
+        'json', 'jsonl', 'yaml', 'yml', 'toml', 'csv', 'tsv',
+        'sql', 'ini', 'conf', 'cfg', 'env', 'properties',
+        // Docs / plain text
+        'md', 'markdown', 'txt', 'log', 'rst', 'adoc',
+        // Translations / feeds / captions
+        'pot', 'po', 'rss', 'atom', 'srt', 'vtt', 'webvtt',
+        // Misc text-y
+        'sh', 'bash', 'patch', 'diff',
+    ];
+    if (in_array($ext, $compressible, true)) {
+        return 'yes';
+    }
+    static $incompressible = [
+        // Already-compressed / encrypted archives
+        'zip', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'tar',
+        // Images
+        'jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'avif',
+        'tiff', 'tif', 'bmp', 'ico',
+        // Audio
+        'mp3', 'm4a', 'aac', 'ogg', 'opus', 'flac', 'wav',
+        // Video
+        'mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi',
+        // Fonts (already deflate-compressed in woff/woff2)
+        'woff', 'woff2', 'ttf', 'otf', 'eot',
+        // Misc binary blobs
+        'pdf', 'psd', 'sketch', 'fig', 'iso', 'dmg', 'mo', 'phar',
+    ];
+    if (in_array($ext, $incompressible, true)) {
+        return 'no';
+    }
+    return 'unknown';
+}
+
+/**
+ * Probes the first bytes of a file to decide if it looks like text.
+ *
+ * Used as a fallback when the extension didn't match either the text or the
+ * binary list. The cost is one open + read + close per file in the
+ * file_fetch batch, which is negligible relative to streaming the file
+ * itself; the upside is we don't need to grow the extension lists every
+ * time a plugin invents a new template suffix.
+ *
+ * The check is deliberately strict: any NUL or other ASCII control byte
+ * (outside tab/newline/CR/form-feed) means binary, and the head must also
+ * decode as valid UTF-8. UTF-8 happens to reject most random binary
+ * sequences naturally because high-bit bytes only validate in well-formed
+ * multi-byte runs — so PNG, JPEG, ZIP, etc. fail this within a handful of
+ * bytes even when their headers look ASCII.
+ */
+function path_head_looks_like_text(string $path): bool
+{
+    $fp = @fopen($path, 'rb');
+    if ($fp === false) {
+        // Producer will surface a clearer error later; don't compress on
+        // unreadable paths.
+        return false;
+    }
+    $head = (string) fread($fp, 64);
+    fclose($fp);
+    if ($head === '') {
+        // Empty file: nothing to compress, default to identity.
+        return false;
+    }
+    // Any NUL byte → binary. Cheapest signal, catches PNG/ZIP/woff/etc.
+    if (strpos($head, "\x00") !== false) {
+        return false;
+    }
+    // Other ASCII control bytes (excluding TAB \x09, LF \x0A, FF \x0C, CR \x0D)
+    // shouldn't appear in source/data files. Also reject DEL \x7F.
+    if (preg_match('/[\x01-\x08\x0B\x0E-\x1F\x7F]/', $head)) {
+        return false;
+    }
+    // Must decode cleanly as UTF-8. mb_check_encoding handles the case where
+    // a multi-byte sequence is sliced by our 64-byte window: it returns false,
+    // which we treat as "not obviously text" — biased toward identity, which
+    // is the safe direction.
+    if (function_exists('mb_check_encoding') && !mb_check_encoding($head, 'UTF-8')) {
+        return false;
+    }
+    return true;
 }
 
 /**
