@@ -1,0 +1,10 @@
+# Stages this PR's perf comment will benchmark.
+# One stage name per line; comments and blank lines ignored.
+#
+# This branch is a one-off probe: it disables nginx fastcgi_buffering
+# and runs the binary-compression scenario against trunk's exporter
+# (gzip on, unchanged) to see how much of the 5+ s wall time on the
+# original PR 194 baseline came from nginx buffering vs. real gzip
+# CPU cost. After we read the number off the perf comment we close
+# this PR; nothing here is meant to merge.
+file-fetch-binary-compression

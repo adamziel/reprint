@@ -71,6 +71,18 @@ jobs:
           path: trunk-exporter
           submodules: true
 
+      - name: Resolve focused bench stages
+        id: stages
+        run: |
+          file="tests/e2e/benchmark/focused-stages.txt"
+          if [ -f "$file" ]; then
+            stages="$(grep -v '^[[:space:]]*$' "$file" | grep -v '^[[:space:]]*#' | paste -sd, -)"
+          else
+            stages=""
+          fi
+          echo "stages=$stages" >> "$GITHUB_OUTPUT"
+          echo "Focused stages: $stages"
+
       - name: Download PR phar
         uses: actions/download-artifact@v4
         with:
@@ -125,6 +137,7 @@ jobs:
           BENCH_LABEL: pr
           BENCH_JSON_OUT: bench-pr.json
           BENCH_MD_OUT: bench-pr.md
+          BENCH_STAGES: ${{ steps.stages.outputs.stages }}
           E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}
         run: node benchmark/bench-pull.mjs
 
@@ -140,6 +153,7 @@ jobs:
           BENCH_LABEL: ${{ github.base_ref }}
           BENCH_JSON_OUT: bench-base.json
           BENCH_MD_OUT: bench-base.md
+          BENCH_STAGES: ${{ steps.stages.outputs.stages }}
           E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}/trunk-exporter
         # Don't fail the whole job if the baseline bench fails — we still
         # want to publish the PR's numbers.

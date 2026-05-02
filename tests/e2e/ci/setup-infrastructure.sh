@@ -186,9 +186,11 @@ server {
         include fastcgi_params;
         fastcgi_param SITE_EXPORT_TEST_MODE "1";
         fastcgi_read_timeout 120s;
-        fastcgi_buffering on;
-        fastcgi_buffer_size 128k;
-        fastcgi_buffers 8 128k;
+        # Probe: disable nginx FastCGI response buffering so we can see how
+        # much of trunk's gzip-stream slowness was actually nginx waiting
+        # for buffer fills, vs. real gzip-CPU cost. PR comment will compare
+        # this branch's number against the buffered baseline on PR 194.
+        fastcgi_buffering off;
     }
 }
 VHOST
