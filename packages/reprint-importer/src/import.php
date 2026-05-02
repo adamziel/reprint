@@ -5695,21 +5695,32 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $chunks_since_save++;
-            if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                $this->state[$state_key]["cursor"] = $cursor;
-                // Track current file for crash recovery
-                if ($context->file_handle && $context->file_path) {
-                    // Flush to ensure bytes are on disk before saving state
-                    fflush($context->file_handle);
-                    $this->state["current_file"] = $context->file_path;
-                    $this->state["current_file_bytes"] = $context->file_bytes_written;
-                } else {
-                    $this->state["current_file"] = null;
-                    $this->state["current_file_bytes"] = null;
+            // Defer save_state on intermediate body events of a streamed
+            // file part. The cursor on those events points at the *end* of
+            // the current part, but file_bytes_written only catches up at
+            // the part's last body event. Saving mid-body would persist a
+            // (cursor, bytes) pair where the cursor is ahead — a resume
+            // would tell the server to skip past bytes the importer never
+            // received and leave a gap in the local file. The save fires
+            // again on the part's complete event, where the two values are
+            // back in sync.
+            if (empty($chunk["is_streaming_body"])) {
+                $chunks_since_save++;
+                if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+                    $this->state[$state_key]["cursor"] = $cursor;
+                    // Track current file for crash recovery
+                    if ($context->file_handle && $context->file_path) {
+                        // Flush to ensure bytes are on disk before saving state
+                        fflush($context->file_handle);
+                        $this->state["current_file"] = $context->file_path;
+                        $this->state["current_file_bytes"] = $context->file_bytes_written;
+                    } else {
+                        $this->state["current_file"] = null;
+                        $this->state["current_file_bytes"] = null;
+                    }
+                    $this->save_state($this->state);
+                    $chunks_since_save = 0;
                 }
-                $this->save_state($this->state);
-                $chunks_since_save = 0;
             }
 
             if (isset($chunk["headers"]["x-cursor"])) {
@@ -9283,6 +9294,17 @@ class ImportClient
                         ($context->on_chunk)([
                             "headers" => $stream_headers,
                             "body" => $event["data"],
+                            // Marks an intermediate body event of a streamed
+                            // file part — the cursor in $headers refers to the
+                            // *end* of this part, but file_bytes_written only
+                            // catches up after the part's last body event. The
+                            // file_fetch on_chunk uses this flag to suppress
+                            // periodic save_state during the body, since saving
+                            // mid-body would record a cursor that's ahead of
+                            // the bytes actually on disk. State save resumes at
+                            // the part's complete event, where the two values
+                            // are once again consistent.
+                            "is_streaming_body" => true,
                         ]);
                     }
                     $current_chunk["started"] = true;
