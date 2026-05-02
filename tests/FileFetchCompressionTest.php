@@ -78,6 +78,39 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertStringContainsString('pretend-jpeg-bytes', $stdout);
     }
 
+    public function testUnknownExtensionWithTextContentGetsGzipped(): void
+    {
+        // A made-up text format the whitelist doesn't know about. The byte
+        // sniffer should rescue it: first 64 bytes are clean ASCII, no NULs,
+        // valid UTF-8.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $filePath = $siteDir . '/config.neon';
+        file_put_contents($filePath, str_repeat("services: { foo: Foo\\Bar }\n", 200));
+
+        $stdout = $this->runFileFetch($siteDir, [$filePath]);
+
+        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2), 'unknown text extension should sniff as text and gzip');
+        $decoded = gzdecode($stdout);
+        $this->assertNotFalse($decoded);
+        $this->assertStringContainsString('services:', $decoded);
+    }
+
+    public function testUnknownExtensionWithBinaryContentStaysIdentity(): void
+    {
+        // Same unknown extension, but the bytes are binary (NULs + high-bit
+        // junk). The sniffer should reject and the response should be identity.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $filePath = $siteDir . '/blob.weirdext';
+        file_put_contents($filePath, "\x00\xff\x01\xfe" . random_bytes(2048));
+
+        $stdout = $this->runFileFetch($siteDir, [$filePath]);
+
+        $this->assertStringStartsWith('--boundary-', $stdout);
+        $this->assertFalse(@gzdecode($stdout), 'unknown binary extension should sniff as binary and stay identity');
+    }
+
     public function testFileFetchTreatsExtensionlessFilesAsCompressible(): void
     {
         // .htaccess, LICENSE, README, etc. — pathinfo() reports an empty

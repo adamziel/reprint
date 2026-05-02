@@ -3397,8 +3397,21 @@ function file_fetch_paths_should_gzip(array $paths): bool
         return false;
     }
     foreach ($paths as $path) {
-        if (!is_string($path) || !path_extension_is_compressible($path)) {
+        if (!is_string($path)) {
             return false;
+        }
+        $ext = path_extension_compressibility($path);
+        if ($ext === 'no') {
+            return false;
+        }
+        if ($ext === 'unknown') {
+            // Extension didn't match a known-text or known-binary list. Peek
+            // at the first 64 bytes and let the bytes decide. Cheap (one
+            // open/read/close per file) and means we don't have to grow the
+            // whitelist every time a plugin invents a new template suffix.
+            if (!path_head_looks_like_text($path)) {
+                return false;
+            }
         }
     }
     return true;
@@ -3413,24 +3426,36 @@ function file_fetch_paths_should_gzip(array $paths): bool
  */
 function path_extension_is_compressible(string $path): bool
 {
+    return path_extension_compressibility($path) === 'yes';
+}
+
+/**
+ * Three-state classifier for a path's extension.
+ *
+ *   - 'yes'     known text-y extension (or dotfile / extensionless name).
+ *   - 'no'      known binary/already-compressed extension.
+ *   - 'unknown' neither list matches; caller may probe the file bytes.
+ */
+function path_extension_compressibility(string $path): string
+{
     $basename = basename($path);
     if ($basename === '') {
-        return false;
+        return 'no';
     }
     // Dotfiles like .htaccess / .env / .gitignore have no "real" extension —
     // pathinfo() reports the part after the leading dot as the extension,
     // but they're text by convention. Treat the whole class as compressible.
     if ($basename[0] === '.' && strpos($basename, '.', 1) === false) {
-        return true;
+        return 'yes';
     }
     $ext = strtolower((string) pathinfo($basename, PATHINFO_EXTENSION));
     // Files with truly no extension (LICENSE, README, Makefile) — treat as text.
     if ($ext === '') {
-        return true;
+        return 'yes';
     }
     static $compressible = [
         // Source / markup
-        'php', 'phtml', 'phar', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+        'php', 'phtml', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
         'css', 'scss', 'sass', 'less',
         'html', 'htm', 'xml', 'xsl', 'xslt', 'svg',
         'vue', 'astro', 'twig', 'mustache', 'hbs', 'liquid',
@@ -3444,7 +3469,77 @@ function path_extension_is_compressible(string $path): bool
         // Misc text-y
         'sh', 'bash', 'patch', 'diff',
     ];
-    return in_array($ext, $compressible, true);
+    if (in_array($ext, $compressible, true)) {
+        return 'yes';
+    }
+    static $incompressible = [
+        // Already-compressed / encrypted archives
+        'zip', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'tar',
+        // Images
+        'jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'avif',
+        'tiff', 'tif', 'bmp', 'ico',
+        // Audio
+        'mp3', 'm4a', 'aac', 'ogg', 'opus', 'flac', 'wav',
+        // Video
+        'mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi',
+        // Fonts (already deflate-compressed in woff/woff2)
+        'woff', 'woff2', 'ttf', 'otf', 'eot',
+        // Misc binary blobs
+        'pdf', 'psd', 'sketch', 'fig', 'iso', 'dmg', 'mo', 'phar',
+    ];
+    if (in_array($ext, $incompressible, true)) {
+        return 'no';
+    }
+    return 'unknown';
+}
+
+/**
+ * Probes the first bytes of a file to decide if it looks like text.
+ *
+ * Used as a fallback when the extension didn't match either the text or the
+ * binary list. The cost is one open + read + close per file in the
+ * file_fetch batch, which is negligible relative to streaming the file
+ * itself; the upside is we don't need to grow the extension lists every
+ * time a plugin invents a new template suffix.
+ *
+ * The check is deliberately strict: any NUL or other ASCII control byte
+ * (outside tab/newline/CR/form-feed) means binary, and the head must also
+ * decode as valid UTF-8. UTF-8 happens to reject most random binary
+ * sequences naturally because high-bit bytes only validate in well-formed
+ * multi-byte runs — so PNG, JPEG, ZIP, etc. fail this within a handful of
+ * bytes even when their headers look ASCII.
+ */
+function path_head_looks_like_text(string $path): bool
+{
+    $fp = @fopen($path, 'rb');
+    if ($fp === false) {
+        // Producer will surface a clearer error later; don't compress on
+        // unreadable paths.
+        return false;
+    }
+    $head = (string) fread($fp, 64);
+    fclose($fp);
+    if ($head === '') {
+        // Empty file: nothing to compress, default to identity.
+        return false;
+    }
+    // Any NUL byte → binary. Cheapest signal, catches PNG/ZIP/woff/etc.
+    if (strpos($head, "\x00") !== false) {
+        return false;
+    }
+    // Other ASCII control bytes (excluding TAB \x09, LF \x0A, FF \x0C, CR \x0D)
+    // shouldn't appear in source/data files. Also reject DEL \x7F.
+    if (preg_match('/[\x01-\x08\x0B\x0E-\x1F\x7F]/', $head)) {
+        return false;
+    }
+    // Must decode cleanly as UTF-8. mb_check_encoding handles the case where
+    // a multi-byte sequence is sliced by our 64-byte window: it returns false,
+    // which we treat as "not obviously text" — biased toward identity, which
+    // is the safe direction.
+    if (function_exists('mb_check_encoding') && !mb_check_encoding($head, 'UTF-8')) {
+        return false;
+    }
+    return true;
 }
 
 /**
