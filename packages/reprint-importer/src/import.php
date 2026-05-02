@@ -5701,12 +5701,20 @@ class ImportClient
             // the part's last body event. Saving mid-body would persist a
             // (cursor, bytes) pair where the cursor is ahead — a resume
             // would tell the server to skip past bytes the importer never
-            // received and leave a gap in the local file. The save fires
-            // again on the part's complete event, where the two values are
-            // back in sync.
-            if (empty($chunk["is_streaming_body"])) {
+            // received and leave a gap in the local file.
+            //
+            // Force a save on every streamed-file part-complete event,
+            // bypassing the chunks_since_save counter. Multi-chunk files
+            // need per-part resume points; with the counter alone, a file
+            // that's the only thing in the request would never trigger a
+            // save before the (now possibly only) crash, leaving the next
+            // run with no current_file/current_file_bytes to resume from.
+            $is_streaming_body = !empty($chunk["is_streaming_body"]);
+            $is_streaming_close = !empty($chunk["is_streaming_close"]);
+            if (!$is_streaming_body) {
                 $chunks_since_save++;
-                if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+                $force_save = $is_streaming_close;
+                if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                     $this->state[$state_key]["cursor"] = $cursor;
                     // Track current file for crash recovery
                     if ($context->file_handle && $context->file_path) {
@@ -9331,6 +9339,13 @@ class ImportClient
                         ($context->on_chunk)([
                             "headers" => $close_headers,
                             "body" => "",
+                            // Marks the part-complete event for a streamed
+                            // file part. The file_fetch on_chunk forces a
+                            // save_state on these events regardless of the
+                            // periodic counter, so a crash mid-multi-chunk
+                            // file always has a valid resume point even when
+                            // the file is the only thing in the request.
+                            "is_streaming_close" => true,
                         ]);
                     }
                 } elseif ($current_chunk) {
