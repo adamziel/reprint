@@ -20,6 +20,7 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, statSync, writeFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import {
@@ -33,7 +34,7 @@ import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
     const site = 'file-body-resume';
-    const fileRel = 'test-data/big-random.bin';
+    const fileRel = 'test-data/big-binary.jpg';
     const fileSize = 2 * 1024 * 1024;
     let tempDir;
     let sourceSha256;
@@ -41,11 +42,22 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
 
     beforeAll(async () => {
         // Pre-generate the file in Node so we know its SHA before it
-        // ever lands on the test site. Random content so we'd notice
-        // any duplicated or skipped bytes — repetitive content can mask
-        // overlap because the first half and the second half look the
-        // same.
-        const bytes = randomBytes(fileSize);
+        // ever lands on the test site.
+        //
+        // Random bytes (rather than repetitive content) so a duplicated
+        // chunk during resume couldn't hide behind matching content. We
+        // mix in a NUL byte every 64 bytes to force the exporter's
+        // text/binary classifier onto the binary path deterministically —
+        // the classifier rejects anything with NULs in the head, and
+        // pure crypto-random bytes would occasionally pass UTF-8
+        // validation by chance and trip the gzip path. Combined with the
+        // .jpg extension (which the classifier already treats as binary
+        // without sniffing), this keeps the test independent of PR 194's
+        // gzip-decision logic.
+        const bytes = Buffer.from(randomBytes(fileSize));
+        for (let i = 0; i < bytes.length; i += 64) {
+            bytes[i] = 0;
+        }
         sourceSha256 = createHash('sha256').update(bytes).digest('hex');
 
         await ensureSite(site, {
@@ -68,6 +80,9 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
     afterAll(() => {
         removeTestHooks(site);
         clearHookState(site);
+        try {
+            execSync(`sudo rm -f /srv/e2e-sites/.e2e-hook-fired-${site}`);
+        } catch (e) { /* ignore */ }
         cleanupTempDir(tempDir);
     });
 
@@ -76,16 +91,27 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
     }
 
     it('first run crashes mid-file on the second body chunk', () => {
-        // Hook exits the moment we're asked for any chunk past offset 0
-        // for a given file. That's "first chunk written, second chunk
-        // would have been written next" — exactly the mid-file-body
-        // failure mode the streaming change introduces.
+        // Hook exits when we hit a non-first chunk of the specific file
+        // we care about. Two non-obvious bits:
+        //
+        //   1. Path filter. WordPress core ships files larger than the
+        //      chunk size; without the filter the hook would crash on
+        //      whichever WP file the producer happens to reach first.
+        //   2. Self-disabling via a marker file. removeTestHooks() deletes
+        //      the hook PHP source, but PHP-FPM workers keep the function
+        //      in memory across requests — so a worker that already loaded
+        //      the hook would still call it on the resume run and crash
+        //      again. The marker check makes the function a no-op once
+        //      it has fired.
+        const marker = `${'/srv/e2e-sites'}/.e2e-hook-fired-${site}`;
         writeTestHooks(site, [
-            'function test_hook_before_file_chunk($path, $offset, &$data) {',
-            '    if ($offset > 0) {',
-            '        exit(1);',
-            '    }',
-            '}',
+            "function test_hook_before_file_chunk($path, $offset, &$data) {",
+            `    if (file_exists('${marker}')) { return; }`,
+            "    if ($offset > 0 && substr($path, -strlen('big-binary.jpg')) === 'big-binary.jpg') {",
+            `        @file_put_contents('${marker}', '1');`,
+            "        exit(1);",
+            "    }",
+            "}",
         ].join('\n'));
 
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
