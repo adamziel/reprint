@@ -823,6 +823,66 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "6dfc736420cf356cdb778ce3da0def4b82cae4b8",
+      "shortSha": "6dfc736",
+      "date": "2026-05-02T03:08:00+02:00",
+      "message": "Skip gzip for non-compressible files (#194)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.5",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 120.63987900000029,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 2115.141366,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 104117.850588,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 39536.130548,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 85.055709999986,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 200.2729410000029,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 100.73863400000846,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
