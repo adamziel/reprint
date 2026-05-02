@@ -121,6 +121,9 @@
     },
     "plugin-auth": {
       "port": 8119
+    },
+    "file-body-resume": {
+      "port": 8120
     }
   }
 }
