@@ -370,19 +370,34 @@ register_shutdown_function(function () {
 
 function runPreflightForSite(site, stateDir) {
     const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-    execFileSync(PHP_BINARY, [
+    const args = [
         IMPORTER_PATH,
         'preflight',
         url,
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
         `--secret=${getSiteSecret(site)}`,
-    ], {
-        timeout: 120_000,
-        encoding: 'utf-8',
-        maxBuffer: 16 * 1024 * 1024,
-        stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    ];
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            execFileSync(PHP_BINARY, args, {
+                timeout: 120_000,
+                encoding: 'utf-8',
+                maxBuffer: 16 * 1024 * 1024,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            return;
+        } catch (e) {
+            lastErr = e;
+            const output = `${e.stdout || ''}\n${e.stderr || ''}`;
+            if (!/Operation timed out|Could not connect|Connection refused|Empty reply/i.test(output) || attempt === 3) {
+                throw e;
+            }
+            console.log(`   preflight retry ${attempt}/3 after transient failure`);
+        }
+    }
+    throw lastErr;
 }
 
 function renderMarkdown(results, meta) {
