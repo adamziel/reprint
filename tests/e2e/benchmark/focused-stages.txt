@@ -3,7 +3,8 @@
 # Both the PR build and the trunk baseline run the same set, so the
 # table shows two like-for-like wall-time numbers per row.
 #
-# This PR drops gzip from file_fetch responses, so the relevant
-# scenario is a tuned-chunk fetch of an effectively-incompressible
-# random binary.
-file-fetch-binary-compression
+# This PR streams multipart file bodies directly to disk, so the
+# relevant scenario is a single oversized multipart part — the
+# per-stage details include importer peak memory, which is the
+# real signal for the streaming change.
+files-pull-large-part-peak-memory

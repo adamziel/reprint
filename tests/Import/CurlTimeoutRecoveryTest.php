@@ -88,6 +88,33 @@ class CurlTimeoutRecoveryTest extends TestCase
         return json_decode($contents, true);
     }
 
+    public static function fileCursorForBytes(int $bytes): string
+    {
+        return base64_encode(json_encode([
+            "phase" => "streaming",
+            "root" => base64_encode('/srv/htdocs'),
+            "path" => base64_encode('/uploads/large.bin'),
+            "ctime" => 1234567890,
+            "bytes" => $bytes,
+        ]));
+    }
+
+    private static function fileCursorBytes(?string $cursor): ?int
+    {
+        if ($cursor === null || $cursor === '') {
+            return null;
+        }
+        $json = base64_decode($cursor, true);
+        if ($json === false) {
+            return null;
+        }
+        $decoded = json_decode($json, true);
+        if (!is_array($decoded) || !isset($decoded["bytes"])) {
+            return null;
+        }
+        return (int) $decoded["bytes"];
+    }
+
     /**
      * Prepare a client test double with state loaded and TTY disabled.
      *
@@ -191,6 +218,66 @@ class CurlTimeoutRecoveryTest extends TestCase
             "partial",
             $state["status"],
             "After cURL timeout during file fetch, status should be 'partial'"
+        );
+    }
+
+    public function testFileFetchHardCrashCheckpointDoesNotPutCursorBehindBytes()
+    {
+        $trackedPath = $this->fs_root . '/uploads/large.bin';
+        mkdir(dirname($trackedPath), 0755, true);
+        file_put_contents($trackedPath, str_repeat('a', 256));
+
+        $this->writeState([
+            "command" => "files-pull",
+            "status" => "in_progress",
+            "stage" => "fetch",
+            "fetch" => [
+                "offset" => 0,
+                "next_offset" => 100,
+                "batch_file" => null,
+                "cursor" => self::fileCursorForBytes(256),
+            ],
+            "current_file" => $trackedPath,
+            "current_file_bytes" => 256,
+        ]);
+
+        [$client, $reflection] = $this->prepareClient(
+            InterruptedAfterStreamedPartCloseClient::class,
+        );
+
+        $downloadFilesFetch = $reflection->getMethod('download_file_fetch');
+
+        try {
+            $downloadFilesFetch->invoke(
+                $client,
+                null,
+                self::fileCursorForBytes(256),
+                "fetch",
+            );
+            $this->fail('Expected simulated hard crash during file fetch');
+        } catch (\ReflectionException $e) {
+            throw $e;
+        } catch (\RuntimeException $e) {
+            $this->assertSame(
+                'Simulated hard crash after streamed file part close',
+                $e->getMessage(),
+            );
+        }
+
+        $state = $this->readState();
+        $savedBytes = $state["current_file_bytes"] ?? null;
+        $savedCursorBytes = self::fileCursorBytes(
+            $state["fetch"]["cursor"] ?? null,
+        );
+
+        $this->assertNotNull(
+            $savedBytes,
+            'The state should retain a crash-recovery file byte count',
+        );
+        $this->assertSame(
+            $savedBytes,
+            $savedCursorBytes,
+            'A hard-crash checkpoint must not put the saved cursor behind the bytes retained on disk',
         );
     }
 
@@ -507,6 +594,49 @@ class TimeoutTestClient extends \ImportClient
     ): void {
         throw new \CurlTimeoutException(
             "cURL error: Operation timed out after 300001 milliseconds with 0 bytes received"
+        );
+    }
+}
+
+/**
+ * Test double that simulates a process dying immediately after a streamed
+ * file part-complete checkpoint. This is a hard crash, so download_file_fetch()
+ * must not get a chance to do its normal final save.
+ */
+class InterruptedAfterStreamedPartCloseClient extends \ImportClient
+{
+    protected function fetch_streaming(
+        string $url,
+        ?string $cursor,
+        \StreamingContext $context,
+        ?array $post_data = null,
+        ?string $endpoint = null
+    ): void {
+        $headers = [
+            "x-chunk-type" => "file",
+            "x-cursor" => CurlTimeoutRecoveryTest::fileCursorForBytes(512),
+            "x-file-path" => base64_encode('/uploads/large.bin'),
+            "x-file-size" => "1024",
+            "x-file-ctime" => "1234567890",
+            "x-chunk-offset" => "256",
+            "x-chunk-size" => "256",
+            "x-first-chunk" => "0",
+            "x-last-chunk" => "0",
+        ];
+
+        ($context->on_chunk)([
+            "headers" => $headers,
+            "body" => str_repeat('b', 256),
+            "is_streaming_body" => true,
+        ]);
+        ($context->on_chunk)([
+            "headers" => $headers,
+            "body" => "",
+            "is_streaming_close" => true,
+        ]);
+
+        throw new \RuntimeException(
+            'Simulated hard crash after streamed file part close',
         );
     }
 }

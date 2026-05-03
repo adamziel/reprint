@@ -5695,21 +5695,31 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $chunks_since_save++;
-            if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                $this->state[$state_key]["cursor"] = $cursor;
-                // Track current file for crash recovery
-                if ($context->file_handle && $context->file_path) {
-                    // Flush to ensure bytes are on disk before saving state
-                    fflush($context->file_handle);
-                    $this->state["current_file"] = $context->file_path;
-                    $this->state["current_file_bytes"] = $context->file_bytes_written;
-                } else {
-                    $this->state["current_file"] = null;
-                    $this->state["current_file_bytes"] = null;
+            // Streamed file bodies can arrive in multiple parser callbacks
+            // for one exporter file part. Save only at the part boundary:
+            // mid-body, the cursor already points to the end of the part
+            // while file_bytes_written may still lag; at is_streaming_close
+            // the bytes are on disk and we force a per-part checkpoint.
+            $is_streaming_body = !empty($chunk["is_streaming_body"]);
+            $is_streaming_close = !empty($chunk["is_streaming_close"]);
+            if (!$is_streaming_body) {
+                $chunks_since_save++;
+                $force_save = $is_streaming_close;
+                if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+                    $this->state[$state_key]["cursor"] = $cursor;
+                    // Track current file for crash recovery
+                    if ($context->file_handle && $context->file_path) {
+                        // Flush to ensure bytes are on disk before saving state
+                        fflush($context->file_handle);
+                        $this->state["current_file"] = $context->file_path;
+                        $this->state["current_file_bytes"] = $context->file_bytes_written;
+                    } else {
+                        $this->state["current_file"] = null;
+                        $this->state["current_file_bytes"] = null;
+                    }
+                    $this->save_state($this->state);
+                    $chunks_since_save = 0;
                 }
-                $this->save_state($this->state);
-                $chunks_since_save = 0;
             }
 
             if (isset($chunk["headers"]["x-cursor"])) {
@@ -9251,8 +9261,9 @@ class ImportClient
      * Build the multipart chunk handler callback shared by both parser
      * creation sites inside fetch_streaming.
      *
-     * The callback accumulates "body" events into $current_chunk and emits
-     * completed chunks to $context->on_chunk on "complete" events.
+     * File parts are forwarded as body data arrives so large files are written
+     * to disk incrementally. Non-file parts are still accumulated until
+     * complete because they are small metadata/progress JSON payloads.
      */
     private function make_chunk_handler(
         StreamingContext $context,
@@ -9260,10 +9271,40 @@ class ImportClient
     ): callable {
         return function ($event) use ($context, &$current_chunk) {
             if ($event["type"] === "body") {
-                // Accumulate body data in current chunk
+                $headers = $event["headers"];
+                $chunk_type = $headers["x-chunk-type"] ?? "";
+                if ($chunk_type === "file") {
+                    if (!$current_chunk) {
+                        $current_chunk = [
+                            "headers" => $headers,
+                            "body_streamed" => true,
+                            "started" => false,
+                        ];
+                    }
+
+                    if ($context->on_chunk) {
+                        $stream_headers = $headers;
+                        if (!empty($current_chunk["started"])) {
+                            $stream_headers["x-first-chunk"] = "0";
+                        }
+                        // The parser emits a separate complete event after the
+                        // last body bytes, so close/index the file from there.
+                        $stream_headers["x-last-chunk"] = "0";
+                        ($context->on_chunk)([
+                            "headers" => $stream_headers,
+                            "body" => $event["data"],
+                            // Suppresses state saves while a streamed file
+                            // part body is still being written.
+                            "is_streaming_body" => true,
+                        ]);
+                    }
+                    $current_chunk["started"] = true;
+                    return;
+                }
+
                 if (!$current_chunk) {
                     $current_chunk = [
-                        "headers" => $event["headers"],
+                        "headers" => $headers,
                         "body" => $event["data"],
                     ];
                 } else {
@@ -9272,19 +9313,34 @@ class ImportClient
                         $event["data"];
                 }
             } elseif ($event["type"] === "complete") {
-                // Chunk complete - emit to handler
-                if ($current_chunk) {
+                $headers = $event["headers"];
+                $chunk_type = $headers["x-chunk-type"] ?? "";
+                if ($chunk_type === "file" && !empty($current_chunk["body_streamed"])) {
+                    if ($context->on_chunk) {
+                        $close_headers = $headers;
+                        $close_headers["x-first-chunk"] = "0";
+                        ($context->on_chunk)([
+                            "headers" => $close_headers,
+                            "body" => "",
+                            // Forces a save at every streamed file-part
+                            // boundary, even if the periodic counter has not
+                            // reached SAVE_STATE_EVERY_N_CHUNKS.
+                            "is_streaming_close" => true,
+                        ]);
+                    }
+                } elseif ($current_chunk) {
+                    // Chunk complete - emit to handler
                     if ($context->on_chunk) {
                         ($context->on_chunk)(
                             $current_chunk,
                         );
                     }
-                } elseif ($event["headers"]) {
+                } elseif ($headers) {
                     // No body data - emit just headers
                     if ($context->on_chunk) {
                         ($context->on_chunk)([
                             "headers" =>
-                                $event["headers"],
+                                $headers,
                             "body" => "",
                         ]);
                     }

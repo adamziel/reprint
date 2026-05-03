@@ -279,6 +279,127 @@ async function runFileFetchScenario({ stage, site, filePath, params = {}, detail
     };
 }
 
+function runFilePullWithPeakMemory({ site, stateDir, filePath }) {
+    const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
+    const peakProbe = join(tmpdir(), `reprint-bench-peak-${process.pid}-${Date.now()}.php`);
+    const peakFile = join(tmpdir(), `reprint-bench-peak-${process.pid}-${Date.now()}.txt`);
+    writeFileSync(peakProbe, `<?php
+register_shutdown_function(function () {
+    $path = getenv('REPRINT_BENCH_PEAK_FILE');
+    if ($path) {
+        file_put_contents($path, (string) memory_get_peak_usage(true));
+    }
+});
+`);
+
+    const baseArgs = [
+        IMPORTER_PATH,
+        'files-pull',
+        url,
+        `--state-dir=${stateDir}`,
+        `--fs-root=${fsRootDir(stateDir)}`,
+        `--secret=${getSiteSecret(site)}`,
+        `--file-chunk-start=${FILE_BENCH_TUNED_CHUNK_SIZE}`,
+        `--file-chunk-max=${FILE_BENCH_TUNED_CHUNK_SIZE}`,
+        '--duty=1',
+        '--max-exec=60',
+    ];
+    const args = [
+        '-d',
+        `auto_prepend_file=${peakProbe}`,
+        ...baseArgs,
+    ];
+
+    const start = performance.now();
+    let attempts = 0;
+    let peakMemory = 0;
+    let lastErr = null;
+
+    while (true) {
+        attempts += 1;
+        try {
+            execFileSync(PHP_BINARY, args, {
+                timeout: 900_000,
+                encoding: 'utf-8',
+                maxBuffer: 64 * 1024 * 1024,
+                stdio: ['ignore', 'pipe', 'pipe'],
+                env: { ...process.env, REPRINT_BENCH_PEAK_FILE: peakFile },
+            });
+            if (existsSync(peakFile)) {
+                peakMemory = Math.max(peakMemory, Number(readFileSync(peakFile, 'utf-8')) || 0);
+            }
+            return {
+                stage: 'files-pull-large-part-peak-memory',
+                elapsedMs: performance.now() - start,
+                attempts,
+                ok: true,
+                details: {
+                    condition: 'files-pull large multipart file part',
+                    file: fmtBytes(statSync(filePath).size),
+                    chunk_size: fmtBytes(FILE_BENCH_TUNED_CHUNK_SIZE),
+                    peak_memory: fmtBytes(peakMemory),
+                },
+            };
+        } catch (e) {
+            lastErr = e;
+            if (existsSync(peakFile)) {
+                peakMemory = Math.max(peakMemory, Number(readFileSync(peakFile, 'utf-8')) || 0);
+            }
+            const exitCode = e.status === null ? -1 : (e.status || 1);
+            if (exitCode === 2 && attempts < 50) {
+                continue;
+            }
+            return {
+                stage: 'files-pull-large-part-peak-memory',
+                elapsedMs: performance.now() - start,
+                attempts,
+                ok: false,
+                exitCode,
+                stderr: (lastErr.stderr || '').toString().slice(-2000),
+                stdout: (lastErr.stdout || '').toString().slice(-2000),
+                details: {
+                    condition: 'files-pull large multipart file part',
+                    file: fmtBytes(statSync(filePath).size),
+                    chunk_size: fmtBytes(FILE_BENCH_TUNED_CHUNK_SIZE),
+                    peak_memory: fmtBytes(peakMemory),
+                },
+            };
+        }
+    }
+}
+
+function runPreflightForSite(site, stateDir) {
+    const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
+    const args = [
+        IMPORTER_PATH,
+        'preflight',
+        url,
+        `--state-dir=${stateDir}`,
+        `--fs-root=${fsRootDir(stateDir)}`,
+        `--secret=${getSiteSecret(site)}`,
+    ];
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            execFileSync(PHP_BINARY, args, {
+                timeout: 120_000,
+                encoding: 'utf-8',
+                maxBuffer: 16 * 1024 * 1024,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            return;
+        } catch (e) {
+            lastErr = e;
+            const output = `${e.stdout || ''}\n${e.stderr || ''}`;
+            if (!/Operation timed out|Could not connect|Connection refused|Empty reply/i.test(output) || attempt === 3) {
+                throw e;
+            }
+            console.log(`   preflight retry ${attempt}/3 after transient failure`);
+        }
+    }
+    throw lastErr;
+}
+
 function renderMarkdown(results, meta) {
     const total = results.reduce((s, r) => s + r.elapsedMs, 0);
     const lines = [];
@@ -398,6 +519,25 @@ async function main() {
         });
         results.push(binaryCompressionFetch);
         console.log(`   ${binaryCompressionFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(binaryCompressionFetch.elapsedMs)} (${fmtDetails(binaryCompressionFetch.details)})`);
+    }
+
+    if (shouldRun('files-pull-large-part-peak-memory')) {
+        if (!fileBench) {
+            console.log(`Provisioning site: ${FILE_BENCH_SITE}`);
+            fileBench = await ensureFileBenchSite();
+        }
+        const filePullStateDir = join(tmpdir(), `bench-file-pull-${Date.now()}`);
+        mkdirSync(filePullStateDir, { recursive: true });
+        mkdirSync(fsRootDir(filePullStateDir), { recursive: true });
+        runPreflightForSite(fileBench.site, filePullStateDir);
+        console.log('-> files-pull-large-part-peak-memory');
+        const largePartPull = runFilePullWithPeakMemory({
+            site: fileBench.site,
+            stateDir: filePullStateDir,
+            filePath: fileBench.filePath,
+        });
+        results.push(largePartPull);
+        console.log(`   ${largePartPull.ok ? 'ok' : 'FAIL'} in ${fmtMs(largePartPull.elapsedMs)} (${fmtDetails(largePartPull.details)})`);
     }
 
     const phpVersion = execFileSync(PHP_BINARY, ['-r', 'echo PHP_VERSION;'], { encoding: 'utf-8' }).trim();
