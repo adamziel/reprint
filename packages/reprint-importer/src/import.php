@@ -6735,7 +6735,7 @@ class ImportClient
 
         clearstatcache(true, $tmp);
         $resume_from = ($can_resume && is_file($tmp)) ? (int) filesize($tmp) : 0;
-        if ($resume_from < 0 || $resume_from > $size) {
+        if ($resume_from > $size) {
             @unlink($tmp);
             $resume_from = 0;
         }
