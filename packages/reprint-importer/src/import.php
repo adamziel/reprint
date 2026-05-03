@@ -1041,9 +1041,6 @@ class ImportClient
      */
     public $state;
 
-    /** @var int Chunks processed since last state save — triggers periodic persistence. */
-    private $chunks_since_save = 0;
-
     /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
     private $shutdown_requested = false;
 
@@ -5621,7 +5618,7 @@ class ImportClient
     ): bool {
         $cursor = $cursor ?? ($this->state[$state_key]["cursor"] ?? null);
         $complete = false;
-        $this->chunks_since_save = 0;
+        $chunks_since_save = 0;
 
         // Crash recovery: if we have a tracked file that's larger than expected,
         // truncate it. This happens if we crashed after writing but before saving
@@ -5686,6 +5683,7 @@ class ImportClient
         $context->on_chunk = function ($chunk) use (
             &$cursor,
             &$complete,
+            &$chunks_since_save,
             $context,
             $state_key
         ) {
@@ -5697,8 +5695,8 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $this->chunks_since_save++;
-            if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+            $chunks_since_save++;
+            if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                 $this->state[$state_key]["cursor"] = $cursor;
                 // Track current file for crash recovery
                 if ($context->file_handle && $context->file_path) {
@@ -5711,7 +5709,7 @@ class ImportClient
                     $this->state["current_file_bytes"] = null;
                 }
                 $this->save_state($this->state);
-                $this->chunks_since_save = 0;
+                $chunks_since_save = 0;
             }
 
             if (isset($chunk["headers"]["x-cursor"])) {
@@ -5863,7 +5861,7 @@ class ImportClient
         }
 
         $complete = false;
-        $this->chunks_since_save = 0;
+        $chunks_since_save = 0;
         $params = $this->get_tuned_params("file_index");
         if ($cursor === null) {
             $params["list_dir"] = $list_dir_override ?? $roots[0];
@@ -5887,6 +5885,7 @@ class ImportClient
         $context->on_chunk = function ($chunk) use (
             &$cursor,
             &$complete,
+            &$chunks_since_save,
             $handle,
             $context
         ) {
@@ -5898,13 +5897,13 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $this->chunks_since_save++;
-            if ($this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+            $chunks_since_save++;
+            if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                 $this->state["index"] = [
                     "cursor" => $cursor,
                 ];
                 $this->save_state($this->state);
-                $this->chunks_since_save = 0;
+                $chunks_since_save = 0;
             }
 
             if (isset($chunk["headers"]["x-cursor"])) {
@@ -7155,6 +7154,7 @@ class ImportClient
         $curl_timed_out = false;
         $caught_exception = null;
         $buffer_not_flushed = "";
+        $chunks_since_save = 0;
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
@@ -7175,7 +7175,8 @@ class ImportClient
                     $query_stream,
                     $domain_collector,
                     $domains_file,
-                    &$sql_statements_counted
+                    &$sql_statements_counted,
+                    &$chunks_since_save
                 ) {
                     // Check if shutdown was requested
                     if ($this->shutdown_requested) {
@@ -7193,9 +7194,9 @@ class ImportClient
                     // Skip saving when there's buffered SQL waiting for a
                     // complete statement — crash recovery would replay the
                     // cursor but miss the buffered bytes.
-                    $this->chunks_since_save++;
+                    $chunks_since_save++;
                     if (
-                        $this->chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
+                        $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
                         && $sql_buffer === ""
                     ) {
                         if ($sql_handle) {
@@ -7205,7 +7206,7 @@ class ImportClient
                         $this->state["sql_bytes"] = $sql_bytes_written;
                         $this->state["sql_statements_counted"] = $sql_statements_counted;
                         $this->save_state($this->state);
-                        $this->chunks_since_save = 0;
+                        $chunks_since_save = 0;
 
                         // Also persist discovered domains so they survive crashes.
                         // On resume, the SQL download picks up from the cursor,
