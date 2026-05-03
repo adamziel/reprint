@@ -281,6 +281,7 @@ final class Site_Export_HTTP_Server {
         return [
             'file_index' => 'endpoint_file_index',
             'file_fetch' => 'endpoint_file_fetch',
+            'file_prefix_hash' => 'endpoint_file_prefix_hash',
             'sql_chunk' => 'endpoint_sql_chunk',
             'db_index' => 'endpoint_db_index',
             'preflight' => 'endpoint_preflight',

@@ -157,12 +157,82 @@ class PublicUploadDownloadTest extends TestCase
         );
     }
 
-    private function makeClient(string $uploadsBasedir, string $uploadsBaseurl): \ImportClient
+    public function testPrepareFetchBatchResumesUnsupportedPublicRangeViaFileFetchOffset(): void
     {
-        $client = new \ImportClient('http://fake.url', $this->stateDir, $this->fsRoot);
+        $sourceRoot = $this->tempDir . '/no-range-source-uploads';
+        mkdir($sourceRoot . '/2024/05', 0755, true);
+        $contents = str_repeat('fallback resume body ', 256);
+        $sourceFile = $sourceRoot . '/2024/05/resume-photo.txt';
+        file_put_contents($sourceFile, $contents);
+        clearstatcache(true, $sourceFile);
+        $ctime = filectime($sourceFile);
+        $rangeLog = $this->tempDir . '/no-range.log';
+        $remoteUploads = '/var/www/html/wp-content/uploads/';
+        $baseurl = $this->startNoRangeHashServer($sourceRoot, $rangeLog, $remoteUploads);
+
+        $remotePath = $remoteUploads . '2024/05/resume-photo.txt';
+        $listFile = $this->writeDownloadList([
+            [
+                'path' => base64_encode($remotePath),
+                'ctime' => $ctime,
+                'size' => strlen($contents),
+                'type' => 'file',
+            ],
+        ]);
+
+        $localPath = realpath($this->fsRoot) . $remotePath;
+        $tmpPath = $localPath . '.reprint-public-download';
+        mkdir(dirname($tmpPath), 0755, true);
+        $resumeFrom = 37;
+        file_put_contents($tmpPath, substr($contents, 0, $resumeFrom));
+
+        $client = $this->makeClient($remoteUploads, $baseurl, $baseurl);
+        $client->state['public_upload'] = [
+            'path' => $remotePath,
+            'url' => $baseurl . '/2024/05/resume-photo.txt',
+            'local_path' => $localPath,
+            'tmp_path' => $tmpPath,
+            'ctime' => $ctime,
+            'size' => strlen($contents),
+            'bytes' => $resumeFrom,
+        ];
+
+        $batch = (new \ReflectionClass($client))->getMethod('prepare_fetch_batch')
+            ->invoke($client, $listFile, 0);
+
+        $this->assertNotNull($batch);
+        $this->assertSame(1, $batch['entries']);
+        $this->assertSame(1, $batch['fallback_entries']);
+        $this->assertSame([$remotePath], json_decode(file_get_contents($batch['file']), true));
+        $this->assertSame($localPath, $batch['current_file']);
+        $this->assertSame($resumeFrom, $batch['current_file_bytes']);
+        $this->assertSame(substr($contents, 0, $resumeFrom), file_get_contents($localPath));
+        $this->assertFileDoesNotExist($tmpPath);
+        $this->assertStringContainsString('bytes=' . $resumeFrom . '-', file_get_contents($rangeLog));
+
+        $cursor = json_decode(base64_decode($batch['cursor']), true);
+        $this->assertSame('streaming', $cursor['phase']);
+        $this->assertSame($remotePath, base64_decode($cursor['path']));
+        $this->assertSame($ctime, $cursor['ctime']);
+        $this->assertSame($resumeFrom, $cursor['bytes']);
+        @unlink($batch['file']);
+    }
+
+    private function makeClient(string $uploadsBasedir, string $uploadsBaseurl, ?string $remoteUrl = null): \ImportClient
+    {
+        $client = new \ImportClient($remoteUrl ?? 'http://fake.url', $this->stateDir, $this->fsRoot);
         $client->state = $client->default_state();
+        $root = rtrim($uploadsBasedir, '/');
+        $needle = '/wp-content/uploads';
+        $pos = strpos($root, $needle);
+        $root = $pos === false ? dirname($root) : substr($root, 0, $pos);
         $client->state['preflight'] = [
             'data' => [
+                'wp_detect' => [
+                    'roots' => [
+                        ['path' => $root],
+                    ],
+                ],
                 'database' => [
                     'wp' => [
                         'paths_urls' => [
@@ -264,6 +334,94 @@ PHP
             [
                 '__DOCROOT__' => var_export($docroot, true),
                 '__RANGE_LOG__' => var_export($rangeLog, true),
+            ],
+        );
+        file_put_contents($router, $routerSource);
+        return $this->startServer($serverRoot, $router);
+    }
+
+    private function startNoRangeHashServer(string $docroot, string $rangeLog, string $remoteUploads): string
+    {
+        $router = $this->tempDir . '/no-range-router.php';
+        $serverRoot = $this->tempDir . '/no-range-server-root';
+        mkdir($serverRoot, 0755, true);
+        $routerSource = strtr(
+            <<<'PHP'
+<?php
+$docroot = realpath(__DOCROOT__);
+$remoteUploads = rtrim(__REMOTE_UPLOADS__, '/') . '/';
+
+if (($_GET['endpoint'] ?? '') === 'file_prefix_hash') {
+    header('Content-Type: application/json');
+    $remotePath = base64_decode($_GET['path'] ?? '', true);
+    $bytes = (int) ($_GET['bytes'] ?? 0);
+    $expectedSize = (int) ($_GET['size'] ?? -1);
+    $expectedCtime = (int) ($_GET['ctime'] ?? -1);
+    if (!is_string($remotePath) || strpos($remotePath, $remoteUploads) !== 0) {
+        echo json_encode(['ok' => false, 'reason' => 'bad_path']);
+        return;
+    }
+    $relative = substr($remotePath, strlen($remoteUploads));
+    $file = realpath($docroot . '/' . $relative);
+    if ($file === false || strpos($file, $docroot . DIRECTORY_SEPARATOR) !== 0 || !is_file($file)) {
+        echo json_encode(['ok' => false, 'reason' => 'missing']);
+        return;
+    }
+    clearstatcache(true, $file);
+    if (filesize($file) !== $expectedSize || filectime($file) !== $expectedCtime || $bytes <= 0) {
+        echo json_encode(['ok' => false, 'reason' => 'metadata_mismatch']);
+        return;
+    }
+    $handle = fopen($file, 'rb');
+    $hash = hash_init('md5');
+    $remaining = $bytes;
+    while ($remaining > 0 && !feof($handle)) {
+        $chunk = fread($handle, min(1024 * 1024, $remaining));
+        $remaining -= strlen($chunk);
+        hash_update($hash, $chunk);
+    }
+    fclose($handle);
+    echo json_encode([
+        'ok' => $remaining === 0,
+        'algorithm' => 'md5',
+        'bytes' => $bytes,
+        'hash' => hash_final($hash),
+        'size' => $expectedSize,
+        'ctime' => $expectedCtime,
+    ]);
+    return;
+}
+
+$uriPath = rawurldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?: '/');
+if ($uriPath === '/__ready__') {
+    http_response_code(204);
+    return;
+}
+
+$file = realpath($docroot . '/' . ltrim($uriPath, '/'));
+if (
+    $docroot === false ||
+    $file === false ||
+    strpos($file, $docroot . DIRECTORY_SEPARATOR) !== 0 ||
+    !is_file($file)
+) {
+    http_response_code(404);
+    return;
+}
+
+$range = $_SERVER['HTTP_RANGE'] ?? '';
+file_put_contents(__RANGE_LOG__, $range . PHP_EOL, FILE_APPEND);
+
+http_response_code(200);
+header('Content-Type: application/octet-stream');
+header('Content-Length: ' . filesize($file));
+readfile($file);
+PHP
+            ,
+            [
+                '__DOCROOT__' => var_export($docroot, true),
+                '__RANGE_LOG__' => var_export($rangeLog, true),
+                '__REMOTE_UPLOADS__' => var_export($remoteUploads, true),
             ],
         );
         file_put_contents($router, $routerSource);

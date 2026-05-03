@@ -1023,6 +1023,12 @@ class ImportClient
     /** @var int Running count of files imported in the current invocation. */
     private $files_imported = 0;
 
+    /**
+     * @var array{cursor: string, current_file: string, current_file_bytes: int}|null
+     * File-fetch resume details synthesized from a validated public temp prefix.
+     */
+    private $pending_file_fetch_resume = null;
+
     /** @var int|null Total entries in the current download list.  Set once
      *  at the start of download_files_from_list() by counting newlines. */
     private $download_list_total = null;
@@ -6317,15 +6323,19 @@ class ImportClient
             $next_offset = $batch["next_offset"];
             $batch_entries = $batch["entries"];
             $fallback_entries = $batch["fallback_entries"];
-            $cursor = null;
+            $cursor = $batch["cursor"] ?? null;
             $this->state[$state_key] = [
                 "offset" => $batch_offset,
                 "next_offset" => $next_offset,
                 "batch_file" => $batch_file,
                 "batch_entries" => $batch_entries,
                 "fallback_entries" => $fallback_entries,
-                "cursor" => null,
+                "cursor" => $cursor,
             ];
+            if (isset($batch["current_file"], $batch["current_file_bytes"])) {
+                $this->state["current_file"] = $batch["current_file"];
+                $this->state["current_file_bytes"] = $batch["current_file_bytes"];
+            }
             $this->save_state($this->state);
         }
 
@@ -6404,12 +6414,14 @@ class ImportClient
      *
      * @param string $list_file Path to the JSONL download list.
      * @param int    $offset    Byte offset into the download list file.
-     * @return array{file: string, offset: int, next_offset: int, entries: int, fallback_entries: int}|null
+     * @return array{file: string, offset: int, next_offset: int, entries: int, fallback_entries: int, cursor?: string, current_file?: string, current_file_bytes?: int}|null
      *         The temp file path, byte offsets, and entry count, or null if
      *         no paths remain.
      */
     private function prepare_fetch_batch(string $list_file, int $offset): ?array
     {
+        $this->pending_file_fetch_resume = null;
+
         // Cap the batch at 80% of the server's max request size so the
         // multipart envelope and headers still fit.  Floor at 256 KB so
         // tiny max_request values don't produce degenerate single-file batches.
@@ -6512,7 +6524,8 @@ class ImportClient
             }
 
             $entries++;
-            if ($this->try_download_public_upload($entry)) {
+            $allow_php_prefix_resume = $fallback_entries === 0 && $first;
+            if ($this->try_download_public_upload($entry, $allow_php_prefix_resume)) {
                 $bytes += strlen($chunk);
                 if ($oversized_first_entry) {
                     break;
@@ -6526,6 +6539,9 @@ class ImportClient
             $bytes += strlen($chunk);
             $fallback_entries++;
             $first = false;
+            if ($this->pending_file_fetch_resume !== null) {
+                break;
+            }
             if ($oversized_first_entry) {
                 break;
             }
@@ -6543,13 +6559,19 @@ class ImportClient
             return null;
         }
 
-        return [
+        $batch = [
             "file" => $tmp,
             "offset" => $offset,
             "next_offset" => $next_offset,
             "entries" => $entries,
             "fallback_entries" => $fallback_entries,
         ];
+        if ($this->pending_file_fetch_resume !== null) {
+            $batch["cursor"] = $this->pending_file_fetch_resume["cursor"];
+            $batch["current_file"] = $this->pending_file_fetch_resume["current_file"];
+            $batch["current_file_bytes"] = $this->pending_file_fetch_resume["current_file_bytes"];
+        }
+        return $batch;
     }
 
     /**
@@ -6664,7 +6686,7 @@ class ImportClient
      * the public download does not exactly match the exported size; callers
      * then fall back to file_fetch through WordPress/PHP.
      */
-    private function try_download_public_upload(array $entry): bool
+    private function try_download_public_upload(array $entry, bool $allow_php_prefix_resume = false): bool
     {
         $path = $entry["path"] ?? null;
         if (!is_string($path) || $path === "") {
@@ -6835,6 +6857,20 @@ class ImportClient
                     "Public upload range resume unsupported | path={$path} | http={$http_code}",
                     false,
                 );
+                if (
+                    $allow_php_prefix_resume &&
+                    is_file($tmp) &&
+                    $this->prepare_public_upload_file_fetch_resume(
+                        $path,
+                        $tmp,
+                        $local_path,
+                        $ctime,
+                        $size,
+                        $resume_from,
+                    )
+                ) {
+                    return false;
+                }
             }
             @unlink($tmp);
             $this->clear_public_upload_resume_state();
@@ -6884,6 +6920,176 @@ class ImportClient
         $this->audit_log("Public upload downloaded: {$path}", false);
 
         return true;
+    }
+
+    private function prepare_public_upload_file_fetch_resume(
+        string $path,
+        string $tmp,
+        string $local_path,
+        int $ctime,
+        int $size,
+        int $resume_from
+    ): bool {
+        clearstatcache(true, $tmp);
+        $tmp_size = is_file($tmp) ? filesize($tmp) : false;
+        if ($tmp_size === false || $tmp_size < $resume_from) {
+            return false;
+        }
+
+        if ($tmp_size !== $resume_from) {
+            $handle = fopen($tmp, "r+");
+            if (!$handle) {
+                return false;
+            }
+            $truncated = ftruncate($handle, $resume_from);
+            fclose($handle);
+            if (!$truncated) {
+                return false;
+            }
+        }
+
+        if (!$this->validate_public_upload_prefix_with_php($path, $tmp, $resume_from, $ctime, $size)) {
+            return false;
+        }
+
+        $cursor = $this->build_file_fetch_resume_cursor($path, $ctime, $resume_from);
+        if ($cursor === null) {
+            return false;
+        }
+
+        if (!rename($tmp, $local_path)) {
+            return false;
+        }
+
+        $this->pending_file_fetch_resume = [
+            "cursor" => $cursor,
+            "current_file" => $local_path,
+            "current_file_bytes" => $resume_from,
+        ];
+        $this->clear_public_upload_resume_state();
+        $this->audit_log(
+            "Public upload prefix validated; resuming via file_fetch | path={$path} | bytes={$resume_from}",
+            false,
+        );
+        return true;
+    }
+
+    private function validate_public_upload_prefix_with_php(
+        string $path,
+        string $tmp,
+        int $bytes,
+        int $ctime,
+        int $size
+    ): bool {
+        $local_hash = $this->hash_file_prefix($tmp, $bytes, "md5");
+        if ($local_hash === null) {
+            return false;
+        }
+
+        $params = [
+            "path" => base64_encode($path),
+            "bytes" => $bytes,
+            "ctime" => $ctime,
+            "size" => $size,
+            "algorithm" => "md5",
+        ];
+        $export_dirs = $this->get_export_directories();
+        if (empty($export_dirs)) {
+            return false;
+        }
+        $params["directory"] = $export_dirs;
+
+        $response = $this->fetch_json($this->build_url("file_prefix_hash", null, $params));
+        if (!$response["ok"] || !is_array($response["json"])) {
+            $this->audit_log(
+                "Public upload prefix validation failed: " . ($response["error"] ?? "invalid response"),
+                false,
+            );
+            return false;
+        }
+
+        $remote = $response["json"];
+        if (
+            empty($remote["ok"]) ||
+            ($remote["algorithm"] ?? null) !== "md5" ||
+            (int) ($remote["bytes"] ?? 0) !== $bytes ||
+            !is_string($remote["hash"] ?? null) ||
+            !hash_equals($remote["hash"], $local_hash)
+        ) {
+            $reason = isset($remote["reason"]) && is_string($remote["reason"])
+                ? $remote["reason"]
+                : "hash_mismatch";
+            $this->audit_log(
+                "Public upload prefix validation rejected | path={$path} | reason={$reason}",
+                false,
+            );
+            return false;
+        }
+
+        return true;
+    }
+
+    private function hash_file_prefix(string $path, int $bytes, string $algorithm): ?string
+    {
+        if ($bytes <= 0 || !in_array($algorithm, hash_algos(), true)) {
+            return null;
+        }
+
+        $handle = fopen($path, "rb");
+        if (!$handle) {
+            return null;
+        }
+
+        $hash = hash_init($algorithm);
+        $remaining = $bytes;
+        while ($remaining > 0 && !feof($handle)) {
+            $chunk = fread($handle, min(1024 * 1024, $remaining));
+            if ($chunk === false) {
+                fclose($handle);
+                return null;
+            }
+            $remaining -= strlen($chunk);
+            hash_update($hash, $chunk);
+        }
+        fclose($handle);
+
+        if ($remaining !== 0) {
+            return null;
+        }
+
+        return hash_final($hash);
+    }
+
+    private function build_file_fetch_resume_cursor(string $path, int $ctime, int $bytes): ?string
+    {
+        $export_dirs = $this->get_export_directories();
+        if (empty($export_dirs) || $bytes <= 0) {
+            return null;
+        }
+
+        $root = null;
+        foreach ($export_dirs as $dir) {
+            $dir = rtrim($dir, "/");
+            if ($path === $dir || str_starts_with($path, $dir . "/")) {
+                $root = $dir;
+                break;
+            }
+        }
+        if ($root === null) {
+            $root = rtrim($export_dirs[0], "/");
+        }
+
+        $cursor = json_encode(
+            [
+                "phase" => "streaming",
+                "root" => base64_encode($root),
+                "path" => base64_encode($path),
+                "ctime" => $ctime,
+                "bytes" => $bytes,
+            ],
+            JSON_UNESCAPED_SLASHES,
+        );
+        return $cursor === false ? null : base64_encode($cursor);
     }
 
     /**
@@ -8610,6 +8816,10 @@ class ImportClient
                 $progress_record["files_total"] = $this->download_list_total;
             }
             $this->output_progress($progress_record);
+        }
+
+        if (!$is_first && $context->file_ctime === null && isset($headers["x-file-ctime"])) {
+            $context->file_ctime = (int) $headers["x-file-ctime"];
         }
 
         // Skip body/close for files being preserved

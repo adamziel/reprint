@@ -170,7 +170,7 @@ class FileBodyStreamingTest extends TestCase
         $context2 = new \StreamingContext();
         $context2->file_handle = fopen($target, 'ab');
         $context2->file_path = $target;
-        $context2->file_ctime = 1234567890;
+        $context2->file_ctime = null;
         $context2->file_bytes_written = $trackedBytes;
         $context2->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context2): void {
             $handleFileChunk->invoke($client, $chunk, $context2);

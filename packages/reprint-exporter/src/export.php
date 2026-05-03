@@ -7,6 +7,7 @@ use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\build_pdo_dsn;
 use function WordPress\Reprint\Exporter\json_encode_or_throw;
 use function WordPress\Reprint\Exporter\parse_size;
+use function WordPress\Reprint\Exporter\path_is_within_root;
 
 // Capture any accidental output before headers are set so we can discard it
 // when switching to streaming mode later.
@@ -3368,6 +3369,142 @@ function endpoint_file_fetch(
         $config,
         file_fetch_paths_should_gzip($paths),
     );
+}
+
+/**
+ * Hashes a prefix of one regular file for validating a resumed public download.
+ */
+function endpoint_file_prefix_hash(
+    array $config,
+    ResourceBudget $budget
+): array {
+    unset($budget);
+    clearstatcache(true);
+
+    $algorithm = (string) ($config["algorithm"] ?? "md5");
+    if ($algorithm !== "md5") {
+        throw new InvalidArgumentException("Unsupported hash algorithm");
+    }
+
+    $path_b64 = $config["path"] ?? null;
+    if (!is_string($path_b64) || $path_b64 === "") {
+        throw new InvalidArgumentException("path is required");
+    }
+
+    $path = base64_decode($path_b64, true);
+    if (!is_string($path) || $path === "") {
+        throw new InvalidArgumentException("path must be base64-encoded");
+    }
+    assert_valid_path($path, "path");
+
+    $bytes = require_int_range(
+        "bytes",
+        (int) ($config["bytes"] ?? 0),
+        1,
+        PHP_INT_MAX,
+    );
+    $expected_size = isset($config["size"]) ? (int) $config["size"] : null;
+    $expected_ctime = isset($config["ctime"]) ? (int) $config["ctime"] : null;
+
+    $directories = resolve_directories($config);
+    $real_path = realpath($path);
+    if ($real_path === false || !is_file($real_path)) {
+        return endpoint_file_prefix_hash_response([
+            "ok" => false,
+            "reason" => "missing",
+        ]);
+    }
+
+    $within_root = false;
+    foreach ($directories as $root) {
+        if (path_is_within_root($real_path, rtrim($root, "/"))) {
+            $within_root = true;
+            break;
+        }
+    }
+    if (!$within_root) {
+        return endpoint_file_prefix_hash_response([
+            "ok" => false,
+            "reason" => "outside_root",
+        ]);
+    }
+
+    $stat = stat($real_path);
+    if ($stat === false) {
+        return endpoint_file_prefix_hash_response([
+            "ok" => false,
+            "reason" => "stat_failed",
+        ]);
+    }
+
+    $size = (int) $stat["size"];
+    $ctime = (int) $stat["ctime"];
+    if (
+        ($expected_size !== null && $expected_size !== $size) ||
+        ($expected_ctime !== null && $expected_ctime !== $ctime) ||
+        $bytes > $size
+    ) {
+        return endpoint_file_prefix_hash_response([
+            "ok" => false,
+            "reason" => "metadata_mismatch",
+            "bytes" => $bytes,
+            "size" => $size,
+            "ctime" => $ctime,
+        ]);
+    }
+
+    $handle = fopen($real_path, "rb");
+    if (!$handle) {
+        return endpoint_file_prefix_hash_response([
+            "ok" => false,
+            "reason" => "open_failed",
+        ]);
+    }
+
+    $hash = hash_init($algorithm);
+    $remaining = $bytes;
+    while ($remaining > 0 && !feof($handle)) {
+        $chunk = fread($handle, min(1024 * 1024, $remaining));
+        if ($chunk === false) {
+            fclose($handle);
+            return endpoint_file_prefix_hash_response([
+                "ok" => false,
+                "reason" => "read_failed",
+            ]);
+        }
+        $remaining -= strlen($chunk);
+        hash_update($hash, $chunk);
+    }
+    fclose($handle);
+
+    if ($remaining !== 0) {
+        return endpoint_file_prefix_hash_response([
+            "ok" => false,
+            "reason" => "short_read",
+        ]);
+    }
+
+    return endpoint_file_prefix_hash_response([
+        "ok" => true,
+        "algorithm" => $algorithm,
+        "bytes" => $bytes,
+        "hash" => hash_final($hash),
+        "size" => $size,
+        "ctime" => $ctime,
+    ]);
+}
+
+/**
+ * Emits a JSON response for endpoint_file_prefix_hash().
+ */
+function endpoint_file_prefix_hash_response(array $response): array
+{
+    header("Content-Type: application/json");
+    echo json_encode_or_throw($response, JSON_UNESCAPED_SLASHES);
+    return [
+        "status" => !empty($response["ok"]) ? "ok" : "error",
+        "stats" => $response,
+    ];
 }
 
 /**
