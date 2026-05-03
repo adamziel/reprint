@@ -5695,20 +5695,11 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            // Defer save_state on intermediate body events of a streamed
-            // file part. The cursor on those events points at the *end* of
-            // the current part, but file_bytes_written only catches up at
-            // the part's last body event. Saving mid-body would persist a
-            // (cursor, bytes) pair where the cursor is ahead — a resume
-            // would tell the server to skip past bytes the importer never
-            // received and leave a gap in the local file.
-            //
-            // Force a save on every streamed-file part-complete event,
-            // bypassing the chunks_since_save counter. Multi-chunk files
-            // need per-part resume points; with the counter alone, a file
-            // that's the only thing in the request would never trigger a
-            // save before the (now possibly only) crash, leaving the next
-            // run with no current_file/current_file_bytes to resume from.
+            // Streamed file bodies can arrive in multiple parser callbacks
+            // for one exporter file part. Save only at the part boundary:
+            // mid-body, the cursor already points to the end of the part
+            // while file_bytes_written may still lag; at is_streaming_close
+            // the bytes are on disk and we force a per-part checkpoint.
             $is_streaming_body = !empty($chunk["is_streaming_body"]);
             $is_streaming_close = !empty($chunk["is_streaming_close"]);
             if (!$is_streaming_body) {
@@ -9302,16 +9293,8 @@ class ImportClient
                         ($context->on_chunk)([
                             "headers" => $stream_headers,
                             "body" => $event["data"],
-                            // Marks an intermediate body event of a streamed
-                            // file part — the cursor in $headers refers to the
-                            // *end* of this part, but file_bytes_written only
-                            // catches up after the part's last body event. The
-                            // file_fetch on_chunk uses this flag to suppress
-                            // periodic save_state during the body, since saving
-                            // mid-body would record a cursor that's ahead of
-                            // the bytes actually on disk. State save resumes at
-                            // the part's complete event, where the two values
-                            // are once again consistent.
+                            // Suppresses state saves while a streamed file
+                            // part body is still being written.
                             "is_streaming_body" => true,
                         ]);
                     }
@@ -9339,12 +9322,9 @@ class ImportClient
                         ($context->on_chunk)([
                             "headers" => $close_headers,
                             "body" => "",
-                            // Marks the part-complete event for a streamed
-                            // file part. The file_fetch on_chunk forces a
-                            // save_state on these events regardless of the
-                            // periodic counter, so a crash mid-multi-chunk
-                            // file always has a valid resume point even when
-                            // the file is the only thing in the request.
+                            // Forces a save at every streamed file-part
+                            // boundary, even if the periodic counter has not
+                            // reached SAVE_STATE_EVERY_N_CHUNKS.
                             "is_streaming_close" => true,
                         ]);
                     }
