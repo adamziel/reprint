@@ -1132,9 +1132,6 @@ class ImportClient
     /** @var int|null Total number of pipeline steps. Set via --steps. */
     private $pipeline_steps = null;
 
-    /** @var bool Current files-pull invocation is resuming persisted progress. */
-    private bool $files_sync_resuming = false;
-
     /** @var string Path to .import-status.json — machine-readable status for external progress readers. */
     private $status_file;
 
@@ -2539,7 +2536,6 @@ class ImportClient
             $state_command === "files-pull" &&
             $current_status !== null &&
             $current_status !== "complete";
-        $this->files_sync_resuming = $has_progress;
 
         $this->recover_index_updates();
 
@@ -2859,7 +2855,6 @@ class ImportClient
             $complete = $this->download_files_from_list(
                 $this->download_list_file,
                 "fetch",
-                !$this->files_sync_resuming,
             );
             if (!$complete) {
                 $this->state["status"] = "partial";
@@ -2911,7 +2906,6 @@ class ImportClient
             $complete = $this->download_files_from_list(
                 $this->skipped_download_list_file,
                 "fetch_skipped",
-                !$this->files_sync_resuming,
             );
             if (!$complete) {
                 $this->state["status"] = "partial";
@@ -6284,8 +6278,7 @@ class ImportClient
 
     private function download_files_from_list(
         string $list_file,
-        string $state_key,
-        bool $allow_public_uploads = true
+        string $state_key
     ): bool {
         if (!file_exists($list_file)) {
             return true;
@@ -6315,7 +6308,7 @@ class ImportClient
         $fallback_entries = (int) ($fetch_state["fallback_entries"] ?? $batch_entries);
 
         if ($batch_file === null || !file_exists($batch_file)) {
-            $batch = $this->prepare_fetch_batch($list_file, $batch_offset, $allow_public_uploads);
+            $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
             if ($batch === null) {
                 return true;
             }
@@ -6415,11 +6408,7 @@ class ImportClient
      *         The temp file path, byte offsets, and entry count, or null if
      *         no paths remain.
      */
-    private function prepare_fetch_batch(
-        string $list_file,
-        int $offset,
-        bool $allow_public_uploads = true
-    ): ?array
+    private function prepare_fetch_batch(string $list_file, int $offset): ?array
     {
         // Cap the batch at 80% of the server's max request size so the
         // multipart envelope and headers still fit.  Floor at 256 KB so
@@ -6523,7 +6512,7 @@ class ImportClient
             }
 
             $entries++;
-            if ($allow_public_uploads && $this->try_download_public_upload($entry)) {
+            if ($this->try_download_public_upload($entry)) {
                 $bytes += strlen($chunk);
                 if ($oversized_first_entry) {
                     break;
@@ -6663,6 +6652,11 @@ class ImportClient
         return $baseurl . "/" . implode("/", $segments);
     }
 
+    private function public_upload_temp_path(string $local_path): string
+    {
+        return $local_path . ".reprint-public-download";
+    }
+
     /**
      * Try to download a public upload directly from the source web server/CDN.
      *
@@ -6724,17 +6718,59 @@ class ImportClient
             }
         }
 
-        $tmp = $local_path . ".reprint-download-" . getmypid() . "-" . str_replace(".", "", uniqid("", true));
-        $handle = fopen($tmp, "wb");
+        $tmp = $this->public_upload_temp_path($local_path);
+        $resume_state = $this->state["public_upload"] ?? [];
+        $can_resume =
+            is_array($resume_state) &&
+            ($resume_state["path"] ?? null) === $path &&
+            ($resume_state["url"] ?? null) === $url &&
+            ($resume_state["local_path"] ?? null) === $local_path &&
+            ($resume_state["tmp_path"] ?? null) === $tmp &&
+            (int) ($resume_state["ctime"] ?? 0) === $ctime &&
+            (int) ($resume_state["size"] ?? -1) === $size;
+
+        if (!$can_resume && file_exists($tmp)) {
+            @unlink($tmp);
+        }
+
+        clearstatcache(true, $tmp);
+        $resume_from = ($can_resume && is_file($tmp)) ? (int) filesize($tmp) : 0;
+        if ($resume_from < 0 || $resume_from > $size) {
+            @unlink($tmp);
+            $resume_from = 0;
+        }
+
+        $this->state["public_upload"] = [
+            "path" => $path,
+            "url" => $url,
+            "local_path" => $local_path,
+            "tmp_path" => $tmp,
+            "ctime" => $ctime,
+            "size" => $size,
+            "bytes" => $resume_from,
+        ];
+        $this->save_state($this->state);
+
+        if ($resume_from === $size && is_file($tmp)) {
+            return $this->finish_public_upload_download($tmp, $local_path, $path, $ctime, $size);
+        }
+
+        $handle = fopen($tmp, $resume_from > 0 ? "ab" : "wb");
         if (!$handle) {
             $this->audit_log("Public upload download could not open temp file: {$tmp}", true);
+            $this->clear_public_upload_resume_state();
             return false;
         }
 
-        $this->audit_log("HTTP_REQUEST | GET | {$url} | public_upload_path={$path}", false);
+        $this->audit_log(
+            "HTTP_REQUEST | GET | {$url} | public_upload_path={$path} | resume_from={$resume_from}",
+            false,
+        );
 
         $ch = curl_init($url);
         reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
+        $last_state_save = microtime(true);
         curl_setopt_array($ch, [
             CURLOPT_FILE => $handle,
             CURLOPT_FOLLOWLOCATION => true,
@@ -6752,11 +6788,31 @@ class ImportClient
             CURLOPT_FAILONERROR => false,
             CURLOPT_NOPROGRESS => false,
             CURLOPT_PROGRESSFUNCTION =>
-                function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
+                function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) use (
+                    $tmp,
+                    $resume_from,
+                    &$last_state_save
+                ) {
                     $this->progress->tick_spinner();
+                    $bytes = $resume_from + (int) $dl_now;
+                    $this->state["public_upload"]["bytes"] = $bytes;
+                    if (microtime(true) - $last_state_save >= 2.0) {
+                        clearstatcache(true, $tmp);
+                        if (is_file($tmp)) {
+                            $this->state["public_upload"]["bytes"] = (int) filesize($tmp);
+                        }
+                        $this->save_state($this->state);
+                        $last_state_save = microtime(true);
+                    }
                     return 0;
                 },
         ]);
+        if ($resume_from > 0) {
+            $resume_option = defined("CURLOPT_RESUME_FROM_LARGE")
+                ? constant("CURLOPT_RESUME_FROM_LARGE")
+                : CURLOPT_RESUME_FROM;
+            curl_setopt($ch, $resume_option, $resume_from);
+        }
 
         $ok = curl_exec($ch);
         $errno = curl_errno($ch);
@@ -6767,8 +6823,21 @@ class ImportClient
 
         clearstatcache(true, $tmp);
         $actual_size = is_file($tmp) ? filesize($tmp) : false;
-        if ($ok !== true || $errno !== 0 || $http_code !== 200 || $actual_size !== $size) {
+        $expected_http_code = $resume_from > 0 ? 206 : 200;
+        if (
+            $ok !== true ||
+            $errno !== 0 ||
+            $http_code !== $expected_http_code ||
+            $actual_size !== $size
+        ) {
+            if ($resume_from > 0 && $http_code !== 206) {
+                $this->audit_log(
+                    "Public upload range resume unsupported | path={$path} | http={$http_code}",
+                    false,
+                );
+            }
             @unlink($tmp);
+            $this->clear_public_upload_resume_state();
             $this->audit_log(
                 sprintf(
                     "Public upload download fallback | path=%s | http=%d | errno=%d | size=%s/%d | error=%s",
@@ -6784,8 +6853,25 @@ class ImportClient
             return false;
         }
 
+        return $this->finish_public_upload_download($tmp, $local_path, $path, $ctime, $size);
+    }
+
+    private function clear_public_upload_resume_state(): void
+    {
+        $this->state["public_upload"] = $this->default_state()["public_upload"];
+        $this->save_state($this->state);
+    }
+
+    private function finish_public_upload_download(
+        string $tmp,
+        string $local_path,
+        string $path,
+        int $ctime,
+        int $size
+    ): bool {
         if (!rename($tmp, $local_path)) {
             @unlink($tmp);
+            $this->clear_public_upload_resume_state();
             $this->audit_log("Public upload download could not move temp file into place: {$path}", true);
             return false;
         }
@@ -6794,6 +6880,7 @@ class ImportClient
         $this->upsert_index_entry($path, $ctime, $size, "file");
         $this->files_imported++;
         $this->clear_volatile_file($path);
+        $this->clear_public_upload_resume_state();
         $this->audit_log("Public upload downloaded: {$path}", false);
 
         return true;
@@ -10393,6 +10480,15 @@ class ImportClient
                 "fallback_entries" => 0,
                 "cursor" => null,
             ],
+            "public_upload" => [
+                "path" => null,
+                "url" => null,
+                "local_path" => null,
+                "tmp_path" => null,
+                "ctime" => null,
+                "size" => null,
+                "bytes" => 0,
+            ],
             // Crash recovery: track in-progress file downloads
             // If we crash mid-write, we can truncate to the expected size on resume
             "current_file" => null,        // Path to file being written
@@ -10475,6 +10571,12 @@ class ImportClient
         }
         $fetch_skipped = array_intersect_key($fetch_skipped, $defaults["fetch_skipped"]);
         $state["fetch_skipped"] = array_merge($defaults["fetch_skipped"], $fetch_skipped);
+        $public_upload = $state["public_upload"] ?? [];
+        if (!is_array($public_upload)) {
+            $public_upload = [];
+        }
+        $public_upload = array_intersect_key($public_upload, $defaults["public_upload"]);
+        $state["public_upload"] = array_merge($defaults["public_upload"], $public_upload);
         $tuning = $state["tuning"] ?? [];
         if (!is_array($tuning)) {
             $tuning = [];
@@ -10521,6 +10623,15 @@ class ImportClient
         $state["fetch"]["batch_file"] = $this->encode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
+        $state["public_upload"]["path"] = $this->encode_state_path_value(
+            $state["public_upload"]["path"] ?? null,
+        );
+        $state["public_upload"]["local_path"] = $this->encode_state_path_value(
+            $state["public_upload"]["local_path"] ?? null,
+        );
+        $state["public_upload"]["tmp_path"] = $this->encode_state_path_value(
+            $state["public_upload"]["tmp_path"] ?? null,
+        );
         $state["current_file"] = $this->encode_state_path_value(
             $state["current_file"] ?? null,
         );
@@ -10554,6 +10665,15 @@ class ImportClient
         );
         $state["fetch"]["batch_file"] = $this->decode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
+        );
+        $state["public_upload"]["path"] = $this->decode_state_path_value(
+            $state["public_upload"]["path"] ?? null,
+        );
+        $state["public_upload"]["local_path"] = $this->decode_state_path_value(
+            $state["public_upload"]["local_path"] ?? null,
+        );
+        $state["public_upload"]["tmp_path"] = $this->decode_state_path_value(
+            $state["public_upload"]["tmp_path"] ?? null,
         );
         $state["current_file"] = $this->decode_state_path_value(
             $state["current_file"] ?? null,

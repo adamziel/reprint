@@ -105,29 +105,56 @@ class PublicUploadDownloadTest extends TestCase
         @unlink($batch['file']);
     }
 
-    public function testPrepareFetchBatchUsesFileFetchWhenPublicUploadsDisabled(): void
+    public function testDownloadFilesFromListResumesPublicUploadWithHttpRange(): void
     {
-        $contents = str_repeat('direct upload body ', 128);
-        $remotePath = '/var/www/html/wp-content/uploads/2024/05/resume-photo.jpg';
+        $sourceRoot = $this->tempDir . '/range-source-uploads';
+        mkdir($sourceRoot . '/2024/05', 0755, true);
+        $contents = str_repeat('resumable public upload body ', 256);
+        file_put_contents($sourceRoot . '/2024/05/resume-photo.txt', $contents);
+        $rangeLog = $this->tempDir . '/range.log';
+        $baseurl = $this->startRangeServer($sourceRoot, $rangeLog);
+
+        $ctime = 1700000000;
+        $remotePath = '/var/www/html/wp-content/uploads/2024/05/resume-photo.txt';
         $listFile = $this->writeDownloadList([
             [
                 'path' => base64_encode($remotePath),
-                'ctime' => 1700000000,
+                'ctime' => $ctime,
                 'size' => strlen($contents),
                 'type' => 'file',
             ],
         ]);
 
-        $client = $this->makeClient('/var/www/html/wp-content/uploads/', 'http://127.0.0.1:1');
-        $batch = (new \ReflectionClass($client))->getMethod('prepare_fetch_batch')
-            ->invoke($client, $listFile, 0, false);
+        $localPath = realpath($this->fsRoot) . $remotePath;
+        $tmpPath = $localPath . '.reprint-public-download';
+        mkdir(dirname($tmpPath), 0755, true);
+        $resumeFrom = 37;
+        file_put_contents($tmpPath, substr($contents, 0, $resumeFrom));
 
-        $this->assertNotNull($batch);
-        $this->assertSame(1, $batch['entries']);
-        $this->assertSame(1, $batch['fallback_entries']);
-        $this->assertSame([$remotePath], json_decode(file_get_contents($batch['file']), true));
-        $this->assertFileDoesNotExist($this->fsRoot . $remotePath);
-        @unlink($batch['file']);
+        $client = $this->makeClient('/var/www/html/wp-content/uploads/', $baseurl);
+        $client->state['public_upload'] = [
+            'path' => $remotePath,
+            'url' => $baseurl . '/2024/05/resume-photo.txt',
+            'local_path' => $localPath,
+            'tmp_path' => $tmpPath,
+            'ctime' => $ctime,
+            'size' => strlen($contents),
+            'bytes' => $resumeFrom,
+        ];
+
+        $complete = (new \ReflectionClass($client))->getMethod('download_files_from_list')
+            ->invoke($client, $listFile, 'fetch');
+
+        $this->assertTrue($complete);
+        $this->assertSame($contents, file_get_contents($localPath));
+        $this->assertFileDoesNotExist($tmpPath);
+        $this->assertNull($client->state['public_upload']['path']);
+        $this->assertSame(filesize($listFile), $client->state['fetch']['offset']);
+        $this->assertStringContainsString(
+            'bytes=' . $resumeFrom . '-',
+            file_get_contents($rangeLog),
+            file_get_contents($this->stateDir . '/.import-audit.log'),
+        );
     }
 
     private function makeClient(string $uploadsBasedir, string $uploadsBaseurl): \ImportClient
@@ -178,7 +205,72 @@ class PublicUploadDownloadTest extends TestCase
         return $entries;
     }
 
-    private function startServer(string $docroot): string
+    private function startRangeServer(string $docroot, string $rangeLog): string
+    {
+        $router = $this->tempDir . '/range-router.php';
+        $serverRoot = $this->tempDir . '/range-server-root';
+        mkdir($serverRoot, 0755, true);
+        $routerSource = strtr(
+            <<<'PHP'
+<?php
+$uriPath = rawurldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?: '/');
+if ($uriPath === '/__ready__') {
+    http_response_code(204);
+    return;
+}
+
+$docroot = realpath(__DOCROOT__);
+$file = realpath($docroot . '/' . ltrim($uriPath, '/'));
+if (
+    $docroot === false ||
+    $file === false ||
+    strpos($file, $docroot . DIRECTORY_SEPARATOR) !== 0 ||
+    !is_file($file)
+) {
+    http_response_code(404);
+    return;
+}
+
+$range = $_SERVER['HTTP_RANGE'] ?? '';
+file_put_contents(__RANGE_LOG__, $range . PHP_EOL, FILE_APPEND);
+
+$size = filesize($file);
+$start = 0;
+$status = 200;
+if (preg_match('/^bytes=(\d+)-$/', $range, $matches)) {
+    $start = (int) $matches[1];
+    if ($start >= $size) {
+        http_response_code(416);
+        header('Content-Range: bytes */' . $size);
+        return;
+    }
+    $status = 206;
+}
+
+http_response_code($status);
+header('Accept-Ranges: bytes');
+header('Content-Type: application/octet-stream');
+header('Content-Length: ' . ($size - $start));
+if ($status === 206) {
+    header('Content-Range: bytes ' . $start . '-' . ($size - 1) . '/' . $size);
+}
+
+$handle = fopen($file, 'rb');
+fseek($handle, $start);
+fpassthru($handle);
+fclose($handle);
+PHP
+            ,
+            [
+                '__DOCROOT__' => var_export($docroot, true),
+                '__RANGE_LOG__' => var_export($rangeLog, true),
+            ],
+        );
+        file_put_contents($router, $routerSource);
+        return $this->startServer($serverRoot, $router);
+    }
+
+    private function startServer(string $docroot, ?string $router = null): string
     {
         $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
         if (!$socket) {
@@ -189,6 +281,9 @@ class PublicUploadDownloadTest extends TestCase
         $port = (int) substr(strrchr($name, ':'), 1);
 
         $cmd = escapeshellarg(PHP_BINARY) . ' -S 127.0.0.1:' . $port . ' -t ' . escapeshellarg($docroot);
+        if ($router !== null) {
+            $cmd .= ' ' . escapeshellarg($router);
+        }
         $this->serverProcess = proc_open(
             $cmd,
             [
