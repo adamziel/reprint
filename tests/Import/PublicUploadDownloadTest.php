@@ -105,6 +105,31 @@ class PublicUploadDownloadTest extends TestCase
         @unlink($batch['file']);
     }
 
+    public function testPrepareFetchBatchUsesFileFetchWhenPublicUploadsDisabled(): void
+    {
+        $contents = str_repeat('direct upload body ', 128);
+        $remotePath = '/var/www/html/wp-content/uploads/2024/05/resume-photo.jpg';
+        $listFile = $this->writeDownloadList([
+            [
+                'path' => base64_encode($remotePath),
+                'ctime' => 1700000000,
+                'size' => strlen($contents),
+                'type' => 'file',
+            ],
+        ]);
+
+        $client = $this->makeClient('/var/www/html/wp-content/uploads/', 'http://127.0.0.1:1');
+        $batch = (new \ReflectionClass($client))->getMethod('prepare_fetch_batch')
+            ->invoke($client, $listFile, 0, false);
+
+        $this->assertNotNull($batch);
+        $this->assertSame(1, $batch['entries']);
+        $this->assertSame(1, $batch['fallback_entries']);
+        $this->assertSame([$remotePath], json_decode(file_get_contents($batch['file']), true));
+        $this->assertFileDoesNotExist($this->fsRoot . $remotePath);
+        @unlink($batch['file']);
+    }
+
     private function makeClient(string $uploadsBasedir, string $uploadsBaseurl): \ImportClient
     {
         $client = new \ImportClient('http://fake.url', $this->stateDir, $this->fsRoot);

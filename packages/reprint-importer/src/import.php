@@ -1132,6 +1132,9 @@ class ImportClient
     /** @var int|null Total number of pipeline steps. Set via --steps. */
     private $pipeline_steps = null;
 
+    /** @var bool Current files-pull invocation is resuming persisted progress. */
+    private bool $files_sync_resuming = false;
+
     /** @var string Path to .import-status.json — machine-readable status for external progress readers. */
     private $status_file;
 
@@ -2536,6 +2539,7 @@ class ImportClient
             $state_command === "files-pull" &&
             $current_status !== null &&
             $current_status !== "complete";
+        $this->files_sync_resuming = $has_progress;
 
         $this->recover_index_updates();
 
@@ -2855,6 +2859,7 @@ class ImportClient
             $complete = $this->download_files_from_list(
                 $this->download_list_file,
                 "fetch",
+                !$this->files_sync_resuming,
             );
             if (!$complete) {
                 $this->state["status"] = "partial";
@@ -2906,6 +2911,7 @@ class ImportClient
             $complete = $this->download_files_from_list(
                 $this->skipped_download_list_file,
                 "fetch_skipped",
+                !$this->files_sync_resuming,
             );
             if (!$complete) {
                 $this->state["status"] = "partial";
@@ -6278,7 +6284,8 @@ class ImportClient
 
     private function download_files_from_list(
         string $list_file,
-        string $state_key
+        string $state_key,
+        bool $allow_public_uploads = true
     ): bool {
         if (!file_exists($list_file)) {
             return true;
@@ -6308,7 +6315,7 @@ class ImportClient
         $fallback_entries = (int) ($fetch_state["fallback_entries"] ?? $batch_entries);
 
         if ($batch_file === null || !file_exists($batch_file)) {
-            $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
+            $batch = $this->prepare_fetch_batch($list_file, $batch_offset, $allow_public_uploads);
             if ($batch === null) {
                 return true;
             }
@@ -6408,7 +6415,11 @@ class ImportClient
      *         The temp file path, byte offsets, and entry count, or null if
      *         no paths remain.
      */
-    private function prepare_fetch_batch(string $list_file, int $offset): ?array
+    private function prepare_fetch_batch(
+        string $list_file,
+        int $offset,
+        bool $allow_public_uploads = true
+    ): ?array
     {
         // Cap the batch at 80% of the server's max request size so the
         // multipart envelope and headers still fit.  Floor at 256 KB so
@@ -6512,7 +6523,7 @@ class ImportClient
             }
 
             $entries++;
-            if ($this->try_download_public_upload($entry)) {
+            if ($allow_public_uploads && $this->try_download_public_upload($entry)) {
                 $bytes += strlen($chunk);
                 if ($oversized_first_entry) {
                     break;
