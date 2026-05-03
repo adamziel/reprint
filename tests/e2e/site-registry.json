@@ -124,6 +124,9 @@
     },
     "file-body-resume": {
       "port": 8120
+    },
+    "public-upload-bench": {
+      "port": 8121
     }
   }
 }

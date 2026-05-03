@@ -31,6 +31,7 @@ import {
 
 const SITE = 'large-directory';
 const FILE_BENCH_SITE = 'large-single-file';
+const PUBLIC_UPLOAD_BENCH_SITE = 'public-upload-bench';
 const FILE_BENCH_SIZE_MB = Number(process.env.BENCH_FILE_SIZE_MB || 24);
 const FILE_BENCH_SIZE = FILE_BENCH_SIZE_MB * 1024 * 1024;
 const FILE_BENCH_TUNED_CHUNK_SIZE = 16 * 1024 * 1024;
@@ -219,7 +220,6 @@ async function ensureFileBenchSite() {
 
     const siteDir = getSiteDir(FILE_BENCH_SITE);
     const filePath = join(siteDir, FILE_BENCH_RELATIVE_PATH);
-    const uploadFilePath = join(siteDir, FILE_BENCH_UPLOAD_RELATIVE_PATH);
     const needsFile = !existsSync(filePath) || statSync(filePath).size !== FILE_BENCH_SIZE;
     if (needsFile) {
         console.log(`Creating ${fmtBytes(FILE_BENCH_SIZE)} random file for file-transfer benchmark...`);
@@ -227,6 +227,19 @@ async function ensureFileBenchSite() {
         execSync(`sudo rm -f ${JSON.stringify(filePath)}`);
         execSync(`sudo dd if=/dev/urandom of=${JSON.stringify(filePath)} bs=1M count=${FILE_BENCH_SIZE_MB} status=none`);
         execSync(`sudo chown nginx:nginx ${JSON.stringify(filePath)}`);
+    }
+
+    return { site: FILE_BENCH_SITE, siteDir, filePath };
+}
+
+async function ensurePublicUploadBenchSite() {
+    await ensureSite(PUBLIC_UPLOAD_BENCH_SITE, { files: 'none' });
+
+    const siteDir = getSiteDir(PUBLIC_UPLOAD_BENCH_SITE);
+    const filePath = join(siteDir, FILE_BENCH_RELATIVE_PATH);
+    const uploadFilePath = join(siteDir, FILE_BENCH_UPLOAD_RELATIVE_PATH);
+    if (existsSync(filePath)) {
+        execSync(`sudo rm -f ${JSON.stringify(filePath)}`);
     }
 
     const needsUploadFile = !existsSync(uploadFilePath) || statSync(uploadFilePath).size !== FILE_BENCH_SIZE;
@@ -238,7 +251,7 @@ async function ensureFileBenchSite() {
         execSync(`sudo chown nginx:nginx ${JSON.stringify(uploadFilePath)}`);
     }
 
-    return { site: FILE_BENCH_SITE, siteDir, filePath, uploadFilePath };
+    return { site: PUBLIC_UPLOAD_BENCH_SITE, siteDir, uploadFilePath };
 }
 
 async function runFileFetchScenario({ stage, site, filePath, params = {}, details = {} }) {
@@ -418,7 +431,9 @@ function readUploadsBaseUrl(stateDir) {
     return state.preflight?.data?.database?.wp?.paths_urls?.uploads?.baseurl || '';
 }
 
-function runPublicUploadsFilePull({ site, stateDir, uploadFilePath, uploadsBaseUrl }) {
+function runPublicUploadsFilePull({
+    site, stateDir, uploadFilePath, uploadsBaseUrl, requireDirectUpload = false,
+}) {
     const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     const args = [
         IMPORTER_PATH,
@@ -443,6 +458,29 @@ function runPublicUploadsFilePull({ site, stateDir, uploadFilePath, uploadsBaseU
                 maxBuffer: 64 * 1024 * 1024,
                 stdio: ['ignore', 'pipe', 'pipe'],
             });
+            const auditLog = join(stateDir, '.import-audit.log');
+            const audit = existsSync(auditLog) ? readFileSync(auditLog, 'utf-8') : '';
+            const uploadRemotePath = uploadFilePath;
+            const sawDirectUpload = audit.includes(`Public upload downloaded: ${uploadRemotePath}`);
+            const sawFallbackForUpload = audit.includes(`Public upload download fallback | path=${uploadRemotePath}`);
+            if (requireDirectUpload && (!sawDirectUpload || sawFallbackForUpload)) {
+                return {
+                    stage: 'files-pull-public-uploads',
+                    elapsedMs: performance.now() - start,
+                    attempts,
+                    ok: false,
+                    exitCode: 1,
+                    stderr: `Expected direct public upload download for ${uploadRemotePath}`,
+                    stdout: audit.slice(-2000),
+                    details: {
+                        condition: 'files-pull public wp-content/uploads file',
+                        upload: fmtBytes(statSync(uploadFilePath).size),
+                        uploads_baseurl: uploadsBaseUrl ? 'present' : 'missing',
+                        direct_upload: sawDirectUpload ? 'yes' : 'no',
+                        public_fallback: sawFallbackForUpload ? 'yes' : 'no',
+                    },
+                };
+            }
             return {
                 stage: 'files-pull-public-uploads',
                 elapsedMs: performance.now() - start,
@@ -452,6 +490,8 @@ function runPublicUploadsFilePull({ site, stateDir, uploadFilePath, uploadsBaseU
                     condition: 'files-pull public wp-content/uploads file',
                     upload: fmtBytes(statSync(uploadFilePath).size),
                     uploads_baseurl: uploadsBaseUrl ? 'present' : 'missing',
+                    direct_upload: sawDirectUpload ? 'yes' : 'no',
+                    public_fallback: sawFallbackForUpload ? 'yes' : 'no',
                 },
             };
         } catch (e) {
@@ -472,6 +512,7 @@ function runPublicUploadsFilePull({ site, stateDir, uploadFilePath, uploadsBaseU
                     condition: 'files-pull public wp-content/uploads file',
                     upload: fmtBytes(statSync(uploadFilePath).size),
                     uploads_baseurl: uploadsBaseUrl ? 'present' : 'missing',
+                    direct_upload: 'unknown',
                 },
             };
         }
@@ -619,21 +660,20 @@ async function main() {
     }
 
     if (shouldRun('files-pull-public-uploads')) {
-        if (!fileBench) {
-            console.log(`Provisioning site: ${FILE_BENCH_SITE}`);
-            fileBench = await ensureFileBenchSite();
-        }
+        console.log(`Provisioning site: ${PUBLIC_UPLOAD_BENCH_SITE}`);
+        const publicUploadBench = await ensurePublicUploadBenchSite();
         const publicUploadsStateDir = join(tmpdir(), `bench-public-uploads-${Date.now()}`);
         mkdirSync(publicUploadsStateDir, { recursive: true });
         mkdirSync(fsRootDir(publicUploadsStateDir), { recursive: true });
-        runPreflightForSite(fileBench.site, publicUploadsStateDir);
+        runPreflightForSite(publicUploadBench.site, publicUploadsStateDir);
         const uploadsBaseUrl = readUploadsBaseUrl(publicUploadsStateDir);
         console.log('-> files-pull-public-uploads');
         const publicUploadsPull = runPublicUploadsFilePull({
-            site: fileBench.site,
+            site: publicUploadBench.site,
             stateDir: publicUploadsStateDir,
-            uploadFilePath: fileBench.uploadFilePath,
+            uploadFilePath: publicUploadBench.uploadFilePath,
             uploadsBaseUrl,
+            requireDirectUpload: process.env.BENCH_REQUIRE_DIRECT_PUBLIC_UPLOAD === '1',
         });
         results.push(publicUploadsPull);
         console.log(`   ${publicUploadsPull.ok ? 'ok' : 'FAIL'} in ${fmtMs(publicUploadsPull.elapsedMs)} (${fmtDetails(publicUploadsPull.details)})`);

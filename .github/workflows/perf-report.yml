@@ -138,13 +138,14 @@ jobs:
           BENCH_JSON_OUT: bench-pr.json
           BENCH_MD_OUT: bench-pr.md
           BENCH_STAGES: ${{ steps.stages.outputs.stages }}
+          BENCH_REQUIRE_DIRECT_PUBLIC_UPLOAD: '1'
           E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}
         run: node benchmark/bench-pull.mjs
 
       - name: Reset benchmark sites before trunk
         run: |
-          sudo rm -rf /srv/e2e-sites/large-directory /srv/e2e-sites/large-single-file
-          sudo rm -f /tmp/e2e-site-large-directory.lock /tmp/e2e-site-large-single-file.lock
+          sudo rm -rf /srv/e2e-sites/large-directory /srv/e2e-sites/large-single-file /srv/e2e-sites/public-upload-bench
+          sudo rm -f /tmp/e2e-site-large-directory.lock /tmp/e2e-site-large-single-file.lock /tmp/e2e-site-public-upload-bench.lock
 
       - name: Bench trunk
         working-directory: tests/e2e
