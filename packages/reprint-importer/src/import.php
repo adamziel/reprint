@@ -3385,13 +3385,13 @@ class ImportClient
             $buffered_done    = $pool_state["buffered_done"] ?? [];
             $next_slot_id     = (int) ($pool_state["next_slot_id"] ?? 0);
             $restored_slots   = $pool_state["slots"] ?? [];
-            $this->audit_log(sprintf(
-                "FOLLOW SYMLINK RESUME | committed=%d buffered_done=%d in_flight=%d next_slot_id=%d",
-                $committed,
-                count($buffered_done),
-                count($restored_slots),
-                $next_slot_id,
-            ), true);
+            $this->output_progress([
+                "type"          => "symlink_pool_resume",
+                "committed"     => $committed,
+                "buffered_done" => count($buffered_done),
+                "in_flight"     => count($restored_slots),
+                "next_slot_id"  => $next_slot_id,
+            ], true);
             // Restore in-flight slots into $slots under their *original*
             // slot ids so the watermark stays contiguous. Mark each dir
             // as visited so the freshly-rebuilt queue doesn't redispatch
@@ -3543,12 +3543,12 @@ class ImportClient
                 "slots"        => $persistent_slots,
             ];
             $this->save_state($this->state);
-            $this->audit_log(sprintf(
-                "FOLLOW SYMLINK PERSIST | committed=%d buffered_done=%d in_flight=%d",
-                $committed,
-                count($buffered_done),
-                count($persistent_slots),
-            ), true);
+            $this->output_progress([
+                "type"          => "symlink_pool_persist",
+                "committed"     => $committed,
+                "buffered_done" => count($buffered_done),
+                "in_flight"     => count($persistent_slots),
+            ], true);
         };
 
         // curl_multi-driven main loop: each in-flight slot owns one cURL
