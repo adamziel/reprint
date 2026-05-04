@@ -3385,23 +3385,36 @@ class ImportClient
             $buffered_done    = $pool_state["buffered_done"] ?? [];
             $next_slot_id     = (int) ($pool_state["next_slot_id"] ?? 0);
             $restored_slots   = $pool_state["slots"] ?? [];
-            // Re-enqueue restored in-flight slots at the front of the queue
-            // so they are dispatched again in the correct order. Buffered-done
-            // slots are *not* re-issued; their data lives in the sidecar dir
-            // and will drain when the failed earlier slot finally completes.
+            // Restore in-flight slots into $slots under their *original*
+            // slot ids so the watermark stays contiguous. Mark each dir
+            // as visited so the freshly-rebuilt queue doesn't redispatch
+            // it as a new slot id. The pool's re-attach pass will pick
+            // these up and resume from their saved cursor.
             foreach ($restored_slots as $slot) {
                 $slot_id = (int) ($slot["slot_id"] ?? $next_slot_id);
                 if (isset($buffered_done[$slot_id])) {
                     continue;
                 }
-                array_unshift($queue, $slot["dir"]);
-                unset($visited[$slot["dir"]]);
+                $slots[$slot_id] = [
+                    "dir"         => $slot["dir"],
+                    "cursor"      => $slot["cursor"] ?? null,
+                    "attempts"    => (int) ($slot["attempts"] ?? 0),
+                    "last_cursor" => null,
+                    "data_buf"    => "",
+                    "done"        => false,
+                    "skipped"     => false,
+                    "error"       => null,
+                ];
+                $visited[$slot["dir"]] = true;
             }
             // Materialise buffered-done slots back into $slots so the
-            // watermark advance + flush logic can drain their sidecars.
+            // watermark advance + flush logic can drain their sidecars,
+            // and mark their directories visited so the queue doesn't
+            // re-issue them as fresh requests.
             foreach ($buffered_done as $slot_id => $_) {
+                $dir = $pool_state["buffered_dirs"][$slot_id] ?? "";
                 $slots[$slot_id] = [
-                    "dir"         => $pool_state["buffered_dirs"][$slot_id] ?? "",
+                    "dir"         => $dir,
                     "cursor"      => null,
                     "attempts"    => 0,
                     "last_cursor" => null,
@@ -3410,6 +3423,9 @@ class ImportClient
                     "skipped"     => false,
                     "error"       => null,
                 ];
+                if ($dir !== "") {
+                    $visited[$dir] = true;
+                }
             }
             unset($this->state["symlink_pool"]);
         }
