@@ -165,15 +165,44 @@ register_shutdown_function(function () {
 
 function resolve_sqlite_integration_path(string $suffix = ''): string
 {
+    $suffixes = [$suffix];
+    $moved_paths = [
+        '/php-polyfills.php' => '/packages/mysql-on-sqlite/src/php-polyfills.php',
+        '/version.php' => '/packages/mysql-on-sqlite/src/version.php',
+    ];
+    if (isset($moved_paths[$suffix])) {
+        $suffixes[] = $moved_paths[$suffix];
+    }
+
     foreach ([dirname(__DIR__, 3), dirname(__DIR__, 4)] as $project_root) {
-        $candidate = $project_root . '/lib/sqlite-database-integration' . $suffix;
-        if (file_exists($candidate)) {
-            return $candidate;
+        foreach ($suffixes as $candidate_suffix) {
+            $candidate = $project_root . '/lib/sqlite-database-integration' . $candidate_suffix;
+            if (file_exists($candidate)) {
+                return $candidate;
+            }
         }
     }
 
     throw new RuntimeException(
         'SQLite target support requires lib/sqlite-database-integration to be initialized.'
+    );
+}
+
+function resolve_sqlite_integration_plugin_path(): string
+{
+    foreach ([dirname(__DIR__, 3), dirname(__DIR__, 4)] as $project_root) {
+        $root = $project_root . '/lib/sqlite-database-integration';
+        $package = $root . '/packages/plugin-sqlite-database-integration';
+        if (is_dir($package)) {
+            return $package;
+        }
+        if (is_dir($root . '/wp-includes/sqlite')) {
+            return $root;
+        }
+    }
+
+    throw new RuntimeException(
+        'SQLite runtime support requires lib/sqlite-database-integration to be initialized.'
     );
 }
 
@@ -3906,7 +3935,7 @@ class ImportClient
                 $db_file = '.ht.sqlite';
             }
             $manifest->sqlite = [
-                'plugin_source' => resolve_sqlite_integration_path(),
+                'plugin_source' => resolve_sqlite_integration_plugin_path(),
                 'plugin_dir' => '',  // resolved after copy_sqlite_plugin()
                 'db_dir' => $db_dir,
                 'db_file' => $db_file,
@@ -4788,24 +4817,19 @@ class ImportClient
             );
         }
 
-        // The bundled wp-pdo-mysql-on-sqlite.php require_onces a fixed
-        // set of class files relative to its own dirname. When the host
-        // already loaded a *different* copy of those same classes
-        // (notably WordPress Playground's auto_prepend, which preloads
-        // /internal/shared/sqlite-database-integration), each class
-        // declaration in the bundled tree throws a fatal "name already
-        // in use". The require_once path-guard doesn't help because the
-        // two trees live at different paths. Skip the loader entirely
-        // when the host's copy is already in memory — both trees expose
-        // the same class names, so the existing instance is fine.
+        // The bundled loader require_onces a fixed set of class files
+        // relative to its own dirname. When the host already loaded a
+        // different copy of those same classes (notably WordPress
+        // Playground's auto_prepend), each class declaration would throw
+        // a fatal "name already in use". Skip the loader entirely when the
+        // host's copy is already in memory — both trees expose the same
+        // public class names, so the existing instance is fine.
         $driver_loader = resolve_sqlite_integration_path("/wp-pdo-mysql-on-sqlite.php");
-        $polyfills = resolve_sqlite_integration_path("/php-polyfills.php");
         if (
             class_exists("WP_PDO_MySQL_On_SQLite", false) &&
             class_exists("WP_Parser_Grammar", false)
         ) {
             $driver_loader = null;
-            $polyfills = null;
         }
 
         if ($target_path !== ':memory:') {
@@ -4819,7 +4843,6 @@ class ImportClient
             }
         }
 
-        if ($polyfills !== null)     { require_once $polyfills; }
         if ($driver_loader !== null) { require_once $driver_loader; }
 
         $dsn = sprintf(

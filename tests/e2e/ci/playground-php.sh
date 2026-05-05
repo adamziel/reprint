@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Wrapper that invokes PHP through WordPress Playground CLI's WASM runtime.
+# Wrapper that invokes PHP through WordPress Playground's WASM runtime.
 # Used by e2e tests when PHP_BINARY points here instead of the system `php`.
 #
-# Mounts the host filesystem paths that the importer needs:
-# - The workspace root (for reprint.phar and project files)
-# - /tmp (for temporary test output)
-# - /srv (for e2e test site data)
+# By default this delegates to @wp-playground/cli php so the CI still covers
+# the public CLI path. When WP_MYSQL_PARSER_EXTENSION_MANIFEST is set, or when
+# PLAYGROUND_PHP_USE_WASM_RUNNER=1 is set, it uses the local @php-wasm/node
+# runner because the CLI does not expose arbitrary external PHP extensions.
 set -euo pipefail
+
+if [ -n "${WP_MYSQL_PARSER_EXTENSION_MANIFEST:-}" ] || [ "${PLAYGROUND_PHP_USE_WASM_RUNNER:-}" = "1" ]; then
+    SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    exec node --experimental-wasm-jspi "${SCRIPT_DIR}/php-wasm-runner.mjs" "$@"
+fi
 
 MOUNT_ARGS=()
 

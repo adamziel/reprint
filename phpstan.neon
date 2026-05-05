@@ -17,6 +17,7 @@ parameters:
             - reprint-exporter-wp/wordpress/
             - reprint-exporter-wp/index.php
             - reprint-exporter-wp/vendor/
+            - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/mysql/native/
         analyse:
             - packages/reprint-exporter/src/class-sqlite-driver-pdo.php
             - packages/reprint-importer/src/lib/mysql-query-stream/
@@ -24,7 +25,6 @@ parameters:
     treatPhpDocTypesAsCertain: false
     scanDirectories:
         - packages/reprint-exporter/src
-        - lib/sqlite-database-integration/wp-includes/parser
-        - lib/sqlite-database-integration/wp-includes/mysql
-        - lib/sqlite-database-integration/wp-includes/sqlite
-        - lib/sqlite-database-integration/wp-includes/sqlite-ast
+        - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/parser
+        - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/mysql
+        - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/sqlite

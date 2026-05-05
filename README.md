@@ -412,6 +412,16 @@ INI values), SiteGround, and a generic default.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 
+For Playground CI, set `PHP_BINARY=tests/e2e/ci/playground-php.sh`. The wrapper
+delegates to `@wp-playground/cli php` by default. When
+`WP_MYSQL_PARSER_EXTENSION_MANIFEST` is set, it runs the local `@php-wasm/node`
+runner instead so it can load the SQLite Integration plugin's Rust
+`wp_mysql_parser` PHP.wasm extension. CI verifies that this path does more than
+load the `.so`: `tests/e2e/ci/verify-wp-mysql-parser.php` asserts that
+`WP_MySQL_Lexer` resolves to the native lexer and that the SQLite driver creates
+a native-backed parser before benchmarking Playground `db-pull` and `db-apply`.
+That path requires Node.js with JSPI support; CI uses Node 24.
+
 #### Shoehorning the site onto your platform
 
 You've got a copy of the remote files in the `--fs-root` directory and

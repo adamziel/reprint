@@ -33,6 +33,9 @@ jobs:
     needs: build-phar
     runs-on: ubuntu-22.04
     timeout-minutes: 60
+    env:
+      PLAYGROUND_PHP_VERSION: '8.3'
+      WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
 
     steps:
       - uses: actions/checkout@v4
@@ -45,10 +48,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       # The export side still needs real PHP-FPM + nginx.
-      # Use PHP 8.2 for the server; the importer will use Playground CLI's PHP 8.0.
+      # Use PHP 8.2 for the server; the importer runs under PHP.wasm.
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
       # because every Launchpad endpoint flakes regularly.
@@ -82,6 +85,13 @@ jobs:
           echo "=== Test PHAR with mount ==="
           npx @wp-playground/cli php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- "${GITHUB_WORKSPACE}/reprint.phar" --help || echo "EXIT: $?"
 
+      - name: Verify wp_mysql_parser extension is selected
+        env:
+          PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
+        run: |
+          output="$("$PHP_BINARY" "${GITHUB_WORKSPACE}/tests/e2e/ci/verify-wp-mysql-parser.php" "${GITHUB_WORKSPACE}" parser)"
+          echo "$output"
+
       - name: Provision basic site and smoke-test API
         env:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
@@ -107,7 +117,7 @@ jobs:
           DIR="/srv/e2e-sites/basic"
 
           echo "=== Playground CLI importer preflight ==="
-          timeout 60 "$PHP_BINARY" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+          timeout 120 "$PHP_BINARY" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
 
       - name: Run E2E tests
         env:
