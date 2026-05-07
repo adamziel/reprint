@@ -44,6 +44,7 @@ const SEED_POSTMETA = Number(process.env.BENCH_SEED_POSTMETA || 720_015);
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+const PREFLIGHT_IMPORTER_PATH = process.env.BENCH_PREFLIGHT_IMPORTER_PATH || IMPORTER_PATH;
 const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'playground-php.sh');
 const PLAYGROUND_PHP_VERSION = process.env.PLAYGROUND_PHP_VERSION || '8.3';
 const REGISTRY = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'site-registry.json'), 'utf-8'));
@@ -137,8 +138,9 @@ async function provisionDatabase() {
 
 function runStage(stage, stateDir, extraArgs = [], { includeUrl = true, phpBinary = PHP_BINARY, env = {} } = {}) {
     const url = `${getSiteUrl(SITE)}&directory=${getSiteDir(SITE)}`;
+    const importerPath = stage === 'preflight' ? PREFLIGHT_IMPORTER_PATH : IMPORTER_PATH;
     const args = [
-        IMPORTER_PATH,
+        importerPath,
         stage,
         ...(includeUrl ? [url] : []),
         `--state-dir=${stateDir}`,
@@ -733,6 +735,7 @@ async function main() {
         seedPostmeta: SEED_POSTMETA,
         phpVersion,
         importer: IMPORTER_PATH,
+        preflightImporter: PREFLIGHT_IMPORTER_PATH,
     };
     const md = renderMarkdown(results, meta);
     console.log('\n' + md);

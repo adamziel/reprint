@@ -64,13 +64,6 @@ jobs:
         with:
           submodules: true
 
-      - name: Checkout trunk exporter baseline
-        uses: actions/checkout@v5
-        with:
-          ref: trunk
-          path: trunk-exporter
-          submodules: true
-
       - name: Resolve focused bench stages
         id: stages
         run: |
@@ -113,11 +106,6 @@ jobs:
 
       - name: Setup test sites
         run: tests/e2e/setup.sh
-
-      - name: Install trunk exporter dependencies
-        run: |
-          composer install --no-dev --no-interaction --prefer-dist --working-dir=trunk-exporter
-          composer install --no-dev --no-interaction --prefer-dist --working-dir=trunk-exporter/reprint-exporter-wp
 
       - name: Install e2e dependencies
         working-directory: tests/e2e
@@ -162,9 +150,10 @@ jobs:
           BENCH_JSON_OUT: bench-trunk.json
           BENCH_MD_OUT: bench-trunk.md
           BENCH_STAGES: ${{ steps.stages.outputs.stages }}
-          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}/trunk-exporter
+          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}
           BENCH_SEED_POSTS: '10000'
           BENCH_SEED_POSTMETA: '25000'
+          BENCH_PREFLIGHT_IMPORTER_PATH: ${{ github.workspace }}/phars/pr/reprint.phar
           BENCH_PLAYGROUND_PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
           PLAYGROUND_PHP_USE_WASM_RUNNER: '1'
           PLAYGROUND_PHP_VERSION: '8.3'
