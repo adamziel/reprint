@@ -4,13 +4,18 @@
 #
 # By default this delegates to @wp-playground/cli php so the CI still covers
 # the public CLI path. When WP_MYSQL_PARSER_EXTENSION_MANIFEST is set, or when
-# PLAYGROUND_PHP_USE_WASM_RUNNER=1 is set, it uses the local @php-wasm/node
-# runner because the CLI does not expose arbitrary external PHP extensions.
+# PLAYGROUND_PHP_USE_WASM_RUNNER=1 is set, it uses the npm-installed
+# @php-wasm/node runner because the CLI does not expose arbitrary external PHP
+# extensions.
 set -euo pipefail
 
 if [ -n "${WP_MYSQL_PARSER_EXTENSION_MANIFEST:-}" ] || [ "${PLAYGROUND_PHP_USE_WASM_RUNNER:-}" = "1" ]; then
     SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-    exec node --experimental-wasm-jspi "${SCRIPT_DIR}/php-wasm-runner.mjs" "$@"
+    NODE_CMD=(node)
+    if ! node --experimental-wasm-jspi --input-type=module -e "import { jspi } from 'wasm-feature-detect'; process.exit(await jspi() ? 0 : 1);" >/dev/null 2>&1; then
+        NODE_CMD=(npx --yes node@24)
+    fi
+    exec "${NODE_CMD[@]}" --experimental-wasm-jspi "${SCRIPT_DIR}/php-wasm-runner.mjs" "$@"
 fi
 
 MOUNT_ARGS=()
