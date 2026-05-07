@@ -3,41 +3,33 @@
  * Loader for MySQL lexer, parser, and query stream classes.
  *
  * The lexer, parser, and grammar come from the WordPress/sqlite-database-integration
- * submodule at lib/sqlite-database-integration/. The naive query stream is local
- * to this project.
+ * submodule at lib/sqlite-database-integration/. Its root loader selects the
+ * optional native Rust parser classes when the wp_mysql_parser extension is
+ * loaded and falls back to the pure-PHP parser otherwise. The query streams are
+ * local to this project.
  *
  * If you see "failed to open stream" errors, run:
  *   git submodule update --init
  */
 
-$sdi = null;
+$sdi_loader = null;
 foreach ([
-    dirname(__DIR__, 5) . '/lib/sqlite-database-integration/wp-includes',
-    dirname(__DIR__, 6) . '/lib/sqlite-database-integration/wp-includes',
+    dirname(__DIR__, 5) . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php',
+    dirname(__DIR__, 6) . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php',
 ] as $candidate) {
-    if (file_exists($candidate . '/parser/class-wp-parser-token.php')) {
-        $sdi = $candidate;
+    if (file_exists($candidate)) {
+        $sdi_loader = $candidate;
         break;
     }
 }
 
-if ($sdi === null) {
+if ($sdi_loader === null) {
     throw new RuntimeException(
         'sqlite-database-integration is missing. Run: git submodule update --init'
     );
 }
 
-// Generic parser framework
-require_once $sdi . '/parser/class-wp-parser-token.php';
-require_once $sdi . '/parser/class-wp-parser-node.php';
-require_once $sdi . '/parser/class-wp-parser-grammar.php';
-require_once $sdi . '/parser/class-wp-parser.php';
-
-// MySQL lexer and parser
-require_once $sdi . '/mysql/mysql-grammar.php';
-require_once $sdi . '/mysql/class-wp-mysql-token.php';
-require_once $sdi . '/mysql/class-wp-mysql-lexer.php';
-require_once $sdi . '/mysql/class-wp-mysql-parser.php';
+require_once $sdi_loader;
 
 // Local: naive query stream (not part of the submodule)
 require_once __DIR__ . '/class-wp-mysql-naive-query-stream.php';

@@ -22,7 +22,7 @@ if ! command -v php >/dev/null 2>&1; then
 fi
 
 # Verify the submodule is initialised
-if [ ! -f "$PROJECT_ROOT/lib/sqlite-database-integration/wp-includes/parser/class-wp-parser.php" ]; then
+if [ ! -f "$PROJECT_ROOT/lib/sqlite-database-integration/packages/mysql-on-sqlite/src/parser/class-wp-parser.php" ]; then
     echo "Error: sqlite-database-integration submodule not initialised." >&2
     echo "Run: git submodule update --init" >&2
     exit 1

@@ -44,7 +44,11 @@ const SEED_POSTMETA = Number(process.env.BENCH_SEED_POSTMETA || 720_015);
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+const PREFLIGHT_IMPORTER_PATH = process.env.BENCH_PREFLIGHT_IMPORTER_PATH || IMPORTER_PATH;
+const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'playground-php.sh');
+const PLAYGROUND_PHP_VERSION = process.env.PLAYGROUND_PHP_VERSION || '8.3';
 const REGISTRY = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'site-registry.json'), 'utf-8'));
+const MYSQL_PARSER_MANIFEST = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST || '';
 
 async function seedSourceDb() {
     const dbName = `e2e_${SITE.replace(/-/g, '_')}`;
@@ -132,10 +136,11 @@ async function provisionDatabase() {
     await conn.end();
 }
 
-function runStage(stage, stateDir, extraArgs = [], { includeUrl = true } = {}) {
+function runStage(stage, stateDir, extraArgs = [], { includeUrl = true, phpBinary = PHP_BINARY, env = {} } = {}) {
     const url = `${getSiteUrl(SITE)}&directory=${getSiteDir(SITE)}`;
+    const importerPath = stage === 'preflight' ? PREFLIGHT_IMPORTER_PATH : IMPORTER_PATH;
     const args = [
-        IMPORTER_PATH,
+        importerPath,
         stage,
         ...(includeUrl ? [url] : []),
         `--state-dir=${stateDir}`,
@@ -153,11 +158,12 @@ function runStage(stage, stateDir, extraArgs = [], { includeUrl = true } = {}) {
     while (true) {
         attempts += 1;
         try {
-            execFileSync(PHP_BINARY, args, {
+            execFileSync(phpBinary, args, {
                 timeout: 900_000,
                 encoding: 'utf-8',
                 maxBuffer: 64 * 1024 * 1024,
                 stdio: ['ignore', 'pipe', 'pipe'],
+                env: { ...process.env, ...env },
             });
             const elapsedMs = performance.now() - start;
             return { stage, elapsedMs, attempts, ok: true };
@@ -175,6 +181,165 @@ function runStage(stage, stateDir, extraArgs = [], { includeUrl = true } = {}) {
             };
         }
     }
+}
+
+function requireBenchStageOk(result, context) {
+    if (result.ok) {
+        return;
+    }
+
+    throw new Error(
+        `${context} failed with exit ${result.exitCode}\n` +
+        `stderr:\n${result.stderr || ''}\nstdout:\n${result.stdout || ''}`,
+    );
+}
+
+function playgroundPhpEnv() {
+    return {
+        PLAYGROUND_PHP_USE_WASM_RUNNER: '1',
+        PLAYGROUND_PHP_VERSION,
+    };
+}
+
+function runNativeMysqlParserProof({ requireParser }) {
+    if (!MYSQL_PARSER_MANIFEST) {
+        return {
+            ok: true,
+            details: {
+                wp_mysql_parser: 'disabled',
+                native_lexer: 'not requested',
+                native_parser: 'not requested',
+            },
+        };
+    }
+
+    const mode = requireParser ? 'parser' : 'lexer';
+    const verifierPath = join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'verify-wp-mysql-parser.php');
+
+    try {
+        const stdout = execFileSync(PLAYGROUND_PHP_BINARY, [verifierPath, PROJECT_ROOT, mode], {
+            cwd: PROJECT_ROOT,
+            timeout: 120_000,
+            encoding: 'utf-8',
+            maxBuffer: 16 * 1024 * 1024,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, ...playgroundPhpEnv() },
+        }).trim();
+        return {
+            ok: true,
+            details: stdout ? JSON.parse(stdout) : {},
+        };
+    } catch (e) {
+        return {
+            ok: false,
+            exitCode: e.status === null ? -1 : (e.status || 1),
+            stderr: (e.stderr || '').toString().slice(-4000),
+            stdout: (e.stdout || '').toString().slice(-4000),
+        };
+    }
+}
+
+function proofFailureResult(stage, start, proof, details) {
+    return {
+        stage,
+        elapsedMs: performance.now() - start,
+        attempts: 0,
+        ok: false,
+        exitCode: proof.exitCode || 1,
+        stderr: proof.stderr || '',
+        stdout: proof.stdout || '',
+        details: {
+            ...details,
+            wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
+            native_parser_proof: 'failed',
+        },
+    };
+}
+
+function runPlaygroundSqliteDbPullBenchmark() {
+    const start = performance.now();
+    const stateDir = join(tmpdir(), `bench-playground-sqlite-db-pull-${Date.now()}`);
+    mkdirSync(stateDir, { recursive: true });
+    mkdirSync(fsRootDir(stateDir), { recursive: true });
+
+    requireBenchStageOk(
+        runStage('preflight', stateDir),
+        'playground sqlite benchmark preflight',
+    );
+    const proof = runNativeMysqlParserProof({ requireParser: false });
+    const baseDetails = {
+        condition: 'db-pull in PHP.wasm',
+        runtime: `php.wasm ${PLAYGROUND_PHP_VERSION}`,
+        wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
+    };
+    if (!proof.ok) {
+        return proofFailureResult('playground-sqlite-db-pull', start, proof, baseDetails);
+    }
+
+    const result = runStage('db-pull', stateDir, [], {
+        phpBinary: PLAYGROUND_PHP_BINARY,
+        env: playgroundPhpEnv(),
+    });
+
+    return {
+        ...result,
+        stage: 'playground-sqlite-db-pull',
+        details: {
+            ...baseDetails,
+            ...proof.details,
+        },
+    };
+}
+
+function runPlaygroundSqliteDbApplyBenchmark() {
+    const start = performance.now();
+    const stateDir = join(tmpdir(), `bench-playground-sqlite-db-apply-${Date.now()}`);
+    mkdirSync(stateDir, { recursive: true });
+    mkdirSync(fsRootDir(stateDir), { recursive: true });
+
+    requireBenchStageOk(
+        runStage('preflight', stateDir),
+        'playground sqlite benchmark preflight',
+    );
+    requireBenchStageOk(
+        runStage('db-pull', stateDir),
+        'playground sqlite benchmark db-pull',
+    );
+    const proof = runNativeMysqlParserProof({ requireParser: true });
+    const baseDetails = {
+        condition: 'db-apply to SQLite in PHP.wasm',
+        runtime: `php.wasm ${PLAYGROUND_PHP_VERSION}`,
+        wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
+    };
+    if (!proof.ok) {
+        return proofFailureResult('playground-sqlite-db-apply', start, proof, baseDetails);
+    }
+
+    const sqlitePath = join(
+        fsRootDir(stateDir),
+        getSiteDir(SITE),
+        'wp-content',
+        'database',
+        'bench-playground.sqlite',
+    );
+    const result = runStage('db-apply', stateDir, [
+        '--target-engine=sqlite',
+        `--target-sqlite-path=${sqlitePath}`,
+        '--target-db=playground_sqlite_bench',
+        '--new-site-url=http://localhost:9999',
+    ], {
+        phpBinary: PLAYGROUND_PHP_BINARY,
+        env: playgroundPhpEnv(),
+    });
+
+    return {
+        ...result,
+        stage: 'playground-sqlite-db-apply',
+        details: {
+            ...baseDetails,
+            ...proof.details,
+        },
+    };
 }
 
 function fmtMs(ms) {
@@ -483,6 +648,28 @@ async function main() {
         }
     }
 
+    if (shouldRun('playground-sqlite-db-pull')) {
+        console.log('-> playground-sqlite-db-pull');
+        const playgroundSqlitePull = runPlaygroundSqliteDbPullBenchmark();
+        results.push(playgroundSqlitePull);
+        console.log(`   ${playgroundSqlitePull.ok ? 'ok' : 'FAIL'} in ${fmtMs(playgroundSqlitePull.elapsedMs)} (${fmtDetails(playgroundSqlitePull.details)})`);
+        if (!playgroundSqlitePull.ok) {
+            console.error(`   stderr (tail):\n${playgroundSqlitePull.stderr}`);
+            console.error(`   stdout (tail):\n${playgroundSqlitePull.stdout}`);
+        }
+    }
+
+    if (shouldRun('playground-sqlite-db-apply')) {
+        console.log('-> playground-sqlite-db-apply');
+        const playgroundSqliteApply = runPlaygroundSqliteDbApplyBenchmark();
+        results.push(playgroundSqliteApply);
+        console.log(`   ${playgroundSqliteApply.ok ? 'ok' : 'FAIL'} in ${fmtMs(playgroundSqliteApply.elapsedMs)} (${fmtDetails(playgroundSqliteApply.details)})`);
+        if (!playgroundSqliteApply.ok) {
+            console.error(`   stderr (tail):\n${playgroundSqliteApply.stderr}`);
+            console.error(`   stdout (tail):\n${playgroundSqliteApply.stdout}`);
+        }
+    }
+
     const fileFetchScenarios = ['file-fetch-untuned-random', 'file-fetch-binary-compression'];
     let fileBench = null;
     if (fileFetchScenarios.some(shouldRun)) {
@@ -548,6 +735,7 @@ async function main() {
         seedPostmeta: SEED_POSTMETA,
         phpVersion,
         importer: IMPORTER_PATH,
+        preflightImporter: PREFLIGHT_IMPORTER_PATH,
     };
     const md = renderMarkdown(results, meta);
     console.log('\n' + md);

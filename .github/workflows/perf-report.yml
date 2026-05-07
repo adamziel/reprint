@@ -64,13 +64,6 @@ jobs:
         with:
           submodules: true
 
-      - name: Checkout trunk exporter baseline
-        uses: actions/checkout@v5
-        with:
-          ref: trunk
-          path: trunk-exporter
-          submodules: true
-
       - name: Resolve focused bench stages
         id: stages
         run: |
@@ -97,7 +90,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
@@ -113,11 +106,6 @@ jobs:
 
       - name: Setup test sites
         run: tests/e2e/setup.sh
-
-      - name: Install trunk exporter dependencies
-        run: |
-          composer install --no-dev --no-interaction --prefer-dist --working-dir=trunk-exporter
-          composer install --no-dev --no-interaction --prefer-dist --working-dir=trunk-exporter/reprint-exporter-wp
 
       - name: Install e2e dependencies
         working-directory: tests/e2e
@@ -139,6 +127,14 @@ jobs:
           BENCH_MD_OUT: bench-pr.md
           BENCH_STAGES: ${{ steps.stages.outputs.stages }}
           E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}
+          # Keep the PHP.wasm SQLite benchmark large enough to exercise the
+          # parser without pushing a PR check into the workflow timeout.
+          BENCH_SEED_POSTS: '10000'
+          BENCH_SEED_POSTMETA: '25000'
+          BENCH_PLAYGROUND_PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
+          PLAYGROUND_PHP_USE_WASM_RUNNER: '1'
+          PLAYGROUND_PHP_VERSION: '8.3'
+          WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
         run: node benchmark/bench-pull.mjs
 
       - name: Reset benchmark sites before trunk
@@ -154,7 +150,13 @@ jobs:
           BENCH_JSON_OUT: bench-trunk.json
           BENCH_MD_OUT: bench-trunk.md
           BENCH_STAGES: ${{ steps.stages.outputs.stages }}
-          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}/trunk-exporter
+          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}
+          BENCH_SEED_POSTS: '10000'
+          BENCH_SEED_POSTMETA: '25000'
+          BENCH_PREFLIGHT_IMPORTER_PATH: ${{ github.workspace }}/phars/pr/reprint.phar
+          BENCH_PLAYGROUND_PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
+          PLAYGROUND_PHP_USE_WASM_RUNNER: '1'
+          PLAYGROUND_PHP_VERSION: '8.3'
         # Don't fail the whole job if trunk's bench fails — we still want
         # to publish the PR's numbers.
         continue-on-error: true

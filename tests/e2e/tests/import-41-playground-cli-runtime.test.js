@@ -21,6 +21,7 @@ import { ensureSite } from '../lib/site-setup.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
+const itWhenRustExtensionConfigured = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST ? it : it.skip;
 
 describe('Import: Playground CLI runtime', () => {
     const site = 'basic';
@@ -45,6 +46,23 @@ describe('Import: Playground CLI runtime', () => {
     function importUrl() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
+
+    itWhenRustExtensionConfigured('loads and selects the Rust wp_mysql_parser extension in Playground PHP', () => {
+        const output = execFileSync(PHP_BINARY, [
+            join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'verify-wp-mysql-parser.php'),
+            PROJECT_ROOT,
+            'parser',
+        ], {
+            encoding: 'utf-8',
+            timeout: 120000,
+        }).trim();
+        const details = JSON.parse(output);
+
+        assert.equal(details.wp_mysql_parser, 'enabled');
+        assert.equal(details.native_lexer, 'verified');
+        assert.equal(details.native_parser, 'verified');
+        assert.equal(details.sqlite_driver_parser, 'verified');
+    });
 
     it('files-sync downloads the site', () => {
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
