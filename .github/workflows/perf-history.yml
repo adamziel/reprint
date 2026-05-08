@@ -96,6 +96,10 @@ jobs:
           BENCH_LABEL: trunk
           BENCH_JSON_OUT: bench-trunk.json
           BENCH_MD_OUT: bench-trunk.md
+          BENCH_PLAYGROUND_PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
+          PLAYGROUND_PHP_USE_WASM_RUNNER: '1'
+          PLAYGROUND_PHP_VERSION: '8.3'
+          WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
         run: node benchmark/bench-pull.mjs
 
       - name: Capture commit metadata
