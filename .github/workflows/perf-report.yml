@@ -157,6 +157,14 @@ jobs:
           BENCH_PLAYGROUND_PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
           PLAYGROUND_PHP_USE_WASM_RUNNER: '1'
           PLAYGROUND_PHP_VERSION: '8.3'
+          # Match the PR side. Without this, the Playground SQLite db-pull
+          # / db-apply scenarios run on trunk WITHOUT the Rust MySQL parser
+          # extension (because the parser is loaded only when the manifest
+          # URL is set), while the PR side runs WITH it. The resulting
+          # comparison shows a constant ~10× "improvement" attributable to
+          # the parser, on every PR — which has nothing to do with what
+          # the PR actually changes. Keep both sides on the same parser.
+          WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
         # Don't fail the whole job if trunk's bench fails — we still want
         # to publish the PR's numbers.
         continue-on-error: true
