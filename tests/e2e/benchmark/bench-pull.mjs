@@ -22,6 +22,10 @@ import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, sta
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { gunzipSync } from 'node:zlib';
+import { randomBytes } from 'node:crypto';
 import { createConnection } from 'mysql2/promise';
 import { ensureSite } from '../lib/site-setup.js';
 import { HmacClient } from '../lib/hmac-client.js';
@@ -510,19 +514,78 @@ async function ensureFileFetchMixedBatchFixture() {
 }
 
 /**
+ * Build a multipart/form-data request body with a single file field.
+ * We can't use the WHATWG `FormData` + `fetch()` path here because Node's
+ * fetch() auto-decompresses gzip responses (no opt-out short of dropping
+ * to undici directly), and we specifically want to measure raw wire
+ * bytes — including the gzip framing the server adds.
+ */
+function buildSingleFieldFormData(fieldName, value, filename, contentType) {
+    const boundary = `----bench-${randomBytes(16).toString('hex')}`;
+    const head = `--${boundary}\r\n`
+        + `Content-Disposition: form-data; name="${fieldName}"; filename="${filename}"\r\n`
+        + `Content-Type: ${contentType}\r\n\r\n`;
+    const tail = `\r\n--${boundary}--\r\n`;
+    const body = Buffer.concat([
+        Buffer.from(head, 'utf8'),
+        Buffer.from(value, 'utf8'),
+        Buffer.from(tail, 'utf8'),
+    ]);
+    return { body, boundary };
+}
+
+/**
+ * Issue one HTTP POST and read the raw response body without
+ * decompressing it. node:http's response stream gives us bytes as they
+ * came off the socket, so a gzip-encoded response stays gzipped and
+ * `body.length` is the true wire size.
+ */
+async function rawHttpPost(urlString, headers, body) {
+    const u = new URL(urlString);
+    const isHttps = u.protocol === 'https:';
+    const req = isHttps ? httpsRequest : httpRequest;
+    return new Promise((resolve, reject) => {
+        const r = req({
+            hostname: u.hostname,
+            port: u.port || (isHttps ? 443 : 80),
+            path: u.pathname + u.search,
+            method: 'POST',
+            headers,
+        }, (res) => {
+            const chunks = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => resolve({
+                statusCode: res.statusCode,
+                headers: res.headers,
+                body: Buffer.concat(chunks),
+            }));
+            res.on('error', reject);
+        });
+        r.on('error', reject);
+        r.write(body);
+        r.end();
+    });
+}
+
+/**
  * Issue one file_fetch POST with a path list and capture the multipart
  * response. Reports encoding + total wire size + multipart part count in
  * `details`, which is what makes the trunk-vs-PR difference visible in
  * the sticky perf comment (the renderer emits both sides' details
  * side-by-side).
+ *
+ * Uses a raw node:http POST instead of fetch() so we measure the true
+ * gzipped wire bytes — fetch() decompresses transparently, which would
+ * make a gzipped PR response look the same size as an identity trunk
+ * response and silently mask the very thing this benchmark is for.
  */
 async function runFileFetchMixedBatchScenario({ stage, site, paths, details = {} }) {
     const fileListJson = JSON.stringify(paths);
-    const formData = new FormData();
-    formData.append(
+    const { body: requestBody, boundary } = buildSingleFieldFormData(
         'file_list',
-        new Blob([fileListJson], { type: 'application/json' }),
+        fileListJson,
         'file_list.json',
+        'application/json',
     );
 
     const url = new URL(getSiteUrl(site));
@@ -530,19 +593,26 @@ async function runFileFetchMixedBatchScenario({ stage, site, paths, details = {}
     url.searchParams.set('directory', getSiteDir(site));
 
     const client = new HmacClient(getSiteSecret(site));
-    const headers = client.getAuthHeaders(fileListJson);
+    const authHeaders = client.getAuthHeaders(fileListJson);
+    const headers = {
+        ...authHeaders,
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': String(requestBody.length),
+        'Accept-Encoding': 'gzip',
+    };
 
     const start = performance.now();
-    const response = await fetch(url.toString(), {
-        method: 'POST',
-        headers,
-        body: formData,
-    });
-    const body = Buffer.from(await response.arrayBuffer());
+    const response = await rawHttpPost(url.toString(), headers, requestBody);
     const elapsedMs = performance.now() - start;
-    const contentType = response.headers.get('content-type') || '';
-    const ok = response.ok && contentType.includes('multipart/mixed');
-    const multipart = summarizeMultipart(body, contentType);
+    const contentType = response.headers['content-type'] || '';
+    const contentEncoding = response.headers['content-encoding'] || 'identity';
+    const wireBytes = response.body.length;
+    const ok = response.statusCode >= 200 && response.statusCode < 300
+        && contentType.includes('multipart/mixed');
+    // Decompress only for multipart-parsing, not for byte counting — we
+    // already captured the wire size above.
+    const decoded = contentEncoding === 'gzip' ? gunzipSync(response.body) : response.body;
+    const multipart = summarizeMultipart(decoded, contentType);
     const totalSourceBytes = paths.reduce((sum, p) => sum + statSync(p).size, 0);
 
     return {
@@ -550,13 +620,14 @@ async function runFileFetchMixedBatchScenario({ stage, site, paths, details = {}
         elapsedMs,
         attempts: 1,
         ok,
-        exitCode: ok ? null : response.status,
+        exitCode: ok ? null : response.statusCode,
         details: {
             ...details,
             files: paths.length,
             source: fmtBytes(totalSourceBytes),
-            encoding: response.headers.get('content-encoding') || 'identity',
-            response: fmtBytes(body.length),
+            encoding: contentEncoding,
+            wire: fmtBytes(wireBytes),
+            decoded: fmtBytes(decoded.length),
             file_parts: multipart.file_parts,
             multipart_parts: multipart.multipart_parts,
         },
