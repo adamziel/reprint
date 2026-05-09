@@ -35,6 +35,16 @@ const FILE_BENCH_SIZE_MB = Number(process.env.BENCH_FILE_SIZE_MB || 24);
 const FILE_BENCH_SIZE = FILE_BENCH_SIZE_MB * 1024 * 1024;
 const FILE_BENCH_TUNED_CHUNK_SIZE = 16 * 1024 * 1024;
 const FILE_BENCH_RELATIVE_PATH = `test-data/bench-random-${FILE_BENCH_SIZE_MB}mb.bin`;
+// Mixed-batch fixture — exercises the file_fetch_paths_should_gzip()
+// heuristic for batches that contain both compressible and incompressible
+// files. Sized so the gzip-vs-identity wire-byte difference is meaningful
+// in absolute bytes (a few hundred KB), not lost in microseconds of
+// runner noise.
+const MIXED_BATCH_RELATIVE_DIR = 'test-data/bench-mixed-batch';
+const MIXED_BATCH_CSS_COUNT = 100;
+const MIXED_BATCH_CSS_BYTES = 1024;   // each CSS file
+const MIXED_BATCH_PNG_COUNT = 5;
+const MIXED_BATCH_PNG_BYTES = 20 * 1024;
 const IMPORT_DB = 'e2e_bench_pull';
 // Seed enough posts/postmeta to make db-pull and db-apply dominate wall-clock
 // (the default WP install has ~1 post). Mirrors the dataset shape used in
@@ -444,6 +454,115 @@ async function runFileFetchScenario({ stage, site, filePath, params = {}, detail
     };
 }
 
+/**
+ * Provision a mixed-batch fixture inside the FILE_BENCH_SITE: many small
+ * CSS files (compressible) plus a handful of pseudo-PNG files (incompressible).
+ * Returns the absolute path list ready to feed into a file_fetch request.
+ *
+ * Idempotent: if every expected file already exists at the right size the
+ * function is a no-op.
+ */
+async function ensureFileFetchMixedBatchFixture() {
+    await ensureSite(FILE_BENCH_SITE, { files: 'none' });
+
+    const siteDir = getSiteDir(FILE_BENCH_SITE);
+    const fixtureDir = join(siteDir, MIXED_BATCH_RELATIVE_DIR);
+
+    const cssPaths = Array.from({ length: MIXED_BATCH_CSS_COUNT }, (_, i) =>
+        join(fixtureDir, `style-${String(i + 1).padStart(3, '0')}.css`));
+    const pngPaths = Array.from({ length: MIXED_BATCH_PNG_COUNT }, (_, i) =>
+        join(fixtureDir, `screenshot-${i + 1}.png`));
+    const allPaths = [...cssPaths, ...pngPaths];
+
+    const allReady = allPaths.every((p) => {
+        if (!existsSync(p)) return false;
+        const size = statSync(p).size;
+        const expected = p.endsWith('.css') ? MIXED_BATCH_CSS_BYTES : MIXED_BATCH_PNG_BYTES;
+        return size === expected;
+    });
+    if (allReady) {
+        return { site: FILE_BENCH_SITE, siteDir, paths: allPaths };
+    }
+
+    console.log(
+        `Creating mixed-batch fixture: ${MIXED_BATCH_CSS_COUNT} × ${fmtBytes(MIXED_BATCH_CSS_BYTES)} CSS + `
+        + `${MIXED_BATCH_PNG_COUNT} × ${fmtBytes(MIXED_BATCH_PNG_BYTES)} PNG`,
+    );
+    execSync(`sudo mkdir -p ${JSON.stringify(fixtureDir)}`);
+    // Repetitive CSS so gzip squeezes hard — that's the win we want to
+    // surface. The block is repeated to fill MIXED_BATCH_CSS_BYTES, padded
+    // with spaces if needed to hit the exact byte count.
+    const cssBlock = '.wp-block-image{margin:1em 0;}\n';
+    const cssBody = cssBlock.repeat(Math.floor(MIXED_BATCH_CSS_BYTES / cssBlock.length));
+    const cssBodyPadded = cssBody + ' '.repeat(MIXED_BATCH_CSS_BYTES - cssBody.length);
+    const cssTmp = join(tmpdir(), `bench-mixed-batch-css-${process.pid}.css`);
+    writeFileSync(cssTmp, cssBodyPadded);
+    for (const p of cssPaths) {
+        execSync(`sudo cp ${JSON.stringify(cssTmp)} ${JSON.stringify(p)}`);
+    }
+    // Random bytes for PNG — pseudo binary content that gzip can't compress.
+    for (const p of pngPaths) {
+        execSync(`sudo dd if=/dev/urandom of=${JSON.stringify(p)} bs=${MIXED_BATCH_PNG_BYTES} count=1 status=none`);
+    }
+    execSync(`sudo chown -R nginx:nginx ${JSON.stringify(fixtureDir)}`);
+
+    return { site: FILE_BENCH_SITE, siteDir, paths: allPaths };
+}
+
+/**
+ * Issue one file_fetch POST with a path list and capture the multipart
+ * response. Reports encoding + total wire size + multipart part count in
+ * `details`, which is what makes the trunk-vs-PR difference visible in
+ * the sticky perf comment (the renderer emits both sides' details
+ * side-by-side).
+ */
+async function runFileFetchMixedBatchScenario({ stage, site, paths, details = {} }) {
+    const fileListJson = JSON.stringify(paths);
+    const formData = new FormData();
+    formData.append(
+        'file_list',
+        new Blob([fileListJson], { type: 'application/json' }),
+        'file_list.json',
+    );
+
+    const url = new URL(getSiteUrl(site));
+    url.searchParams.set('endpoint', 'file_fetch');
+    url.searchParams.set('directory', getSiteDir(site));
+
+    const client = new HmacClient(getSiteSecret(site));
+    const headers = client.getAuthHeaders(fileListJson);
+
+    const start = performance.now();
+    const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers,
+        body: formData,
+    });
+    const body = Buffer.from(await response.arrayBuffer());
+    const elapsedMs = performance.now() - start;
+    const contentType = response.headers.get('content-type') || '';
+    const ok = response.ok && contentType.includes('multipart/mixed');
+    const multipart = summarizeMultipart(body, contentType);
+    const totalSourceBytes = paths.reduce((sum, p) => sum + statSync(p).size, 0);
+
+    return {
+        stage,
+        elapsedMs,
+        attempts: 1,
+        ok,
+        exitCode: ok ? null : response.status,
+        details: {
+            ...details,
+            files: paths.length,
+            source: fmtBytes(totalSourceBytes),
+            encoding: response.headers.get('content-encoding') || 'identity',
+            response: fmtBytes(body.length),
+            file_parts: multipart.file_parts,
+            multipart_parts: multipart.multipart_parts,
+        },
+    };
+}
+
 function runFilePullWithPeakMemory({ site, stateDir, filePath }) {
     const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     const peakProbe = join(tmpdir(), `reprint-bench-peak-${process.pid}-${Date.now()}.php`);
@@ -706,6 +825,21 @@ async function main() {
         });
         results.push(binaryCompressionFetch);
         console.log(`   ${binaryCompressionFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(binaryCompressionFetch.elapsedMs)} (${fmtDetails(binaryCompressionFetch.details)})`);
+    }
+
+    if (shouldRun('file-fetch-mixed-batch')) {
+        console.log('-> file-fetch-mixed-batch');
+        const mixed = await ensureFileFetchMixedBatchFixture();
+        const mixedFetch = await runFileFetchMixedBatchScenario({
+            stage: 'file-fetch-mixed-batch',
+            site: mixed.site,
+            paths: mixed.paths,
+            details: {
+                condition: 'mixed CSS + PNG batch (gzip-heuristic boundary)',
+            },
+        });
+        results.push(mixedFetch);
+        console.log(`   ${mixedFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(mixedFetch.elapsedMs)} (${fmtDetails(mixedFetch.details)})`);
     }
 
     if (shouldRun('files-pull-large-part-peak-memory')) {

@@ -64,6 +64,19 @@ jobs:
         with:
           submodules: true
 
+      # Side-by-side checkout of the trunk exporter so the trunk bench step
+      # serves test-site requests against trunk's exporter code, not the
+      # PR's. Without this, both bench steps would deploy the PR's exporter
+      # (E2E_EXPORTER_PROJECT_ROOT defaults to the workspace), and the
+      # trunk-vs-PR diff would only ever capture importer-side changes —
+      # any exporter-side perf change in the PR would be invisible.
+      - name: Checkout trunk exporter baseline
+        uses: actions/checkout@v5
+        with:
+          ref: trunk
+          path: trunk-exporter
+          submodules: true
+
       - name: Resolve focused bench stages
         id: stages
         run: |
@@ -106,6 +119,14 @@ jobs:
 
       - name: Setup test sites
         run: tests/e2e/setup.sh
+
+      # The trunk exporter checkout needs its own Composer install so its
+      # /reprint-exporter-wp/ vendor tree is populated when the trunk bench
+      # step deploys that copy to the test site.
+      - name: Install trunk exporter dependencies
+        run: |
+          composer install --no-dev --no-interaction --prefer-dist --working-dir=trunk-exporter
+          composer install --no-dev --no-interaction --prefer-dist --working-dir=trunk-exporter/reprint-exporter-wp
 
       - name: Install e2e dependencies
         working-directory: tests/e2e
@@ -150,7 +171,14 @@ jobs:
           BENCH_JSON_OUT: bench-trunk.json
           BENCH_MD_OUT: bench-trunk.md
           BENCH_STAGES: ${{ steps.stages.outputs.stages }}
-          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}
+          # Deploy trunk's exporter (not the PR's) to the test site for the
+          # trunk-side bench. site-setup.js reads E2E_EXPORTER_PROJECT_ROOT
+          # to locate /reprint-exporter-wp/, so pointing it at the side-by-side
+          # checkout means trunk-side requests are served by trunk's
+          # exporter code. That's what makes server-side perf changes
+          # (e.g. file_fetch's gzip heuristic) visible in the PR-vs-trunk
+          # diff.
+          E2E_EXPORTER_PROJECT_ROOT: ${{ github.workspace }}/trunk-exporter
           BENCH_SEED_POSTS: '10000'
           BENCH_SEED_POSTMETA: '25000'
           BENCH_PREFLIGHT_IMPORTER_PATH: ${{ github.workspace }}/phars/pr/reprint.phar
