@@ -91,6 +91,74 @@ class AdaptiveTunerTest extends TestCase
         $this->assertSame(1000, $tuner2->get_state()["file_chunk_size"]);
     }
 
+    public function testTransferProfileOverridesPersistedTunerState(): void
+    {
+        $tempDir = sys_get_temp_dir() . '/transfer-profile-test-' . uniqid('', true);
+        $stateDir = $tempDir . '/state';
+        $fsRoot = $tempDir . '/fs-root';
+
+        try {
+            $client = new \ImportClient('http://example.invalid', $stateDir, $fsRoot);
+            $client->state = [
+                "tuning" => [
+                    "config" => [
+                        "duty" => 0.5,
+                        "file_chunk_start" => 5 * 1024 * 1024,
+                        "index_batch_start" => 5000,
+                        "sql_fragments_start" => 1000,
+                    ],
+                    "state" => [
+                        "duty" => 0.5,
+                        "file_chunk_size" => 5 * 1024 * 1024,
+                        "index_batch_size" => 5000,
+                        "sql_fragments_per_batch" => 1000,
+                    ],
+                ],
+            ];
+
+            $applyProfile = new \ReflectionMethod(\ImportClient::class, 'apply_transfer_profile_options');
+            $applyProfile->setAccessible(true);
+            $initialize = new \ReflectionMethod(\ImportClient::class, 'initialize_tuner');
+            $initialize->setAccessible(true);
+
+            $options = $applyProfile->invoke($client, [
+                "transfer_profile" => "aggressive",
+            ]);
+            $initialize->invoke($client, $options);
+
+            $config = $client->state["tuning"]["config"];
+            $state = $client->state["tuning"]["state"];
+
+            $this->assertSame(30, $config["max_execution_time"]);
+            $this->assertSame(1.0, $config["duty"]);
+            $this->assertSame(1.0, $state["duty"]);
+            $this->assertSame(16 * 1024 * 1024, $state["file_chunk_size"]);
+            $this->assertSame(50000, $state["index_batch_size"]);
+            $this->assertSame(5000, $state["sql_fragments_per_batch"]);
+        } finally {
+            $this->recursiveDelete($tempDir);
+        }
+    }
+
+    private function recursiveDelete(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        foreach (scandir($dir) as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $path = $dir . '/' . $item;
+            if (is_dir($path) && !is_link($path)) {
+                $this->recursiveDelete($path);
+            } else {
+                unlink($path);
+            }
+        }
+        rmdir($dir);
+    }
+
     // ---------------------------------------------------------------
     // Request params
     // ---------------------------------------------------------------

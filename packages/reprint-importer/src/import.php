@@ -959,6 +959,46 @@ class ImportClient
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
+    private const DEFAULT_FILE_CHUNK_SIZE = 5 * 1024 * 1024;
+    private const MAX_FILE_CHUNK_SIZE = 16 * 1024 * 1024;
+    private const DEFAULT_INDEX_BATCH_SIZE = 5000;
+    private const MAX_INDEX_BATCH_SIZE = 50000;
+    private const DEFAULT_SQL_FRAGMENTS_PER_BATCH = 1000;
+    private const MAX_SQL_FRAGMENTS_PER_BATCH = 5000;
+
+    private const TRANSFER_PROFILES = [
+        "balanced" => [
+            "max_execution_time" => 5,
+            "duty" => 0.5,
+            "duty_min" => 0.35,
+            "duty_max" => 1.0,
+            "file_chunk_start" => self::DEFAULT_FILE_CHUNK_SIZE,
+            "file_chunk_max" => self::MAX_FILE_CHUNK_SIZE,
+            "index_batch_start" => self::DEFAULT_INDEX_BATCH_SIZE,
+            "index_batch_max" => self::MAX_INDEX_BATCH_SIZE,
+            "sql_fragments_start" => self::DEFAULT_SQL_FRAGMENTS_PER_BATCH,
+            "sql_fragments_max" => self::MAX_SQL_FRAGMENTS_PER_BATCH,
+        ],
+        "aggressive" => [
+            "max_execution_time" => 30,
+            "duty" => 1.0,
+            "duty_min" => 1.0,
+            "duty_max" => 1.0,
+            "file_chunk_start" => self::MAX_FILE_CHUNK_SIZE,
+            "file_chunk_max" => self::MAX_FILE_CHUNK_SIZE,
+            "index_batch_start" => self::MAX_INDEX_BATCH_SIZE,
+            "index_batch_max" => self::MAX_INDEX_BATCH_SIZE,
+            "sql_fragments_start" => self::MAX_SQL_FRAGMENTS_PER_BATCH,
+            "sql_fragments_max" => self::MAX_SQL_FRAGMENTS_PER_BATCH,
+        ],
+    ];
+
+    private const TUNING_STATE_OVERRIDES = [
+        "duty" => "duty",
+        "file_chunk_start" => "file_chunk_size",
+        "index_batch_start" => "index_batch_size",
+        "sql_fragments_start" => "sql_fragments_per_batch",
+    ];
 
     /**
      * Maximum number of consecutive cURL timeouts with no cursor progress
@@ -1702,6 +1742,7 @@ class ImportClient
             );
         }
 
+        $options = $this->apply_transfer_profile_options($options);
         $this->initialize_tuner($options);
 
         // Initialize HMAC authentication if a shared secret was provided.
@@ -1993,6 +2034,7 @@ class ImportClient
         $cli_config = $options["tuning_config"] ?? [];
 
         $config = array_merge($config, $cli_config);
+        $state = $this->apply_tuning_state_overrides($state, $cli_config);
 
         $this->tuner = new AdaptiveTuner($config, $state);
         $this->state["tuning"] = [
@@ -2004,6 +2046,49 @@ class ImportClient
             "TUNER CONFIG | " . json_encode($this->state["tuning"]["config"]),
             false,
         );
+    }
+
+    /**
+     * Expand a named transfer profile into explicit tuning options.
+     *
+     * Profiles are intentionally opt-in. Any lower-level tuning flag passed
+     * alongside the profile wins, so operators can use a profile as a base
+     * and still adjust one budget or chunk size for a specific host.
+     */
+    private function apply_transfer_profile_options(array $options): array
+    {
+        $profile = $options["transfer_profile"] ?? null;
+        if ($profile === null) {
+            return $options;
+        }
+
+        if (!isset(self::TRANSFER_PROFILES[$profile])) {
+            throw new InvalidArgumentException(
+                "Invalid --transfer-profile value: {$profile}. Valid values: " .
+                    implode(", ", array_keys(self::TRANSFER_PROFILES)),
+            );
+        }
+
+        $options["tuning_config"] = array_merge(
+            self::TRANSFER_PROFILES[$profile],
+            $options["tuning_config"] ?? [],
+        );
+        return $options;
+    }
+
+    /**
+     * Treat explicit CLI/profile start values as new tuner state, not just
+     * config. Without this, a resumed state seeded by preflight could keep an
+     * old duty cycle or chunk size even after the caller supplied overrides.
+     */
+    private function apply_tuning_state_overrides(array $state, array $cli_config): array
+    {
+        foreach (self::TUNING_STATE_OVERRIDES as $config_key => $state_key) {
+            if (array_key_exists($config_key, $cli_config)) {
+                $state[$state_key] = $cli_config[$config_key];
+            }
+        }
+        return $state;
     }
 
     /**
@@ -10965,6 +11050,16 @@ if (
             'help' => 'Include generated caches, VCS metadata, OS junk and editor scratch files (skipped by default)',
             'help_section' => 'global',
             'commands' => ['pull', 'files-pull', 'files-index'],
+        ],
+        [
+            'name' => 'transfer-profile',
+            'type' => 'value',
+            'target' => 'transfer_profile',
+            'placeholder' => 'PROFILE',
+            'valid_values' => ['balanced', 'aggressive'],
+            'help' => 'Transfer tuning profile (balanced|aggressive)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'adaptive',

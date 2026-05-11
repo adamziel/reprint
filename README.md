@@ -203,6 +203,17 @@ The command returns one of three exit codes:
 
 Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
 
+**Transfer profile**
+
+By default, RePrint uses the `balanced` transfer profile: short requests with an intentional duty-cycle pause between partial requests. On trusted sources that can tolerate sustained sequential transfer load, use `--transfer-profile=aggressive` to remove the duty-cycle pause and use larger request budgets:
+
+```bash
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+    --transfer-profile=aggressive
+```
+
+The aggressive profile keeps transfers sequential. It raises the per-request execution budget, starts file chunks at 16 MiB, and uses larger file-index batches.
+
 **Non-empty local fs-root**
 
 By default, `files-pull` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
