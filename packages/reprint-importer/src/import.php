@@ -1082,6 +1082,19 @@ class ImportClient
     private $follow_symlinks = true;
 
     /**
+     * @var bool When true, ask the server to ship the default-skipped
+     * generated content (wp-content/cache, .git, node_modules, etc.).
+     *
+     * The server's file-index endpoint filters these by default so a
+     * typical migration doesn't waste bytes on regeneratable junk. Set
+     * to true with --include-caches when the consumer genuinely needs
+     * those paths transferred (for example, debugging a caching plugin
+     * or migrating a site whose cache holds first-render-only artifacts
+     * with no source).
+     */
+    private $include_caches = false;
+
+    /**
      * @var string Controls behavior when the fs root is non-empty at import start.
      *
      * 'error' (default): throw an error if the fs root is non-empty.
@@ -1496,6 +1509,7 @@ class ImportClient
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
+        $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
@@ -5901,6 +5915,11 @@ class ImportClient
         }
         if ($this->follow_symlinks) {
             $params["follow_symlinks"] = "1";
+        }
+        if ($this->include_caches) {
+            // Server defaults to skipping caches/VCS metadata/OS junk.
+            // Opt in to include them when the consumer explicitly asks.
+            $params["include_caches"] = "1";
         }
         // Always send directory[] to the server when we have export dirs.
         // Without this parameter, the server falls back to ABSPATH as the
@@ -10937,6 +10956,15 @@ if (
             'help_section' => 'global',
             'commands' => ['pull', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
+        ],
+        [
+            'name' => 'include-caches',
+            'type' => 'flag',
+            'target' => 'include_caches',
+            'flag_value' => true,
+            'help' => 'Include generated caches, VCS metadata, OS junk and editor scratch files (skipped by default)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'files-pull', 'files-index'],
         ],
         [
             'name' => 'adaptive',

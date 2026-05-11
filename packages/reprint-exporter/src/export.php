@@ -2762,6 +2762,10 @@ function endpoint_file_index(
     $ordered = [];
     $follow_symlinks = !empty($config["follow_symlinks"]);
     $cursor_provided = isset($config["cursor"]);
+    // Default-skip generated caches, VCS metadata, OS junk, and editor
+    // scratch files unless the client explicitly opts in. See
+    // path_is_default_skipped() for the full deny-list and rationale.
+    $include_caches = !empty($config["include_caches"]);
 
     // Find the starting point – either by parsing the cursor, or by
     // sourcing it from the filesystem.
@@ -3083,6 +3087,14 @@ function endpoint_file_index(
 
                 $stack[$frame_index]["after"] = $entry;
                 $path = $current_dir . "/" . $entry;
+                // Default deny-list. Applied before stat() to save a syscall
+                // per skipped entry, and before the traversal push so we
+                // don't recurse into skipped directories. The "after" cursor
+                // is updated above this check, so resume correctly skips
+                // past the filtered entry on the next request.
+                if (!$include_caches && path_is_default_skipped($path)) {
+                    continue;
+                }
                 clearstatcache(true, $path);
                 $stat = @lstat($path);
                 if ($stat === false) {
@@ -3550,6 +3562,104 @@ function path_head_looks_like_text(string $path): bool
         return false;
     }
     return true;
+}
+
+/**
+ * Returns true if $path is a generated cache file, version-control or
+ * dev-tooling artifact, or OS-level junk that is not worth shipping in
+ * a typical site migration.
+ *
+ * Matching rules:
+ *
+ *   - Path-component-aware: a segment that *contains* a skipped name as a
+ *     substring (e.g. "cache-control" or "node_modules-backup") does NOT
+ *     trigger a skip. Only whole-segment matches do. This is done by
+ *     wrapping `/` around both the haystack and needle and doing a
+ *     substring check.
+ *
+ *   - Cache/upgrade dirs are matched only under `wp-content/` so a user
+ *     directory literally called `cache` in some other tree doesn't
+ *     silently disappear.
+ *
+ *   - Dotfiles that ship in real WordPress sites — `.htaccess`,
+ *     `.user.ini`, `.well-known/` — are preserved. Editor/VCS dotfiles
+ *     and macOS metadata are not.
+ *
+ * The default deny-list is conservative: false-negatives (something we
+ * could have skipped but didn't) are mere wire-byte waste; false-positives
+ * (something the user actually wanted) are silent data loss. Callers
+ * opting in to a more aggressive filter can pass extra patterns; callers
+ * who want everything can set include_caches=1 on the request.
+ */
+function path_is_default_skipped(string $path): bool
+{
+    // Sentinel slashes on each side make "starts-with" / "ends-with" /
+    // "anywhere-in-middle" the same str_contains() check.
+    $needle_haystack = '/' . trim($path, '/') . '/';
+
+    // Generated content under wp-content/. WordPress regenerates these
+    // on demand (cache via the page lifecycle, upgrade via wp-admin
+    // updates), so transferring them is pure waste.
+    //
+    // Notable specific entries:
+    //   - wp-content/wpcomsh-cache: wp.com Atomic's Memcached-backed
+    //     filesystem cache shadow.
+    //   - wp-content/wflogs: Wordfence's per-request scan logs; can
+    //     reach gigabytes on long-running sites.
+    static $cache_dirs = [
+        '/wp-content/cache/',
+        '/wp-content/upgrade/',
+        '/wp-content/wpcomsh-cache/',
+        '/wp-content/wflogs/',
+    ];
+    foreach ($cache_dirs as $needle) {
+        if (strpos($needle_haystack, $needle) !== false) {
+            return true;
+        }
+    }
+
+    // VCS metadata + local dev tooling. Match any path component exactly.
+    static $junk_components = [
+        '.git', '.svn', '.hg', '.bzr',
+        'node_modules',
+        '.idea', '.vscode',
+        '.cache', '.npm', '.yarn', '.pnpm-store',
+    ];
+    foreach ($junk_components as $needle) {
+        if (strpos($needle_haystack, '/' . $needle . '/') !== false) {
+            return true;
+        }
+    }
+
+    // OS junk + filesystem metadata files (basename match).
+    $basename = basename($path);
+    static $junk_basenames = [
+        '.DS_Store', '._.DS_Store',
+        'Thumbs.db', 'desktop.ini', 'ehthumbs.db',
+    ];
+    if (in_array($basename, $junk_basenames, true)) {
+        return true;
+    }
+
+    // Editor / merge scratch files (basename pattern):
+    //   `.#name`      Emacs lock
+    //   `#name#`      Emacs autosave
+    //   `name~`       Editor backup
+    //   `name.swp`    Vim swap (also .swo, .swn)
+    //   `name.bak`    generic backup
+    //   `name.orig`   merge conflict leftover
+    //   `name.rej`    merge conflict leftover
+    if ($basename !== '' && $basename[0] === '.' && isset($basename[1]) && $basename[1] === '#') {
+        return true;
+    }
+    if (strlen($basename) >= 3 && $basename[0] === '#' && substr($basename, -1) === '#') {
+        return true;
+    }
+    if (preg_match('/(?:~|\.(?:swp|swo|swn|bak|orig|rej))$/', $basename) === 1) {
+        return true;
+    }
+
+    return false;
 }
 
 /**
