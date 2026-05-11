@@ -3396,23 +3396,18 @@ function endpoint_file_fetch(
  *     input). Negligible per individual file, but unbounded if the batch is
  *     all-binary multiplied by request volume.
  *
- * Rule: gzip the response if **any** file in the batch is compressible.
+ * Rule: gzip the response only if every file in the batch is compressible.
  *
- * The previous all-or-nothing rule ("gzip only if every file is compressible")
- * was over-conservative — a single PNG in a 200-CSS batch flipped the whole
- * response to identity, losing ~50 % of wire size that would have compressed.
- * The wasted CPU on the small binary portion of mixed batches is bounded by
- * request size (capped server-side), so this trade-off favors smaller wire
- * bytes on the common WordPress mixed batch (theme dirs, wp-content/uploads
- * mixed with plugin assets) without harming the all-binary uploads case
- * (which has zero compressible files and stays identity).
+ * The importer keeps text-y and binary path lists in separate sequential
+ * batches, so text-only responses still compress well while media-heavy
+ * responses avoid wasting CPU on already-compressed bytes. If an older or
+ * custom client sends a mixed batch directly, prefer identity.
  */
 function file_fetch_paths_should_gzip(array $paths): bool
 {
     if ($paths === []) {
         return false;
     }
-    $any_compressible = false;
     foreach ($paths as $path) {
         if (!is_string($path)) {
             // Defensive: an unexpected non-string entry is a bad input we
@@ -3421,7 +3416,6 @@ function file_fetch_paths_should_gzip(array $paths): bool
         }
         $ext = path_extension_compressibility($path);
         if ($ext === 'yes') {
-            $any_compressible = true;
             continue;
         }
         if ($ext === 'unknown') {
@@ -3430,13 +3424,14 @@ function file_fetch_paths_should_gzip(array $paths): bool
             // open/read/close per file) and means we don't have to grow the
             // whitelist every time a plugin invents a new template suffix.
             if (path_head_looks_like_text($path)) {
-                $any_compressible = true;
+                continue;
             }
-            continue;
+            return false;
         }
-        // 'no' — known binary. Skip; doesn't disqualify the batch.
+        // 'no' — known binary. Keep response identity.
+        return false;
     }
-    return $any_compressible;
+    return true;
 }
 
 /**
