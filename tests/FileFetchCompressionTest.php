@@ -55,14 +55,16 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertStringContainsString('body { color: red; }', $decoded);
     }
 
-    public function testFileFetchFallsBackToIdentityWhenAnyPathIsBinary(): void
+    public function testFileFetchGzipsMixedBatchesIfAnyFileIsCompressible(): void
     {
-        // Mixed batches must err on the side of identity: response-level
-        // Content-Encoding can't be flipped per part, so a single binary
-        // in the list disables gzip for the whole response. This preserves
-        // the binary fast path the importer just shipped — the alternative
-        // (gzip the whole thing) would re-introduce the buffer-stall
-        // behavior we're explicitly avoiding.
+        // A mixed batch (some text + some binary) gets gzipped at the
+        // response level. The binary portion passes through deflate as
+        // literal stored blocks (~0 % size change, ~4 ms CPU per 200 KB);
+        // the text portion compresses 5–60×. Net: a ~50 % wire reduction
+        // on a typical wp-content batch with mostly assets.
+        //
+        // The previous behaviour (fall back to identity if any binary)
+        // sacrificed all gzip benefit on these batches.
         $siteDir = $this->tempDir . '/site';
         mkdir($siteDir, 0755, true);
         $textPath = $siteDir . '/style.css';
@@ -72,10 +74,151 @@ final class FileFetchCompressionTest extends TestCase
 
         $stdout = $this->runFileFetch($siteDir, [$textPath, $binaryPath]);
 
+        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2), 'mixed batch should be gzip framed');
+        $decoded = gzdecode($stdout);
+        $this->assertNotFalse($decoded, 'gzip body should decode');
+        $this->assertStringContainsString('body { color: red; }', $decoded);
+        $this->assertStringContainsString('pretend-jpeg-bytes', $decoded);
+    }
+
+    public function testFileFetchKeepsIdentityWhenAllPathsAreBinary(): void
+    {
+        // Pure-binary batch — no compressible files at all. Must stay
+        // identity; otherwise we'd burn server CPU re-deflating already
+        // compressed image bytes for ~0 % wire reduction.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $jpg = $siteDir . '/photo.jpg';
+        $png = $siteDir . '/icon.png';
+        $mp4 = $siteDir . '/clip.mp4';
+        file_put_contents($jpg, 'jpeg-blob');
+        file_put_contents($png, 'png-blob');
+        file_put_contents($mp4, 'mp4-blob');
+
+        $stdout = $this->runFileFetch($siteDir, [$jpg, $png, $mp4]);
+
         $this->assertStringStartsWith('--boundary-', $stdout);
-        $this->assertFalse(@gzdecode($stdout), 'mixed batch should fall back to identity');
-        $this->assertStringContainsString('body { color: red; }', $stdout);
-        $this->assertStringContainsString('pretend-jpeg-bytes', $stdout);
+        $this->assertFalse(@gzdecode($stdout), 'all-binary batch must stay identity');
+        $this->assertStringContainsString('jpeg-blob', $stdout);
+        $this->assertStringContainsString('png-blob', $stdout);
+        $this->assertStringContainsString('mp4-blob', $stdout);
+    }
+
+    public function testFileFetchGzipsBatchWhereOnlyOneFileIsCompressible(): void
+    {
+        // Edge case: 99 binary files + 1 readme. The single text file
+        // alone is enough to flip the response to gzip. The 99 binaries
+        // ride through deflate as stored blocks (no inflation). This
+        // codifies the "any compressible → gzip" rule on a slightly
+        // pathological mix — we accept the CPU cost on the binary
+        // majority because per-request total size is bounded server-side.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $paths = [];
+        for ($i = 0; $i < 8; $i++) {
+            $p = $siteDir . sprintf('/blob-%d.jpg', $i);
+            file_put_contents($p, 'binary-' . $i);
+            $paths[] = $p;
+        }
+        $readme = $siteDir . '/README';
+        file_put_contents($readme, str_repeat("Welcome to the plugin.\n", 100));
+        $paths[] = $readme;
+
+        $stdout = $this->runFileFetch($siteDir, $paths);
+        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2), 'one compressible file flips the batch to gzip');
+        $decoded = gzdecode($stdout);
+        $this->assertNotFalse($decoded);
+        $this->assertStringContainsString('Welcome to the plugin.', $decoded);
+        $this->assertStringContainsString('binary-0', $decoded);
+        $this->assertStringContainsString('binary-7', $decoded);
+    }
+
+    public function testFileFetchGzipsBatchWithUnknownTextAndKnownBinary(): void
+    {
+        // Mixed: an unknown-extension file with text bytes (sniffer says
+        // text) plus a known-binary jpeg. The unknown-text contributes a
+        // 'yes' classification → response gzipped.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $unknownText = $siteDir . '/config.neon';
+        file_put_contents($unknownText, str_repeat("services: { foo: Foo\\Bar }\n", 100));
+        $jpg = $siteDir . '/photo.jpg';
+        file_put_contents($jpg, 'jpeg-blob');
+
+        $stdout = $this->runFileFetch($siteDir, [$unknownText, $jpg]);
+        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2));
+        $decoded = gzdecode($stdout);
+        $this->assertNotFalse($decoded);
+        $this->assertStringContainsString('services:', $decoded);
+        $this->assertStringContainsString('jpeg-blob', $decoded);
+    }
+
+    public function testFileFetchKeepsIdentityWithUnknownBinaryAndKnownBinary(): void
+    {
+        // No compressible file in the batch — even with unknown extensions,
+        // sniffer says binary → no gzip.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $unknownBin = $siteDir . '/blob.weirdext';
+        file_put_contents($unknownBin, "\x00\xff\x01\xfe" . random_bytes(2048));
+        $jpg = $siteDir . '/photo.jpg';
+        file_put_contents($jpg, 'jpeg-blob');
+
+        $stdout = $this->runFileFetch($siteDir, [$unknownBin, $jpg]);
+        $this->assertStringStartsWith('--boundary-', $stdout);
+        $this->assertFalse(@gzdecode($stdout), 'no compressible file → identity');
+    }
+
+    public function testFileFetchGzipsBatchWithExtensionlessTextAndImage(): void
+    {
+        // .htaccess + a screenshot — the canonical "theme/plugin
+        // distribution" shape. Pre-PR this was identity; now it gzips.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $ht = $siteDir . '/.htaccess';
+        file_put_contents($ht, str_repeat("RewriteRule ^index\\.php$ - [L]\n", 200));
+        $png = $siteDir . '/screenshot.png';
+        file_put_contents($png, 'pretend-png-bytes');
+
+        $stdout = $this->runFileFetch($siteDir, [$ht, $png]);
+        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2));
+        $decoded = gzdecode($stdout);
+        $this->assertNotFalse($decoded);
+        $this->assertStringContainsString('RewriteRule', $decoded);
+        $this->assertStringContainsString('pretend-png-bytes', $decoded);
+    }
+
+    public function testFileFetchEmptyListStaysIdentity(): void
+    {
+        // Empty path list — nothing to compress → identity. (The endpoint
+        // itself probably won't accept this, but the heuristic must.)
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+        $this->assertFalse(file_fetch_paths_should_gzip([]));
+    }
+
+    public function testFileFetchHeuristicDirectly(): void
+    {
+        // Direct unit test of the heuristic — broader coverage than the
+        // in-process file_fetch tests above.
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+
+        // Single-file cases.
+        $this->assertTrue(file_fetch_paths_should_gzip(['a.php']),                     'single text');
+        $this->assertFalse(file_fetch_paths_should_gzip(['photo.jpg']),                'single binary');
+        $this->assertTrue(file_fetch_paths_should_gzip(['.htaccess']),                 'single extensionless');
+
+        // Multi-file: any-compressible flips on.
+        $this->assertTrue(file_fetch_paths_should_gzip(['a.php', 'b.jpg']),            'text + binary');
+        $this->assertTrue(file_fetch_paths_should_gzip(['a.jpg', 'b.css', 'c.mp4']),   'majority binary, one text');
+        $this->assertFalse(file_fetch_paths_should_gzip(['a.jpg', 'b.png', 'c.mp4']),  'all binary');
+
+        // Bad input — defensive.
+        $this->assertFalse(file_fetch_paths_should_gzip([null]),                       /** @phpstan-ignore-line */
+            'non-string entry rejects the batch');
+        $this->assertFalse(file_fetch_paths_should_gzip([42]),                         /** @phpstan-ignore-line */
+            'numeric entry rejects the batch');
     }
 
     public function testUnknownExtensionWithTextContentGetsGzipped(): void

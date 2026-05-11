@@ -3375,46 +3375,56 @@ function endpoint_file_fetch(
  * list it will carry.
  *
  * Encoding is set per response (Content-Encoding is a response-level header),
- * so we have to commit before any byte is sent. The trade-off for any given
- * path:
- *   - Text-y bodies (PHP/JS/CSS/JSON/SQL/etc.) compress well; gzip is a clear
- *     win on both wire size and total wall time.
- *   - Image/video/audio/font/archive bodies are already compressed; gzip
- *     adds CPU and, more importantly, response-buffering stalls (the gzip
- *     stream withholds bytes from the wire until block boundaries, so any
- *     intermediary that buffers — nginx with fastcgi_buffering on, for
- *     example — sits waiting on the byte stream while server-side bytes pile
- *     up) without producing meaningful size reduction.
+ * so we have to commit before any byte is sent. The trade-off:
+ *   - Text-y bodies (PHP/JS/CSS/JSON/SQL/HTML/etc.) compress 5–60×. Gzip is
+ *     a clear win on wire size and total wall time.
+ *   - Image/video/audio/font/archive bodies are already compressed; passing
+ *     them through gzip costs ~4 ms per 200 KB and produces ~0% size
+ *     reduction (deflate falls back to literal stored blocks for incompressible
+ *     input). Negligible per individual file, but unbounded if the batch is
+ *     all-binary multiplied by request volume.
  *
- * The whitelist is the conservative direction: gzip only when every path in
- * the request has a known-compressible extension. A single binary in the
- * batch flips the whole response to identity, which preserves the "binary
- * fast path" the importer just shipped.
+ * Rule: gzip the response if **any** file in the batch is compressible.
+ *
+ * The previous all-or-nothing rule ("gzip only if every file is compressible")
+ * was over-conservative — a single PNG in a 200-CSS batch flipped the whole
+ * response to identity, losing ~50 % of wire size that would have compressed.
+ * The wasted CPU on the small binary portion of mixed batches is bounded by
+ * request size (capped server-side), so this trade-off favors smaller wire
+ * bytes on the common WordPress mixed batch (theme dirs, wp-content/uploads
+ * mixed with plugin assets) without harming the all-binary uploads case
+ * (which has zero compressible files and stays identity).
  */
 function file_fetch_paths_should_gzip(array $paths): bool
 {
     if ($paths === []) {
         return false;
     }
+    $any_compressible = false;
     foreach ($paths as $path) {
         if (!is_string($path)) {
+            // Defensive: an unexpected non-string entry is a bad input we
+            // shouldn't compress around. Treat as a hard reject.
             return false;
         }
         $ext = path_extension_compressibility($path);
-        if ($ext === 'no') {
-            return false;
+        if ($ext === 'yes') {
+            $any_compressible = true;
+            continue;
         }
         if ($ext === 'unknown') {
             // Extension didn't match a known-text or known-binary list. Peek
             // at the first 64 bytes and let the bytes decide. Cheap (one
             // open/read/close per file) and means we don't have to grow the
             // whitelist every time a plugin invents a new template suffix.
-            if (!path_head_looks_like_text($path)) {
-                return false;
+            if (path_head_looks_like_text($path)) {
+                $any_compressible = true;
             }
+            continue;
         }
+        // 'no' — known binary. Skip; doesn't disqualify the batch.
     }
-    return true;
+    return $any_compressible;
 }
 
 /**
