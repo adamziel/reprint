@@ -3626,7 +3626,10 @@ class ImportClient
             }
         } elseif (file_exists($sql_file)) {
             // Scan db.sql for domains using the same pipeline as db-pull
-            $query_stream = new \WP_MySQL_Naive_Query_Stream();
+            $query_stream = $this->create_domain_scan_query_stream();
+            if ($query_stream === null) {
+                throw new RuntimeException("No SQL query stream parser available");
+            }
             $domain_collector = new \DomainCollector();
 
             $sql_handle = fopen($sql_file, "r");
@@ -7159,9 +7162,7 @@ class ImportClient
         }
 
         // Domain discovery and statement counting: scan SQL for URLs during download
-        $query_stream = class_exists('WP_MySQL_Naive_Query_Stream')
-            ? new \WP_MySQL_Naive_Query_Stream()
-            : null;
+        $query_stream = $this->create_domain_scan_query_stream();
         $domain_collector = class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
@@ -7606,8 +7607,34 @@ class ImportClient
      * Drain complete SQL statements from a query stream and scan their
      * base64-decoded values for URL domains.
      */
+    private function create_domain_scan_query_stream()
+    {
+        if (class_exists('WP_MySQL_FastQueryStream')) {
+            $stream = new \WP_MySQL_FastQueryStream();
+            $stream->set_error_logger(function (array $error): void {
+                $this->audit_log(
+                    sprintf(
+                        "FAST QUERY STREAM FALLBACK | phase=%s | byte_offset=%d | %s",
+                        $error['phase'] ?? 'unknown',
+                        (int) ($error['byte_offset'] ?? 0),
+                        $error['message'] ?? 'unknown parser fallback',
+                    ),
+                    true,
+                );
+            });
+            return $stream;
+        }
+        if (class_exists('WP_MySQL_Naive_Query_Stream')) {
+            return new \WP_MySQL_Naive_Query_Stream();
+        }
+        return null;
+    }
+
+    /**
+     * @param WP_MySQL_FastQueryStream|WP_MySQL_Naive_Query_Stream $query_stream
+     */
     private function drain_query_stream_for_domains(
-        \WP_MySQL_Naive_Query_Stream $query_stream,
+        $query_stream,
         \DomainCollector $domain_collector,
         ?int &$statements_counted = null
     ) {
