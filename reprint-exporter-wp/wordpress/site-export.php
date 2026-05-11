@@ -275,6 +275,8 @@ class Site_Export_Plugin {
             </div>
             <?php endif; ?>
 
+            <?php $this->render_mu_plugin_status_notice(); ?>
+
             <div class="site-export-card">
                 <h2>Connection Token</h2>
                 <p class="card-desc">
@@ -332,6 +334,78 @@ class Site_Export_Plugin {
         }
         </script>
         <?php
+    }
+
+    /**
+     * Render a status notice for the mu-plugin fast-path install.
+     *
+     * The fast-path is an optimisation, not required for correctness, so
+     * the only failure state worth alarming on is when the operator
+     * explicitly tried to install it (last activation recorded an error)
+     * AND we can't recover automatically. "Not installed" is silent;
+     * "active" is a discreet green badge.
+     */
+    public function render_mu_plugin_status_notice() {
+        if (!function_exists('reprint_get_mu_plugin_status')) {
+            // The install module may not be loaded in older plugin
+            // checkouts. Don't error; the admin page should still render.
+            return;
+        }
+        $status = reprint_get_mu_plugin_status();
+        $kind = $status['kind'] ?? 'missing';
+        $target = $status['target_path'] ?? '';
+        $message = $status['message'] ?? '';
+        $method = $status['install_method'] ?? null;
+
+        switch ($kind) {
+            case 'active':
+                $method_label = $method === 'symlink' ? 'symlinked' : 'copied';
+                ?>
+                <div class="site-export-status is-ready">
+                    <span class="dashicons dashicons-performance"></span>
+                    <span><strong>Fast path active</strong> — exporter is <?php echo esc_html($method_label); ?> into <code>mu-plugins/</code>, bypassing regular plugin load for API requests.</span>
+                </div>
+                <?php
+                break;
+            case 'foreign':
+                ?>
+                <div class="site-export-status is-pending">
+                    <span class="dashicons dashicons-warning"></span>
+                    <span><strong>Fast path not installed.</strong>
+                        <?php if ($target !== ''): ?>
+                            Another file already exists at <code><?php echo esc_html($target); ?></code>.
+                            Move or remove it manually, then deactivate and reactivate this plugin to retry the install.
+                        <?php else: ?>
+                            <?php echo esc_html($message); ?>
+                        <?php endif; ?>
+                    </span>
+                </div>
+                <?php
+                break;
+            case 'install-failed':
+            case 'uninstall-failed':
+                ?>
+                <div class="site-export-status is-pending">
+                    <span class="dashicons dashicons-warning"></span>
+                    <span><strong>mu-plugin <?php echo $kind === 'install-failed' ? 'install' : 'uninstall'; ?> failed.</strong>
+                        <?php echo esc_html($message); ?>
+                        <?php if ($target !== '' && $kind === 'install-failed'): ?>
+                            <br>
+                            You can install it manually with:
+                            <code>ln -s <?php echo esc_html(SITE_EXPORT_PLUGIN_DIR . 'mu-plugin/' . REPRINT_MU_PLUGIN_FILENAME); ?> <?php echo esc_html($target); ?></code>
+                        <?php endif; ?>
+                    </span>
+                </div>
+                <?php
+                break;
+            case 'missing':
+            default:
+                // No-op. Plugin works fine without the mu-plugin loader;
+                // an "info: not installed" notice would just be noise on
+                // every page load for the majority of installs that can't
+                // write to mu-plugins/ at all.
+                break;
+        }
     }
 }
 

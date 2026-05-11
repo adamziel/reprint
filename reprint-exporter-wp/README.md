@@ -22,6 +22,45 @@ When a request arrives at `https://example.com/?reprint-api` (or the legacy `?si
 
 This gives us a clean execution environment while using WordPress's front controller as the entry point.
 
+### Optional fast path: install as a must-use plugin
+
+The regular plugin still pays for everything wp-settings.php does
+before it fires plugin-load: `$wpdb` instantiation, mu-plugin loading,
+and any regular plugins that sort alphabetically before
+`reprint-exporter-wp`. On a typical wp.com Atomic / large managed-host
+site that's 50–200 ms per request — paid on every file_fetch,
+file_index, and sql batch in a sync, which adds up over a
+multi-thousand-batch migration.
+
+To skip most of that, install the bundled mu-plugin loader. Either copy
+or symlink it into `wp-content/mu-plugins/`:
+
+```bash
+# Copy (simpler, but won't track plugin upgrades):
+cp wp-content/plugins/reprint-exporter-wp/mu-plugin/0-reprint-exporter.php \
+   wp-content/mu-plugins/0-reprint-exporter.php
+
+# Or symlink (recommended — picks up plugin updates automatically):
+ln -s ../plugins/reprint-exporter-wp/mu-plugin/0-reprint-exporter.php \
+      wp-content/mu-plugins/0-reprint-exporter.php
+```
+
+The leading `0-` makes it sort before any other mu-plugin in
+`wp_get_mu_plugins()`. For API requests it hands off to `lib.php` and
+calls `exit` before the rest of mu-plugin and regular-plugin loading
+runs. For non-API requests it returns silently and normal WP boot
+proceeds untouched.
+
+Safe to install alongside the regular plugin — on API requests the
+mu-plugin exits before the regular plugin would have loaded; on
+non-API requests the mu-plugin no-ops and the regular plugin continues
+to serve its admin UI responsibilities.
+
+If the regular plugin directory is missing or unreadable, the
+mu-plugin falls through silently rather than fatal-erroring. Better to
+serve a 404 to an unhandled `?reprint-api` request than to take the
+whole site offline.
+
 ## Using as a library
 
 The export engine can be embedded in another PHP project without the WordPress plugin wrapper. Require `lib.php` instead of `index.php` — it defines constants and functions but does not handle any HTTP requests or check any URLs.

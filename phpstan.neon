@@ -16,6 +16,13 @@ parameters:
         analyseAndScan:
             - reprint-exporter-wp/wordpress/
             - reprint-exporter-wp/index.php
+            # mu-plugin/install.php is included only from activation /
+            # deactivation hooks, where WP is fully booted. It calls
+            # update_option / get_option / delete_option / wp_mkdir_p
+            # unconditionally because that context guarantees them —
+            # but PHPStan can't see that. Same exclusion strategy as
+            # index.php above.
+            - reprint-exporter-wp/mu-plugin/install.php
             - reprint-exporter-wp/vendor/
             - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/mysql/native/
         analyse:
