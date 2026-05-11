@@ -5683,6 +5683,7 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
+        $params["file_part_gzip"] = "1";
         // Always send directory[] – see comment in download_remote_index().
         $export_dirs = $this->get_export_directories();
         if (!empty($export_dirs)) {
@@ -9299,6 +9300,34 @@ class ImportClient
         ];
     }
 
+    private function decode_file_part_body(array $headers, string $body): string
+    {
+        $encoding = strtolower(trim($headers["x-body-encoding"] ?? ""));
+        if ($encoding === "" || $encoding === "identity") {
+            return $body;
+        }
+        if ($encoding !== "gzip") {
+            throw new RuntimeException("Unsupported file part body encoding: {$encoding}");
+        }
+
+        $decoded = gzdecode($body);
+        if ($decoded === false) {
+            throw new RuntimeException("Failed to decode gzip file part body");
+        }
+
+        if (isset($headers["x-decoded-content-length"])) {
+            $expected_length = (int) $headers["x-decoded-content-length"];
+            $actual_length = strlen($decoded);
+            if ($actual_length !== $expected_length) {
+                throw new RuntimeException(
+                    "Decoded gzip file part length mismatch: expected {$expected_length}, got {$actual_length}"
+                );
+            }
+        }
+
+        return $decoded;
+    }
+
     /**
      * Build the multipart chunk handler callback shared by both parser
      * creation sites inside fetch_streaming.
@@ -9316,6 +9345,21 @@ class ImportClient
                 $headers = $event["headers"];
                 $chunk_type = $headers["x-chunk-type"] ?? "";
                 if ($chunk_type === "file") {
+                    $body_encoding = strtolower(trim($headers["x-body-encoding"] ?? ""));
+                    if ($body_encoding === "gzip") {
+                        if (!$current_chunk) {
+                            $current_chunk = [
+                                "headers" => $headers,
+                                "body" => "",
+                                "compressed_file_part" => true,
+                            ];
+                        }
+                        $current_chunk["body"] =
+                            ($current_chunk["body"] ?? "") .
+                            $event["data"];
+                        return;
+                    }
+
                     if (!$current_chunk) {
                         $current_chunk = [
                             "headers" => $headers,
@@ -9357,7 +9401,29 @@ class ImportClient
             } elseif ($event["type"] === "complete") {
                 $headers = $event["headers"];
                 $chunk_type = $headers["x-chunk-type"] ?? "";
-                if ($chunk_type === "file" && !empty($current_chunk["body_streamed"])) {
+                if ($chunk_type === "file" && !empty($current_chunk["compressed_file_part"])) {
+                    if ($context->on_chunk) {
+                        $decoded_body = $this->decode_file_part_body(
+                            $headers,
+                            (string) ($current_chunk["body"] ?? ""),
+                        );
+                        $stream_headers = $headers;
+                        $stream_headers["x-last-chunk"] = "0";
+                        ($context->on_chunk)([
+                            "headers" => $stream_headers,
+                            "body" => $decoded_body,
+                            "is_streaming_body" => true,
+                        ]);
+
+                        $close_headers = $headers;
+                        $close_headers["x-first-chunk"] = "0";
+                        ($context->on_chunk)([
+                            "headers" => $close_headers,
+                            "body" => "",
+                            "is_streaming_close" => true,
+                        ]);
+                    }
+                } elseif ($chunk_type === "file" && !empty($current_chunk["body_streamed"])) {
                     if ($context->on_chunk) {
                         $close_headers = $headers;
                         $close_headers["x-first-chunk"] = "0";

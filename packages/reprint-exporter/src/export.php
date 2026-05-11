@@ -2181,11 +2181,20 @@ function stream_file_producer(
     $producer,
     ResourceBudget $budget,
     array $config = [],
-    bool $gzip = false
+    $compression_mode = 'identity'
 ): array {
     prepare_streaming_response();
 
-    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(false, $gzip);
+    if ($compression_mode === true) {
+        $compression_mode = 'response-gzip';
+    } elseif ($compression_mode === false || !is_string($compression_mode)) {
+        $compression_mode = 'identity';
+    }
+
+    $response_gzip = $compression_mode === 'response-gzip';
+    $gzip_file_parts = $compression_mode === 'file-parts';
+
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(false, $response_gzip);
 
     // E2E test hook: after gzip stream initialization (file producer)
     if (getenv('SITE_EXPORT_TEST_MODE')) {
@@ -2376,7 +2385,18 @@ function stream_file_producer(
                     $files_completed++;
                 }
 
+                $decoded_size = strlen($chunk["data"]);
                 $data = $chunk["data"];
+                $body_encoding_headers = "";
+                if ($gzip_file_parts && file_part_body_should_gzip($chunk["path"], $data)) {
+                    $encoded = gzencode($data, 6);
+                    if ($encoded !== false && strlen($encoded) < $decoded_size) {
+                        $data = $encoded;
+                        $body_encoding_headers =
+                            "X-Body-Encoding: gzip\r\n" .
+                            "X-Decoded-Content-Length: " . $decoded_size . "\r\n";
+                    }
+                }
 
                 $headers =
                     "--{$boundary}\r\n" .
@@ -2388,9 +2408,10 @@ function stream_file_producer(
                     "X-File-Size: " . $chunk["size"] . "\r\n" .
                     "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
                     "X-Chunk-Offset: " . $chunk["offset"] . "\r\n" .
-                    "X-Chunk-Size: " . strlen($data) . "\r\n" .
+                    "X-Chunk-Size: " . $decoded_size . "\r\n" .
                     "X-First-Chunk: " . ($chunk["is_first_chunk"] ? "1" : "0") . "\r\n" .
-                    "X-Last-Chunk: " . ($chunk["is_last_chunk"] ? "1" : "0") . "\r\n";
+                    "X-Last-Chunk: " . ($chunk["is_last_chunk"] ? "1" : "0") . "\r\n" .
+                    $body_encoding_headers;
                 if (!empty($chunk["file_changed"])) {
                     $headers .= "X-File-Changed: 1\r\n";
                     if ($chunk["change_ctime"] !== null) {
@@ -3378,16 +3399,16 @@ function endpoint_file_fetch(
         $producer,
         $budget,
         $config,
-        file_fetch_paths_should_gzip($paths),
+        file_fetch_compression_mode($paths, !empty($config["file_part_gzip"])),
     );
 }
 
 /**
- * Decides whether to gzip a file_fetch multipart response based on the path
+ * Decides how to compress a file_fetch multipart response based on the path
  * list it will carry.
  *
  * Encoding is set per response (Content-Encoding is a response-level header),
- * so we have to commit before any byte is sent. The trade-off:
+ * so whole-response gzip is still all-or-nothing. The trade-off:
  *   - Text-y bodies (PHP/JS/CSS/JSON/SQL/HTML/etc.) compress 5–60×. Gzip is
  *     a clear win on wire size and total wall time.
  *   - Image/video/audio/font/archive bodies are already compressed; passing
@@ -3396,28 +3417,28 @@ function endpoint_file_fetch(
  *     input). Negligible per individual file, but unbounded if the batch is
  *     all-binary multiplied by request volume.
  *
- * Rule: gzip the response if **any** file in the batch is compressible.
- *
- * The previous all-or-nothing rule ("gzip only if every file is compressible")
- * was over-conservative — a single PNG in a 200-CSS batch flipped the whole
- * response to identity, losing ~50 % of wire size that would have compressed.
- * The wasted CPU on the small binary portion of mixed batches is bounded by
- * request size (capped server-side), so this trade-off favors smaller wire
- * bytes on the common WordPress mixed batch (theme dirs, wp-content/uploads
- * mixed with plugin assets) without harming the all-binary uploads case
- * (which has zero compressible files and stays identity).
+ * Rule:
+ *   - all text-y: gzip the whole response, which is best for many small files
+ *     because one stream can share a compression dictionary across parts.
+ *   - all binary: keep the response identity.
+ *   - mixed with file_part_gzip client capability: keep the response identity
+ *     and gzip only compressible file parts. This preserves the text win
+ *     without spending CPU deflating media bytes.
+ *   - mixed without that capability: fall back to response gzip so older
+ *     importers never receive encoded file parts they cannot decode.
  */
-function file_fetch_paths_should_gzip(array $paths): bool
+function file_fetch_compression_mode(array $paths, bool $allow_file_parts = false): string
 {
     if ($paths === []) {
-        return false;
+        return 'identity';
     }
     $any_compressible = false;
+    $any_incompressible = false;
     foreach ($paths as $path) {
         if (!is_string($path)) {
             // Defensive: an unexpected non-string entry is a bad input we
             // shouldn't compress around. Treat as a hard reject.
-            return false;
+            return 'identity';
         }
         $ext = path_extension_compressibility($path);
         if ($ext === 'yes') {
@@ -3431,12 +3452,29 @@ function file_fetch_paths_should_gzip(array $paths): bool
             // whitelist every time a plugin invents a new template suffix.
             if (path_head_looks_like_text($path)) {
                 $any_compressible = true;
+            } else {
+                $any_incompressible = true;
             }
             continue;
         }
-        // 'no' — known binary. Skip; doesn't disqualify the batch.
+        // 'no' — known binary.
+        $any_incompressible = true;
     }
-    return $any_compressible;
+    if ($any_compressible && $any_incompressible) {
+        return $allow_file_parts ? 'file-parts' : 'response-gzip';
+    }
+    if ($any_compressible) {
+        return 'response-gzip';
+    }
+    return 'identity';
+}
+
+/**
+ * Back-compat helper for callers/tests that only care about response-level gzip.
+ */
+function file_fetch_paths_should_gzip(array $paths): bool
+{
+    return file_fetch_compression_mode($paths) === 'response-gzip';
 }
 
 /**
@@ -3558,6 +3596,36 @@ function path_head_looks_like_text(string $path): bool
     // a multi-byte sequence is sliced by our 64-byte window: it returns false,
     // which we treat as "not obviously text" — biased toward identity, which
     // is the safe direction.
+    if (function_exists('mb_check_encoding') && !mb_check_encoding($head, 'UTF-8')) {
+        return false;
+    }
+    return true;
+}
+
+function file_part_body_should_gzip(string $path, string $body): bool
+{
+    $ext = path_extension_compressibility($path);
+    if ($ext === 'yes') {
+        return true;
+    }
+    if ($ext === 'no') {
+        return false;
+    }
+    return body_head_looks_like_text($body);
+}
+
+function body_head_looks_like_text(string $body): bool
+{
+    $head = substr($body, 0, 64);
+    if ($head === '') {
+        return false;
+    }
+    if (strpos($head, "\x00") !== false) {
+        return false;
+    }
+    if (preg_match('/[\x01-\x08\x0B\x0E-\x1F\x7F]/', $head)) {
+        return false;
+    }
     if (function_exists('mb_check_encoding') && !mb_check_encoding($head, 'UTF-8')) {
         return false;
     }

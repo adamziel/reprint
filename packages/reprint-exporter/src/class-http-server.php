@@ -171,7 +171,7 @@ final class Site_Export_HTTP_Server {
                 $value = (int) $value;
             } elseif (in_array($key, ['memory_threshold'], true)) {
                 $value = (float) $value;
-            } elseif (in_array($key, ['create_table_query', 'db_unbuffered', 'follow_symlinks'], true)) {
+            } elseif (in_array($key, ['create_table_query', 'db_unbuffered', 'follow_symlinks', 'file_part_gzip'], true)) {
                 $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
             } elseif ($key === 'paths' && is_string($value)) {
                 $decoded = json_decode($value, true);

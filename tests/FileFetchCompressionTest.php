@@ -55,16 +55,11 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertStringContainsString('body { color: red; }', $decoded);
     }
 
-    public function testFileFetchGzipsMixedBatchesIfAnyFileIsCompressible(): void
+    public function testFileFetchUsesPerPartGzipForMixedBatches(): void
     {
-        // A mixed batch (some text + some binary) gets gzipped at the
-        // response level. The binary portion passes through deflate as
-        // literal stored blocks (~0 % size change, ~4 ms CPU per 200 KB);
-        // the text portion compresses 5–60×. Net: a ~50 % wire reduction
-        // on a typical wp-content batch with mostly assets.
-        //
-        // The previous behaviour (fall back to identity if any binary)
-        // sacrificed all gzip benefit on these batches.
+        // Mixed batches keep the HTTP response identity, but gzip the
+        // compressible file part body. That avoids spending CPU deflating
+        // already-compressed media while preserving the text-file wire win.
         $siteDir = $this->tempDir . '/site';
         mkdir($siteDir, 0755, true);
         $textPath = $siteDir . '/style.css';
@@ -74,11 +69,35 @@ final class FileFetchCompressionTest extends TestCase
 
         $stdout = $this->runFileFetch($siteDir, [$textPath, $binaryPath]);
 
-        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2), 'mixed batch should be gzip framed');
+        $this->assertStringStartsWith('--boundary-', $stdout);
+        $this->assertFalse(@gzdecode($stdout), 'mixed file_fetch should not use response-level gzip');
+
+        $textPart = $this->findFilePart($stdout, $textPath);
+        $this->assertSame('gzip', $textPart['headers']['x-body-encoding'] ?? null);
+        $this->assertSame('body { color: red; }', substr((string) gzdecode($textPart['body']), 0, 20));
+
+        $binaryPart = $this->findFilePart($stdout, $binaryPath);
+        $this->assertArrayNotHasKey('x-body-encoding', $binaryPart['headers']);
+        $this->assertSame('pretend-jpeg-bytes', $binaryPart['body']);
+    }
+
+    public function testFileFetchKeepsResponseGzipForMixedBatchesWithoutCapability(): void
+    {
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $textPath = $siteDir . '/style.css';
+        $binaryPath = $siteDir . '/photo.jpg';
+        file_put_contents($textPath, str_repeat("body { color: red; }\n", 200));
+        file_put_contents($binaryPath, 'pretend-jpeg-bytes');
+
+        $stdout = $this->runFileFetch($siteDir, [$textPath, $binaryPath], false);
+
+        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2));
         $decoded = gzdecode($stdout);
-        $this->assertNotFalse($decoded, 'gzip body should decode');
+        $this->assertNotFalse($decoded);
         $this->assertStringContainsString('body { color: red; }', $decoded);
         $this->assertStringContainsString('pretend-jpeg-bytes', $decoded);
+        $this->assertStringNotContainsString('X-Body-Encoding: gzip', $decoded);
     }
 
     public function testFileFetchKeepsIdentityWhenAllPathsAreBinary(): void
@@ -104,14 +123,10 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertStringContainsString('mp4-blob', $stdout);
     }
 
-    public function testFileFetchGzipsBatchWhereOnlyOneFileIsCompressible(): void
+    public function testFileFetchUsesPerPartGzipWhenOnlyOneFileIsCompressible(): void
     {
-        // Edge case: 99 binary files + 1 readme. The single text file
-        // alone is enough to flip the response to gzip. The 99 binaries
-        // ride through deflate as stored blocks (no inflation). This
-        // codifies the "any compressible → gzip" rule on a slightly
-        // pathological mix — we accept the CPU cost on the binary
-        // majority because per-request total size is bounded server-side.
+        // Edge case: many binary files + one readme. Only the readme part
+        // should be encoded; media parts stay raw.
         $siteDir = $this->tempDir . '/site';
         mkdir($siteDir, 0755, true);
         $paths = [];
@@ -125,19 +140,18 @@ final class FileFetchCompressionTest extends TestCase
         $paths[] = $readme;
 
         $stdout = $this->runFileFetch($siteDir, $paths);
-        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2), 'one compressible file flips the batch to gzip');
-        $decoded = gzdecode($stdout);
-        $this->assertNotFalse($decoded);
-        $this->assertStringContainsString('Welcome to the plugin.', $decoded);
-        $this->assertStringContainsString('binary-0', $decoded);
-        $this->assertStringContainsString('binary-7', $decoded);
+        $this->assertStringStartsWith('--boundary-', $stdout);
+        $readmePart = $this->findFilePart($stdout, $readme);
+        $this->assertSame('gzip', $readmePart['headers']['x-body-encoding'] ?? null);
+        $this->assertStringContainsString('Welcome to the plugin.', (string) gzdecode($readmePart['body']));
+        $this->assertSame('binary-0', $this->findFilePart($stdout, $paths[0])['body']);
+        $this->assertSame('binary-7', $this->findFilePart($stdout, $paths[7])['body']);
     }
 
-    public function testFileFetchGzipsBatchWithUnknownTextAndKnownBinary(): void
+    public function testFileFetchUsesPerPartGzipWithUnknownTextAndKnownBinary(): void
     {
         // Mixed: an unknown-extension file with text bytes (sniffer says
-        // text) plus a known-binary jpeg. The unknown-text contributes a
-        // 'yes' classification → response gzipped.
+        // text) plus a known-binary jpeg. The unknown-text part gets gzip.
         $siteDir = $this->tempDir . '/site';
         mkdir($siteDir, 0755, true);
         $unknownText = $siteDir . '/config.neon';
@@ -146,11 +160,11 @@ final class FileFetchCompressionTest extends TestCase
         file_put_contents($jpg, 'jpeg-blob');
 
         $stdout = $this->runFileFetch($siteDir, [$unknownText, $jpg]);
-        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2));
-        $decoded = gzdecode($stdout);
-        $this->assertNotFalse($decoded);
-        $this->assertStringContainsString('services:', $decoded);
-        $this->assertStringContainsString('jpeg-blob', $decoded);
+        $this->assertStringStartsWith('--boundary-', $stdout);
+        $unknownTextPart = $this->findFilePart($stdout, $unknownText);
+        $this->assertSame('gzip', $unknownTextPart['headers']['x-body-encoding'] ?? null);
+        $this->assertStringContainsString('services:', (string) gzdecode($unknownTextPart['body']));
+        $this->assertSame('jpeg-blob', $this->findFilePart($stdout, $jpg)['body']);
     }
 
     public function testFileFetchKeepsIdentityWithUnknownBinaryAndKnownBinary(): void
@@ -169,10 +183,10 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertFalse(@gzdecode($stdout), 'no compressible file → identity');
     }
 
-    public function testFileFetchGzipsBatchWithExtensionlessTextAndImage(): void
+    public function testFileFetchUsesPerPartGzipWithExtensionlessTextAndImage(): void
     {
-        // .htaccess + a screenshot — the canonical "theme/plugin
-        // distribution" shape. Pre-PR this was identity; now it gzips.
+        // .htaccess + a screenshot — common theme/plugin distribution shape.
+        // Only the text part should be gzip encoded.
         $siteDir = $this->tempDir . '/site';
         mkdir($siteDir, 0755, true);
         $ht = $siteDir . '/.htaccess';
@@ -181,11 +195,11 @@ final class FileFetchCompressionTest extends TestCase
         file_put_contents($png, 'pretend-png-bytes');
 
         $stdout = $this->runFileFetch($siteDir, [$ht, $png]);
-        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2));
-        $decoded = gzdecode($stdout);
-        $this->assertNotFalse($decoded);
-        $this->assertStringContainsString('RewriteRule', $decoded);
-        $this->assertStringContainsString('pretend-png-bytes', $decoded);
+        $this->assertStringStartsWith('--boundary-', $stdout);
+        $htPart = $this->findFilePart($stdout, $ht);
+        $this->assertSame('gzip', $htPart['headers']['x-body-encoding'] ?? null);
+        $this->assertStringContainsString('RewriteRule', (string) gzdecode($htPart['body']));
+        $this->assertSame('pretend-png-bytes', $this->findFilePart($stdout, $png)['body']);
     }
 
     public function testFileFetchEmptyListStaysIdentity(): void
@@ -209,10 +223,15 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertFalse(file_fetch_paths_should_gzip(['photo.jpg']),                'single binary');
         $this->assertTrue(file_fetch_paths_should_gzip(['.htaccess']),                 'single extensionless');
 
-        // Multi-file: any-compressible flips on.
+        // Multi-file without file-part capability keeps old response-gzip behavior.
         $this->assertTrue(file_fetch_paths_should_gzip(['a.php', 'b.jpg']),            'text + binary');
         $this->assertTrue(file_fetch_paths_should_gzip(['a.jpg', 'b.css', 'c.mp4']),   'majority binary, one text');
         $this->assertFalse(file_fetch_paths_should_gzip(['a.jpg', 'b.png', 'c.mp4']),  'all binary');
+
+        $this->assertSame('response-gzip', file_fetch_compression_mode(['a.php', 'b.css']));
+        $this->assertSame('response-gzip', file_fetch_compression_mode(['a.php', 'b.jpg']));
+        $this->assertSame('file-parts', file_fetch_compression_mode(['a.php', 'b.jpg'], true));
+        $this->assertSame('identity', file_fetch_compression_mode(['a.jpg', 'b.png']));
 
         // Bad input — defensive.
         $this->assertFalse(file_fetch_paths_should_gzip([null]),                       /** @phpstan-ignore-line */
@@ -310,7 +329,60 @@ final class FileFetchCompressionTest extends TestCase
         ];
     }
 
-    private function runFileFetch(string $siteDir, array $paths): string
+    private function findFilePart(string $multipart, string $path): array
+    {
+        foreach ($this->parseMultipart($multipart) as $part) {
+            if (($part['headers']['x-chunk-type'] ?? '') !== 'file') {
+                continue;
+            }
+            $partPath = base64_decode($part['headers']['x-file-path'] ?? '', true);
+            if ($partPath === $path) {
+                return $part;
+            }
+        }
+        $this->fail("File part not found for {$path}");
+    }
+
+    private function parseMultipart(string $multipart): array
+    {
+        $lineEnd = strpos($multipart, "\n");
+        $this->assertNotFalse($lineEnd, 'multipart response should start with a boundary line');
+        $boundaryLine = rtrim(substr($multipart, 0, $lineEnd), "\r\n");
+        $this->assertStringStartsWith('--boundary-', $boundaryLine);
+
+        $boundary = substr($boundaryLine, 2);
+        $parts = [];
+        foreach (explode('--' . $boundary, $multipart) as $segment) {
+            $segment = ltrim($segment, "\r\n");
+            if ($segment === '' || strncmp($segment, '--', 2) === 0) {
+                continue;
+            }
+            $headerEnd = strpos($segment, "\r\n\r\n");
+            $this->assertNotFalse($headerEnd, 'multipart part should contain a header/body separator');
+            $headerBlock = substr($segment, 0, $headerEnd);
+            $body = substr($segment, $headerEnd + 4);
+            if (substr($body, -2) === "\r\n") {
+                $body = substr($body, 0, -2);
+            }
+
+            $headers = [];
+            foreach (explode("\r\n", $headerBlock) as $line) {
+                $colon = strpos($line, ':');
+                if ($colon === false) {
+                    continue;
+                }
+                $headers[strtolower(substr($line, 0, $colon))] = ltrim(substr($line, $colon + 1));
+            }
+            $parts[] = [
+                'headers' => $headers,
+                'body' => $body,
+            ];
+        }
+
+        return $parts;
+    }
+
+    private function runFileFetch(string $siteDir, array $paths, bool $filePartGzip = true): string
     {
         $listPath = $this->tempDir . '/file-list.json';
         file_put_contents($listPath, json_encode($paths, JSON_THROW_ON_ERROR));
@@ -319,6 +391,7 @@ final class FileFetchCompressionTest extends TestCase
         file_put_contents($configPath, json_encode([
             'directory' => $siteDir,
             'file_list_path' => $listPath,
+            'file_part_gzip' => $filePartGzip,
         ], JSON_THROW_ON_ERROR));
 
         $scriptPath = $this->tempDir . '/run-file-fetch.php';
