@@ -210,6 +210,33 @@ class FileBodyStreamingTest extends TestCase
             'Final file must be byte-identical to source after mid-file resume.');
     }
 
+    public function testFileFetchCheckpointPolicyBatchesCompletedFiles(): void
+    {
+        $client = new \ImportClient(
+            'http://fake.url',
+            $this->tempDir . '/state',
+            $this->tempDir . '/fs-root',
+        );
+        $reflection = new \ReflectionClass($client);
+        $shouldForceCheckpoint = $reflection->getMethod('should_force_file_fetch_checkpoint');
+
+        $this->assertFalse($shouldForceCheckpoint->invoke($client, [
+            'is_streaming_close' => true,
+            'headers' => [
+                'x-chunk-type' => 'file',
+                'x-last-chunk' => '1',
+            ],
+        ]), 'A complete file part should be batched instead of forcing a state write.');
+
+        $this->assertTrue($shouldForceCheckpoint->invoke($client, [
+            'is_streaming_close' => true,
+            'headers' => [
+                'x-chunk-type' => 'file',
+                'x-last-chunk' => '0',
+            ],
+        ]), 'An unfinished file part must checkpoint immediately for mid-file resume.');
+    }
+
     private function buildMultipart(string $boundary, array $parts): string
     {
         $out = '';

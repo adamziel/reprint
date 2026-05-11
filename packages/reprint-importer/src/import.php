@@ -1052,6 +1052,9 @@ class ImportClient
     /** @var int Running count of files imported in the current invocation. */
     private $files_imported = 0;
 
+    /** @var int|null Cached index count for repeated save-state audit logs. */
+    private $save_state_index_count = null;
+
     /** @var int|null Total entries in the current download list.  Set once
      *  at the start of download_files_from_list() by counting newlines. */
     private $download_list_total = null;
@@ -5741,7 +5744,7 @@ class ImportClient
             $is_streaming_close = !empty($chunk["is_streaming_close"]);
             if (!$is_streaming_body) {
                 $chunks_since_save++;
-                $force_save = $is_streaming_close;
+                $force_save = $this->should_force_file_fetch_checkpoint($chunk);
                 if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                     $this->state[$state_key]["cursor"] = $cursor;
                     // Track current file for crash recovery
@@ -5869,6 +5872,26 @@ class ImportClient
         $this->save_state($this->state);
 
         return $complete;
+    }
+
+    /**
+     * Force checkpoints only for unfinished file parts.
+     *
+     * Completed small files are cheap to replay on crash, so batching their
+     * checkpoints avoids thousands of state writes on many-small-file sites.
+     * Unfinished file parts still checkpoint immediately so mid-file resume
+     * has the byte count it needs to append safely.
+     */
+    private function should_force_file_fetch_checkpoint(array $chunk): bool
+    {
+        if (empty($chunk["is_streaming_close"])) {
+            return false;
+        }
+        $headers = $chunk["headers"] ?? [];
+        if (($headers["x-chunk-type"] ?? "") !== "file") {
+            return false;
+        }
+        return ($headers["x-last-chunk"] ?? "0") !== "1";
     }
 
     /**
@@ -6950,6 +6973,7 @@ class ImportClient
         if (!rename($new_index, $this->index_file)) {
             throw new RuntimeException("Failed to replace index file");
         }
+        $this->invalidate_save_state_index_count();
         $this->audit_log("INDEX MERGE COMPLETE | {$this->index_file} updated");
 
         @unlink($updates_path);
@@ -10588,7 +10612,7 @@ class ImportClient
             throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->state_file}");
         }
 
-        $indexed = $this->index_count();
+        $indexed = $this->get_save_state_index_count();
         $files_imported = $this->files_imported; // Completed in this run
         $has_cursor =
             !empty($state["cursor"] ?? null) ||
@@ -10607,6 +10631,19 @@ class ImportClient
         );
 
         $this->write_status_file();
+    }
+
+    private function get_save_state_index_count(): int
+    {
+        if ($this->save_state_index_count === null) {
+            $this->save_state_index_count = $this->index_count();
+        }
+        return $this->save_state_index_count;
+    }
+
+    private function invalidate_save_state_index_count(): void
+    {
+        $this->save_state_index_count = null;
     }
 
     /**
