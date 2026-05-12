@@ -3399,7 +3399,11 @@ function endpoint_file_fetch(
         $producer,
         $budget,
         $config,
-        file_fetch_compression_mode($paths, !empty($config["file_part_gzip"])),
+        file_fetch_compression_mode(
+            $paths,
+            !empty($config["file_part_gzip"]),
+            $directories
+        ),
     );
 }
 
@@ -3427,22 +3431,41 @@ function endpoint_file_fetch(
  *   - mixed without that capability: fall back to response gzip so older
  *     importers never receive encoded file parts they cannot decode.
  */
-function file_fetch_compression_mode(array $paths, bool $allow_file_parts = false): string
+function file_fetch_compression_mode(
+    array $paths,
+    bool $allow_file_parts = false,
+    array $directories = []
+): string
 {
     if ($paths === []) {
         return 'identity';
     }
     $any_compressible = false;
     $any_incompressible = false;
+    $compressible_bytes = 0;
+    $incompressible_bytes = 0;
+    $compressible_count = 0;
+    $incompressible_count = 0;
+    $unknown_size_count = 0;
+
     foreach ($paths as $path) {
         if (!is_string($path)) {
             // Defensive: an unexpected non-string entry is a bad input we
             // shouldn't compress around. Treat as a hard reject.
             return 'identity';
         }
+        $resolved_path = resolve_file_fetch_heuristic_path($path, $directories);
+        $size = file_fetch_heuristic_file_size($resolved_path);
+
         $ext = path_extension_compressibility($path);
         if ($ext === 'yes') {
             $any_compressible = true;
+            $compressible_count++;
+            if ($size === null) {
+                $unknown_size_count++;
+            } else {
+                $compressible_bytes += $size;
+            }
             continue;
         }
         if ($ext === 'unknown') {
@@ -3450,23 +3473,158 @@ function file_fetch_compression_mode(array $paths, bool $allow_file_parts = fals
             // at the first 64 bytes and let the bytes decide. Cheap (one
             // open/read/close per file) and means we don't have to grow the
             // whitelist every time a plugin invents a new template suffix.
-            if (path_head_looks_like_text($path)) {
+            if (path_head_looks_like_text($resolved_path ?? $path)) {
                 $any_compressible = true;
+                $compressible_count++;
+                if ($size === null) {
+                    $unknown_size_count++;
+                } else {
+                    $compressible_bytes += $size;
+                }
             } else {
                 $any_incompressible = true;
+                $incompressible_count++;
+                if ($size === null) {
+                    $unknown_size_count++;
+                } else {
+                    $incompressible_bytes += $size;
+                }
             }
             continue;
         }
         // 'no' — known binary.
         $any_incompressible = true;
+        $incompressible_count++;
+        if ($size === null) {
+            $unknown_size_count++;
+        } else {
+            $incompressible_bytes += $size;
+        }
     }
     if ($any_compressible && $any_incompressible) {
-        return $allow_file_parts ? 'file-parts' : 'response-gzip';
+        if (!$allow_file_parts) {
+            return 'response-gzip';
+        }
+        return file_fetch_mixed_batch_prefers_file_parts([
+            'compressible_bytes' => $compressible_bytes,
+            'incompressible_bytes' => $incompressible_bytes,
+            'compressible_count' => $compressible_count,
+            'incompressible_count' => $incompressible_count,
+            'unknown_size_count' => $unknown_size_count,
+        ]) ? 'file-parts' : 'response-gzip';
     }
     if ($any_compressible) {
         return 'response-gzip';
     }
     return 'identity';
+}
+
+/**
+ * Resolves a file_fetch path for compression heuristics only.
+ *
+ * FileTreeProducer still performs the authoritative path resolution later.
+ * This helper just lets the compression decision use file sizes and byte
+ * sniffing for relative path lists too.
+ */
+function resolve_file_fetch_heuristic_path(string $path, array $directories = []): ?string
+{
+    if ($path === '') {
+        return null;
+    }
+
+    clearstatcache(true, $path);
+    if ($path[0] === '/' && (is_file($path) || is_link($path))) {
+        return $path;
+    }
+
+    foreach ($directories as $directory) {
+        if (!is_string($directory) || $directory === '') {
+            continue;
+        }
+        $candidate = rtrim($directory, '/') . '/' . ltrim($path, '/');
+        clearstatcache(true, $candidate);
+        if (is_file($candidate) || is_link($candidate)) {
+            return $candidate;
+        }
+    }
+
+    if ($path[0] !== '/') {
+        clearstatcache(true, $path);
+        if (is_file($path) || is_link($path)) {
+            return $path;
+        }
+    }
+
+    return null;
+}
+
+function file_fetch_heuristic_file_size(?string $path): ?int
+{
+    if ($path === null || !is_file($path)) {
+        return null;
+    }
+
+    $size = @filesize($path);
+    return $size === false ? null : (int) $size;
+}
+
+/**
+ * Decide whether a mixed batch is worth splitting into per-file gzip bodies.
+ *
+ * Whole-response gzip is still better for batches dominated by many tiny text
+ * files: one stream shares a dictionary across part boundaries and avoids
+ * thousands of tiny gzip members. Per-part gzip wins when enough bytes are
+ * already-compressed media/archive data that response gzip would burn CPU
+ * deflating bytes it cannot shrink.
+ *
+ * @param array{compressible_bytes:int,incompressible_bytes:int,compressible_count:int,incompressible_count:int,unknown_size_count:int} $summary
+ */
+function file_fetch_mixed_batch_prefers_file_parts(array $summary): bool
+{
+    if ($summary['unknown_size_count'] > 0) {
+        // Preserve the old mixed-batch behavior when we cannot size the
+        // entries. endpoint_file_fetch passes directories, so production
+        // requests normally take the measured path.
+        return true;
+    }
+
+    $compressible_bytes = $summary['compressible_bytes'];
+    $incompressible_bytes = $summary['incompressible_bytes'];
+    $total_bytes = $compressible_bytes + $incompressible_bytes;
+    if ($total_bytes <= 0 || $incompressible_bytes <= 0) {
+        return false;
+    }
+
+    // If the binary side is tiny, response gzip's shared dictionary is worth
+    // more than avoiding a negligible amount of binary deflate work.
+    if ($incompressible_bytes < 1024 * 1024) {
+        return false;
+    }
+
+    if (($incompressible_bytes / $total_bytes) < 0.10) {
+        return false;
+    }
+
+    // Many tiny text files are the specific bad case for per-part gzip: each
+    // file pays its own gzip header/trailer and cannot reuse a dictionary from
+    // neighboring parts. Keep response gzip until the binary side is large
+    // enough to dominate both CPU and wire size.
+    if ($summary['compressible_count'] >= 128) {
+        $average_compressible_size = $compressible_bytes > 0
+            ? $compressible_bytes / $summary['compressible_count']
+            : 0;
+        if (
+            $average_compressible_size <= 16 * 1024 &&
+            (
+                $incompressible_bytes < 8 * 1024 * 1024 ||
+                $incompressible_bytes < $compressible_bytes
+            )
+        ) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /**

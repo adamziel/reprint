@@ -151,6 +151,59 @@ class FileBodyStreamingTest extends TestCase
         $this->assertSame('', $events[1]['body']);
     }
 
+    public function testEncodedFilePartWithoutEncodingHeaderFailsSizeCheck(): void
+    {
+        $client = new \ImportClient(
+            'http://fake.url',
+            $this->tempDir . '/state',
+            $this->tempDir . '/fs-root',
+        );
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('is_tty')->setValue($client, true);
+        $reflection->getProperty('state')->setValue($client, []);
+
+        $handleFileChunk = $reflection->getMethod('handle_file_chunk');
+        $context = new \StreamingContext();
+        $context->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context): void {
+            $handleFileChunk->invoke($client, $chunk, $context);
+        };
+
+        $currentChunk = null;
+        $makeHandler = $reflection->getMethod('make_chunk_handler');
+        $handler = $makeHandler->invokeArgs($client, [$context, &$currentChunk]);
+        $parser = new \MultipartStreamParser('BOUNDARY', $handler);
+
+        $body = str_repeat("body { color: red; }\n", 1024);
+        $encodedBody = gzencode($body);
+        $this->assertNotFalse($encodedBody);
+        $multipart = $this->buildMultipart('BOUNDARY', [
+            [
+                'headers' => [
+                    'Content-Type' => 'application/octet-stream',
+                    'Content-Length' => (string) strlen($encodedBody),
+                    'X-Chunk-Type' => 'file',
+                    // Simulates a body-inspecting wrapper that strips the new
+                    // X-Body-Encoding header but leaves the compressed bytes.
+                    'X-File-Path' => base64_encode('/themes/style.css'),
+                    'X-File-Size' => (string) strlen($body),
+                    'X-File-Ctime' => '1234567890',
+                    'X-Chunk-Offset' => '0',
+                    'X-Chunk-Size' => (string) strlen($body),
+                    'X-First-Chunk' => '1',
+                    'X-Last-Chunk' => '1',
+                ],
+                'body' => $encodedBody,
+            ],
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Downloaded file size mismatch');
+
+        for ($offset = 0; $offset < strlen($multipart); $offset += 257) {
+            $parser->feed(substr($multipart, $offset, 257));
+        }
+    }
+
     /**
      * The PR's whole point is partial on-disk writes before a part completes.
      * That means a request cut mid-body now leaves bytes already written —

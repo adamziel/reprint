@@ -65,7 +65,7 @@ final class FileFetchCompressionTest extends TestCase
         $textPath = $siteDir . '/style.css';
         $binaryPath = $siteDir . '/photo.jpg';
         file_put_contents($textPath, str_repeat("body { color: red; }\n", 200));
-        file_put_contents($binaryPath, 'pretend-jpeg-bytes');
+        file_put_contents($binaryPath, str_repeat('pretend-jpeg-bytes', 128 * 1024));
 
         $stdout = $this->runFileFetch($siteDir, [$textPath, $binaryPath]);
 
@@ -78,7 +78,7 @@ final class FileFetchCompressionTest extends TestCase
 
         $binaryPart = $this->findFilePart($stdout, $binaryPath);
         $this->assertArrayNotHasKey('x-body-encoding', $binaryPart['headers']);
-        $this->assertSame('pretend-jpeg-bytes', $binaryPart['body']);
+        $this->assertStringStartsWith('pretend-jpeg-bytes', $binaryPart['body']);
     }
 
     public function testFileFetchKeepsResponseGzipForMixedBatchesWithoutCapability(): void
@@ -132,7 +132,7 @@ final class FileFetchCompressionTest extends TestCase
         $paths = [];
         for ($i = 0; $i < 8; $i++) {
             $p = $siteDir . sprintf('/blob-%d.jpg', $i);
-            file_put_contents($p, 'binary-' . $i);
+            file_put_contents($p, str_repeat('binary-' . $i, 32 * 1024));
             $paths[] = $p;
         }
         $readme = $siteDir . '/README';
@@ -144,8 +144,8 @@ final class FileFetchCompressionTest extends TestCase
         $readmePart = $this->findFilePart($stdout, $readme);
         $this->assertSame('gzip', $readmePart['headers']['x-body-encoding'] ?? null);
         $this->assertStringContainsString('Welcome to the plugin.', (string) gzdecode($readmePart['body']));
-        $this->assertSame('binary-0', $this->findFilePart($stdout, $paths[0])['body']);
-        $this->assertSame('binary-7', $this->findFilePart($stdout, $paths[7])['body']);
+        $this->assertStringStartsWith('binary-0', $this->findFilePart($stdout, $paths[0])['body']);
+        $this->assertStringStartsWith('binary-7', $this->findFilePart($stdout, $paths[7])['body']);
     }
 
     public function testFileFetchUsesPerPartGzipWithUnknownTextAndKnownBinary(): void
@@ -157,14 +157,14 @@ final class FileFetchCompressionTest extends TestCase
         $unknownText = $siteDir . '/config.neon';
         file_put_contents($unknownText, str_repeat("services: { foo: Foo\\Bar }\n", 100));
         $jpg = $siteDir . '/photo.jpg';
-        file_put_contents($jpg, 'jpeg-blob');
+        file_put_contents($jpg, str_repeat('jpeg-blob', 128 * 1024));
 
         $stdout = $this->runFileFetch($siteDir, [$unknownText, $jpg]);
         $this->assertStringStartsWith('--boundary-', $stdout);
         $unknownTextPart = $this->findFilePart($stdout, $unknownText);
         $this->assertSame('gzip', $unknownTextPart['headers']['x-body-encoding'] ?? null);
         $this->assertStringContainsString('services:', (string) gzdecode($unknownTextPart['body']));
-        $this->assertSame('jpeg-blob', $this->findFilePart($stdout, $jpg)['body']);
+        $this->assertStringStartsWith('jpeg-blob', $this->findFilePart($stdout, $jpg)['body']);
     }
 
     public function testFileFetchKeepsIdentityWithUnknownBinaryAndKnownBinary(): void
@@ -192,14 +192,40 @@ final class FileFetchCompressionTest extends TestCase
         $ht = $siteDir . '/.htaccess';
         file_put_contents($ht, str_repeat("RewriteRule ^index\\.php$ - [L]\n", 200));
         $png = $siteDir . '/screenshot.png';
-        file_put_contents($png, 'pretend-png-bytes');
+        file_put_contents($png, str_repeat('pretend-png-bytes', 128 * 1024));
 
         $stdout = $this->runFileFetch($siteDir, [$ht, $png]);
         $this->assertStringStartsWith('--boundary-', $stdout);
         $htPart = $this->findFilePart($stdout, $ht);
         $this->assertSame('gzip', $htPart['headers']['x-body-encoding'] ?? null);
         $this->assertStringContainsString('RewriteRule', (string) gzdecode($htPart['body']));
-        $this->assertSame('pretend-png-bytes', $this->findFilePart($stdout, $png)['body']);
+        $this->assertStringStartsWith('pretend-png-bytes', $this->findFilePart($stdout, $png)['body']);
+    }
+
+    public function testFileFetchKeepsResponseGzipForTextHeavySmallMixedBatches(): void
+    {
+        // Many small text files plus a tiny binary file are better as one gzip
+        // response: the shared dictionary beats thousands of isolated gzip
+        // members, and the binary side is too small to matter.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $paths = [];
+        for ($i = 0; $i < 200; $i++) {
+            $p = $siteDir . sprintf('/snippet-%03d.php', $i);
+            file_put_contents($p, str_repeat("<?php echo 'hello';\n", 100));
+            $paths[] = $p;
+        }
+        $tinyBinary = $siteDir . '/tiny-logo.jpg';
+        file_put_contents($tinyBinary, str_repeat('tiny-jpeg', 1024));
+        $paths[] = $tinyBinary;
+
+        $stdout = $this->runFileFetch($siteDir, $paths);
+
+        $this->assertSame("\x1f\x8b", substr($stdout, 0, 2));
+        $decoded = gzdecode($stdout);
+        $this->assertNotFalse($decoded);
+        $this->assertStringContainsString("<?php echo 'hello';", $decoded);
+        $this->assertStringNotContainsString('X-Body-Encoding: gzip', $decoded);
     }
 
     public function testFileFetchEmptyListStaysIdentity(): void
@@ -238,6 +264,30 @@ final class FileFetchCompressionTest extends TestCase
             'non-string entry rejects the batch');
         $this->assertFalse(file_fetch_paths_should_gzip([42]),                         /** @phpstan-ignore-line */
             'numeric entry rejects the batch');
+    }
+
+    public function testMixedBatchHeuristicUsesMeasuredSizesWhenDirectoriesAreKnown(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+
+        $largeText = $siteDir . '/large.css';
+        $largeBinary = $siteDir . '/large.jpg';
+        file_put_contents($largeText, str_repeat('body { color: red; }', 64 * 1024));
+        file_put_contents($largeBinary, str_repeat('jpeg-blob', 256 * 1024));
+        $this->assertSame(
+            'file-parts',
+            file_fetch_compression_mode(['large.css', 'large.jpg'], true, [$siteDir])
+        );
+
+        $smallBinary = $siteDir . '/small.jpg';
+        file_put_contents($smallBinary, str_repeat('jpeg-blob', 1024));
+        $this->assertSame(
+            'response-gzip',
+            file_fetch_compression_mode(['large.css', 'small.jpg'], true, [$siteDir])
+        );
     }
 
     public function testUnknownExtensionWithTextContentGetsGzipped(): void

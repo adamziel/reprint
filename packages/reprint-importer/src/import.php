@@ -8382,6 +8382,11 @@ class ImportClient
                 : 0;
 
             $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
+            if (!$file_changed && $final_size !== $file_size) {
+                throw new RuntimeException(
+                    "Downloaded file size mismatch for {$path}: expected {$file_size}, wrote {$final_size}"
+                );
+            }
 
             if ($context->file_ctime && !$file_changed) {
                 $this->upsert_index_entry(
