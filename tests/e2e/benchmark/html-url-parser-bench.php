@@ -110,6 +110,20 @@ function reprint_count_urls_in_text( $text, $base_url ) {
 	return $count;
 }
 
+function reprint_count_urls_in_text_native_direct( $text ) {
+	$native_processor_class = 'WordPress\\DataLiberation\\URL\\NativeURLInTextProcessor';
+	$processor              = new $native_processor_class( $text );
+	$count                  = 0;
+
+	while ( $processor->next_url() ) {
+		if ( is_string( $processor->get_raw_url() ) ) {
+			++$count;
+		}
+	}
+
+	return $count;
+}
+
 list( $html, $text ) = reprint_build_html_url_fixture( $card_count, $base_url );
 
 $start          = hrtime( true );
@@ -128,7 +142,10 @@ for ( $i = 0; $i < $iterations; $i++ ) {
 
 	$html_urls += count( $resource_urls );
 	$html_tags += $tag_count;
-	$text_urls += reprint_count_urls_in_text( implode( ' ', $resource_urls ) . "\n" . $text, $base_url );
+	$url_corpus = implode( ' ', $resource_urls ) . "\n" . $text;
+	$text_urls += $use_native
+		? reprint_count_urls_in_text_native_direct( $url_corpus )
+		: reprint_count_urls_in_text( $url_corpus, $base_url );
 }
 
 $elapsed_ms = ( hrtime( true ) - $start ) / 1000000;
@@ -139,7 +156,7 @@ if ( $html_urls !== $expected_attrs ) {
 }
 
 if ( $text_urls !== $expected_urls ) {
-	fwrite( STDERR, "HTML URL benchmark parsed $text_urls URLs; expected $expected_urls.\n" );
+	fwrite( STDERR, "HTML URL benchmark detected $text_urls URLs; expected $expected_urls.\n" );
 	exit( 1 );
 }
 
@@ -151,11 +168,11 @@ echo json_encode(
 		'text_bytes'           => strlen( $text ),
 		'html_tags_scanned'    => $html_tags,
 		'html_resource_urls'   => $html_urls,
-		'urls_parsed'          => $text_urls,
+		'urls_detected'        => $text_urls,
 		'elapsed_ms'           => $elapsed_ms,
 		'native_html'          => $use_native ? 'yes' : 'no',
 		'native_url_in_text'   => $use_native ? 'yes' : 'no',
 		'html_strategy'        => $use_native ? 'native compact attribute batches' : 'php per-tag scan',
+		'url_strategy'         => $use_native ? 'native candidate scan' : 'php public URLInTextProcessor parse',
 	)
 );
-

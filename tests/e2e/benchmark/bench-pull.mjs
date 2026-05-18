@@ -486,16 +486,17 @@ function runHtmlUrlParserBenchmark({
             attempts: 1,
             ok: true,
             details: {
-                condition: 'HTML resource URL scan plus URL-in-text parsing',
+                condition: 'HTML resource URL extraction plus URL candidate scanning',
                 cards: benchmark.cards,
                 html_tags: benchmark.html_tags_scanned,
                 html_urls: benchmark.html_resource_urls,
-                parsed_urls: benchmark.urls_parsed,
+                detected_urls: benchmark.urls_detected,
                 html: fmtBytes(benchmark.html_bytes),
                 text: fmtBytes(benchmark.text_bytes),
                 native_html: benchmark.native_html,
                 native_url_in_text: benchmark.native_url_in_text,
-                strategy: benchmark.html_strategy,
+                html_strategy: benchmark.html_strategy,
+                url_strategy: benchmark.url_strategy,
                 ...details,
             },
         };
@@ -509,7 +510,7 @@ function runHtmlUrlParserBenchmark({
             stderr: (e.stderr || '').toString().slice(-2000),
             stdout: (e.stdout || '').toString().slice(-2000),
             details: {
-                condition: 'HTML resource URL scan plus URL-in-text parsing',
+                condition: 'HTML resource URL extraction plus URL candidate scanning',
                 ...details,
             },
         };
