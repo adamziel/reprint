@@ -1,10 +1,7 @@
-# Stages this PR's perf comment will benchmark.
-# One stage name per line; comments and blank lines ignored.
-# Both the PR build and the trunk baseline run the same set, so the
-# table shows two like-for-like wall-time numbers per row.
-#
-# This PR loads the Rust wp_mysql_parser PHP.wasm extension for the PR side
-# and leaves it disabled for the trunk baseline. Both sides use the same
-# direct PHP.wasm runner so the wall-time delta isolates the extension.
+# Default stages this PR's perf comment will benchmark when BENCH_STAGES is
+# not set explicitly. The CI workflow overrides this with separate host PHP
+# and PHP.wasm stage lists so each native/userland pair is like-for-like.
+db-pull
+db-apply
 playground-sqlite-db-pull
 playground-sqlite-db-apply

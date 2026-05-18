@@ -6,7 +6,10 @@ import { existsSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 const DEFAULT_PHP_VERSION = '8.3';
-const MYSQL_PARSER_MANIFEST_ENV = 'WP_MYSQL_PARSER_EXTENSION_MANIFEST';
+const EXTENSION_MANIFEST_ENVS = [
+    'WP_MYSQL_PARSER_EXTENSION_MANIFEST',
+    'WP_NATIVE_APIS_EXTENSION_MANIFEST',
+];
 
 function envRecord() {
     return Object.fromEntries(
@@ -109,8 +112,7 @@ async function main() {
     const argv = process.argv.slice(2);
     const phpVersion = process.env.PLAYGROUND_PHP_VERSION || DEFAULT_PHP_VERSION;
     const extensions = ['intl'];
-    const manifestUrl = process.env[MYSQL_PARSER_MANIFEST_ENV];
-    if (manifestUrl) {
+    for (const manifestUrl of EXTENSION_MANIFEST_ENVS.map((name) => process.env[name]).filter(Boolean)) {
         extensions.push({
             source: {
                 format: 'manifest',

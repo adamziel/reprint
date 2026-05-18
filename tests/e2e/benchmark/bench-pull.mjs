@@ -49,6 +49,8 @@ const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PR
 const PLAYGROUND_PHP_VERSION = process.env.PLAYGROUND_PHP_VERSION || '8.3';
 const REGISTRY = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'site-registry.json'), 'utf-8'));
 const MYSQL_PARSER_MANIFEST = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST || '';
+const NATIVE_APIS_EXTENSION_SO = process.env.WP_NATIVE_APIS_EXTENSION_SO || '';
+const NATIVE_APIS_MANIFEST = process.env.WP_NATIVE_APIS_EXTENSION_MANIFEST || '';
 
 async function seedSourceDb() {
     const dbName = `e2e_${SITE.replace(/-/g, '_')}`;
@@ -239,7 +241,51 @@ function runNativeMysqlParserProof({ requireParser }) {
     }
 }
 
-function proofFailureResult(stage, start, proof, details) {
+function runNativeApisProof({
+    phpBinary = PHP_BINARY,
+    env = {},
+    runtime = 'host PHP',
+    requireNative = Boolean(NATIVE_APIS_EXTENSION_SO || NATIVE_APIS_MANIFEST),
+    mode = 'public-api',
+} = {}) {
+    if (!requireNative) {
+        return {
+            ok: true,
+            details: {
+                wp_native_apis: 'disabled',
+            },
+        };
+    }
+
+    const verifierPath = join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'verify-wp-native-apis.php');
+
+    try {
+        const stdout = execFileSync(phpBinary, [verifierPath, PROJECT_ROOT, mode], {
+            cwd: PROJECT_ROOT,
+            timeout: 120_000,
+            encoding: 'utf-8',
+            maxBuffer: 16 * 1024 * 1024,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, ...env },
+        }).trim();
+        return {
+            ok: true,
+            details: {
+                runtime,
+                ...(stdout ? JSON.parse(stdout) : { wp_native_apis: 'enabled' }),
+            },
+        };
+    } catch (e) {
+        return {
+            ok: false,
+            exitCode: e.status === null ? -1 : (e.status || 1),
+            stderr: (e.stderr || '').toString().slice(-4000),
+            stdout: (e.stdout || '').toString().slice(-4000),
+        };
+    }
+}
+
+function proofFailureResult(stage, start, proof, details, proofName = 'native_proof') {
     return {
         stage,
         elapsedMs: performance.now() - start,
@@ -251,7 +297,7 @@ function proofFailureResult(stage, start, proof, details) {
         details: {
             ...details,
             wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
-            native_parser_proof: 'failed',
+            [proofName]: 'failed',
         },
     };
 }
@@ -267,13 +313,24 @@ function runPlaygroundSqliteDbPullBenchmark() {
         'playground sqlite benchmark preflight',
     );
     const proof = runNativeMysqlParserProof({ requireParser: false });
+    const nativeApisProof = runNativeApisProof({
+        phpBinary: PLAYGROUND_PHP_BINARY,
+        env: playgroundPhpEnv(),
+        runtime: `php.wasm ${PLAYGROUND_PHP_VERSION}`,
+        requireNative: Boolean(NATIVE_APIS_MANIFEST),
+        mode: 'extension-only',
+    });
     const baseDetails = {
         condition: 'db-pull in PHP.wasm',
         runtime: `php.wasm ${PLAYGROUND_PHP_VERSION}`,
         wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
+        wp_native_apis: NATIVE_APIS_MANIFEST ? 'enabled' : 'disabled',
     };
     if (!proof.ok) {
-        return proofFailureResult('playground-sqlite-db-pull', start, proof, baseDetails);
+        return proofFailureResult('playground-sqlite-db-pull', start, proof, baseDetails, 'native_mysql_parser_proof');
+    }
+    if (!nativeApisProof.ok) {
+        return proofFailureResult('playground-sqlite-db-pull', start, nativeApisProof, baseDetails, 'native_apis_proof');
     }
 
     const result = runStage('db-pull', stateDir, [], {
@@ -287,6 +344,7 @@ function runPlaygroundSqliteDbPullBenchmark() {
         details: {
             ...baseDetails,
             ...proof.details,
+            ...nativeApisProof.details,
         },
     };
 }
@@ -306,13 +364,24 @@ function runPlaygroundSqliteDbApplyBenchmark() {
         'playground sqlite benchmark db-pull',
     );
     const proof = runNativeMysqlParserProof({ requireParser: true });
+    const nativeApisProof = runNativeApisProof({
+        phpBinary: PLAYGROUND_PHP_BINARY,
+        env: playgroundPhpEnv(),
+        runtime: `php.wasm ${PLAYGROUND_PHP_VERSION}`,
+        requireNative: Boolean(NATIVE_APIS_MANIFEST),
+        mode: 'extension-only',
+    });
     const baseDetails = {
         condition: 'db-apply to SQLite in PHP.wasm',
         runtime: `php.wasm ${PLAYGROUND_PHP_VERSION}`,
         wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
+        wp_native_apis: NATIVE_APIS_MANIFEST ? 'enabled' : 'disabled',
     };
     if (!proof.ok) {
-        return proofFailureResult('playground-sqlite-db-apply', start, proof, baseDetails);
+        return proofFailureResult('playground-sqlite-db-apply', start, proof, baseDetails, 'native_mysql_parser_proof');
+    }
+    if (!nativeApisProof.ok) {
+        return proofFailureResult('playground-sqlite-db-apply', start, nativeApisProof, baseDetails, 'native_apis_proof');
     }
 
     const sqlitePath = join(
@@ -338,6 +407,7 @@ function runPlaygroundSqliteDbApplyBenchmark() {
         details: {
             ...baseDetails,
             ...proof.details,
+            ...nativeApisProof.details,
         },
     };
 }
@@ -618,13 +688,22 @@ async function main() {
 
     // Optional stage filter — when BENCH_STAGES is set (comma-separated
     // list of stage names), only those stages run on both sides of the
-    // PR-vs-trunk comparison. This is how each PR limits its perf comment
-    // to the single scenario it actually changes.
+    // comparison. This is how each PR limits its perf comment to the
+    // scenarios it actually changes.
     const stageFilter = (process.env.BENCH_STAGES || '')
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
     const shouldRun = (name) => stageFilter.length === 0 || stageFilter.includes(name);
+    const hostNativeApisProof = runNativeApisProof({
+        runtime: 'host PHP',
+        requireNative: Boolean(NATIVE_APIS_EXTENSION_SO),
+    });
+    if (!hostNativeApisProof.ok) {
+        throw new Error(
+            `Native API proof failed before host PHP benchmark\nstderr:\n${hostNativeApisProof.stderr || ''}\nstdout:\n${hostNativeApisProof.stdout || ''}`,
+        );
+    }
 
     const stages = [
         { name: 'preflight', extra: [] },
@@ -640,7 +719,13 @@ async function main() {
         if (!shouldRun(name)) continue;
         console.log(`-> ${name}`);
         const r = runStage(name, stateDir, extra, { includeUrl });
-        results.push(r);
+        results.push({
+            ...r,
+            details: {
+                ...(r.details || {}),
+                ...hostNativeApisProof.details,
+            },
+        });
         console.log(`   ${r.ok ? 'ok' : 'FAIL'} in ${fmtMs(r.elapsedMs)} (attempts=${r.attempts})`);
         if (!r.ok) {
             console.error(`   stderr (tail):\n${r.stderr}`);
