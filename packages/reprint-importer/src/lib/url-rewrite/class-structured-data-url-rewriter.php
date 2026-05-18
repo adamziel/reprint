@@ -57,6 +57,9 @@ class StructuredDataUrlRewriter
     /** @var string Default base_url used by the URL processors (first from-url). */
     private string $base_url;
 
+    /** @var string Compact URL mapping passed to the native batch text rewriter. */
+    private string $native_compact_mapping = '';
+
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
      */
@@ -76,12 +79,18 @@ class StructuredDataUrlRewriter
         // (scheme/host/path tokenisation, punycode, etc.) and used to be
         // repeated on every leaf we rewrote.
         $this->parsed_mapping = [];
+        $native_mapping_rows = [];
         foreach ($url_mapping as $from_url_string => $to_url_string) {
             $this->parsed_mapping[] = [
                 'from_url' => WPURL::parse($from_url_string),
                 'to_url'   => WPURL::parse($to_url_string),
             ];
+
+            if (strpbrk($from_url_string . $to_url_string, "\x1e\x1f") === false) {
+                $native_mapping_rows[] = $from_url_string . "\x1f" . $to_url_string;
+            }
         }
+        $this->native_compact_mapping = implode("\x1e", $native_mapping_rows);
 
         // Default base_url: first from-url in the mapping. Preserves the
         // behaviour of the previous per-call default so outputs are unchanged.
@@ -177,6 +186,30 @@ class StructuredDataUrlRewriter
     }
 
     /**
+     * Rewrite plain text URLs with the native extension when it is available.
+     *
+     * The native function accepts the whole value and the whole URL mapping at
+     * once, so PHP does not have to drive URL detection, WHATWG-style candidate
+     * checks, base replacement, and lexical update assembly one URL at a time.
+     * Returning null means "native path unavailable; use the PHP implementation."
+     */
+    private function rewrite_text_urls_native(string $content): ?string
+    {
+        $rewrite_text_url_bases = 'wp_native_apis_' . 'rewrite_text_url_bases';
+        if (
+            $this->native_compact_mapping === ''
+            || !extension_loaded('wp_native_apis')
+            || !function_exists($rewrite_text_url_bases)
+        ) {
+            return null;
+        }
+
+        $rewritten = $rewrite_text_url_bases($content, $this->base_url, $this->native_compact_mapping);
+
+        return is_string($rewritten) ? $rewritten : null;
+    }
+
+    /**
      * Migrate URLs in post content. See WPRewriteUrlsTests for
      * specific examples. TODO: A better description.
      *
@@ -217,6 +250,13 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
+                if (strpos($content, '<') === false) {
+                    $native_rewritten = $this->rewrite_text_urls_native($content);
+                    if ($native_rewritten !== null) {
+                        return $native_rewritten;
+                    }
+                }
+
                 $p = new BlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $parsed_url = $p->get_parsed_url();
@@ -231,6 +271,11 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
+                $native_rewritten = $this->rewrite_text_urls_native($content);
+                if ($native_rewritten !== null) {
+                    return $native_rewritten;
+                }
+
                 $p = new URLInTextProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $parsed_url = $p->get_parsed_url();

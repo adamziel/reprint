@@ -1,9 +1,9 @@
 /**
  * Combine PR and baseline bench results into a single markdown table with
  * per-stage deltas. Reads bench-pr.json and bench-base.json (legacy:
- * bench-trunk.json), writes bench-results.md. The baseline label defaults
- * to "trunk" but can be overridden with BASELINE_LABEL — that's how stacked
- * PRs report their incremental impact against the parent branch.
+ * bench-trunk.json), writes bench-results.md. The result and baseline labels
+ * default to "PR" and "trunk" but can be overridden with RESULT_LABEL and
+ * BASELINE_LABEL.
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
@@ -37,6 +37,7 @@ const prPath = process.env.PR_JSON || 'bench-pr.json';
 const basePath = process.env.TRUNK_JSON || 'bench-trunk.json';
 const outPath = process.env.OUT_MD || 'bench-results.md';
 const baselineLabel = process.env.BASELINE_LABEL || 'trunk';
+const resultLabel = process.env.RESULT_LABEL || 'PR';
 
 if (!existsSync(prPath)) {
     console.error(`Missing PR results: ${prPath}`);
@@ -59,7 +60,7 @@ lines.push('');
 
 if (base) {
     lines.push('');
-    lines.push(`| Stage | PR | ${baselineLabel} | Δ | Status | Details |`);
+    lines.push(`| Stage | ${resultLabel} | ${baselineLabel} | Δ | Status | Details |`);
     lines.push('|---|---:|---:|---:|---|---|');
     const baseByStage = Object.fromEntries(base.results.map((r) => [r.stage, r]));
     let prTotal = 0;

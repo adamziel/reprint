@@ -17,3 +17,9 @@ if (!function_exists('trailingslashit')) {
         return rtrim($value, '/\\') . '/';
     }
 }
+
+if (!function_exists('wp_native_apis_rewrite_text_url_bases')) {
+    function wp_native_apis_rewrite_text_url_bases(string $text, ?string $base_url, string $compact_mapping): string {
+        return $text;
+    }
+}

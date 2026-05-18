@@ -49,6 +49,10 @@ const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PR
 const PLAYGROUND_PHP_VERSION = process.env.PLAYGROUND_PHP_VERSION || '8.3';
 const REGISTRY = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'site-registry.json'), 'utf-8'));
 const MYSQL_PARSER_MANIFEST = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST || '';
+const NATIVE_APIS_EXTENSION_MANIFEST = process.env.WP_NATIVE_APIS_EXTENSION_MANIFEST || '';
+const NATIVE_APIS_EXTENSION_SO = process.env.WP_NATIVE_APIS_EXTENSION_SO || '';
+const STRUCTURED_TEXT_REWRITE_BENCHMARK = join(PROJECT_ROOT, 'tests', 'e2e', 'benchmark', 'structured-text-url-rewrite-bench.php');
+const STRUCTURED_TEXT_REWRITE_PHP_BINARY = process.env.BENCH_STRUCTURED_REWRITE_PHP_BINARY || PHP_BINARY;
 
 async function seedSourceDb() {
     const dbName = `e2e_${SITE.replace(/-/g, '_')}`;
@@ -239,6 +243,40 @@ function runNativeMysqlParserProof({ requireParser }) {
     }
 }
 
+function runNativeApisProof({ phpBinary = PHP_BINARY, env = {} } = {}) {
+    if (!NATIVE_APIS_EXTENSION_SO && !NATIVE_APIS_EXTENSION_MANIFEST) {
+        return {
+            ok: true,
+            details: {
+                wp_native_apis: 'disabled',
+            },
+        };
+    }
+
+    const verifierPath = join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'verify-wp-native-apis.php');
+    try {
+        const stdout = execFileSync(phpBinary, [verifierPath], {
+            cwd: PROJECT_ROOT,
+            timeout: 120_000,
+            encoding: 'utf-8',
+            maxBuffer: 16 * 1024 * 1024,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, ...env },
+        }).trim();
+        return {
+            ok: true,
+            details: stdout ? JSON.parse(stdout) : {},
+        };
+    } catch (e) {
+        return {
+            ok: false,
+            exitCode: e.status === null ? -1 : (e.status || 1),
+            stderr: (e.stderr || '').toString().slice(-4000),
+            stdout: (e.stdout || '').toString().slice(-4000),
+        };
+    }
+}
+
 function proofFailureResult(stage, start, proof, details) {
     return {
         stage,
@@ -254,6 +292,51 @@ function proofFailureResult(stage, start, proof, details) {
             native_parser_proof: 'failed',
         },
     };
+}
+
+function runStructuredTextRewriteBenchmark() {
+    const start = performance.now();
+    const proof = runNativeApisProof({ phpBinary: STRUCTURED_TEXT_REWRITE_PHP_BINARY });
+    const baseDetails = {
+        condition: 'StructuredDataUrlRewriter plain text batch URL base rewrite',
+        runtime: STRUCTURED_TEXT_REWRITE_PHP_BINARY.includes('playground-php.sh') ? `php.wasm ${PLAYGROUND_PHP_VERSION}` : 'host PHP',
+    };
+    if (!proof.ok) {
+        return proofFailureResult('structured-text-url-rewrite', start, proof, baseDetails);
+    }
+
+    try {
+        const stdout = execFileSync(STRUCTURED_TEXT_REWRITE_PHP_BINARY, [STRUCTURED_TEXT_REWRITE_BENCHMARK], {
+            cwd: PROJECT_ROOT,
+            timeout: 300_000,
+            encoding: 'utf-8',
+            maxBuffer: 16 * 1024 * 1024,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        const details = JSON.parse(stdout.trim());
+        return {
+            stage: 'structured-text-url-rewrite',
+            elapsedMs: Number(details.elapsed_ms),
+            attempts: 1,
+            ok: true,
+            details: {
+                ...baseDetails,
+                ...details,
+                ...proof.details,
+            },
+        };
+    } catch (e) {
+        return {
+            stage: 'structured-text-url-rewrite',
+            elapsedMs: performance.now() - start,
+            attempts: 1,
+            ok: false,
+            exitCode: e.status === null ? -1 : (e.status || 1),
+            stderr: (e.stderr || '').toString().slice(-4000),
+            stdout: (e.stdout || '').toString().slice(-4000),
+            details: baseDetails,
+        };
+    }
 }
 
 function runPlaygroundSqliteDbPullBenchmark() {
@@ -583,6 +666,43 @@ function renderMarkdown(results, meta) {
 }
 
 async function main() {
+    const stageFilter = (process.env.BENCH_STAGES || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const shouldRun = (name) => stageFilter.length === 0 || stageFilter.includes(name);
+
+    if (stageFilter.length === 1 && shouldRun('structured-text-url-rewrite')) {
+        const structuredTextRewrite = runStructuredTextRewriteBenchmark();
+        const phpVersion = execFileSync(PHP_BINARY, ['-r', 'echo PHP_VERSION;'], { encoding: 'utf-8' }).trim();
+        const meta = {
+            site: SITE,
+            fileCount: 'not provisioned for focused structured text benchmark',
+            seedPosts: 0,
+            seedPostmeta: 0,
+            phpVersion,
+            importer: IMPORTER_PATH,
+            preflightImporter: PREFLIGHT_IMPORTER_PATH,
+        };
+        const md = renderMarkdown([structuredTextRewrite], meta);
+        console.log('\n' + md);
+
+        const label = process.env.BENCH_LABEL || 'pr';
+        const jsonOut = process.env.BENCH_JSON_OUT || 'bench-results.json';
+        const mdOut = process.env.BENCH_MD_OUT || 'bench-results.md';
+        writeFileSync(jsonOut, JSON.stringify({ meta: { ...meta, label }, results: [structuredTextRewrite] }, null, 2));
+        writeFileSync(mdOut, md);
+
+        if (process.env.GITHUB_STEP_SUMMARY) {
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n');
+        }
+
+        if (!structuredTextRewrite.ok) {
+            process.exit(1);
+        }
+        return;
+    }
+
     console.log(`Provisioning site: ${SITE}`);
     await ensureSite(SITE, {
         files: 'none',
@@ -620,12 +740,6 @@ async function main() {
     // list of stage names), only those stages run on both sides of the
     // PR-vs-trunk comparison. This is how each PR limits its perf comment
     // to the single scenario it actually changes.
-    const stageFilter = (process.env.BENCH_STAGES || '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-    const shouldRun = (name) => stageFilter.length === 0 || stageFilter.includes(name);
-
     const stages = [
         { name: 'preflight', extra: [] },
         { name: 'files-pull', extra: [] },
@@ -667,6 +781,17 @@ async function main() {
         if (!playgroundSqliteApply.ok) {
             console.error(`   stderr (tail):\n${playgroundSqliteApply.stderr}`);
             console.error(`   stdout (tail):\n${playgroundSqliteApply.stdout}`);
+        }
+    }
+
+    if (shouldRun('structured-text-url-rewrite')) {
+        console.log('-> structured-text-url-rewrite');
+        const structuredTextRewrite = runStructuredTextRewriteBenchmark();
+        results.push(structuredTextRewrite);
+        console.log(`   ${structuredTextRewrite.ok ? 'ok' : 'FAIL'} in ${fmtMs(structuredTextRewrite.elapsedMs)} (${fmtDetails(structuredTextRewrite.details)})`);
+        if (!structuredTextRewrite.ok) {
+            console.error(`   stderr (tail):\n${structuredTextRewrite.stderr}`);
+            console.error(`   stdout (tail):\n${structuredTextRewrite.stdout}`);
         }
     }
 
