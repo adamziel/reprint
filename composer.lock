@@ -8,16 +8,16 @@
     "packages": [
         {
             "name": "wp-php-toolkit/bytestream",
-            "version": "v0.7.3",
+            "version": "v0.7.9",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/bytestream.git",
-                "reference": "0c4adfc82065d52e0060b8072e7812b6d05e3c16"
+                "reference": "38617382ea9cecd057202bed34739c53e804173b"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/bytestream/zipball/0c4adfc82065d52e0060b8072e7812b6d05e3c16",
-                "reference": "0c4adfc82065d52e0060b8072e7812b6d05e3c16",
+                "url": "https://api.github.com/repos/wp-php-toolkit/bytestream/zipball/38617382ea9cecd057202bed34739c53e804173b",
+                "reference": "38617382ea9cecd057202bed34739c53e804173b",
                 "shasum": ""
             },
             "require": {
@@ -60,29 +60,29 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-03T23:19:57+00:00"
+            "time": "2026-05-14T14:42:57+00:00"
         },
         {
             "name": "wp-php-toolkit/data-liberation",
-            "version": "v0.7.3",
+            "version": "v0.7.9",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/data-liberation.git",
-                "reference": "791a54f89b6540b7ef25f9f518a92f0631c81335"
+                "reference": "ee553c24a84f0669fd7d71b3a9d5122cc374fff1"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/data-liberation/zipball/791a54f89b6540b7ef25f9f518a92f0631c81335",
-                "reference": "791a54f89b6540b7ef25f9f518a92f0631c81335",
+                "url": "https://api.github.com/repos/wp-php-toolkit/data-liberation/zipball/ee553c24a84f0669fd7d71b3a9d5122cc374fff1",
+                "reference": "ee553c24a84f0669fd7d71b3a9d5122cc374fff1",
                 "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/bytestream": "^0.7.3",
-                "wp-php-toolkit/filesystem": "^0.7.3",
-                "wp-php-toolkit/html": "^0.7.3",
-                "wp-php-toolkit/http-client": "^0.7.3",
-                "wp-php-toolkit/xml": "^0.7.3"
+                "wp-php-toolkit/bytestream": "^0.7.9",
+                "wp-php-toolkit/filesystem": "^0.7.9",
+                "wp-php-toolkit/html": "^0.7.9",
+                "wp-php-toolkit/http-client": "^0.7.9",
+                "wp-php-toolkit/xml": "^0.7.9"
             },
             "type": "library",
             "autoload": {
@@ -123,20 +123,20 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-04T13:39:30+00:00"
+            "time": "2026-05-18T15:07:34+00:00"
         },
         {
             "name": "wp-php-toolkit/encoding",
-            "version": "v0.7.3",
+            "version": "v0.7.9",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/encoding.git",
-                "reference": "f333f2292d7f3c70a4c3f540012f3fe3da956bdf"
+                "reference": "0da853cd2ce08deee92dddaa0bd5c3fbf7507608"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/encoding/zipball/f333f2292d7f3c70a4c3f540012f3fe3da956bdf",
-                "reference": "f333f2292d7f3c70a4c3f540012f3fe3da956bdf",
+                "url": "https://api.github.com/repos/wp-php-toolkit/encoding/zipball/0da853cd2ce08deee92dddaa0bd5c3fbf7507608",
+                "reference": "0da853cd2ce08deee92dddaa0bd5c3fbf7507608",
                 "shasum": ""
             },
             "require": {
@@ -178,25 +178,25 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-03T23:19:57+00:00"
+            "time": "2026-05-14T14:42:57+00:00"
         },
         {
             "name": "wp-php-toolkit/filesystem",
-            "version": "v0.7.3",
+            "version": "v0.7.9",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/filesystem.git",
-                "reference": "52e533feb3579f814bbdb936d53b4426aab84498"
+                "reference": "2a38ca4e45903120502fd7166f4ea2d40c9ccd46"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/filesystem/zipball/52e533feb3579f814bbdb936d53b4426aab84498",
-                "reference": "52e533feb3579f814bbdb936d53b4426aab84498",
+                "url": "https://api.github.com/repos/wp-php-toolkit/filesystem/zipball/2a38ca4e45903120502fd7166f4ea2d40c9ccd46",
+                "reference": "2a38ca4e45903120502fd7166f4ea2d40c9ccd46",
                 "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/bytestream": "^0.7.3"
+                "wp-php-toolkit/bytestream": "^0.7.9"
             },
             "require-dev": {
                 "phpunit/phpunit": "^9.5"
@@ -238,20 +238,20 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-04T13:39:30+00:00"
+            "time": "2026-05-18T15:07:34+00:00"
         },
         {
             "name": "wp-php-toolkit/html",
-            "version": "v0.7.3",
+            "version": "v0.7.9",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/html.git",
-                "reference": "7ec3f8f4df9cc0f850eaa00655fb9ed21bf9ca4e"
+                "reference": "6c845f71340cec388fac1dfabe7694712b94190a"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/html/zipball/7ec3f8f4df9cc0f850eaa00655fb9ed21bf9ca4e",
-                "reference": "7ec3f8f4df9cc0f850eaa00655fb9ed21bf9ca4e",
+                "url": "https://api.github.com/repos/wp-php-toolkit/html/zipball/6c845f71340cec388fac1dfabe7694712b94190a",
+                "reference": "6c845f71340cec388fac1dfabe7694712b94190a",
                 "shasum": ""
             },
             "require": {
@@ -295,27 +295,27 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-03T23:19:57+00:00"
+            "time": "2026-05-18T15:06:45+00:00"
         },
         {
             "name": "wp-php-toolkit/http-client",
-            "version": "v0.7.3",
+            "version": "v0.7.9",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/http-client.git",
-                "reference": "c956d60d0983799d25d6761db1454942bdc19e4d"
+                "reference": "0806fce8858937467e5132e93bf5f1828bb1b5fa"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/http-client/zipball/c956d60d0983799d25d6761db1454942bdc19e4d",
-                "reference": "c956d60d0983799d25d6761db1454942bdc19e4d",
+                "url": "https://api.github.com/repos/wp-php-toolkit/http-client/zipball/0806fce8858937467e5132e93bf5f1828bb1b5fa",
+                "reference": "0806fce8858937467e5132e93bf5f1828bb1b5fa",
                 "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/bytestream": "^0.7.3",
-                "wp-php-toolkit/data-liberation": "^0.7.3",
-                "wp-php-toolkit/filesystem": "^0.7.3"
+                "wp-php-toolkit/bytestream": "^0.7.9",
+                "wp-php-toolkit/data-liberation": "^0.7.9",
+                "wp-php-toolkit/filesystem": "^0.7.9"
             },
             "require-dev": {
                 "phpunit/phpunit": "^9.5"
@@ -354,22 +354,22 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-04T13:39:30+00:00"
+            "time": "2026-05-18T15:07:34+00:00"
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-adamziel/bump-toolkit-0.7.0",
+            "version": "dev-d4f76bfa91e6beafc129880cb322ab8ec6b92430",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "3688174c0966c8fd3ae8104f2449d4e34f736b93"
+                "reference": "53111b45f1d3fefa4b50aaa63cc49aeeb974770d"
             },
             "require": {
                 "ext-pdo": "*",
                 "ext-pdo_mysql": "*",
                 "php": ">=7.4",
-                "wp-php-toolkit/data-liberation": "^0.7.0",
-                "wp-php-toolkit/html": "^0.7.0"
+                "wp-php-toolkit/data-liberation": "^0.7.9",
+                "wp-php-toolkit/html": "^0.7.9"
             },
             "type": "library",
             "autoload": {
@@ -399,18 +399,18 @@
         },
         {
             "name": "wp-php-toolkit/reprint-importer",
-            "version": "dev-adamziel/bump-toolkit-0.7.0",
+            "version": "dev-d4f76bfa91e6beafc129880cb322ab8ec6b92430",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-importer",
-                "reference": "bda8076471e2de2d9650a85b20b67f94d7f958e1"
+                "reference": "b64ec25454efd6b3ac6e2772849bab26f51335a8"
             },
             "require": {
                 "ext-pdo": "*",
                 "ext-pdo_mysql": "*",
                 "php": ">=7.4",
-                "wp-php-toolkit/data-liberation": "^0.7.0",
-                "wp-php-toolkit/html": "^0.7.0",
+                "wp-php-toolkit/data-liberation": "^0.7.9",
+                "wp-php-toolkit/html": "^0.7.9",
                 "wp-php-toolkit/reprint-exporter": "*@dev"
             },
             "bin": [
@@ -428,21 +428,21 @@
         },
         {
             "name": "wp-php-toolkit/xml",
-            "version": "v0.7.3",
+            "version": "v0.7.9",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/xml.git",
-                "reference": "023c17dcc0165f65e28d7633f7fa306350105c04"
+                "reference": "639d3ff1d29751a2458538dee2edc0c59ddbdd99"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/xml/zipball/023c17dcc0165f65e28d7633f7fa306350105c04",
-                "reference": "023c17dcc0165f65e28d7633f7fa306350105c04",
+                "url": "https://api.github.com/repos/wp-php-toolkit/xml/zipball/639d3ff1d29751a2458538dee2edc0c59ddbdd99",
+                "reference": "639d3ff1d29751a2458538dee2edc0c59ddbdd99",
                 "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/encoding": "^0.7.3"
+                "wp-php-toolkit/encoding": "^0.7.9"
             },
             "require-dev": {
                 "phpunit/phpunit": "^9.5"
@@ -481,7 +481,7 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-04T13:39:30+00:00"
+            "time": "2026-05-18T15:07:34+00:00"
         }
     ],
     "packages-dev": [
