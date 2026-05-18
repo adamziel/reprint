@@ -51,7 +51,7 @@ const REGISTRY = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'site-r
 const MYSQL_PARSER_MANIFEST = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST || '';
 const NATIVE_APIS_EXTENSION_SO = process.env.WP_NATIVE_APIS_EXTENSION_SO || '';
 const NATIVE_APIS_MANIFEST = process.env.WP_NATIVE_APIS_EXTENSION_MANIFEST || '';
-const URL_REWRITE_BENCHMARK = join(PROJECT_ROOT, 'tests', 'e2e', 'benchmark', 'url-rewrite-bench.php');
+const URL_IN_TEXT_BENCHMARK = join(PROJECT_ROOT, 'tests', 'e2e', 'benchmark', 'url-rewrite-bench.php');
 
 async function seedSourceDb() {
     const dbName = `e2e_${SITE.replace(/-/g, '_')}`;
@@ -413,7 +413,7 @@ function runPlaygroundSqliteDbApplyBenchmark() {
     };
 }
 
-function runUrlRewritePlainTextBenchmark({
+function runUrlInTextDetectionBenchmark({
     phpBinary = PHP_BINARY,
     env = {},
     details = {},
@@ -421,7 +421,7 @@ function runUrlRewritePlainTextBenchmark({
     const start = performance.now();
 
     try {
-        const stdout = execFileSync(phpBinary, [URL_REWRITE_BENCHMARK], {
+        const stdout = execFileSync(phpBinary, [URL_IN_TEXT_BENCHMARK], {
             cwd: PROJECT_ROOT,
             timeout: 900_000,
             encoding: 'utf-8',
@@ -432,12 +432,12 @@ function runUrlRewritePlainTextBenchmark({
         const benchmark = stdout ? JSON.parse(stdout) : {};
 
         return {
-            stage: 'url-rewrite-plain-text',
+            stage: 'url-in-text-detect',
             elapsedMs: benchmark.elapsed_ms || (performance.now() - start),
             attempts: 1,
             ok: true,
             details: {
-                condition: 'StructuredDataUrlRewriter plain text URL scan/rewrite',
+                condition: 'URLInTextProcessor plain text URL detection and parse',
                 urls: benchmark.total_urls_scanned,
                 bytes: fmtBytes(benchmark.total_bytes_scanned),
                 native_url_in_text: benchmark.native_url_in_text,
@@ -446,7 +446,7 @@ function runUrlRewritePlainTextBenchmark({
         };
     } catch (e) {
         return {
-            stage: 'url-rewrite-plain-text',
+            stage: 'url-in-text-detect',
             elapsedMs: performance.now() - start,
             attempts: 1,
             ok: false,
@@ -454,7 +454,7 @@ function runUrlRewritePlainTextBenchmark({
             stderr: (e.stderr || '').toString().slice(-2000),
             stdout: (e.stdout || '').toString().slice(-2000),
             details: {
-                condition: 'StructuredDataUrlRewriter plain text URL scan/rewrite',
+                condition: 'URLInTextProcessor plain text URL detection and parse',
                 ...details,
             },
         };
@@ -782,9 +782,9 @@ async function main() {
         }
     }
 
-    if (shouldRun('url-rewrite-plain-text')) {
-        console.log('-> url-rewrite-plain-text');
-        const urlRewriteResult = runUrlRewritePlainTextBenchmark({
+    if (shouldRun('url-in-text-detect')) {
+        console.log('-> url-in-text-detect');
+        const urlRewriteResult = runUrlInTextDetectionBenchmark({
             details: hostNativeApisProof.details,
         });
         results.push(urlRewriteResult);

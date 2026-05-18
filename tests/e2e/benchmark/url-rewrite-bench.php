@@ -3,16 +3,13 @@
 $project_root = dirname( __DIR__, 3 );
 
 require_once $project_root . '/vendor/autoload.php';
-require_once $project_root . '/packages/reprint-importer/src/lib/wp-stubs.php';
-require_once $project_root . '/packages/reprint-importer/src/lib/url-rewrite/class-php-serialization-processor.php';
-require_once $project_root . '/packages/reprint-importer/src/lib/url-rewrite/class-json-string-iterator.php';
-require_once $project_root . '/packages/reprint-importer/src/lib/url-rewrite/class-structured-data-url-rewriter.php';
+
+use WordPress\DataLiberation\URL\URLInTextProcessor;
 
 $iterations = (int) ( getenv( 'BENCH_URL_REWRITE_ITERATIONS' ) ?: 20 );
 $url_count  = (int) ( getenv( 'BENCH_URL_REWRITE_URLS' ) ?: 200 );
 
 $from_url = 'http://localhost:9999';
-$to_url   = 'https://native-rewrite.example';
 $parts    = array();
 
 for ( $i = 0; $i < $url_count; $i++ ) {
@@ -27,20 +24,20 @@ for ( $i = 0; $i < $url_count; $i++ ) {
 }
 
 $content  = implode( "\n", $parts );
-$rewriter = new StructuredDataUrlRewriter(
-	array(
-		$from_url => $to_url,
-	)
-);
 
 $start = hrtime( true );
+$matched_urls = 0;
 for ( $i = 0; $i < $iterations; $i++ ) {
-	$rewritten = $rewriter->rewrite( $content, StructuredDataUrlRewriter::PLAIN_TEXT );
+	$processor = new URLInTextProcessor( $content, $from_url );
+	while ( $processor->next_url() ) {
+		$processor->get_parsed_url();
+		$matched_urls++;
+	}
 }
 $elapsed_ms = ( hrtime( true ) - $start ) / 1000000;
 
-if ( false !== strpos( $rewritten, $from_url ) || false === strpos( $rewritten, $to_url ) ) {
-	fwrite( STDERR, "URL rewrite benchmark did not rewrite the fixture as expected.\n" );
+if ( $matched_urls !== $iterations * $url_count * 2 ) {
+	fwrite( STDERR, "URL detection benchmark matched $matched_urls URLs; expected " . ( $iterations * $url_count * 2 ) . ".\n" );
 	exit( 1 );
 }
 
