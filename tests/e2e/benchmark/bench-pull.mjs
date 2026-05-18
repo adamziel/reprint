@@ -52,6 +52,7 @@ const MYSQL_PARSER_MANIFEST = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST || 
 const NATIVE_APIS_EXTENSION_SO = process.env.WP_NATIVE_APIS_EXTENSION_SO || '';
 const NATIVE_APIS_MANIFEST = process.env.WP_NATIVE_APIS_EXTENSION_MANIFEST || '';
 const URL_IN_TEXT_BENCHMARK = join(PROJECT_ROOT, 'tests', 'e2e', 'benchmark', 'url-rewrite-bench.php');
+const HTML_URL_PARSER_BENCHMARK = join(PROJECT_ROOT, 'tests', 'e2e', 'benchmark', 'html-url-parser-bench.php');
 
 async function seedSourceDb() {
     const dbName = `e2e_${SITE.replace(/-/g, '_')}`;
@@ -461,6 +462,60 @@ function runUrlInTextDetectionBenchmark({
     }
 }
 
+function runHtmlUrlParserBenchmark({
+    phpBinary = PHP_BINARY,
+    env = {},
+    details = {},
+} = {}) {
+    const start = performance.now();
+
+    try {
+        const stdout = execFileSync(phpBinary, [HTML_URL_PARSER_BENCHMARK], {
+            cwd: PROJECT_ROOT,
+            timeout: 900_000,
+            encoding: 'utf-8',
+            maxBuffer: 16 * 1024 * 1024,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, ...env },
+        }).trim();
+        const benchmark = stdout ? JSON.parse(stdout) : {};
+
+        return {
+            stage: 'html-url-parser-scan',
+            elapsedMs: benchmark.elapsed_ms || (performance.now() - start),
+            attempts: 1,
+            ok: true,
+            details: {
+                condition: 'HTML resource URL scan plus URL-in-text parsing',
+                cards: benchmark.cards,
+                html_tags: benchmark.html_tags_scanned,
+                html_urls: benchmark.html_resource_urls,
+                parsed_urls: benchmark.urls_parsed,
+                html: fmtBytes(benchmark.html_bytes),
+                text: fmtBytes(benchmark.text_bytes),
+                native_html: benchmark.native_html,
+                native_url_in_text: benchmark.native_url_in_text,
+                strategy: benchmark.html_strategy,
+                ...details,
+            },
+        };
+    } catch (e) {
+        return {
+            stage: 'html-url-parser-scan',
+            elapsedMs: performance.now() - start,
+            attempts: 1,
+            ok: false,
+            exitCode: e.status === null ? -1 : (e.status || 1),
+            stderr: (e.stderr || '').toString().slice(-2000),
+            stdout: (e.stdout || '').toString().slice(-2000),
+            details: {
+                condition: 'HTML resource URL scan plus URL-in-text parsing',
+                ...details,
+            },
+        };
+    }
+}
+
 function fmtMs(ms) {
     if (ms < 1000) return `${ms.toFixed(0)} ms`;
     return `${(ms / 1000).toFixed(2)} s`;
@@ -792,6 +847,19 @@ async function main() {
         if (!urlRewriteResult.ok) {
             console.error(`   stderr (tail):\n${urlRewriteResult.stderr}`);
             console.error(`   stdout (tail):\n${urlRewriteResult.stdout}`);
+        }
+    }
+
+    if (shouldRun('html-url-parser-scan')) {
+        console.log('-> html-url-parser-scan');
+        const htmlUrlParserResult = runHtmlUrlParserBenchmark({
+            details: hostNativeApisProof.details,
+        });
+        results.push(htmlUrlParserResult);
+        console.log(`   ${htmlUrlParserResult.ok ? 'ok' : 'FAIL'} in ${fmtMs(htmlUrlParserResult.elapsedMs)} (${fmtDetails(htmlUrlParserResult.details)})`);
+        if (!htmlUrlParserResult.ok) {
+            console.error(`   stderr (tail):\n${htmlUrlParserResult.stderr}`);
+            console.error(`   stdout (tail):\n${htmlUrlParserResult.stdout}`);
         }
     }
 

@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      PHP_BENCH_STAGES: preflight,db-pull,url-in-text-detect
+      PHP_BENCH_STAGES: preflight,db-pull,url-in-text-detect,html-url-parser-scan
       BENCH_SEED_POSTS: '10000'
       BENCH_SEED_POSTMETA: '25000'
 
