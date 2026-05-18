@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "99d6c92ffc89e8ccfb6debcce799f49d",
+    "content-hash": "235fd4568fd52fc58afeaf434a8e167a",
     "packages": [
         {
             "name": "wp-php-toolkit/bytestream",
@@ -64,34 +64,41 @@
         },
         {
             "name": "wp-php-toolkit/data-liberation",
-            "version": "dev-trunk",
+            "version": "v0.7.6",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/wp-php-toolkit/data-liberation.git",
+                "reference": "5ec9e7fc72ec2ab0b91079a90e6ca20ca88cfc4a"
+            },
             "dist": {
-                "type": "path",
-                "url": "php-toolkit-native/components/DataLiberation",
-                "reference": "8c8a1d1eeee42f1b011a4685fb7d9879ec7f8a89"
+                "type": "zip",
+                "url": "https://api.github.com/repos/wp-php-toolkit/data-liberation/zipball/5ec9e7fc72ec2ab0b91079a90e6ca20ca88cfc4a",
+                "reference": "5ec9e7fc72ec2ab0b91079a90e6ca20ca88cfc4a",
+                "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/bytestream": "^0.8",
-                "wp-php-toolkit/filesystem": "^0.8",
-                "wp-php-toolkit/html": "^0.8",
-                "wp-php-toolkit/http-client": "^0.8",
-                "wp-php-toolkit/xml": "^0.8"
+                "wp-php-toolkit/bytestream": "^0.7.6",
+                "wp-php-toolkit/filesystem": "^0.7.6",
+                "wp-php-toolkit/html": "^0.7.6",
+                "wp-php-toolkit/http-client": "^0.7.6",
+                "wp-php-toolkit/xml": "^0.7.6"
             },
             "type": "library",
             "autoload": {
+                "files": [
+                    "URL/functions.php"
+                ],
                 "classmap": [
                     "./",
                     "vendor-patched/"
-                ],
-                "files": [
-                    "URL/functions.php"
                 ],
                 "exclude-from-classmap": [
                     "/Tests/",
                     "/bin/"
                 ]
             },
+            "notification-url": "https://packagist.org/downloads/",
             "license": [
                 "GPL-2.0-or-later"
             ],
@@ -112,14 +119,11 @@
                 "wordpress"
             ],
             "support": {
+                "docs": "https://wordpress.github.io/php-toolkit/reference/dataliberation.html",
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
-                "source": "https://github.com/WordPress/php-toolkit",
-                "docs": "https://wordpress.github.io/php-toolkit/reference/dataliberation.html"
+                "source": "https://github.com/WordPress/php-toolkit"
             },
-            "transport-options": {
-                "symlink": false,
-                "relative": true
-            }
+            "time": "2026-05-17T00:17:07+00:00"
         },
         {
             "name": "wp-php-toolkit/encoding",
@@ -295,17 +299,23 @@
         },
         {
             "name": "wp-php-toolkit/http-client",
-            "version": "dev-trunk",
+            "version": "v0.7.6",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/wp-php-toolkit/http-client.git",
+                "reference": "81d48e1085e5afd49b4f5725fba21f7a31bfd8b0"
+            },
             "dist": {
-                "type": "path",
-                "url": "php-toolkit-native/components/HttpClient",
-                "reference": "710883cb46591d25cb45db191130757023b6ac79"
+                "type": "zip",
+                "url": "https://api.github.com/repos/wp-php-toolkit/http-client/zipball/81d48e1085e5afd49b4f5725fba21f7a31bfd8b0",
+                "reference": "81d48e1085e5afd49b4f5725fba21f7a31bfd8b0",
+                "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/bytestream": "^0.8",
-                "wp-php-toolkit/data-liberation": "^0.8",
-                "wp-php-toolkit/filesystem": "^0.8"
+                "wp-php-toolkit/bytestream": "^0.7.6",
+                "wp-php-toolkit/data-liberation": "^0.7.6",
+                "wp-php-toolkit/filesystem": "^0.7.6"
             },
             "require-dev": {
                 "phpunit/phpunit": "^9.5"
@@ -319,6 +329,7 @@
                     "/Tests/"
                 ]
             },
+            "notification-url": "https://packagist.org/downloads/",
             "license": [
                 "GPL-2.0-or-later"
             ],
@@ -339,14 +350,11 @@
                 "wordpress"
             ],
             "support": {
+                "docs": "https://wordpress.github.io/php-toolkit/reference/httpclient.html",
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
-                "source": "https://github.com/WordPress/php-toolkit",
-                "docs": "https://wordpress.github.io/php-toolkit/reference/httpclient.html"
+                "source": "https://github.com/WordPress/php-toolkit"
             },
-            "transport-options": {
-                "symlink": false,
-                "relative": true
-            }
+            "time": "2026-05-17T00:17:07+00:00"
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
@@ -354,14 +362,14 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "2358096707b77e8672f7d45188dd2c30c4db3221"
+                "reference": "4c972549cd16fc4ef2839426a7df9dde5ec00f8b"
             },
             "require": {
                 "ext-pdo": "*",
                 "ext-pdo_mysql": "*",
                 "php": ">=7.4",
-                "wp-php-toolkit/data-liberation": "^0.8",
-                "wp-php-toolkit/html": "^0.8"
+                "wp-php-toolkit/data-liberation": "^0.7.3",
+                "wp-php-toolkit/html": "^0.7.3"
             },
             "type": "library",
             "autoload": {
@@ -395,14 +403,14 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-importer",
-                "reference": "df85c1b72f85d1c6e279cc39c64027d9e09326e4"
+                "reference": "b11aedff2875c99fd968d702ccdf8e297924d721"
             },
             "require": {
                 "ext-pdo": "*",
                 "ext-pdo_mysql": "*",
                 "php": ">=7.4",
-                "wp-php-toolkit/data-liberation": "^0.8",
-                "wp-php-toolkit/html": "^0.8",
+                "wp-php-toolkit/data-liberation": "^0.7.3",
+                "wp-php-toolkit/html": "^0.7.3",
                 "wp-php-toolkit/reprint-exporter": "*@dev"
             },
             "bin": [
@@ -2437,54 +2445,9 @@
             "time": "2025-11-17T20:03:58+00:00"
         }
     ],
-    "aliases": [
-        {
-            "package": "wp-php-toolkit/bytestream",
-            "version": "0.7.6.0",
-            "alias": "0.8.99",
-            "alias_normalized": "0.8.99.0"
-        },
-        {
-            "package": "wp-php-toolkit/data-liberation",
-            "version": "9999999-dev",
-            "alias": "0.8.99",
-            "alias_normalized": "0.8.99.0"
-        },
-        {
-            "package": "wp-php-toolkit/encoding",
-            "version": "0.7.6.0",
-            "alias": "0.8.99",
-            "alias_normalized": "0.8.99.0"
-        },
-        {
-            "package": "wp-php-toolkit/filesystem",
-            "version": "0.7.6.0",
-            "alias": "0.8.99",
-            "alias_normalized": "0.8.99.0"
-        },
-        {
-            "package": "wp-php-toolkit/html",
-            "version": "0.7.6.0",
-            "alias": "0.8.99",
-            "alias_normalized": "0.8.99.0"
-        },
-        {
-            "package": "wp-php-toolkit/http-client",
-            "version": "9999999-dev",
-            "alias": "0.8.99",
-            "alias_normalized": "0.8.99.0"
-        },
-        {
-            "package": "wp-php-toolkit/xml",
-            "version": "0.7.6.0",
-            "alias": "0.8.99",
-            "alias_normalized": "0.8.99.0"
-        }
-    ],
+    "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
-        "wp-php-toolkit/data-liberation": 20,
-        "wp-php-toolkit/http-client": 20,
         "wp-php-toolkit/reprint-exporter": 20,
         "wp-php-toolkit/reprint-importer": 20
     },

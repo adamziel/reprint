@@ -19,39 +19,12 @@
             "options": {
                 "symlink": false
             }
-        },
-        {
-            "type": "path",
-            "url": "php-toolkit-native/components/DataLiberation",
-            "options": {
-                "symlink": false,
-                "versions": {
-                    "wp-php-toolkit/data-liberation": "dev-trunk"
-                }
-            }
-        },
-        {
-            "type": "path",
-            "url": "php-toolkit-native/components/HttpClient",
-            "options": {
-                "symlink": false,
-                "versions": {
-                    "wp-php-toolkit/http-client": "dev-trunk"
-                }
-            }
         }
     ],
     "require": {
         "php": ">=7.4",
         "ext-pdo": "*",
         "ext-pdo_mysql": "*",
-        "wp-php-toolkit/bytestream": "v0.7.6 as 0.8.99",
-        "wp-php-toolkit/data-liberation": "dev-trunk as 0.8.99",
-        "wp-php-toolkit/encoding": "v0.7.6 as 0.8.99",
-        "wp-php-toolkit/filesystem": "v0.7.6 as 0.8.99",
-        "wp-php-toolkit/html": "v0.7.6 as 0.8.99",
-        "wp-php-toolkit/http-client": "dev-trunk as 0.8.99",
-        "wp-php-toolkit/xml": "v0.7.6 as 0.8.99",
         "wp-php-toolkit/reprint-exporter": "*@dev",
         "wp-php-toolkit/reprint-importer": "*@dev"
     },

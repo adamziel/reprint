@@ -51,6 +51,7 @@ const REGISTRY = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'site-r
 const MYSQL_PARSER_MANIFEST = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST || '';
 const NATIVE_APIS_EXTENSION_SO = process.env.WP_NATIVE_APIS_EXTENSION_SO || '';
 const NATIVE_APIS_MANIFEST = process.env.WP_NATIVE_APIS_EXTENSION_MANIFEST || '';
+const URL_REWRITE_BENCHMARK = join(PROJECT_ROOT, 'tests', 'e2e', 'benchmark', 'url-rewrite-bench.php');
 
 async function seedSourceDb() {
     const dbName = `e2e_${SITE.replace(/-/g, '_')}`;
@@ -412,6 +413,54 @@ function runPlaygroundSqliteDbApplyBenchmark() {
     };
 }
 
+function runUrlRewritePlainTextBenchmark({
+    phpBinary = PHP_BINARY,
+    env = {},
+    details = {},
+} = {}) {
+    const start = performance.now();
+
+    try {
+        const stdout = execFileSync(phpBinary, [URL_REWRITE_BENCHMARK], {
+            cwd: PROJECT_ROOT,
+            timeout: 900_000,
+            encoding: 'utf-8',
+            maxBuffer: 16 * 1024 * 1024,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, ...env },
+        }).trim();
+        const benchmark = stdout ? JSON.parse(stdout) : {};
+
+        return {
+            stage: 'url-rewrite-plain-text',
+            elapsedMs: benchmark.elapsed_ms || (performance.now() - start),
+            attempts: 1,
+            ok: true,
+            details: {
+                condition: 'StructuredDataUrlRewriter plain text URL scan/rewrite',
+                urls: benchmark.total_urls_scanned,
+                bytes: fmtBytes(benchmark.total_bytes_scanned),
+                native_url_in_text: benchmark.native_url_in_text,
+                ...details,
+            },
+        };
+    } catch (e) {
+        return {
+            stage: 'url-rewrite-plain-text',
+            elapsedMs: performance.now() - start,
+            attempts: 1,
+            ok: false,
+            exitCode: e.status === null ? -1 : (e.status || 1),
+            stderr: (e.stderr || '').toString().slice(-2000),
+            stdout: (e.stdout || '').toString().slice(-2000),
+            details: {
+                condition: 'StructuredDataUrlRewriter plain text URL scan/rewrite',
+                ...details,
+            },
+        };
+    }
+}
+
 function fmtMs(ms) {
     if (ms < 1000) return `${ms.toFixed(0)} ms`;
     return `${(ms / 1000).toFixed(2)} s`;
@@ -730,6 +779,19 @@ async function main() {
         if (!r.ok) {
             console.error(`   stderr (tail):\n${r.stderr}`);
             console.error(`   stdout (tail):\n${r.stdout}`);
+        }
+    }
+
+    if (shouldRun('url-rewrite-plain-text')) {
+        console.log('-> url-rewrite-plain-text');
+        const urlRewriteResult = runUrlRewritePlainTextBenchmark({
+            details: hostNativeApisProof.details,
+        });
+        results.push(urlRewriteResult);
+        console.log(`   ${urlRewriteResult.ok ? 'ok' : 'FAIL'} in ${fmtMs(urlRewriteResult.elapsedMs)} (${fmtDetails(urlRewriteResult.details)})`);
+        if (!urlRewriteResult.ok) {
+            console.error(`   stderr (tail):\n${urlRewriteResult.stderr}`);
+            console.error(`   stdout (tail):\n${urlRewriteResult.stdout}`);
         }
     }
 
