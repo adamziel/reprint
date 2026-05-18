@@ -18,12 +18,12 @@ function reprint_build_html_url_fixture( $card_count, $base_url ) {
 
 	for ( $i = 0; $i < $card_count; $i++ ) {
 		$html_parts[] = sprintf(
-			'<article class="card card-%1$d" data-id="%1$d"><a class="title" href="%2$s/posts/%1$d?utm=bench&amp;slot=%1$d" data-track="hero-%1$d">Post %1$d</a><img src="%2$s/wp-content/uploads/%1$d.jpg" alt="Image %1$d" width="640" height="480"><p>Related: %2$s/text/%1$d and example.com/docs/%1$d.</p></article>',
+			'<article class="card card-%1$d" data-id="%1$d"><a class="title" href="%2$s/posts/%1$d?utm=bench&amp;slot=%1$d" data-track="hero-%1$d">Post %1$d</a><img src="%2$s/wp-content/uploads/%1$d.jpg" alt="Image %1$d" width="640" height="480"><p>Related: %2$s/text/%1$d and https://example.com/docs/%1$d.</p></article>',
 			$i,
 			$base_url
 		);
 		$text_parts[] = sprintf(
-			'Related: %s/text/%d and example.com/docs/%d.',
+			'Related: %s/text/%d and https://example.com/docs/%d.',
 			$base_url,
 			$i,
 			$i
