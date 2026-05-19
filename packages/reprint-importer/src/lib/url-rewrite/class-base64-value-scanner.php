@@ -156,20 +156,19 @@ class Base64ValueScanner
             return $this->sql;
         }
 
-        $result = $this->sql;
-
-        // Process in reverse order to preserve byte offsets
-        for ($i = count($this->entries) - 1; $i >= 0; $i--) {
-            $entry = $this->entries[$i];
+        $parts = [];
+        $cursor = 0;
+        foreach ($this->entries as $entry) {
             if ($entry['new_value'] !== null) {
                 $replacement = "'" . base64_encode($entry['new_value']) . "'";
-                $result = substr($result, 0, $entry['quote_start'])
-                    . $replacement
-                    . substr($result, $entry['quote_start'] + $entry['quote_length']);
+                $parts[] = substr($this->sql, $cursor, $entry['quote_start'] - $cursor);
+                $parts[] = $replacement;
+                $cursor = $entry['quote_start'] + $entry['quote_length'];
             }
         }
+        $parts[] = substr($this->sql, $cursor);
 
-        return $result;
+        return implode('', $parts);
     }
 
     /**

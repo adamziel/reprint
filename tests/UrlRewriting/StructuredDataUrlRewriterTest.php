@@ -343,6 +343,28 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/page', $result);
     }
 
+    public function testKnownBlockMarkupFastPathRewritesEscapedBlockJsonAndHtml(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:image {"src":"https:\/\/old-site.com\/img.jpg"} -->'
+            . '<figure><img src="https://old-site.com/img.jpg"/></figure>'
+            . '<!-- /wp:image -->';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https:\/\/new-site.com\/img.jpg', $result);
+        $this->assertStringContainsString('src="https://new-site.com/img.jpg"', $result);
+        $this->assertStringNotContainsString('old-site.com', $result);
+    }
+
+    public function testKnownBlockMarkupFastPathFallsBackForEmbeddedQueryUrl(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<a href="https://webarchive.org?url=https://old-site.com/about">Archive</a>';
+
+        $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
+    }
+
     // --- Content type hint: null (default) uses plain text replacement ---
 
     public function testDefaultHintUsesPlainTextReplacement(): void
