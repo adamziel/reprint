@@ -37,7 +37,7 @@ class FastInsertScanner
      * @return array{
      *   table: string,
      *   column_map: list<array{int, int, string}>,
-     *   base64_entries: list<array{expr_start: int, quote_start: int, quote_length: int, value: string, new_value: ?string}>
+     *   base64_entries: list<array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
      * }|null
      *   Null when the SQL doesn't match the recognised shape.
      */
@@ -139,12 +139,13 @@ class FastInsertScanner
                 $column_map[] = [$value_start, $value_end, $columns[$col_idx]];
 
                 if (is_array($value_kind)) {
-                    // FROM_BASE64 payload: kind = [expr_start, quote_start, quote_length, decoded_value]
+                    // FROM_BASE64 payload: kind = [expr_start, quote_start, quote_length, encoded_value]
                     $base64_entries[] = [
                         'expr_start' => $value_kind[0],
                         'quote_start' => $value_kind[1],
                         'quote_length' => $value_kind[2],
-                        'value' => $value_kind[3],
+                        'encoded_value' => $value_kind[3],
+                        'value' => null,
                         'new_value' => null,
                     ];
                 }
@@ -201,7 +202,7 @@ class FastInsertScanner
      * @return null|true|array{int,int,int,string}
      *   null = unrecognized shape (caller bails)
      *   true = recognised, no FROM_BASE64 entry to record
-     *   array = FROM_BASE64 payload, [expr_start, quote_start, quote_length, decoded]
+     *   array = FROM_BASE64 payload, [expr_start, quote_start, quote_length, encoded]
      */
     private static function scan_value(string $sql, int $sql_len, int &$cursor)
     {
@@ -318,7 +319,7 @@ class FastInsertScanner
     /**
      * Inside a FROM_BASE64( … ) call, with $cursor already past the opening
      * paren. Reads the quoted base64 string and the closing paren. Returns
-     * the [expr_start, quote_start, quote_length, decoded] tuple.
+     * the [expr_start, quote_start, quote_length, encoded] tuple.
      *
      * @return array{int,int,int,string}|null
      */
@@ -357,11 +358,7 @@ class FastInsertScanner
             }
             $cursor++;
         }
-        $decoded = base64_decode($payload, true);
-        if ($decoded === false) {
-            $decoded = '';
-        }
-        return [$expr_start, $quote_start, $quote_length, $decoded];
+        return [$expr_start, $quote_start, $quote_length, $payload];
     }
 
     private static function is_ws(string $c): bool
