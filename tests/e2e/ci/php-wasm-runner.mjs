@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path';
 
 const DEFAULT_PHP_VERSION = '8.3';
 const MYSQL_PARSER_MANIFEST_ENV = 'WP_MYSQL_PARSER_EXTENSION_MANIFEST';
+const NATIVE_APIS_MANIFEST_ENV = 'WP_NATIVE_APIS_EXTENSION_MANIFEST';
 
 function envRecord() {
     return Object.fromEntries(
@@ -78,7 +79,8 @@ function mountRootFor(pathCandidate) {
 }
 
 function collectMounts(args) {
-    const candidates = new Set([process.cwd()]);
+    const projectRoot = resolve(import.meta.dirname, '..', '..', '..');
+    const candidates = new Set([process.cwd(), projectRoot]);
     for (const root of ['/tmp', '/srv']) {
         if (existsSync(root)) {
             candidates.add(root);
@@ -115,6 +117,15 @@ async function main() {
             source: {
                 format: 'manifest',
                 manifestUrl,
+            },
+        });
+    }
+    const nativeApisManifestUrl = process.env[NATIVE_APIS_MANIFEST_ENV];
+    if (nativeApisManifestUrl) {
+        extensions.push({
+            source: {
+                format: 'manifest',
+                manifestUrl: nativeApisManifestUrl,
             },
         });
     }

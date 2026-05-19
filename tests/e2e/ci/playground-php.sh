@@ -9,7 +9,7 @@
 # extensions.
 set -euo pipefail
 
-if [ -n "${WP_MYSQL_PARSER_EXTENSION_MANIFEST:-}" ] || [ "${PLAYGROUND_PHP_USE_WASM_RUNNER:-}" = "1" ]; then
+if [ -n "${WP_MYSQL_PARSER_EXTENSION_MANIFEST:-}" ] || [ -n "${WP_NATIVE_APIS_EXTENSION_MANIFEST:-}" ] || [ "${PLAYGROUND_PHP_USE_WASM_RUNNER:-}" = "1" ]; then
     SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
     NODE_CMD=(node)
     if ! node --experimental-wasm-jspi --input-type=module -e "import { jspi } from 'wasm-feature-detect'; process.exit(await jspi() ? 0 : 1);" >/dev/null 2>&1; then
