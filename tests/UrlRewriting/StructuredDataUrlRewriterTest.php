@@ -5,6 +5,21 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/load.php';
 
+if (!function_exists('wp_native_apis_rewrite_plain_text_literal_urls')) {
+    define('REPRINT_TEST_FAKE_NATIVE_PLAIN_TEXT_LITERAL_URL_REWRITE', true);
+    function wp_native_apis_rewrite_plain_text_literal_urls(string $content, string $compact_mapping)
+    {
+        $GLOBALS['reprint_test_native_plain_text_literal_url_rewrite_calls'] =
+            ($GLOBALS['reprint_test_native_plain_text_literal_url_rewrite_calls'] ?? 0) + 1;
+
+        if (array_key_exists('reprint_test_native_plain_text_literal_url_rewrite_result', $GLOBALS)) {
+            return $GLOBALS['reprint_test_native_plain_text_literal_url_rewrite_result'];
+        }
+
+        return false;
+    }
+}
+
 class StructuredDataUrlRewriterTest extends TestCase
 {
     private function createRewriter(?array $mapping = null): StructuredDataUrlRewriter
@@ -61,6 +76,27 @@ class StructuredDataUrlRewriterTest extends TestCase
         $input = 'Visit us at https://old-site.com/about for more info.';
         $result = $rewriter->rewrite($input);
         $this->assertStringContainsString('https://new-site.com/about', $result);
+    }
+
+    public function testUsesNativePlainTextLiteralUrlRewriteWhenAvailable(): void
+    {
+        if (!defined('REPRINT_TEST_FAKE_NATIVE_PLAIN_TEXT_LITERAL_URL_REWRITE')) {
+            $this->markTestSkipped('The real native extension is loaded; this test only exercises the fake native hook.');
+        }
+
+        $GLOBALS['reprint_test_native_plain_text_literal_url_rewrite_calls'] = 0;
+        $GLOBALS['reprint_test_native_plain_text_literal_url_rewrite_result'] = 'native rewrite result';
+
+        try {
+            $rewriter = $this->createRewriter();
+            $this->assertSame(
+                'native rewrite result',
+                $rewriter->rewrite_plain_text_literal_leaf('Visit https://old-site.com/about')
+            );
+            $this->assertSame(1, $GLOBALS['reprint_test_native_plain_text_literal_url_rewrite_calls']);
+        } finally {
+            unset($GLOBALS['reprint_test_native_plain_text_literal_url_rewrite_result']);
+        }
     }
 
     public function testDoesNotRewriteNonUrlsInText(): void

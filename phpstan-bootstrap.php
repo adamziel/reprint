@@ -17,3 +17,14 @@ if (!function_exists('trailingslashit')) {
         return rtrim($value, '/\\') . '/';
     }
 }
+
+if (!function_exists('wp_native_apis_rewrite_plain_text_literal_urls')) {
+    /**
+     * PHPStan bootstrap stub for the optional php-toolkit PHP.wasm native extension.
+     *
+     * @return false|string
+     */
+    function wp_native_apis_rewrite_plain_text_literal_urls(string $content, string $compact_mapping) {
+        return false;
+    }
+}

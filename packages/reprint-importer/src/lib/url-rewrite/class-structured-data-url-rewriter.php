@@ -46,6 +46,12 @@ class StructuredDataUrlRewriter
      */
     private array $plain_text_literal_origin_mappings;
 
+    /** @var string Compact source-origin to target-prefix mappings for the native fast path. */
+    private string $native_plain_text_literal_origin_mapping;
+
+    /** @var bool Whether the native plain text literal URL rewrite function is available. */
+    private bool $native_plain_text_literal_url_rewriter_available;
+
     /**
      * Pre-parsed url_mapping grouped by the URL origin fields used by
      * is_child_url_of(): protocol and normalized hostname. Each entry is
@@ -108,6 +114,7 @@ class StructuredDataUrlRewriter
         // repeated on every leaf we rewrote.
         $this->parsed_mapping_by_origin = [];
         $this->plain_text_literal_origin_mappings = [];
+        $native_plain_text_literal_origin_mappings = [];
         foreach ($url_mapping as $from_url_string => $to_url_string) {
             $from_url = WPURL::parse($from_url_string);
             $mapping = [
@@ -123,8 +130,13 @@ class StructuredDataUrlRewriter
             $literal_mapping = $this->build_plain_text_literal_origin_mapping($from_url_string, $to_url_string);
             if ($literal_mapping !== null) {
                 $this->plain_text_literal_origin_mappings[] = $literal_mapping;
+                $native_plain_text_literal_origin_mappings[] = $literal_mapping['from'] . "\x1f" . $literal_mapping['to'];
             }
         }
+        $this->native_plain_text_literal_origin_mapping = implode("\x1e", $native_plain_text_literal_origin_mappings);
+        $this->native_plain_text_literal_url_rewriter_available =
+            function_exists('wp_native_apis_rewrite_plain_text_literal_urls') &&
+            (!defined('WP_NATIVE_APIS_DISABLE_DEFAULTS') || !WP_NATIVE_APIS_DISABLE_DEFAULTS);
         $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
 
         // Default base_url: first from-url in the mapping. Preserves the
@@ -499,7 +511,39 @@ class StructuredDataUrlRewriter
      */
     public function rewrite_plain_text_literal_leaf(string $content)
     {
+        $native_rewrite = $this->try_native_rewrite_plain_text_literal_urls($content);
+        if ($native_rewrite !== false) {
+            return $native_rewrite;
+        }
+
         return $this->try_rewrite_plain_text_literal_origins($content);
+    }
+
+    /**
+     * Try native plain text literal source-origin rewriting.
+     *
+     * The native primitive has the same rigor as the PHP path below: it only
+     * rewrites known plain text leaves using pre-normalized HTTP(S)
+     * source-origin mappings, and returns false when the generic parser-owned
+     * path must handle the value.
+     *
+     * @return false|string false when the generic URL processor must handle it.
+     */
+    private function try_native_rewrite_plain_text_literal_urls(string $content)
+    {
+        if (
+            !$this->native_plain_text_literal_url_rewriter_available ||
+            $this->native_plain_text_literal_origin_mapping === ''
+        ) {
+            return false;
+        }
+
+        $rewritten = \wp_native_apis_rewrite_plain_text_literal_urls(
+            $content,
+            $this->native_plain_text_literal_origin_mapping
+        );
+
+        return is_string($rewritten) ? $rewritten : false;
     }
 
     /**
