@@ -76,12 +76,21 @@ class StructuredDataUrlRewriter
      */
     public function __construct(array $url_mapping)
     {
-        // Extract unique source domains for the quick-reject check.
+        // Extract unique source domains for the quick-reject check. Include
+        // both parse_url()'s literal host and WPURL's normalized host so IDN
+        // mappings still match punycode URLs stored in the database.
         $domains = [];
         foreach (array_keys($url_mapping) as $from_url) {
             $host = parse_url($from_url, PHP_URL_HOST);
             if ($host !== null && $host !== false) {
-                $domains[$host] = true;
+                $domains[strtolower($host)] = true;
+            }
+            $parsed = WPURL::parse($from_url);
+            if ($parsed !== false) {
+                $normalized_host = $parsed->hostname;
+                if ($normalized_host !== '') {
+                    $domains[strtolower($normalized_host)] = true;
+                }
             }
         }
         $this->source_domains = array_keys($domains);
@@ -192,7 +201,7 @@ class StructuredDataUrlRewriter
             return true;
         }
         foreach ($this->source_domains as $domain) {
-            if (strpos($value, $domain) !== false) {
+            if (stripos($value, $domain) !== false) {
                 return true;
             }
         }
@@ -266,6 +275,87 @@ class StructuredDataUrlRewriter
         }
 
         $this->rewrite_result_cache[$cache_key] = $value;
+    }
+
+    /**
+     * Split syntax delimiters accidentally captured by URLInTextProcessor from
+     * the URL bytes that should be parsed and rewritten.
+     *
+     * The processor intentionally uses a broad candidate scan before WHATWG
+     * validation. In plain text formats such as Markdown, CSS, JavaScript, CSV,
+     * and shortcodes, the broad candidate may include a closing delimiter or a
+     * quoted-field tail. We preserve that suffix verbatim and only feed the URL
+     * prefix into structured URL parsing and base replacement.
+     *
+     * @return array{0: string, 1: string} URL candidate, preserved suffix.
+     */
+    private function split_plain_text_url_candidate(string $raw_url): array
+    {
+        $suffix = '';
+        $quote_pos = $this->find_structural_quote_position($raw_url);
+        if ($quote_pos !== null) {
+            $suffix = substr($raw_url, $quote_pos);
+            $raw_url = substr($raw_url, 0, $quote_pos);
+        }
+
+        while ($raw_url !== '') {
+            $last = $raw_url[strlen($raw_url) - 1];
+            if ($last === '>' || $last === ',' || $last === ';') {
+                $suffix = $last . $suffix;
+                $raw_url = substr($raw_url, 0, -1);
+                continue;
+            }
+
+            $pairs = [
+                ')' => '(',
+                ']' => '[',
+                '}' => '{',
+            ];
+            if (
+                isset($pairs[$last]) &&
+                substr_count($raw_url, $last) > substr_count($raw_url, $pairs[$last])
+            ) {
+                $suffix = $last . $suffix;
+                $raw_url = substr($raw_url, 0, -1);
+                continue;
+            }
+
+            break;
+        }
+
+        return [$raw_url, $suffix];
+    }
+
+    private function find_structural_quote_position(string $raw_url): ?int
+    {
+        $length = strlen($raw_url);
+        for ($i = 0; $i < $length; $i++) {
+            $char = $raw_url[$i];
+            if ($char !== '"' && $char !== "'") {
+                continue;
+            }
+
+            $next = $raw_url[$i + 1] ?? '';
+            if ($next === '' || strpos(",]})>;\t\r\n ", $next) !== false) {
+                return $i;
+            }
+        }
+
+        return null;
+    }
+
+    private function parse_plain_text_candidate(string $raw_url)
+    {
+        $candidate = $raw_url;
+        if (
+            $this->base_url &&
+            !WPURL::has_http_https_protocol($candidate) &&
+            strpos($candidate, '//') !== 0
+        ) {
+            $candidate = WPURL::ensure_protocol($candidate, parse_url($this->base_url, PHP_URL_SCHEME) ?: 'https');
+        }
+
+        return WPURL::parse($candidate, $this->base_url);
     }
 
     /**
@@ -357,46 +447,80 @@ class StructuredDataUrlRewriter
 
             case self::PLAIN_TEXT:
                 $p = new URLInTextProcessor( $content, $base_url );
+                $updated_content = '';
+                $bytes_copied = 0;
+                $search_offset = 0;
+                $changed = false;
                 while ( $p->next_url() ) {
                     $raw_url = $p->get_raw_url();
-                    $cache_key = $this->mapping_cache_key . "\0" . self::PLAIN_TEXT . "\0" . $raw_url;
+
+                    // Locate the scanner candidate in the original bytes. Some
+                    // processors normalize the exposed URL span, so reapply only
+                    // the bytes we can directly account for.
+                    $url_starts_at = strpos($content, $raw_url, $search_offset);
+                    if ($url_starts_at === false) {
+                        continue;
+                    }
+                    $search_offset = $url_starts_at + strlen($raw_url);
+
+                    // The scanner may include surrounding plain-text syntax in
+                    // its broad candidate. Split that syntax from the URL before
+                    // structured parsing, then append it unchanged after rewrite.
+                    [$rewrite_raw_url, $preserved_suffix] = $this->split_plain_text_url_candidate($raw_url);
+                    if ($rewrite_raw_url === '') {
+                        continue;
+                    }
+
+                    $cache_key = $this->mapping_cache_key . "\0" . self::PLAIN_TEXT . "\0" . $raw_url . "\0" . $rewrite_raw_url;
                     $cached = $this->get_cached_rewrite_result($cache_key);
                     if ($cached !== null) {
                         if ($cached !== false) {
-                            $p->set_raw_url($cached['raw_url']);
+                            $updated_content .= substr($content, $bytes_copied, $url_starts_at - $bytes_copied);
+                            $updated_content .= $cached['raw_url'];
+                            $bytes_copied = $url_starts_at + strlen($raw_url);
+                            $changed = true;
                         }
                         continue;
                     }
 
-                    $parsed_url = $p->get_parsed_url();
+                    $parsed_url = $preserved_suffix === ''
+                        ? $p->get_parsed_url()
+                        : $this->parse_plain_text_candidate($rewrite_raw_url);
                     $converted = false;
-                    foreach ( $parsed_mapping as $mapping ) {
-                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $converted = WPURL::replace_base_url(
-                                $parsed_url,
-                                array(
-                                    'old_base_url' => $base_url,
-                                    'new_base_url' => $mapping['to_url'],
-                                    'raw_url'      => $p->get_raw_url(),
-                                    'is_relative'  => false,
-                                )
-                            );
-                            break;
+                    if ($parsed_url !== false) {
+                        foreach ( $parsed_mapping as $mapping ) {
+                            if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
+                                $converted = WPURL::replace_base_url(
+                                    $parsed_url,
+                                    array(
+                                        'old_base_url' => $mapping['from_url'],
+                                        'new_base_url' => $mapping['to_url'],
+                                        'raw_url'      => $rewrite_raw_url,
+                                        'is_relative'  => false,
+                                    )
+                                );
+                                break;
+                            }
                         }
                     }
 
                     $cache_value = false;
                     if ($converted !== false) {
                         $cache_value = [
-                            'raw_url'    => (string) $converted,
+                            'raw_url'    => (string) $converted . $preserved_suffix,
                             'parsed_url' => $converted->new_url,
                         ];
-                        $p->set_raw_url($cache_value['raw_url']);
+                        $updated_content .= substr($content, $bytes_copied, $url_starts_at - $bytes_copied);
+                        $updated_content .= $cache_value['raw_url'];
+                        $bytes_copied = $url_starts_at + strlen($raw_url);
+                        $changed = true;
                     }
                     $this->set_cached_rewrite_result($cache_key, $cache_value);
                 }
 
-                return $p->get_updated_text();
+                return $changed
+                    ? $updated_content . substr($content, $bytes_copied)
+                    : $content;
 
             default:
                 _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );

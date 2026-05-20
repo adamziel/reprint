@@ -468,4 +468,76 @@ class StructuredDataUrlRewriterTest extends TestCase
             $rewriter->value_might_contain_source_domain('<a href="https://other-site.com/page">Link</a>')
         );
     }
+
+    /**
+     * These are plain text database values, not block markup. The URL scanner
+     * may see the surrounding syntax, but the rewriter must only replace the
+     * structured URL and leave each container's delimiters intact.
+     *
+     * @dataProvider plainTextDataFormatProvider
+     */
+    public function testPlainTextDataFormatsPreserveTheirDelimiters(string $input, string $expected): void
+    {
+        $rewriter = $this->createRewriter();
+
+        $this->assertSame($expected, $rewriter->rewrite($input));
+    }
+
+    public static function plainTextDataFormatProvider(): array
+    {
+        return [
+            'markdown inline link' => [
+                '[Read more](https://old-site.com/post)',
+                '[Read more](https://new-site.com/post)',
+            ],
+            'css url function' => [
+                'body{background:url(https://old-site.com/assets/bg.png)}',
+                'body{background:url(https://new-site.com/assets/bg.png)}',
+            ],
+            'javascript object literal' => [
+                "const cfg = {url: 'https://old-site.com/api'};",
+                "const cfg = {url: 'https://new-site.com/api'};",
+            ],
+            'wordpress shortcode attribute' => [
+                '[button url="https://old-site.com/go"]',
+                '[button url="https://new-site.com/go"]',
+            ],
+            'csv quoted field' => [
+                '1,"https://old-site.com/report",published',
+                '1,"https://new-site.com/report",published',
+            ],
+            'ini assignment' => [
+                "endpoint=https://old-site.com/api\n",
+                "endpoint=https://new-site.com/api\n",
+            ],
+            'yaml sequence item' => [
+                "- https://old-site.com/download\n",
+                "- https://new-site.com/download\n",
+            ],
+            'xml text node' => [
+                '<loc>https://old-site.com/post</loc>',
+                '<loc>https://new-site.com/post</loc>',
+            ],
+            'toml quoted value' => [
+                'endpoint = "https://old-site.com/api"',
+                'endpoint = "https://new-site.com/api"',
+            ],
+            'cdata section' => [
+                '<![CDATA[https://old-site.com/post]]>',
+                '<![CDATA[https://new-site.com/post]]>',
+            ],
+        ];
+    }
+
+    public function testPlainTextRewriteMatchesPunycodeSourceDomain(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://bücher.example' => 'https://new-site.com',
+        ]);
+
+        $this->assertSame(
+            'asset=https://new-site.com/cover.jpg',
+            $rewriter->rewrite('asset=https://xn--bcher-kva.example/cover.jpg')
+        );
+    }
 }
