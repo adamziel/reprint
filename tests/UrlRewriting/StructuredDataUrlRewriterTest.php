@@ -130,6 +130,18 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('\\/', $result);
     }
 
+    public function testRewritesJsonAfterLeadingWhitespace(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = " \n\t{\"url\":\"https://old-site.com/path\"}";
+
+        $result = $rewriter->rewrite($input);
+        $decoded = json_decode($result, true);
+
+        $this->assertNotNull($decoded);
+        $this->assertSame('https://new-site.com/path', $decoded['url']);
+    }
+
     // --- Serialized PHP ---
 
     public function testRewritesUrlInSerializedArray(): void

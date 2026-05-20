@@ -151,32 +151,37 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
-        // Try serialized PHP: the parser validates the entire structure
-        // in the constructor. If it's not malformed, iterate and recurse.
-        $p = new PhpSerializationProcessor($value);
-        if (!$p->is_malformed()) {
-            while ($p->next_value()) {
-                $original = $p->get_value();
-                $rewritten = $this->rewrite($original, $content_type);
-                if ($rewritten !== $original) {
-                    $p->set_value($rewritten);
+        // Try serialized PHP only when the first bytes can begin a valid PHP
+        // serialization document. The parser still owns validation; this only
+        // avoids constructing it for values that are impossible matches.
+        if ($this->can_start_serialized_php($value)) {
+            $p = new PhpSerializationProcessor($value);
+            if (!$p->is_malformed()) {
+                while ($p->next_value()) {
+                    $original = $p->get_value();
+                    $rewritten = $this->rewrite($original, $content_type);
+                    if ($rewritten !== $original) {
+                        $p->set_value($rewritten);
+                    }
                 }
+                return $p->get_updated_serialization();
             }
-            return $p->get_updated_serialization();
         }
 
-        // Try JSON: the iterator calls json_decode in the constructor.
-        // If it's not malformed, iterate and recurse.
-        $iter = new JsonStringIterator($value);
-        if (!$iter->is_malformed()) {
-            while ($iter->next_value()) {
-                $original = $iter->get_value();
-                $rewritten = $this->rewrite($original, $content_type);
-                if ($rewritten !== $original) {
-                    $iter->set_value($rewritten);
+        // JsonStringIterator accepts only object/array documents. After JSON
+        // whitespace, no other leading byte can be accepted by that iterator.
+        if ($this->can_start_json_container($value)) {
+            $iter = new JsonStringIterator($value);
+            if (!$iter->is_malformed()) {
+                while ($iter->next_value()) {
+                    $original = $iter->get_value();
+                    $rewritten = $this->rewrite($original, $content_type);
+                    if ($rewritten !== $original) {
+                        $iter->set_value($rewritten);
+                    }
                 }
+                return $iter->get_result();
             }
-            return $iter->get_result();
         }
 
         // Base64 decoding is temporarily disabled for performance.
@@ -206,6 +211,29 @@ class StructuredDataUrlRewriter
             }
         }
         return false;
+    }
+
+    private function can_start_serialized_php(string $value): bool
+    {
+        if (!isset($value[1])) {
+            return false;
+        }
+
+        if ($value[0] === 'N') {
+            return $value[1] === ';';
+        }
+
+        return strpos('sidbaOCrR', $value[0]) !== false && $value[1] === ':';
+    }
+
+    private function can_start_json_container(string $value): bool
+    {
+        $offset = strspn($value, " \t\r\n");
+        if (!isset($value[$offset])) {
+            return false;
+        }
+
+        return $value[$offset] === '{' || $value[$offset] === '[';
     }
 
     /**
