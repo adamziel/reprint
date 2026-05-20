@@ -220,7 +220,8 @@ class Base64ValueScanner
 
             // If strict base64 decoding fails, preserve the original expression.
             // That keeps malformed or non-literal FROM_BASE64() cases on the
-            // existing SQLite UDF path instead of silently changing semantics.
+            // existing SQLite user-defined function path instead of silently
+            // changing semantics.
             $parts[] = substr($this->sql, $cursor, $entry['expr_start'] - $cursor);
             $parts[] = $replacement ?? substr($this->sql, $entry['expr_start'], $entry['expr_length']);
             $cursor = $entry['expr_start'] + $entry['expr_length'];

@@ -183,6 +183,20 @@ class Base64ValueScannerTest extends TestCase
         );
     }
 
+    public function testSqliteCompatibleLiteralsCollapseConvertWrapperAcrossWhitespaceAndComments(): void
+    {
+        $value = "Bob's Test Blog";
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO t VALUES(CONVERT /* convert */ ( /* open */ FROM_BASE64 /* fn */ ( '{$encoded}' ) /* close */ USING utf8mb4 ));";
+
+        $scanner = new Base64ValueScanner($sql);
+
+        $this->assertSame(
+            "INSERT INTO t VALUES(0x" . bin2hex($value) . ");",
+            $scanner->get_result_with_sqlite_compatible_literals()
+        );
+    }
+
     public function testSqliteCompatibleLiteralsUseRewrittenValues(): void
     {
         $old = 'https://old-site.com/page';
