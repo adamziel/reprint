@@ -31,6 +31,8 @@ class StructuredDataUrlRewriter
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
     private const REWRITE_RESULT_CACHE_MAX = 4096;
+    private const VALUE_REWRITE_CACHE_MAX = 2048;
+    private const VALUE_REWRITE_CACHE_MAX_ENTRY_BYTES = 16384;
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
@@ -67,6 +69,28 @@ class StructuredDataUrlRewriter
     private array $rewrite_result_cache_ring = [];
 
     private int $rewrite_result_cache_next = 0;
+
+    /**
+     * Exact cache for decoded value rewrites.
+     *
+     * This cache is deliberately keyed by content type plus the complete input
+     * bytes, with a hash used only as the array key. The stored input is checked
+     * again on lookup before returning the result, so hash collisions degrade to
+     * a miss instead of returning the wrong rewrite.
+     *
+     * The cache is bounded by entry count and per-entry byte size. Large post
+     * bodies still flow through the parser normally; repeated small leaves such
+     * as options, postmeta values, and recurring JSON strings avoid rebuilding
+     * the structured parser stack.
+     *
+     * @var array<string, array{input: string, result: string}>
+     */
+    private array $value_rewrite_cache = [];
+
+    /** @var string[] */
+    private array $value_rewrite_cache_ring = [];
+
+    private int $value_rewrite_cache_next = 0;
 
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
@@ -131,6 +155,11 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
+        $cached_rewrite = $this->get_cached_value_rewrite_result($value, $content_type);
+        if ($cached_rewrite !== null) {
+            return $cached_rewrite;
+        }
+
         // Try serialized PHP: the parser validates the entire structure
         // in the constructor. If it's not malformed, iterate and recurse.
         $p = new PhpSerializationProcessor($value);
@@ -142,7 +171,9 @@ class StructuredDataUrlRewriter
                     $p->set_value($rewritten);
                 }
             }
-            return $p->get_updated_serialization();
+            $result = $p->get_updated_serialization();
+            $this->set_cached_value_rewrite_result($value, $content_type, $result);
+            return $result;
         }
 
         // Try JSON: the iterator calls json_decode in the constructor.
@@ -156,7 +187,9 @@ class StructuredDataUrlRewriter
                     $iter->set_value($rewritten);
                 }
             }
-            return $iter->get_result();
+            $result = $iter->get_result();
+            $this->set_cached_value_rewrite_result($value, $content_type, $result);
+            return $result;
         }
 
         // Base64 decoding is temporarily disabled for performance.
@@ -164,7 +197,9 @@ class StructuredDataUrlRewriter
         // Base64ValueScanner in SqlStatementRewriter — this block
         // was for base64-within-base64 nesting which is rare in practice.
 
-        return $this->rewrite_urls($value, $content_type);
+        $result = $this->rewrite_urls($value, $content_type);
+        $this->set_cached_value_rewrite_result($value, $content_type, $result);
+        return $result;
     }
 
     /**
@@ -236,6 +271,21 @@ class StructuredDataUrlRewriter
             : null;
     }
 
+    private function get_cached_value_rewrite_result(string $value, string $content_type): ?string
+    {
+        if (!$this->can_lookup_value_rewrite($value)) {
+            return null;
+        }
+
+        $cache_key = $this->get_value_rewrite_cache_key($value, $content_type);
+        if (!array_key_exists($cache_key, $this->value_rewrite_cache)) {
+            return null;
+        }
+
+        $entry = $this->value_rewrite_cache[$cache_key];
+        return $entry['input'] === $value ? $entry['result'] : null;
+    }
+
     /**
      * @param false|array{raw_url: string, parsed_url: mixed} $value
      */
@@ -254,6 +304,46 @@ class StructuredDataUrlRewriter
         }
 
         $this->rewrite_result_cache[$cache_key] = $value;
+    }
+
+    private function set_cached_value_rewrite_result(string $value, string $content_type, string $result): void
+    {
+        if (!$this->can_cache_value_rewrite($value, $result)) {
+            return;
+        }
+
+        $cache_key = $this->get_value_rewrite_cache_key($value, $content_type);
+        if (!array_key_exists($cache_key, $this->value_rewrite_cache)) {
+            if (count($this->value_rewrite_cache_ring) < self::VALUE_REWRITE_CACHE_MAX) {
+                $this->value_rewrite_cache_ring[] = $cache_key;
+            } else {
+                $evicted_key = $this->value_rewrite_cache_ring[$this->value_rewrite_cache_next];
+                unset($this->value_rewrite_cache[$evicted_key]);
+                $this->value_rewrite_cache_ring[$this->value_rewrite_cache_next] = $cache_key;
+            }
+
+            $this->value_rewrite_cache_next = ($this->value_rewrite_cache_next + 1) % self::VALUE_REWRITE_CACHE_MAX;
+        }
+
+        $this->value_rewrite_cache[$cache_key] = [
+            'input'  => $value,
+            'result' => $result,
+        ];
+    }
+
+    private function can_cache_value_rewrite(string $value, string $result): bool
+    {
+        return strlen($value) + strlen($result) <= self::VALUE_REWRITE_CACHE_MAX_ENTRY_BYTES;
+    }
+
+    private function can_lookup_value_rewrite(string $value): bool
+    {
+        return strlen($value) <= self::VALUE_REWRITE_CACHE_MAX_ENTRY_BYTES;
+    }
+
+    private function get_value_rewrite_cache_key(string $value, string $content_type): string
+    {
+        return $this->mapping_cache_key . "\0" . $content_type . "\0" . strlen($value) . "\0" . sha1($value);
     }
 
     /**

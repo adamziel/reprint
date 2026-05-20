@@ -365,6 +365,23 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
     }
 
+    public function testValueRewriteCacheDoesNotConflateContentTypes(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://new-longer-domain-site.com',
+        ]);
+        $input = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} -->'
+            . '<figure><img src="https://old-site.com/img.jpg"/></figure>'
+            . '<!-- /wp:image -->';
+
+        $plain = $rewriter->rewrite($input, 'plain_text');
+        $block = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertStringContainsString('https://new-longer-domain-site.com/img.jpg', $plain);
+        $this->assertStringContainsString('https:\/\/new-longer-domain-site.com\/img.jpg', $block);
+        $this->assertNotSame($plain, $block);
+    }
+
     // --- Content type hint: null (default) uses plain text URL processing ---
 
     public function testDefaultHintUsesPlainTextReplacement(): void
