@@ -157,6 +157,48 @@ class SqlStatementRewriter
     }
 
     /**
+     * Build a SQLite prepared INSERT for producer-shaped statements.
+     *
+     * This follows the same column-aware URL rewriting decisions as rewrite()
+     * but returns SQL with placeholders plus decoded parameter bytes. Unknown
+     * statement shapes return null so callers can fall back to the normal
+     * MySQL-on-SQLite execution path.
+     *
+     * @return array{sql: string, params: list<string>}|null
+     */
+    public function build_sqlite_prepared_insert(string $sql): ?array
+    {
+        return SQLitePreparedInsertBuilder::build(
+            $sql,
+            function (string $value, string $table, ?string $column): string {
+                return $this->rewrite_value_for_column($value, $table, $column);
+            }
+        );
+    }
+
+    private function rewrite_value_for_column(string $value, string $table, ?string $column): string
+    {
+        if (strpos($value, 'http') === false) {
+            return $value;
+        }
+
+        if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
+            return $value;
+        }
+
+        $content_type = $column !== null
+            ? $this->get_content_type($table, $column)
+            : null;
+
+        // Rewrite URLs in the value. Known block-markup columns can first
+        // try a boundary-checked literal base URL swap before falling back
+        // to the full structured parser.
+        return $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
+            ? $this->url_rewriter->rewrite_known_block_markup_value($value)
+            : $this->url_rewriter->rewrite($value, $content_type);
+    }
+
+    /**
      * Run the value-rewriting loop given an already-populated scanner and
      * the table/column-map context. Shared between the fast and lexer paths.
      *
@@ -179,24 +221,20 @@ class SqlStatementRewriter
                 continue;
             }
 
-            // Determine content type hint for this column
-            $content_type = null;
+            // Determine content type hint for this column.
+            $column_name = null;
             if ($value_to_column_map !== null) {
                 $column_name = $this->find_column_at_offset(
                     $value_to_column_map['column_map'],
                     $scanner->get_match_offset()
                 );
-                if ($column_name !== null) {
-                    $content_type = $this->get_content_type($value_to_column_map['table'], $column_name);
-                }
             }
 
-            // Rewrite URLs in the value. Known block-markup columns can first
-            // try a boundary-checked literal base URL swap before falling back
-            // to the full structured parser.
-            $rewritten = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
-                ? $this->url_rewriter->rewrite_known_block_markup_value($value)
-                : $this->url_rewriter->rewrite($value, $content_type);
+            $rewritten = $this->rewrite_value_for_column(
+                $value,
+                $value_to_column_map['table'] ?? '',
+                $column_name
+            );
 
             // Only replace if the value actually changed
             if ($rewritten !== $value) {
