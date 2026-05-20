@@ -394,6 +394,25 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $result);
     }
 
+    public function testDefaultHintDoesNotRewriteSourceUrlAsHostPrefix(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'Visit https://old-site.com.evil.example/about';
+
+        $this->assertSame($input, $rewriter->rewrite($input));
+    }
+
+    public function testDefaultHintRewritesPlainTextUrlWithQueryString(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'Visit https://old-site.com/?p=123&preview=true';
+
+        $this->assertSame(
+            'Visit https://new-site.com/?p=123&preview=true',
+            $rewriter->rewrite($input)
+        );
+    }
+
     public function testDefaultHintAutoDetectsWordPressBlockMarkup(): void
     {
         $rewriter = $this->createRewriter([

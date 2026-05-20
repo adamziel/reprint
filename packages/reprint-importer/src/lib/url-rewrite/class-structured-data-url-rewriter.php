@@ -38,6 +38,15 @@ class StructuredDataUrlRewriter
     private array $source_domains;
 
     /**
+     * Literal origin rewrites that are safe to apply before the generic text
+     * URL scanner. These entries only exist for source mappings whose old base
+     * is an HTTP(S) origin with no path/query/fragment.
+     *
+     * @var list<array{from: string, to: string}>
+     */
+    private array $plain_text_literal_origin_mappings;
+
+    /**
      * Pre-parsed url_mapping grouped by the URL origin fields used by
      * is_child_url_of(): protocol and normalized hostname. Each entry is
      *   [ 'from_url' => <parsed URL>, 'to_url' => <parsed URL>, 'from_pathname' => <decoded pathname> ]
@@ -98,6 +107,7 @@ class StructuredDataUrlRewriter
         // (scheme/host/path tokenisation, punycode, etc.) and used to be
         // repeated on every leaf we rewrote.
         $this->parsed_mapping_by_origin = [];
+        $this->plain_text_literal_origin_mappings = [];
         foreach ($url_mapping as $from_url_string => $to_url_string) {
             $from_url = WPURL::parse($from_url_string);
             $mapping = [
@@ -108,6 +118,11 @@ class StructuredDataUrlRewriter
             if (false !== $from_url) {
                 $origin_key = $from_url->protocol . "\0" . $from_url->hostname;
                 $this->parsed_mapping_by_origin[$origin_key][] = $mapping;
+            }
+
+            $literal_mapping = $this->build_plain_text_literal_origin_mapping($from_url_string, $to_url_string);
+            if ($literal_mapping !== null) {
+                $this->plain_text_literal_origin_mappings[] = $literal_mapping;
             }
         }
         $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
@@ -154,6 +169,13 @@ class StructuredDataUrlRewriter
         // of values that don't contain any rewritable URLs.
         if (!$this->maybe_contains_rewritable_urls($value)) {
             return $value;
+        }
+
+        if ($content_type === self::PLAIN_TEXT) {
+            $literal_rewrite = $this->try_rewrite_plain_text_literal_origins($value);
+            if ($literal_rewrite !== false) {
+                return $literal_rewrite;
+            }
         }
 
         // Try serialized PHP: the parser validates the entire structure
@@ -377,6 +399,11 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
+                $literal_rewrite = $this->try_rewrite_plain_text_literal_origins($content);
+                if ($literal_rewrite !== false) {
+                    return $literal_rewrite;
+                }
+
                 $p = new URLInTextProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $raw_url = $p->get_raw_url();
@@ -457,5 +484,155 @@ class StructuredDataUrlRewriter
             $parent_pathname === $child_pathname_no_trailing_slash . '/' ||
             0 === strncmp( $child_pathname_no_trailing_slash . '/', $parent_pathname, strlen( $parent_pathname ) )
         );
+    }
+
+    /**
+     * Build one literal-origin rewrite entry for the conservative plain-text
+     * fast path.
+     *
+     * The fast path is intentionally narrower than full URL rewriting:
+     * source URLs must be plain HTTP(S) origins, and target URLs may only add
+     * a path prefix. Path-bearing source mappings still go through WPURL so
+     * path-prefix, escaping, and normalization semantics stay parser-owned.
+     *
+     * @return array{from: string, to: string}|null
+     */
+    private function build_plain_text_literal_origin_mapping(string $from_url, string $to_url): ?array
+    {
+        if (
+            preg_match('/[^\x00-\x7F]/', $from_url) ||
+            preg_match('/[^\x00-\x7F]/', $to_url)
+        ) {
+            return null;
+        }
+
+        $from = parse_url($from_url);
+        $to = parse_url($to_url);
+        if (!is_array($from) || !is_array($to)) {
+            return null;
+        }
+
+        if (
+            !isset($from['scheme'], $from['host'], $to['scheme'], $to['host']) ||
+            !in_array(strtolower($from['scheme']), ['http', 'https'], true) ||
+            !in_array(strtolower($to['scheme']), ['http', 'https'], true) ||
+            isset($from['user'], $from['pass'], $from['query'], $from['fragment']) ||
+            isset($to['user'], $to['pass'], $to['query'], $to['fragment'])
+        ) {
+            return null;
+        }
+
+        $from_path = $from['path'] ?? '';
+        if ($from_path !== '' && $from_path !== '/') {
+            return null;
+        }
+
+        $from_origin = strtolower($from['scheme']) . '://' . strtolower($from['host']);
+        if (isset($from['port'])) {
+            $from_origin .= ':' . $from['port'];
+        }
+
+        $to_prefix = strtolower($to['scheme']) . '://' . strtolower($to['host']);
+        if (isset($to['port'])) {
+            $to_prefix .= ':' . $to['port'];
+        }
+        $to_path = $to['path'] ?? '';
+        if ($to_path !== '' && $to_path !== '/') {
+            $to_prefix .= '/' . trim($to_path, '/');
+        }
+
+        return [
+            'from' => $from_origin,
+            'to'   => $to_prefix,
+        ];
+    }
+
+    /**
+     * Rewrite simple literal source-origin URLs in plain leaf text.
+     *
+     * This is a happy-path shortcut, not a replacement URL parser. It only
+     * fires when the value has no obvious structured container delimiters, the
+     * source URL starts at the beginning of the value or after whitespace, and
+     * the byte after the source origin can only continue the same URL as a path,
+     * query, or fragment. Anything ambiguous returns false and falls back to the
+     * normal parser-owned path.
+     *
+     * @return false|string false when the generic URL processor must handle it.
+     */
+    private function try_rewrite_plain_text_literal_origins(string $content)
+    {
+        if (
+            $this->plain_text_literal_origin_mappings === [] ||
+            strpbrk($content, "<>\"'\\{}[]()") !== false
+        ) {
+            return false;
+        }
+
+        $replacements = [];
+        foreach ($this->plain_text_literal_origin_mappings as $mapping) {
+            $from = $mapping['from'];
+            $from_length = strlen($from);
+            $offset = 0;
+
+            while (true) {
+                $position = strpos($content, $from, $offset);
+                if ($position === false) {
+                    break;
+                }
+
+                if (
+                    !$this->plain_text_literal_origin_has_valid_left_boundary($content, $position) ||
+                    !$this->plain_text_literal_origin_has_valid_right_boundary($content, $position + $from_length)
+                ) {
+                    return false;
+                }
+
+                $replacements[] = [$position, $from_length, $mapping['to']];
+                $offset = $position + $from_length;
+            }
+        }
+
+        if ($replacements === []) {
+            return false;
+        }
+
+        usort(
+            $replacements,
+            static fn(array $a, array $b): int => $a[0] <=> $b[0]
+        );
+
+        $rewritten = '';
+        $cursor = 0;
+        foreach ($replacements as $replacement) {
+            [$position, $length, $to] = $replacement;
+            if ($position < $cursor) {
+                return false;
+            }
+
+            $rewritten .= substr($content, $cursor, $position - $cursor);
+            $rewritten .= $to;
+            $cursor = $position + $length;
+        }
+        $rewritten .= substr($content, $cursor);
+
+        return $rewritten;
+    }
+
+    private function plain_text_literal_origin_has_valid_left_boundary(string $content, int $position): bool
+    {
+        if ($position === 0) {
+            return true;
+        }
+
+        return ctype_space($content[$position - 1]);
+    }
+
+    private function plain_text_literal_origin_has_valid_right_boundary(string $content, int $position): bool
+    {
+        if ($position >= strlen($content)) {
+            return true;
+        }
+
+        return $content[$position] === '/' || $content[$position] === '?' || $content[$position] === '#';
     }
 }
