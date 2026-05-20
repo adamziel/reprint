@@ -70,10 +70,8 @@ class Base64ValueScanner
             ) {
                 array_pop($tokens);
             }
-            $this->scan_tokens($tokens);
-        } else {
-            $this->scan_tokens($tokens);
         }
+        $this->scan_tokens($tokens);
     }
 
     /**
