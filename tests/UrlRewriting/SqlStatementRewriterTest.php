@@ -223,6 +223,21 @@ class SqlStatementRewriterTest extends TestCase
         );
     }
 
+    public function testSqliteInliningFindsLowercaseFunctionWithWhitespace(): void
+    {
+        $rewriter = $this->createRewriter();
+        $value = 'https://old-site.com/page';
+        $sql = "INSERT INTO `wp_options` (`option_value`) VALUES(from_base64 ( '" . base64_encode($value) . "' ));";
+
+        $result = $rewriter->rewrite($sql, true);
+
+        $this->assertStringNotContainsString('from_base64', $result);
+        $this->assertStringContainsString(
+            "0x" . bin2hex('https://new-site.com/page'),
+            $result
+        );
+    }
+
     public function testWpDefaultsWorkWithCustomTablePrefix(): void
     {
         $rewriter = $this->createRewriter(null, 'mysite_');

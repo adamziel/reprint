@@ -4990,7 +4990,7 @@ class ImportClient
 
     private function inline_base64_values_for_sqlite(string $query): string
     {
-        if (strpos($query, "FROM_BASE64(") === false) {
+        if (stripos($query, "FROM_BASE64") === false) {
             return $query;
         }
 

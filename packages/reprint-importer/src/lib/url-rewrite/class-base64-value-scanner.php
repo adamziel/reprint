@@ -8,8 +8,9 @@
  * Detects CONVERT(FROM_BASE64('...') USING utf8mb4) wrappers automatically.
  * set_value() only replaces the base64 payload inside the quotes, so wrappers
  * are preserved without the caller needing to know about them. SQLite imports
- * may instead replace the entire outer expression with a MySQL-compatible hex
- * literal, avoiding a user-defined FROM_BASE64() callback for every value.
+ * may instead replace a FROM_BASE64() expression, or that exact utf8mb4
+ * wrapper, with a MySQL-compatible hex literal, avoiding a user-defined
+ * FROM_BASE64() callback for every value.
  *
  * Values are decoded lazily. The scanner keeps the original encoded payload
  * until get_value() is called, so callers can skip obviously irrelevant values
@@ -105,8 +106,8 @@ class Base64ValueScanner
     public function get_value(): string
     {
         if ($this->entries[$this->cursor]['value'] === null) {
-            $decoded = base64_decode($this->entries[$this->cursor]['encoded_value'], true);
-            $this->entries[$this->cursor]['value'] = $decoded !== false ? $decoded : '';
+            $decoded = self::decode_payload($this->entries[$this->cursor]['encoded_value']);
+            $this->entries[$this->cursor]['value'] = $decoded ?? '';
         }
 
         return $this->entries[$this->cursor]['value'];
@@ -203,13 +204,16 @@ class Base64ValueScanner
         $cursor = 0;
         foreach ($this->entries as $entry) {
             $value = $entry['new_value'] ?? $entry['value'];
+            $replacement = null;
             if ($value === null) {
-                $decoded = base64_decode($entry['encoded_value'], true);
-                $value = $decoded !== false ? $decoded : '';
+                $value = self::decode_payload($entry['encoded_value']);
+            }
+            if ($value !== null) {
+                $replacement = $value === '' ? "''" : "0x" . bin2hex($value);
             }
 
             $parts[] = substr($this->sql, $cursor, $entry['expr_start'] - $cursor);
-            $parts[] = $value === '' ? "''" : "0x" . bin2hex($value);
+            $parts[] = $replacement ?? substr($this->sql, $entry['expr_start'], $entry['expr_length']);
             $cursor = $entry['expr_start'] + $entry['expr_length'];
         }
         $parts[] = substr($this->sql, $cursor);
@@ -246,42 +250,48 @@ class Base64ValueScanner
                 $expr_start = $token->start;
 
                 if (
-                    $prev[1] !== null
-                    && $prev[1]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL
-                    && $prev[0] !== null
-                    && $prev[0]->id === WP_MySQL_Lexer::CONVERT_SYMBOL
+                    $i >= 2
+                    && $tokens[$i - 1]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL
+                    && $tokens[$i - 2]->id === WP_MySQL_Lexer::CONVERT_SYMBOL
                 ) {
-                    $expr_start = $prev[0]->start;
+                    $expr_start = $tokens[$i - 2]->start;
                 }
 
-                // Walk forward to find the quoted base64 payload: step past
-                // the opening parenthesis, accept either SINGLE_ or
-                // DOUBLE_QUOTED_TEXT, abort on anything else.
-                for ($j = $i + 1; $j < $token_count; $j++) {
-                    $inner = $tokens[$j];
-                    if (
-                        $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
-                        || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
-                    ) {
-                        $expr_end = $this->find_expression_end_from_tokens($tokens, $expr_start, $i);
-                        if ($expr_end === null) {
-                            break;
-                        }
-                        $this->entries[] = [
-                            'expr_start' => $expr_start,
-                            'expr_length' => $expr_end - $expr_start,
-                            'quote_start' => $inner->start,
-                            'quote_length' => $inner->length,
-                            'encoded_value' => $inner->get_value(),
-                            'value' => null,
-                            'new_value' => null,
-                        ];
-                        break;
-                    }
-                    if ($inner->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
-                        break;
+                $open_index = $i + 1;
+                $payload_index = $i + 2;
+                $close_index = $i + 3;
+                if (
+                    $close_index >= $token_count
+                    || $tokens[$open_index]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL
+                    || (
+                        $tokens[$payload_index]->id !== WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
+                        && $tokens[$payload_index]->id !== WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
+                    )
+                    || $tokens[$close_index]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL
+                ) {
+                    continue;
+                }
+
+                $expr_end = $tokens[$close_index]->start + $tokens[$close_index]->length;
+                if ($expr_start !== $token->start) {
+                    $convert_end = $this->find_utf8mb4_convert_using_end($tokens, $close_index);
+                    if ($convert_end !== null) {
+                        $expr_end = $convert_end;
+                    } else {
+                        $expr_start = $token->start;
                     }
                 }
+
+                $inner = $tokens[$payload_index];
+                $this->entries[] = [
+                    'expr_start' => $expr_start,
+                    'expr_length' => $expr_end - $expr_start,
+                    'quote_start' => $inner->start,
+                    'quote_length' => $inner->length,
+                    'encoded_value' => $inner->get_value(),
+                    'value' => null,
+                    'new_value' => null,
+                ];
             }
 
             $prev[0] = $prev[1];
@@ -290,49 +300,29 @@ class Base64ValueScanner
     }
 
     /**
-     * Find the byte offset immediately after an expression in a token array.
+     * If the FROM_BASE64() call is wrapped in the producer's exact
+     * CONVERT(... USING utf8mb4) shape, return the byte offset immediately
+     * after the wrapper. Other CONVERT() forms are intentionally left intact;
+     * SQLite inlining can still replace the inner FROM_BASE64() without
+     * guessing whether a different cast is redundant.
      *
      * @param WP_MySQL_Token[] $tokens
      */
-    private function find_expression_end_from_tokens(array $tokens, int $expr_start, int $from_base64_index): ?int
+    private function find_utf8mb4_convert_using_end(array $tokens, int $from_base64_close_index): ?int
     {
-        $open_index = null;
-        for ($i = $from_base64_index - 1; $i >= 0; $i--) {
-            if ($tokens[$i]->start < $expr_start) {
-                break;
-            }
-            if ($tokens[$i]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
-                $open_index = $i;
-                break;
-            }
-        }
-
-        if ($open_index === null) {
-            for ($i = $from_base64_index + 1, $count = count($tokens); $i < $count; $i++) {
-                if ($tokens[$i]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
-                    $open_index = $i;
-                    break;
-                }
-            }
-        }
-
-        if ($open_index === null) {
+        $using_index = $from_base64_close_index + 1;
+        $charset_index = $from_base64_close_index + 2;
+        $close_index = $from_base64_close_index + 3;
+        if (
+            $close_index >= count($tokens)
+            || $tokens[$using_index]->id !== WP_MySQL_Lexer::USING_SYMBOL
+            || strcasecmp($tokens[$charset_index]->get_value(), 'utf8mb4') !== 0
+            || $tokens[$close_index]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL
+        ) {
             return null;
         }
 
-        $depth = 0;
-        for ($i = $open_index, $count = count($tokens); $i < $count; $i++) {
-            if ($tokens[$i]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
-                $depth++;
-            } elseif ($tokens[$i]->id === WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
-                $depth--;
-                if ($depth === 0) {
-                    return $tokens[$i]->start + $tokens[$i]->length;
-                }
-            }
-        }
-
-        return null;
+        return $tokens[$close_index]->start + $tokens[$close_index]->length;
     }
 
     private static function encoded_payload_could_decode_to_http_scheme(string $payload): bool
@@ -341,5 +331,11 @@ class Base64ValueScanner
             || strpos($payload, 'dHA6') !== false
             || strpos($payload, 'dHBz') !== false
             || strpos($payload, 'dHRw') !== false;
+    }
+
+    private static function decode_payload(string $payload): ?string
+    {
+        $decoded = base64_decode($payload, true);
+        return $decoded !== false ? $decoded : null;
     }
 }

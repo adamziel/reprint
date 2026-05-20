@@ -97,7 +97,7 @@ class SqlStatementRewriter
     public function rewrite(string $sql, bool $inline_base64_values_for_sqlite = false): string
     {
         // Quick check: if no base64 values, nothing to rewrite
-        if (strpos($sql, "FROM_BASE64(") === false) {
+        if (stripos($sql, "FROM_BASE64") === false) {
             return $sql;
         }
 

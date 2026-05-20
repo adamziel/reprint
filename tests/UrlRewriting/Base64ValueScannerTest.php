@@ -199,6 +199,56 @@ class Base64ValueScannerTest extends TestCase
         );
     }
 
+    public function testMysqlHexLiteralsDoNotDropNonUsingConvertWrapper(): void
+    {
+        $value = "Bob's Test Blog";
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO t VALUES(CONVERT(FROM_BASE64('{$encoded}'), CHAR));";
+
+        $scanner = new Base64ValueScanner($sql);
+
+        $this->assertSame(
+            "INSERT INTO t VALUES(CONVERT(0x" . bin2hex($value) . ", CHAR));",
+            $scanner->get_result_with_mysql_hex_literals()
+        );
+    }
+
+    public function testMysqlHexLiteralsOnlyCollapseUtf8mb4UsingConvertWrapper(): void
+    {
+        $value = "Bob's Test Blog";
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO t VALUES(CONVERT(FROM_BASE64('{$encoded}') USING latin1));";
+
+        $scanner = new Base64ValueScanner($sql);
+
+        $this->assertSame(
+            "INSERT INTO t VALUES(CONVERT(0x" . bin2hex($value) . " USING latin1));",
+            $scanner->get_result_with_mysql_hex_literals()
+        );
+    }
+
+    public function testMysqlHexLiteralsDecodeWhitespaceWrappedPayloads(): void
+    {
+        $value = 'Hello World';
+        $sql = "INSERT INTO t VALUES(FROM_BASE64('  SGVs\n bG8g\tV29ybGQ=  '));";
+
+        $scanner = new Base64ValueScanner($sql);
+
+        $this->assertSame(
+            "INSERT INTO t VALUES(0x" . bin2hex($value) . ");",
+            $scanner->get_result_with_mysql_hex_literals()
+        );
+    }
+
+    public function testMysqlHexLiteralsPreserveMalformedPayloads(): void
+    {
+        $sql = "INSERT INTO t VALUES(FROM_BASE64('ABCD='));";
+
+        $scanner = new Base64ValueScanner($sql);
+
+        $this->assertSame($sql, $scanner->get_result_with_mysql_hex_literals());
+    }
+
     public function testHandlesEmptyString(): void
     {
         $value = '';
