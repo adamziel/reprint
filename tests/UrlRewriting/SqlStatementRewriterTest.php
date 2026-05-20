@@ -208,6 +208,21 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com/api/endpoint', $values[1]);
     }
 
+    public function testSqliteInliningUsesScannerBoundariesAfterUrlRewrite(): void
+    {
+        $rewriter = $this->createRewriter();
+        $value = "https://old-site.com/bob's-page";
+        $sql = "INSERT INTO `wp_options` (`option_value`) VALUES(CONVERT(FROM_BASE64('" . base64_encode($value) . "') USING utf8mb4));";
+
+        $result = $rewriter->rewrite($sql, true);
+
+        $this->assertStringNotContainsString('FROM_BASE64', $result);
+        $this->assertStringContainsString(
+            "0x" . bin2hex("https://new-site.com/bob's-page"),
+            $result
+        );
+    }
+
     public function testWpDefaultsWorkWithCustomTablePrefix(): void
     {
         $rewriter = $this->createRewriter(null, 'mysite_');

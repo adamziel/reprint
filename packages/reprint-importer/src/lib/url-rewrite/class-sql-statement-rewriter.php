@@ -88,9 +88,13 @@ class SqlStatementRewriter
      * without an http/https scheme will not be rewritten.
      *
      * @param string $sql The SQL statement.
+     * @param bool $inline_base64_values_for_sqlite Whether to replace
+     *        FROM_BASE64() expressions with native SQLite text expressions
+     *        while rewriting. This is only for SQLite targets; MySQL targets
+     *        need the original FROM_BASE64() calls.
      * @return string The modified SQL statement.
      */
-    public function rewrite(string $sql): string
+    public function rewrite(string $sql, bool $inline_base64_values_for_sqlite = false): string
     {
         // Quick check: if no base64 values, nothing to rewrite
         if (strpos($sql, "FROM_BASE64(") === false) {
@@ -123,12 +127,13 @@ class SqlStatementRewriter
         // that finds nothing. False negatives would silently leave URLs
         // un-rewritten; the four prefixes above are the minimum set that
         // covers every alignment×scheme combination, so no real URL escapes.
-        if (
+        $encoded_payload_could_contain_http = !(
             strpos($sql, 'aHR0') === false
             && strpos($sql, 'dHA6') === false
             && strpos($sql, 'dHBz') === false
             && strpos($sql, 'dHRw') === false
-        ) {
+        );
+        if (!$encoded_payload_could_contain_http && !$inline_base64_values_for_sqlite) {
             return $sql;
         }
 
@@ -145,7 +150,12 @@ class SqlStatementRewriter
                 'column_map' => $fast['column_map'],
             ];
             $scanner = Base64ValueScanner::from_entries($sql, $fast['base64_entries']);
-            return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+            return $this->rewrite_with_scanner(
+                $scanner,
+                $value_to_column_map,
+                $encoded_payload_could_contain_http,
+                $inline_base64_values_for_sqlite
+            );
         }
 
         // Slow path: lex once, share the token array between the column
@@ -153,7 +163,12 @@ class SqlStatementRewriter
         $tokens = self::significant_tokens($sql);
         $value_to_column_map = $this->map_values_to_columns_from_tokens($tokens);
         $scanner = new Base64ValueScanner($sql, $tokens);
-        return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+        return $this->rewrite_with_scanner(
+            $scanner,
+            $value_to_column_map,
+            $encoded_payload_could_contain_http,
+            $inline_base64_values_for_sqlite
+        );
     }
 
     /**
@@ -162,49 +177,58 @@ class SqlStatementRewriter
      *
      * @param array{table: string, column_map: list<array{int, int, string}>}|null $value_to_column_map
      */
-    private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
+    private function rewrite_with_scanner(
+        Base64ValueScanner $scanner,
+        ?array $value_to_column_map,
+        bool $rewrite_urls,
+        bool $inline_base64_values_for_sqlite
+    ): string
     {
-        while ($scanner->next_value()) {
-            if (!$scanner->encoded_payload_could_contain_http_scheme()) {
-                continue;
-            }
-
-            $value = $scanner->get_value();
-
-            if (strpos($value, 'http') === false) {
-                continue;
-            }
-
-            if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
-                continue;
-            }
-
-            // Determine content type hint for this column
-            $content_type = null;
-            if ($value_to_column_map !== null) {
-                $column_name = $this->find_column_at_offset(
-                    $value_to_column_map['column_map'],
-                    $scanner->get_match_offset()
-                );
-                if ($column_name !== null) {
-                    $content_type = $this->get_content_type($value_to_column_map['table'], $column_name);
+        if ($rewrite_urls) {
+            while ($scanner->next_value()) {
+                if (!$scanner->encoded_payload_could_contain_http_scheme()) {
+                    continue;
                 }
-            }
 
-            // Rewrite URLs in the value. Known block-markup columns can first
-            // try a boundary-checked literal base URL swap before falling back
-            // to the full structured parser.
-            $rewritten = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
-                ? $this->url_rewriter->rewrite_known_block_markup_value($value)
-                : $this->url_rewriter->rewrite($value, $content_type);
+                $value = $scanner->get_value();
 
-            // Only replace if the value actually changed
-            if ($rewritten !== $value) {
-                $scanner->set_value($rewritten);
+                if (strpos($value, 'http') === false) {
+                    continue;
+                }
+
+                if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
+                    continue;
+                }
+
+                // Determine content type hint for this column
+                $content_type = null;
+                if ($value_to_column_map !== null) {
+                    $column_name = $this->find_column_at_offset(
+                        $value_to_column_map['column_map'],
+                        $scanner->get_match_offset()
+                    );
+                    if ($column_name !== null) {
+                        $content_type = $this->get_content_type($value_to_column_map['table'], $column_name);
+                    }
+                }
+
+                // Rewrite URLs in the value. Known block-markup columns can first
+                // try a boundary-checked literal base URL swap before falling back
+                // to the full structured parser.
+                $rewritten = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
+                    ? $this->url_rewriter->rewrite_known_block_markup_value($value)
+                    : $this->url_rewriter->rewrite($value, $content_type);
+
+                // Only replace if the value actually changed
+                if ($rewritten !== $value) {
+                    $scanner->set_value($rewritten);
+                }
             }
         }
 
-        return $scanner->get_result();
+        return $inline_base64_values_for_sqlite
+            ? $scanner->get_result_with_mysql_hex_literals()
+            : $scanner->get_result();
     }
 
     /**

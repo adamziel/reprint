@@ -168,6 +168,37 @@ class Base64ValueScannerTest extends TestCase
         $this->assertSame($sql, $scanner->get_result());
     }
 
+    public function testMysqlHexLiteralsReplaceWholeBase64Expression(): void
+    {
+        $value = "Bob's Test Blog";
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO t VALUES(1, CONVERT(FROM_BASE64('{$encoded}') USING utf8mb4));";
+
+        $scanner = new Base64ValueScanner($sql);
+        $modified = $scanner->get_result_with_mysql_hex_literals();
+
+        $this->assertSame(
+            "INSERT INTO t VALUES(1, 0x" . bin2hex($value) . ");",
+            $modified
+        );
+    }
+
+    public function testMysqlHexLiteralsUseRewrittenValues(): void
+    {
+        $old = 'https://old-site.com/page';
+        $new = 'https://new-site.com/page';
+        $sql = "INSERT INTO t VALUES(FROM_BASE64('" . base64_encode($old) . "'));";
+
+        $scanner = new Base64ValueScanner($sql);
+        $this->assertTrue($scanner->next_value());
+        $scanner->set_value($new);
+
+        $this->assertSame(
+            "INSERT INTO t VALUES(0x" . bin2hex($new) . ");",
+            $scanner->get_result_with_mysql_hex_literals()
+        );
+    }
+
     public function testHandlesEmptyString(): void
     {
         $value = '';

@@ -148,7 +148,7 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
-        if ($content_type === self::PLAIN_TEXT && !$this->might_be_structured_data($value)) {
+        if ($content_type === self::PLAIN_TEXT && !$this->starts_like_json_or_php_serialization($value)) {
             $literal_rewrite = $this->try_rewrite_literal_base_urls($value);
             if ($literal_rewrite !== null && !$this->value_might_contain_source_domain($literal_rewrite)) {
                 return $literal_rewrite;
@@ -312,7 +312,23 @@ class StructuredDataUrlRewriter
             || strpos('/\\?#"\'<)]},;', $next) !== false;
     }
 
-    private function might_be_structured_data(string $value): bool
+    /**
+     * Indicates whether structured parsers should run before the plain-text fast path.
+     *
+     * This is intentionally a narrow prefix check, not a general structured-data detector.
+     * It guards an optimization in rewrite(): values that do not start like JSON arrays /
+     * objects or PHP serialization can usually be rewritten with a boundary-checked literal
+     * base URL replacement instead of constructing the serialized PHP, JSON, and URL parser
+     * stack for every plain string.
+     *
+     * False positives are safe: a plain string like "s:https://example.test" just takes the
+     * existing parser path and may be slower. False negatives must still be safe: the caller
+     * only accepts the fast path when the literal URL swap succeeds and removes every source
+     * domain from the value; otherwise it falls through to the structured parsers. That means
+     * JSON scalar strings such as "\"https:\/\/old.example\"" can still use the fast path
+     * because replacing the escaped literal base URL preserves valid JSON.
+     */
+    private function starts_like_json_or_php_serialization(string $value): bool
     {
         $trimmed = ltrim($value);
         if ($trimmed === '') {
