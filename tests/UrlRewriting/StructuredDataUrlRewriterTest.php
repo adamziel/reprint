@@ -327,8 +327,8 @@ class StructuredDataUrlRewriterTest extends TestCase
     public function testBlockMarkupHintUsesWpRewriteUrls(): void
     {
         $rewriter = $this->createRewriter();
-        // Block markup with JSON attribute — wp_rewrite_urls() handles the JSON
-        // inside the block comment, strtr() would not
+        // Block markup with JSON attribute: wp_rewrite_urls() handles the JSON
+        // inside the block comment.
         $input = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
         $result = $rewriter->rewrite($input, 'block_markup');
         $this->assertStringNotContainsString('old-site.com', $result);
@@ -343,7 +343,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/page', $result);
     }
 
-    public function testKnownBlockMarkupFastPathRewritesEscapedBlockJsonAndHtml(): void
+    public function testKnownBlockMarkupValueRewritesEscapedBlockJsonAndHtml(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<!-- wp:image {"src":"https:\/\/old-site.com\/img.jpg"} -->'
@@ -357,7 +357,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
-    public function testKnownBlockMarkupFastPathFallsBackForEmbeddedQueryUrl(): void
+    public function testKnownBlockMarkupValueDoesNotRewriteEmbeddedQueryUrl(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<a href="https://webarchive.org?url=https://old-site.com/about">Archive</a>';
@@ -365,15 +365,42 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
     }
 
-    // --- Content type hint: null (default) uses plain text replacement ---
+    // --- Content type hint: null (default) uses structured plain text URL rewriting ---
 
-    public function testDefaultHintUsesPlainTextReplacement(): void
+    public function testDefaultHintUsesStructuredPlainTextUrlRewriting(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL string — strtr() handles this fine
         $input = 'Visit https://old-site.com/about for more.';
         $result = $rewriter->rewrite($input);
         $this->assertStringContainsString('https://new-site.com/about', $result);
+        $this->assertStringNotContainsString('old-site.com', $result);
+    }
+
+    public function testDefaultHintDoesNotRewriteSourceUrlInsideAnotherUrl(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'Archived at https://webarchive.org?url=https://old-site.com/about';
+        $result = $rewriter->rewrite($input);
+
+        $this->assertSame($input, $result);
+    }
+
+    public function testDefaultHintAutoDetectsWordPressBlockMarkup(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://old-site.com' => 'https://new-longer-domain-site.com',
+        ]);
+        $input = '<!-- wp:image {"url":"https://old-site.com/img.jpg"} -->'
+            . '<img src="https://old-site.com/img.jpg"/>'
+            . '<!-- /wp:image -->';
+
+        $result = $rewriter->rewrite($input);
+
+        $this->assertStringContainsString(
+            '"url":"https:\/\/new-longer-domain-site.com\/img.jpg"',
+            $result
+        );
+        $this->assertStringContainsString('src="https://new-longer-domain-site.com/img.jpg"', $result);
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 

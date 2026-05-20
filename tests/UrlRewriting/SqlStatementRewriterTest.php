@@ -193,10 +193,11 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
-    public function testUnknownColumnUsesPlainTextReplacement(): void
+    public function testUnknownColumnUsesStructuredPlainTextUrlRewriting(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL in a non-block-markup column — should use strtr()
+        // A plain URL in a non-block-markup column should still be rewritten
+        // through URLInTextProcessor.
         $value = 'https://old-site.com/api/endpoint';
         $encoded = base64_encode($value);
         $sql = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('" . base64_encode('siteurl') . "'), FROM_BASE64('{$encoded}'));";
@@ -204,7 +205,6 @@ class SqlStatementRewriterTest extends TestCase
         $result = $rewriter->rewrite($sql);
 
         $values = $this->collectValues($result);
-        // option_value should be rewritten via strtr
         $this->assertStringContainsString('new-site.com/api/endpoint', $values[1]);
     }
 
@@ -433,12 +433,9 @@ class SqlStatementRewriterTest extends TestCase
         $result = $rewriter->rewrite($sql);
 
         // post_content in this unknown table should NOT get the block_markup
-        // hint — it falls back to auto-detect (plain text strtr), which still
-        // rewrites URLs but through a different code path. The key assertion
-        // is that get_content_type returns null, not 'block_markup'. We verify
-        // indirectly: block_markup would parse the HTML structure, plain text
-        // just does strtr. Both rewrite the URL, so we confirm the rewrite
-        // happens (auto-detect is fine) but the table was not matched as "posts".
+        // hint — it falls back to auto-detect and still rewrites the plain URL.
+        // The key assertion is that get_content_type returns null, not
+        // 'block_markup', so the table was not matched as "posts".
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
         $this->assertStringContainsString('new-site.com/page', $values[0]);
@@ -456,12 +453,7 @@ class SqlStatementRewriterTest extends TestCase
         $result = $rewriter->rewrite($sql);
 
         // The value still gets rewritten (auto-detect/plain text), but it must
-        // NOT have been treated as block_markup. We can tell because plain text
-        // strtr rewrites the URL but doesn't parse block comment JSON attributes.
-        // With a simple URL like this both paths produce the same output, so
-        // we use a value that distinguishes them: a block comment with a JSON
-        // attribute. block_markup would rewrite inside the JSON; plain text
-        // strtr would not touch the JSON attribute.
+        // NOT have been treated as block_markup.
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
         $this->assertStringContainsString('new-site.com', $values[0]);
@@ -508,18 +500,15 @@ class SqlStatementRewriterTest extends TestCase
     }
 
     /**
-     * A block comment JSON attribute lets us distinguish block_markup from
-     * plain text rewriting. block_markup parses the JSON inside
-     * <!-- wp:image {"url":"..."} --> and rewrites it. Plain text strtr does
-     * a byte-for-byte replacement that can break JSON when URL lengths change.
-     *
-     * We use this to prove that "wp_posts".post_content gets block_markup
-     * while a spoofed table does NOT.
+     * A block comment JSON attribute must be treated as block markup even when
+     * the SQL column hint is unavailable. Unknown plugin tables may still store
+     * WordPress block markup, and plain text URL parsing can misread the block
+     * comment JSON boundary as part of the URL.
      */
-    public function testBlockMarkupVsPlainTextDistinction(): void
+    public function testUnknownTableWithBlockMarkupGetsStructuredBlockMarkupRewriting(): void
     {
         $rewriter = $this->createRewriter([
-            // Different-length URLs so strtr would shift offsets and break JSON
+            // Different-length URLs make accidental byte-level rewrites obvious.
             'https://old-site.com' => 'https://new-longer-domain-site.com',
         ]);
 
@@ -534,25 +523,24 @@ class SqlStatementRewriterTest extends TestCase
         $result_real = $rewriter->rewrite($sql_real);
         $values_real = $this->collectValues($result_real);
         $this->assertStringContainsString('new-longer-domain-site.com/img.jpg', $values_real[0]);
-        // The JSON attribute should still be valid inside the block comment.
-        // wp_rewrite_urls() JSON-encodes attribute values, so slashes are escaped.
         $this->assertStringContainsString(
             '"url":"https:\/\/new-longer-domain-site.com\/img.jpg"',
             $values_real[0],
             'block_markup should correctly rewrite the JSON attribute inside the block comment'
         );
 
-        // spoofed_posts.post_content → auto-detect (not block_markup): the
-        // column name matches but the table doesn't, so it falls through to
-        // plain text strtr.
+        // spoofed_posts.post_content has no table hint, but the value itself
+        // is recognizable WordPress block markup and must still be processed
+        // structurally.
         $sql_spoof = "INSERT INTO `spoofed_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
         $result_spoof = $rewriter->rewrite($sql_spoof);
         $values_spoof = $this->collectValues($result_spoof);
-        // The URL is still rewritten (auto-detect handles it), but the JSON
-        // attribute inside the block comment may be malformed because strtr
-        // doesn't understand HTML structure. The key point: the spoofed table
-        // was NOT given the block_markup hint.
-        $this->assertStringContainsString('new-longer-domain-site.com', $values_spoof[0]);
+        $this->assertStringContainsString('new-longer-domain-site.com/img.jpg', $values_spoof[0]);
+        $this->assertStringContainsString(
+            '"url":"https:\/\/new-longer-domain-site.com\/img.jpg"',
+            $values_spoof[0],
+            'block markup auto-detection should rewrite comment JSON without corrupting URL boundaries'
+        );
     }
 
     public function testConsumerHintForUnprefixedPluginTable(): void

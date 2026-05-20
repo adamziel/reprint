@@ -12,8 +12,8 @@
  * WordPress core columns known to contain block markup (post_content, comment_content,
  * etc.) get the 'block_markup' hint so wp_rewrite_urls() handles HTML attributes,
  * block comment JSON, and CSS url(). All other columns default to auto-detect with
- * plain text strtr() replacement, which is simpler and more predictable for columns
- * that contain serialized PHP, JSON, or plain strings.
+ * structured plain-text URL rewriting, which is safer for columns that contain
+ * serialized PHP, JSON, or plain strings.
  *
  * Column resolution walks the lexer output directly. Both INSERT and UPDATE
  * statements emitted by MySQLDumpProducer follow a constrained set of shapes

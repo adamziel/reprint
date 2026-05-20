@@ -20,12 +20,14 @@ use function WordPress\DataLiberation\URL\wp_rewrite_urls;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → wp_rewrite_urls() (block_markup hint) or strtr() (default)
+ * 4. Leaf text → wp_rewrite_urls() / URLInTextProcessor, depending on
+ *    the content type hint
  *
- * HTML is never auto-detected — the caller must explicitly pass
- * content_type='block_markup' for values known to contain HTML/block markup.
- * The hint propagates through recursive calls so that leaf strings inside
- * serialized PHP, JSON, or base64 eventually reach wp_rewrite_urls().
+ * WordPress block markup is auto-detected by its block comment marker. Other
+ * HTML is only handled as block markup when the caller explicitly passes
+ * content_type='block_markup'. The hint propagates through recursive calls
+ * so that leaf strings inside serialized PHP, JSON, or base64 eventually
+ * reach wp_rewrite_urls().
  */
 class StructuredDataUrlRewriter
 {
@@ -35,12 +37,6 @@ class StructuredDataUrlRewriter
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
-
-    /** @var array<string, string> Literal base URL replacements for the block-markup fast path. */
-    private array $literal_base_url_replacements;
-
-    /** @var string[] Unescaped source base URLs, used to avoid changing block-comment JSON formatting. */
-    private array $literal_source_base_urls;
 
     /**
      * Pre-parsed url_mapping: each entry is
@@ -94,22 +90,12 @@ class StructuredDataUrlRewriter
         // (scheme/host/path tokenisation, punycode, etc.) and used to be
         // repeated on every leaf we rewrote.
         $this->parsed_mapping = [];
-        $this->literal_base_url_replacements = [];
-        $this->literal_source_base_urls = [];
         foreach ($url_mapping as $from_url_string => $to_url_string) {
             $this->parsed_mapping[] = [
                 'from_url' => WPURL::parse($from_url_string),
                 'to_url'   => WPURL::parse($to_url_string),
             ];
-
-            $this->literal_source_base_urls[] = $from_url_string;
-            $this->literal_base_url_replacements[$from_url_string] = $to_url_string;
-            $this->literal_base_url_replacements[str_replace('/', '\/', $from_url_string)] = str_replace('/', '\/', $to_url_string);
         }
-        uksort(
-            $this->literal_base_url_replacements,
-            static fn ($a, $b) => strlen($b) <=> strlen($a)
-        );
         $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
 
         // Default base_url: first from-url in the mapping. Preserves the
@@ -140,19 +126,20 @@ class StructuredDataUrlRewriter
             $content_type = self::PLAIN_TEXT;
         }
 
+        // Unknown SQL columns can still contain WordPress block markup. If we
+        // see the block comment marker, use the block-markup processor rather
+        // than treating comment JSON and HTML attributes as undifferentiated
+        // text.
+        if ($content_type === self::PLAIN_TEXT && strpos($value, '<!-- wp:') !== false) {
+            $content_type = self::BLOCK_MARKUP;
+        }
+
         // Quick-reject: if the value doesn't contain href=", src=", or any
         // source domain, there's nothing to rewrite. This avoids expensive
         // parsing (serialized PHP, JSON, block markup) for the vast majority
         // of values that don't contain any rewritable URLs.
         if (!$this->maybe_contains_rewritable_urls($value)) {
             return $value;
-        }
-
-        if ($content_type === self::PLAIN_TEXT && !$this->starts_like_json_or_php_serialization($value)) {
-            $literal_rewrite = $this->try_rewrite_literal_base_urls($value);
-            if ($literal_rewrite !== null && !$this->value_might_contain_source_domain($literal_rewrite)) {
-                return $literal_rewrite;
-            }
         }
 
         // Try serialized PHP: the parser validates the entire structure
@@ -215,12 +202,11 @@ class StructuredDataUrlRewriter
     /**
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
-     * This takes a conservative fast path for the common dump shape where the
-     * value contains literal absolute source URLs in HTML attributes, text, CSS,
-     * or block-comment JSON. In that case a boundary-checked base URL swap gives
-     * the same result as BlockMarkupUrlProcessor without constructing the full
-     * parser stack for every row. If any source URL occurrence is not at a URL
-     * boundary, we fall back to the full structured rewriter.
+     * Even if the value looks like it contains literal source URLs, this must
+     * still go through the block-markup URL processor. URL spellings can vary
+     * through escaping, encoding, host normalization, punycode, block comment
+     * JSON, and CSS syntax; byte-level replacements are not equivalent to URL
+     * rewriting.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -232,115 +218,7 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
-        $literal_rewrite = $this->try_rewrite_literal_base_urls($value);
-        if ($literal_rewrite !== null) {
-            return $literal_rewrite;
-        }
-
         return $this->rewrite($value, self::BLOCK_MARKUP);
-    }
-
-    private function try_rewrite_literal_base_urls(string $value): ?string
-    {
-        if ($this->has_unescaped_source_url_in_block_comment($value)) {
-            return null;
-        }
-
-        $matched = false;
-        foreach ($this->literal_base_url_replacements as $from => $_to) {
-            $offset = 0;
-            while (true) {
-                $pos = strpos($value, $from, $offset);
-                if ($pos === false) {
-                    break;
-                }
-                if (!$this->is_literal_base_url_boundary($value, $pos, strlen($from))) {
-                    return null;
-                }
-                $matched = true;
-                $offset = $pos + strlen($from);
-            }
-        }
-
-        return $matched ? strtr($value, $this->literal_base_url_replacements) : null;
-    }
-
-    private function has_unescaped_source_url_in_block_comment(string $value): bool
-    {
-        $comment_start = 0;
-        while (true) {
-            $comment_start = strpos($value, '<!-- wp:', $comment_start);
-            if ($comment_start === false) {
-                return false;
-            }
-
-            $comment_end = strpos($value, '-->', $comment_start);
-            if ($comment_end === false) {
-                return false;
-            }
-
-            foreach ($this->literal_source_base_urls as $source_url) {
-                $source_pos = strpos($value, $source_url, $comment_start);
-                if ($source_pos !== false && $source_pos < $comment_end) {
-                    return true;
-                }
-            }
-
-            $comment_start = $comment_end + 3;
-        }
-    }
-
-    private function is_literal_base_url_boundary(string $value, int $pos, int $length): bool
-    {
-        if ($pos > 0) {
-            $prev = $value[$pos - 1];
-            if (
-                !ctype_space($prev)
-                && strpos('"\'([{,:>', $prev) === false
-            ) {
-                return false;
-            }
-        }
-
-        $next_pos = $pos + $length;
-        if ($next_pos >= strlen($value)) {
-            return true;
-        }
-
-        $next = $value[$next_pos];
-        return ctype_space($next)
-            || strpos('/\\?#"\'<)]},;', $next) !== false;
-    }
-
-    /**
-     * Indicates whether structured parsers should run before the plain-text fast path.
-     *
-     * This is intentionally a narrow prefix check, not a general structured-data detector.
-     * It guards an optimization in rewrite(): values that do not start like JSON arrays /
-     * objects or PHP serialization can usually be rewritten with a boundary-checked literal
-     * base URL replacement instead of constructing the serialized PHP, JSON, and URL parser
-     * stack for every plain string.
-     *
-     * False positives are safe: a plain string like "s:https://example.test" just takes the
-     * existing parser path and may be slower. False negatives must still be safe: the caller
-     * only accepts the fast path when the literal URL swap succeeds and removes every source
-     * domain from the value; otherwise it falls through to the structured parsers. That means
-     * JSON scalar strings such as "\"https:\/\/old.example\"" can still use the fast path
-     * because replacing the escaped literal base URL preserves valid JSON.
-     */
-    private function starts_like_json_or_php_serialization(string $value): bool
-    {
-        $trimmed = ltrim($value);
-        if ($trimmed === '') {
-            return false;
-        }
-
-        $first = $trimmed[0];
-        if ($first === '{' || $first === '[') {
-            return true;
-        }
-
-        return preg_match('/^(?:a|O|s|i|d|b|N|C):/', $trimmed) === 1;
     }
 
     /**

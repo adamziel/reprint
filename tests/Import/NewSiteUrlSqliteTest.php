@@ -311,7 +311,7 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertCount(1, $posts);
         $postContent = $posts[0]['post_content'];
         $this->assertStringContainsString('https://new-site.example.com/about', $postContent);
-        $this->assertStringContainsString('https://new-site.example.com/wp-content/uploads/photo.jpg', $postContent);
+        $this->assertStringContainsString('https:\/\/new-site.example.com\/wp-content\/uploads\/photo.jpg', $postContent);
         $this->assertStringNotContainsString('old-site.example.com', $postContent);
     }
 }
