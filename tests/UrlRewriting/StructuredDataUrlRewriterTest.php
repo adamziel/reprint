@@ -343,6 +343,15 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/page', $result);
     }
 
+    public function testBlockMarkupHintWithoutMarkupUsesPlainTextUrlRewriting(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'Visit https://old-site.com/page';
+        $result = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertSame('Visit https://new-site.com/page', $result);
+    }
+
     public function testKnownBlockMarkupValueRewritesEscapedBlockJsonAndHtml(): void
     {
         $rewriter = $this->createRewriter();

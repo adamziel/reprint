@@ -318,6 +318,14 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
+                // Without a `<` byte there can be no HTML tag or WordPress
+                // block-comment opener for BlockMarkupUrlProcessor to own.
+                // Treat the value as the leaf text it is instead of running
+                // the block-markup parser stack.
+                if ( strpos( $content, '<' ) === false ) {
+                    return $this->rewrite_urls( $content, self::PLAIN_TEXT );
+                }
+
                 $p = new BlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $raw_url = $p->get_raw_url();
