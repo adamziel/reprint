@@ -314,4 +314,59 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertStringContainsString('https://new-site.example.com/wp-content/uploads/photo.jpg', $postContent);
         $this->assertStringNotContainsString('old-site.example.com', $postContent);
     }
+
+    public function testSqliteDbApplyPreservesArbitraryBase64Bytes(): void
+    {
+        $bytes = '';
+        for ($i = 0; $i <= 255; $i++) {
+            $bytes .= chr($i);
+        }
+
+        $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
+        $stmts = [];
+        $stmts[] = "DROP TABLE IF EXISTS `wp_options`;";
+        $stmts[] = "CREATE TABLE `wp_options` ("
+            . "`option_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT, "
+            . "`option_name` varchar(191) NOT NULL DEFAULT '', "
+            . "`option_value` longtext NOT NULL, "
+            . "`autoload` varchar(20) NOT NULL DEFAULT 'yes', "
+            . "PRIMARY KEY (`option_id`), "
+            . "UNIQUE KEY `option_name` (`option_name`)"
+            . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+        $stmts[] = sprintf(
+            "INSERT INTO `wp_options` (`option_id`, `option_name`, `option_value`, `autoload`) VALUES "
+            . "(1, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('binary_payload'),
+            base64_encode($bytes),
+            base64_encode('yes')
+        );
+
+        file_put_contents($this->tempDir . '/db.sql', implode("\n", $stmts) . "\n");
+        $this->writeState();
+
+        $client = new \ImportClient(
+            'https://old-site.example.com/?reprint-api',
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $client->run([
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $sqlitePath,
+            'target_db' => 'wp_test',
+        ]);
+
+        $rows = $this->querySqlite(
+            $sqlitePath,
+            "SELECT hex(option_value) AS hex_value FROM wp_options WHERE option_name = 'binary_payload'",
+            'wp_test',
+        );
+
+        $this->assertCount(1, $rows);
+        $this->assertSame(strtoupper(bin2hex($bytes)), $rows[0]['hex_value']);
+    }
 }

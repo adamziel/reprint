@@ -5118,6 +5118,13 @@ class ImportClient
         }
 
         [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
+        $sqlite_prepared_pdo = null;
+        if (
+            strtolower((string) ($options["target_engine"] ?? "mysql")) === "sqlite"
+            && method_exists($pdo, 'get_connection')
+        ) {
+            $sqlite_prepared_pdo = $pdo->get_connection()->get_pdo();
+        }
 
         $this->audit_log(
             "CONNECTED | {$connection_label}",
@@ -5222,21 +5229,23 @@ class ImportClient
                         continue;
                     }
 
-                    // Rewrite URLs if mapping is configured
-                    if ($stmt_rewriter) {
-                        $query = $stmt_rewriter->rewrite($query);
-                    }
-
                     // Execute against target database
+                    $executed_query = $query;
                     try {
-                        $pdo->exec($query);
+                        $this->execute_db_apply_query(
+                            $pdo,
+                            $query,
+                            $stmt_rewriter,
+                            $sqlite_prepared_pdo,
+                            $executed_query,
+                        );
                     } catch (PDOException $e) {
                         $this->audit_log(
                             sprintf(
                                 "SQL ERROR | stmt=%d | %s | query=%.200s",
                                 $stmt_count,
                                 $e->getMessage(),
-                                $query,
+                                $executed_query,
                             ),
                             true,
                         );
@@ -5299,19 +5308,22 @@ class ImportClient
                     continue;
                 }
 
-                if ($stmt_rewriter) {
-                    $query = $stmt_rewriter->rewrite($query);
-                }
-
+                $executed_query = $query;
                 try {
-                    $pdo->exec($query);
+                    $this->execute_db_apply_query(
+                        $pdo,
+                        $query,
+                        $stmt_rewriter,
+                        $sqlite_prepared_pdo,
+                        $executed_query,
+                    );
                 } catch (PDOException $e) {
                     $this->audit_log(
                         sprintf(
                             "SQL ERROR | stmt=%d | %s | query=%.200s",
                             $stmt_count,
                             $e->getMessage(),
-                            $query,
+                            $executed_query,
                         ),
                         true,
                     );
@@ -5401,6 +5413,45 @@ class ImportClient
         } finally {
             fclose($sql_handle);
         }
+    }
+
+    private function execute_db_apply_query(
+        PDO $pdo,
+        string $query,
+        ?SqlStatementRewriter $stmt_rewriter,
+        ?PDO $sqlite_prepared_pdo,
+        string &$executed_query
+    ): void {
+        $executed_query = $query;
+
+        if ($sqlite_prepared_pdo !== null) {
+            $prepared_insert = $stmt_rewriter !== null
+                ? $stmt_rewriter->build_sqlite_prepared_insert($query)
+                : SQLitePreparedInsertBuilder::build($query);
+
+            if ($prepared_insert !== null) {
+                $executed_query = $prepared_insert['sql'];
+                $statement = $sqlite_prepared_pdo->prepare($prepared_insert['sql']);
+                if ($statement === false) {
+                    throw new PDOException('Failed to prepare SQLite INSERT statement.');
+                }
+
+                foreach ($prepared_insert['params'] as $index => $value) {
+                    $statement->bindValue($index + 1, $value, PDO::PARAM_STR);
+                }
+
+                if ($statement->execute() === false) {
+                    throw new PDOException('Failed to execute SQLite INSERT statement.');
+                }
+                return;
+            }
+        }
+
+        if ($stmt_rewriter !== null) {
+            $executed_query = $stmt_rewriter->rewrite($query);
+        }
+
+        $pdo->exec($executed_query);
     }
 
     /**
