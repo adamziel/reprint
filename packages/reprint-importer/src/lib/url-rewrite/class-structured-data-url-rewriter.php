@@ -4,7 +4,6 @@ use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 use WordPress\DataLiberation\URL\URLInTextProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
-use function WordPress\DataLiberation\URL\is_child_url_of;
 use function WordPress\DataLiberation\URL\wp_rewrite_urls;
 
 /**
@@ -39,12 +38,12 @@ class StructuredDataUrlRewriter
     private array $source_domains;
 
     /**
-     * Pre-parsed url_mapping: each entry is
-     *   [ 'from_url' => <parsed URL>, 'to_url' => <parsed URL> ]
-     * where <parsed URL> is whatever WPURL::parse() returns (declared as
-     * mixed here because is_child_url_of() and WPURL::replace_base_url()
-     * both accept either a string or the parsed object form — we pass the
-     * object form for performance).
+     * Pre-parsed url_mapping grouped by the URL origin fields used by
+     * is_child_url_of(): protocol and normalized hostname. Each entry is
+     *   [ 'from_url' => <parsed URL>, 'to_url' => <parsed URL>, 'from_pathname' => <decoded pathname> ]
+     * where <parsed URL> is whatever WPURL::parse() returns (declared as mixed
+     * because WPURL::replace_base_url() accepts either string or parsed object
+     * form — we pass the object form for performance).
      *
      * Parsing is pure, deterministic work that used to happen inside
      * rewrite_urls() on every leaf-value call. With N mappings and L leaves
@@ -53,9 +52,9 @@ class StructuredDataUrlRewriter
      * under WASM PHP. Hoisting it into the constructor collapses it to 2·N,
      * which is effectively free.
      *
-     * @var array<int, array{from_url: mixed, to_url: mixed}>
+     * @var array<string, list<array{from_url: mixed, to_url: mixed, from_pathname: string}>>
      */
-    private array $parsed_mapping;
+    private array $parsed_mapping_by_origin;
 
     /** @var string Default base_url used by the URL processors (first from-url). */
     private string $base_url;
@@ -98,12 +97,18 @@ class StructuredDataUrlRewriter
         // Parse the mapping once. Each WPURL::parse() does non-trivial work
         // (scheme/host/path tokenisation, punycode, etc.) and used to be
         // repeated on every leaf we rewrote.
-        $this->parsed_mapping = [];
+        $this->parsed_mapping_by_origin = [];
         foreach ($url_mapping as $from_url_string => $to_url_string) {
-            $this->parsed_mapping[] = [
-                'from_url' => WPURL::parse($from_url_string),
-                'to_url'   => WPURL::parse($to_url_string),
+            $from_url = WPURL::parse($from_url_string);
+            $mapping = [
+                'from_url'      => $from_url,
+                'to_url'        => WPURL::parse($to_url_string),
+                'from_pathname' => false !== $from_url ? urldecode($from_url->pathname) : '',
             ];
+            if (false !== $from_url) {
+                $origin_key = $from_url->protocol . "\0" . $from_url->hostname;
+                $this->parsed_mapping_by_origin[$origin_key][] = $mapping;
+            }
         }
         $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
 
@@ -310,10 +315,9 @@ class StructuredDataUrlRewriter
      * TODO: Migrate these changes back into the php-toolkit repo
      */
     private function rewrite_urls( string $content, string $content_type ): string {
-        // $this->parsed_mapping is built once in the constructor and reused
+        // $this->parsed_mapping_by_origin is built once in the constructor and reused
         // here on every call, avoiding a fresh round of WPURL::parse() per
         // leaf value.
-        $parsed_mapping = $this->parsed_mapping;
         $base_url       = $this->base_url;
 
         switch ( $content_type ) {
@@ -341,8 +345,8 @@ class StructuredDataUrlRewriter
 
                     $parsed_url = $p->get_parsed_url();
                     $converted = false;
-                    foreach ( $parsed_mapping as $mapping ) {
-                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
+                    foreach ( $this->get_origin_mappings( $parsed_url ) as $mapping ) {
+                        if ( $this->parsed_url_is_child_of_mapping( $parsed_url, $mapping ) ) {
                             $converted = WPURL::replace_base_url(
                                 $parsed_url,
                                 array(
@@ -387,8 +391,8 @@ class StructuredDataUrlRewriter
 
                     $parsed_url = $p->get_parsed_url();
                     $converted = false;
-                    foreach ( $parsed_mapping as $mapping ) {
-                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
+                    foreach ( $this->get_origin_mappings( $parsed_url ) as $mapping ) {
+                        if ( $this->parsed_url_is_child_of_mapping( $parsed_url, $mapping ) ) {
                             $converted = WPURL::replace_base_url(
                                 $parsed_url,
                                 array(
@@ -419,5 +423,39 @@ class StructuredDataUrlRewriter
                 _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
                 return '';
         }
+    }
+
+    /**
+     * @return list<array{from_url: mixed, to_url: mixed, from_pathname: string}>
+     */
+    private function get_origin_mappings( $parsed_url ): array
+    {
+        if ( false === $parsed_url ) {
+            return [];
+        }
+
+        $origin_key = $parsed_url->protocol . "\0" . $parsed_url->hostname;
+        return $this->parsed_mapping_by_origin[$origin_key] ?? [];
+    }
+
+    /**
+     * Equivalent to is_child_url_of() for pre-parsed, same-origin URLs.
+     *
+     * @param array{from_url: mixed, to_url: mixed, from_pathname: string} $mapping
+     */
+    private function parsed_url_is_child_of_mapping( $child, array $mapping ): bool
+    {
+        if ( false === $child || false === $mapping['from_url'] ) {
+            return false;
+        }
+
+        $child_pathname_no_trailing_slash = rtrim( urldecode( $child->pathname ), '/' );
+        $parent_pathname = $mapping['from_pathname'];
+
+        return (
+            $parent_pathname === $child_pathname_no_trailing_slash ||
+            $parent_pathname === $child_pathname_no_trailing_slash . '/' ||
+            0 === strncmp( $child_pathname_no_trailing_slash . '/', $parent_pathname, strlen( $parent_pathname ) )
+        );
     }
 }
