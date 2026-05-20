@@ -148,6 +148,13 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
+        if ($content_type === self::PLAIN_TEXT && !$this->might_be_structured_data($value)) {
+            $literal_rewrite = $this->try_rewrite_literal_base_urls($value);
+            if ($literal_rewrite !== null && !$this->value_might_contain_source_domain($literal_rewrite)) {
+                return $literal_rewrite;
+            }
+        }
+
         // Try serialized PHP: the parser validates the entire structure
         // in the constructor. If it's not malformed, iterate and recurse.
         $p = new PhpSerializationProcessor($value);
@@ -303,6 +310,21 @@ class StructuredDataUrlRewriter
         $next = $value[$next_pos];
         return ctype_space($next)
             || strpos('/\\?#"\'<)]},;', $next) !== false;
+    }
+
+    private function might_be_structured_data(string $value): bool
+    {
+        $trimmed = ltrim($value);
+        if ($trimmed === '') {
+            return false;
+        }
+
+        $first = $trimmed[0];
+        if ($first === '{' || $first === '[') {
+            return true;
+        }
+
+        return preg_match('/^(?:a|O|s|i|d|b|N|C):/', $trimmed) === 1;
     }
 
     /**

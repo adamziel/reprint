@@ -4988,6 +4988,26 @@ class ImportClient
         ];
     }
 
+    private function inline_from_base64_for_sqlite(string $query): string
+    {
+        if (strpos($query, "FROM_BASE64(") === false) {
+            return $query;
+        }
+
+        return preg_replace_callback(
+            "/(?:CONVERT\\s*\\(\\s*)?FROM_BASE64\\s*\\(\\s*'([A-Za-z0-9+\\/=]*)'\\s*\\)(?:\\s+USING\\s+utf8mb4\\s*\\))?/i",
+            static function (array $matches): string {
+                $decoded = base64_decode($matches[1], true);
+                if ($decoded === false) {
+                    return $matches[0];
+                }
+
+                return "'" . str_replace("'", "''", $decoded) . "'";
+            },
+            $query
+        );
+    }
+
     public function run_db_apply(array $options): void
     {
         $sql_file = $this->state_dir . "/db.sql";
@@ -5118,6 +5138,7 @@ class ImportClient
         }
 
         [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
+        $inline_from_base64_for_sqlite = ($options["target_engine"] ?? "mysql") === "sqlite";
 
         $this->audit_log(
             "CONNECTED | {$connection_label}",
@@ -5226,6 +5247,9 @@ class ImportClient
                     if ($stmt_rewriter) {
                         $query = $stmt_rewriter->rewrite($query);
                     }
+                    if ($inline_from_base64_for_sqlite) {
+                        $query = $this->inline_from_base64_for_sqlite($query);
+                    }
 
                     // Execute against target database
                     try {
@@ -5301,6 +5325,9 @@ class ImportClient
 
                 if ($stmt_rewriter) {
                     $query = $stmt_rewriter->rewrite($query);
+                }
+                if ($inline_from_base64_for_sqlite) {
+                    $query = $this->inline_from_base64_for_sqlite($query);
                 }
 
                 try {

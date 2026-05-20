@@ -91,7 +91,7 @@ class NewSiteUrlSqliteTest extends TestCase
             "INSERT INTO `wp_options` VALUES "
             . "(3, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'));",
             base64_encode('blogname'),
-            base64_encode('My Test Blog'),
+            base64_encode("Bob's Test Blog"),
             base64_encode('yes'),
         );
 
@@ -192,7 +192,7 @@ class NewSiteUrlSqliteTest extends TestCase
             "SELECT option_value FROM wp_options WHERE option_name = 'blogname'",
             'wp_test',
         );
-        $this->assertSame('My Test Blog', $blogname[0]['option_value']);
+        $this->assertSame("Bob's Test Blog", $blogname[0]['option_value']);
     }
 
     /**
