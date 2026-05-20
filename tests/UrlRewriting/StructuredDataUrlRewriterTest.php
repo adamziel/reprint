@@ -328,7 +328,7 @@ class StructuredDataUrlRewriterTest extends TestCase
     {
         $rewriter = $this->createRewriter();
         // Block markup with JSON attribute — wp_rewrite_urls() handles the JSON
-        // inside the block comment, strtr() would not
+        // inside the block comment.
         $input = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
         $result = $rewriter->rewrite($input, 'block_markup');
         $this->assertStringNotContainsString('old-site.com', $result);
@@ -343,7 +343,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/page', $result);
     }
 
-    public function testKnownBlockMarkupFastPathRewritesEscapedBlockJsonAndHtml(): void
+    public function testKnownBlockMarkupRewritesEscapedBlockJsonAndHtml(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<!-- wp:image {"src":"https:\/\/old-site.com\/img.jpg"} -->'
@@ -357,7 +357,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
-    public function testKnownBlockMarkupFastPathFallsBackForEmbeddedQueryUrl(): void
+    public function testKnownBlockMarkupLeavesEmbeddedQueryUrlAlone(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<a href="https://webarchive.org?url=https://old-site.com/about">Archive</a>';
@@ -365,12 +365,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
     }
 
-    // --- Content type hint: null (default) uses plain text replacement ---
+    // --- Content type hint: null (default) uses plain text URL processing ---
 
     public function testDefaultHintUsesPlainTextReplacement(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL string — strtr() handles this fine
+        // A plain URL string is handled by URLInTextProcessor.
         $input = 'Visit https://old-site.com/about for more.';
         $result = $rewriter->rewrite($input);
         $this->assertStringContainsString('https://new-site.com/about', $result);

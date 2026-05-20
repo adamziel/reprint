@@ -196,7 +196,8 @@ class SqlStatementRewriterTest extends TestCase
     public function testUnknownColumnUsesPlainTextReplacement(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL in a non-block-markup column — should use strtr()
+        // A plain URL in a non-block-markup column uses the plain-text URL
+        // processor after the structured-data layers decline ownership.
         $value = 'https://old-site.com/api/endpoint';
         $encoded = base64_encode($value);
         $sql = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('" . base64_encode('siteurl') . "'), FROM_BASE64('{$encoded}'));";
@@ -204,7 +205,7 @@ class SqlStatementRewriterTest extends TestCase
         $result = $rewriter->rewrite($sql);
 
         $values = $this->collectValues($result);
-        // option_value should be rewritten via strtr
+        // option_value should still be rewritten.
         $this->assertStringContainsString('new-site.com/api/endpoint', $values[1]);
     }
 
@@ -403,12 +404,8 @@ class SqlStatementRewriterTest extends TestCase
         $result = $rewriter->rewrite($sql);
 
         // post_content in this unknown table should NOT get the block_markup
-        // hint — it falls back to auto-detect (plain text strtr), which still
-        // rewrites URLs but through a different code path. The key assertion
-        // is that get_content_type returns null, not 'block_markup'. We verify
-        // indirectly: block_markup would parse the HTML structure, plain text
-        // just does strtr. Both rewrite the URL, so we confirm the rewrite
-        // happens (auto-detect is fine) but the table was not matched as "posts".
+        // hint. It still rewrites plain text URLs after the structured-data
+        // layers decline ownership, but the table was not matched as "posts".
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
         $this->assertStringContainsString('new-site.com/page', $values[0]);
@@ -425,13 +422,8 @@ class SqlStatementRewriterTest extends TestCase
 
         $result = $rewriter->rewrite($sql);
 
-        // The value still gets rewritten (auto-detect/plain text), but it must
-        // NOT have been treated as block_markup. We can tell because plain text
-        // strtr rewrites the URL but doesn't parse block comment JSON attributes.
-        // With a simple URL like this both paths produce the same output, so
-        // we use a value that distinguishes them: a block comment with a JSON
-        // attribute. block_markup would rewrite inside the JSON; plain text
-        // strtr would not touch the JSON attribute.
+        // The value still gets rewritten by the plain-text leaf processor, but
+        // it must NOT have been treated as block_markup.
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
         $this->assertStringContainsString('new-site.com', $values[0]);
@@ -480,8 +472,8 @@ class SqlStatementRewriterTest extends TestCase
     /**
      * A block comment JSON attribute lets us distinguish block_markup from
      * plain text rewriting. block_markup parses the JSON inside
-     * <!-- wp:image {"url":"..."} --> and rewrites it. Plain text strtr does
-     * a byte-for-byte replacement that can break JSON when URL lengths change.
+     * <!-- wp:image {"url":"..."} --> and rewrites it as block markup; plain
+     * text URL processing treats the whole value as unknown leaf text.
      *
      * We use this to prove that "wp_posts".post_content gets block_markup
      * while a spoofed table does NOT.
@@ -489,7 +481,7 @@ class SqlStatementRewriterTest extends TestCase
     public function testBlockMarkupVsPlainTextDistinction(): void
     {
         $rewriter = $this->createRewriter([
-            // Different-length URLs so strtr would shift offsets and break JSON
+            // Different-length URLs make the two processors easier to tell apart.
             'https://old-site.com' => 'https://new-longer-domain-site.com',
         ]);
 
@@ -514,14 +506,12 @@ class SqlStatementRewriterTest extends TestCase
 
         // spoofed_posts.post_content → auto-detect (not block_markup): the
         // column name matches but the table doesn't, so it falls through to
-        // plain text strtr.
+        // plain text leaf processing.
         $sql_spoof = "INSERT INTO `spoofed_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
         $result_spoof = $rewriter->rewrite($sql_spoof);
         $values_spoof = $this->collectValues($result_spoof);
         // The URL is still rewritten (auto-detect handles it), but the JSON
-        // attribute inside the block comment may be malformed because strtr
-        // doesn't understand HTML structure. The key point: the spoofed table
-        // was NOT given the block_markup hint.
+        // The key point: the spoofed table was NOT given the block_markup hint.
         $this->assertStringContainsString('new-longer-domain-site.com', $values_spoof[0]);
     }
 

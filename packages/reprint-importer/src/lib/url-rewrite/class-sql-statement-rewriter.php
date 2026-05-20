@@ -12,7 +12,7 @@
  * WordPress core columns known to contain block markup (post_content, comment_content,
  * etc.) get the 'block_markup' hint so wp_rewrite_urls() handles HTML attributes,
  * block comment JSON, and CSS url(). All other columns default to auto-detect with
- * plain text strtr() replacement, which is simpler and more predictable for columns
+ * plain-text URL processing, which is simpler and more predictable for columns
  * that contain serialized PHP, JSON, or plain strings.
  *
  * Column resolution walks the lexer output directly. Both INSERT and UPDATE
@@ -191,9 +191,10 @@ class SqlStatementRewriter
                 }
             }
 
-            // Rewrite URLs in the value. Known block-markup columns can first
-            // try a boundary-checked literal base URL swap before falling back
-            // to the full structured parser.
+            // Rewrite URLs in the value. Known block-markup columns go through
+            // the block-markup parser first; unknown columns are treated as
+            // plain text only after the structured-data layers have declined
+            // ownership.
             $rewritten = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
                 ? $this->url_rewriter->rewrite_known_block_markup_value($value)
                 : $this->url_rewriter->rewrite($value, $content_type);
