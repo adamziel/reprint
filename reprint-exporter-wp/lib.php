@@ -11,7 +11,7 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('SITE_EXPORT_VERSION')) {
-    define('SITE_EXPORT_VERSION', '0.7.5-dev');
+    define('SITE_EXPORT_VERSION', '0.8.0');
 }
 if (!defined('SITE_EXPORT_PLUGIN_DIR')) {
     define('SITE_EXPORT_PLUGIN_DIR', plugin_dir_path(__FILE__));
