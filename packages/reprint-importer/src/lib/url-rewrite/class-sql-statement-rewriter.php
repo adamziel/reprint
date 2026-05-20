@@ -190,6 +190,9 @@ class SqlStatementRewriter
             ? $this->get_content_type($table, $column)
             : null;
 
+        // Rewrite URLs in the value. Known block-markup columns can first
+        // try a boundary-checked literal base URL swap before falling back
+        // to the full structured parser.
         return $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
             ? $this->url_rewriter->rewrite_known_block_markup_value($value)
             : $this->url_rewriter->rewrite($value, $content_type);
@@ -227,9 +230,6 @@ class SqlStatementRewriter
                 );
             }
 
-            // Rewrite URLs in the value. Known block-markup columns can first
-            // try a boundary-checked literal base URL swap before falling back
-            // to the full structured parser.
             $rewritten = $this->rewrite_value_for_column(
                 $value,
                 $value_to_column_map['table'] ?? '',
