@@ -191,9 +191,12 @@ class SqlStatementRewriter
                 }
             }
 
-            // Rewrite URLs in the value — StructuredDataUrlRewriter classifies the
-            // content type and applies the right strategy for each.
-            $rewritten = $this->url_rewriter->rewrite($value, $content_type);
+            // Rewrite URLs in the value. Known block-markup columns can first
+            // try a boundary-checked literal base URL swap before falling back
+            // to the full structured parser.
+            $rewritten = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
+                ? $this->url_rewriter->rewrite_known_block_markup_value($value)
+                : $this->url_rewriter->rewrite($value, $content_type);
 
             // Only replace if the value actually changed
             if ($rewritten !== $value) {
