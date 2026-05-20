@@ -165,15 +165,17 @@ class SqlStatementRewriter
     private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
     {
         while ($scanner->next_value()) {
+            if (!$scanner->encoded_payload_could_contain_http_scheme()) {
+                continue;
+            }
+
             $value = $scanner->get_value();
 
-            // Skip values that can't contain a URL we'd rewrite. Every
-            // rewritable domain starts with http:// or https://, so a value
-            // without "http" anywhere in it has nothing for us to do. This
-            // avoids the column-map lookup and the full StructuredDataUrlRewriter
-            // pipeline (HTML parse, block markup, PHP/JSON recursion) per value.
-            // See https://github.com/adamziel/reprint/pull/152
             if (strpos($value, 'http') === false) {
+                continue;
+            }
+
+            if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
                 continue;
             }
 

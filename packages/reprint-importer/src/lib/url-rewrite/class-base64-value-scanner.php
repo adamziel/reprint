@@ -9,6 +9,11 @@
  * set_value() only replaces the base64 payload inside the quotes, so wrappers
  * are preserved without the caller needing to know about them.
  *
+ * Values are decoded lazily. The scanner keeps the original encoded payload
+ * until get_value() is called, so callers can skip obviously irrelevant values
+ * without paying base64_decode() for every FROM_BASE64() expression in a large
+ * INSERT batch.
+ *
  * Usage:
  *     $scanner = new Base64ValueScanner($sql);
  *     while ($scanner->next_value()) {
@@ -29,14 +34,16 @@ class Base64ValueScanner
      *   'expr_start'   => int    Offset of the outermost expression (CONVERT or FROM_BASE64)
      *   'quote_start'  => int    Offset of the quoted string token (including quotes)
      *   'quote_length' => int    Length of the quoted string token
-     *   'value'        => string The base64-decoded value
+     *   'encoded_value'=> string The base64 payload
+     *   'value'        => ?string The base64-decoded value, cached on demand
      *   'new_value'    => ?string Non-null when set_value() has been called
      *
-     * @var array<int, array{expr_start: int, quote_start: int, quote_length: int, value: string, new_value: ?string}>
+     * @var array<int, array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
      */
     private array $entries = [];
 
     private int $cursor = -1;
+    private bool $dirty = false;
 
     /**
      * @param string $sql The SQL statement.
@@ -60,10 +67,10 @@ class Base64ValueScanner
     /**
      * Build a scanner from a pre-built entry list. Used by the
      * tokenization-free FastInsertScanner path — when the caller has
-     * already located every FROM_BASE64() expression and decoded its
-     * payload, the scanner skips both lexer and base64_decode work.
+     * already located every FROM_BASE64() expression and captured its payload,
+     * the scanner skips the lexer and still decodes values lazily.
      *
-     * @param list<array{expr_start: int, quote_start: int, quote_length: int, value: string, new_value: ?string}> $entries
+     * @param list<array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}> $entries
      */
     public static function from_entries(string $sql, array $entries): self
     {
@@ -86,7 +93,35 @@ class Base64ValueScanner
      */
     public function get_value(): string
     {
+        if ($this->entries[$this->cursor]['value'] === null) {
+            $decoded = base64_decode($this->entries[$this->cursor]['encoded_value'], true);
+            $this->entries[$this->cursor]['value'] = $decoded !== false ? $decoded : '';
+        }
+
         return $this->entries[$this->cursor]['value'];
+    }
+
+    /**
+     * Return whether the current encoded payload could decode to a value
+     * containing an http:// or https:// scheme.
+     *
+     * This is a conservative base64 prefilter over the encoded text, not proof
+     * that the decoded value contains a URL. false means the payload cannot
+     * decode to a lowercase http/https scheme under the checked alignments.
+     * true only means it could, so the caller still needs to decode and inspect
+     * the value. It mirrors the statement-level prefilter in SqlStatementRewriter,
+     * but applies it per payload so one URL-bearing column does not force every
+     * neighboring FROM_BASE64() value in the same INSERT batch through
+     * base64_decode().
+     */
+    public function encoded_payload_could_contain_http_scheme(): bool
+    {
+        $value = $this->entries[$this->cursor]['value'];
+        if ($value !== null) {
+            return strpos($value, 'http') !== false;
+        }
+
+        return self::encoded_payload_could_decode_to_http_scheme($this->entries[$this->cursor]['encoded_value']);
     }
 
     /**
@@ -96,6 +131,7 @@ class Base64ValueScanner
     public function set_value(string $new_value): void
     {
         $this->entries[$this->cursor]['new_value'] = $new_value;
+        $this->dirty = true;
     }
 
     /**
@@ -116,6 +152,10 @@ class Base64ValueScanner
      */
     public function get_result(): string
     {
+        if (!$this->dirty) {
+            return $this->sql;
+        }
+
         $result = $this->sql;
 
         // Process in reverse order to preserve byte offsets
@@ -172,12 +212,12 @@ class Base64ValueScanner
                         $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
                         || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
                     ) {
-                        $decoded = base64_decode($inner->get_value(), true);
                         $this->entries[] = [
                             'expr_start' => $expr_start,
                             'quote_start' => $inner->start,
                             'quote_length' => $inner->length,
-                            'value' => $decoded !== false ? $decoded : '',
+                            'encoded_value' => $inner->get_value(),
+                            'value' => null,
                             'new_value' => null,
                         ];
                         break;
@@ -241,12 +281,12 @@ class Base64ValueScanner
                         $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
                         || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
                     ) {
-                        $decoded = base64_decode($inner->get_value(), true);
                         $this->entries[] = [
                             'expr_start' => $expr_start,
                             'quote_start' => $inner->start,
                             'quote_length' => $inner->length,
-                            'value' => $decoded !== false ? $decoded : '',
+                            'encoded_value' => $inner->get_value(),
+                            'value' => null,
                             'new_value' => null,
                         ];
                         break;
@@ -260,5 +300,13 @@ class Base64ValueScanner
             $prev[0] = $prev[1];
             $prev[1] = $token;
         }
+    }
+
+    private static function encoded_payload_could_decode_to_http_scheme(string $payload): bool
+    {
+        return strpos($payload, 'aHR0') !== false
+            || strpos($payload, 'dHA6') !== false
+            || strpos($payload, 'dHBz') !== false
+            || strpos($payload, 'dHRw') !== false;
     }
 }

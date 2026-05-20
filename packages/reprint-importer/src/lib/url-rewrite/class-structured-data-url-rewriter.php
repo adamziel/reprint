@@ -31,6 +31,7 @@ class StructuredDataUrlRewriter
 {
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
+    private const REWRITE_RESULT_CACHE_MAX = 4096;
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
@@ -57,6 +58,17 @@ class StructuredDataUrlRewriter
     /** @var string Default base_url used by the URL processors (first from-url). */
     private string $base_url;
 
+    /** @var string Cache namespace for this rewriter's URL mapping. */
+    private string $mapping_cache_key;
+
+    /** @var array<string, false|array{raw_url: string, parsed_url: mixed}> */
+    private array $rewrite_result_cache = [];
+
+    /** @var string[] */
+    private array $rewrite_result_cache_ring = [];
+
+    private int $rewrite_result_cache_next = 0;
+
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
      */
@@ -82,6 +94,7 @@ class StructuredDataUrlRewriter
                 'to_url'   => WPURL::parse($to_url_string),
             ];
         }
+        $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
 
         // Default base_url: first from-url in the mapping. Preserves the
         // behaviour of the previous per-call default so outputs are unchanged.
@@ -177,6 +190,53 @@ class StructuredDataUrlRewriter
     }
 
     /**
+     * Return whether a decoded value may contain one of the configured source
+     * domains. This intentionally checks hosts instead of full source URLs so
+     * escaped spellings of `://` in block markup or JSON do not matter.
+     */
+    public function value_might_contain_source_domain(string $value): bool
+    {
+        if ($this->source_domains === []) {
+            return true;
+        }
+
+        foreach ($this->source_domains as $domain) {
+            if (stripos($value, $domain) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function get_cached_rewrite_result(string $cache_key)
+    {
+        return array_key_exists($cache_key, $this->rewrite_result_cache)
+            ? $this->rewrite_result_cache[$cache_key]
+            : null;
+    }
+
+    /**
+     * @param false|array{raw_url: string, parsed_url: mixed} $value
+     */
+    private function set_cached_rewrite_result(string $cache_key, $value): void
+    {
+        if (!array_key_exists($cache_key, $this->rewrite_result_cache)) {
+            if (count($this->rewrite_result_cache_ring) < self::REWRITE_RESULT_CACHE_MAX) {
+                $this->rewrite_result_cache_ring[] = $cache_key;
+            } else {
+                $evicted_key = $this->rewrite_result_cache_ring[$this->rewrite_result_cache_next];
+                unset($this->rewrite_result_cache[$evicted_key]);
+                $this->rewrite_result_cache_ring[$this->rewrite_result_cache_next] = $cache_key;
+            }
+
+            $this->rewrite_result_cache_next = ($this->rewrite_result_cache_next + 1) % self::REWRITE_RESULT_CACHE_MAX;
+        }
+
+        $this->rewrite_result_cache[$cache_key] = $value;
+    }
+
+    /**
      * Migrate URLs in post content. See WPRewriteUrlsTests for
      * specific examples. TODO: A better description.
      *
@@ -219,13 +279,46 @@ class StructuredDataUrlRewriter
             case self::BLOCK_MARKUP:
                 $p = new BlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
+                    $raw_url = $p->get_raw_url();
+                    $token_type = $p->get_token_type() ?? '';
+                    $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
+                    $cached = $this->get_cached_rewrite_result($cache_key);
+                    if ($cached !== null) {
+                        if ($cached !== false) {
+                            $p->set_url($cached['raw_url'], $cached['parsed_url']);
+                        }
+                        continue;
+                    }
+
                     $parsed_url = $p->get_parsed_url();
+                    $converted = false;
                     foreach ( $parsed_mapping as $mapping ) {
                         if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $p->replace_base_url( $mapping['to_url'] );
+                            $converted = WPURL::replace_base_url(
+                                $parsed_url,
+                                array(
+                                    'old_base_url' => $base_url,
+                                    'new_base_url' => $mapping['to_url'],
+                                    'raw_url'      => $raw_url,
+                                    'is_relative'  => (
+                                        '#text' !== $token_type &&
+                                        ! WPURL::can_parse($raw_url)
+                                    ),
+                                )
+                            );
                             break;
                         }
                     }
+
+                    $cache_value = false;
+                    if ($converted !== false) {
+                        $cache_value = [
+                            'raw_url'    => (string) $converted,
+                            'parsed_url' => $converted->new_url,
+                        ];
+                        $p->set_url($cache_value['raw_url'], $cache_value['parsed_url']);
+                    }
+                    $this->set_cached_rewrite_result($cache_key, $cache_value);
                 }
 
                 return $p->get_updated_html();
@@ -233,10 +326,21 @@ class StructuredDataUrlRewriter
             case self::PLAIN_TEXT:
                 $p = new URLInTextProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
+                    $raw_url = $p->get_raw_url();
+                    $cache_key = $this->mapping_cache_key . "\0" . self::PLAIN_TEXT . "\0" . $raw_url;
+                    $cached = $this->get_cached_rewrite_result($cache_key);
+                    if ($cached !== null) {
+                        if ($cached !== false) {
+                            $p->set_raw_url($cached['raw_url']);
+                        }
+                        continue;
+                    }
+
                     $parsed_url = $p->get_parsed_url();
+                    $converted = false;
                     foreach ( $parsed_mapping as $mapping ) {
                         if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $new_raw_url = WPURL::replace_base_url(
+                            $converted = WPURL::replace_base_url(
                                 $parsed_url,
                                 array(
                                     'old_base_url' => $base_url,
@@ -245,11 +349,19 @@ class StructuredDataUrlRewriter
                                     'is_relative'  => false,
                                 )
                             );
-
-                            $p->set_raw_url( $new_raw_url );
                             break;
                         }
                     }
+
+                    $cache_value = false;
+                    if ($converted !== false) {
+                        $cache_value = [
+                            'raw_url'    => (string) $converted,
+                            'parsed_url' => $converted->new_url,
+                        ];
+                        $p->set_raw_url($cache_value['raw_url']);
+                    }
+                    $this->set_cached_rewrite_result($cache_key, $cache_value);
                 }
 
                 return $p->get_updated_text();

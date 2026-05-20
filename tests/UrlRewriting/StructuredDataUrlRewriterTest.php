@@ -404,4 +404,19 @@ class StructuredDataUrlRewriterTest extends TestCase
     {
         $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
     }
+
+    public function testValueMightContainSourceDomainIgnoresSchemeEscaping(): void
+    {
+        $rewriter = $this->createRewriter();
+
+        $this->assertTrue(
+            $rewriter->value_might_contain_source_domain('{"url":"https:\/\/old-site.com\/page"}')
+        );
+        $this->assertTrue(
+            $rewriter->value_might_contain_source_domain('<a href="HTTPS://OLD-SITE.COM/page">Link</a>')
+        );
+        $this->assertFalse(
+            $rewriter->value_might_contain_source_domain('<a href="https://other-site.com/page">Link</a>')
+        );
+    }
 }
