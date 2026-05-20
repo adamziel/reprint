@@ -4995,7 +4995,7 @@ class ImportClient
         }
 
         $scanner = new Base64ValueScanner($query);
-        return $scanner->get_result_with_mysql_hex_literals();
+        return $scanner->get_result_with_sqlite_compatible_literals();
     }
 
     public function run_db_apply(array $options): void

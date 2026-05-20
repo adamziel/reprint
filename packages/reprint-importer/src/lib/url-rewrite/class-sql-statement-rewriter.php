@@ -227,8 +227,8 @@ class SqlStatementRewriter
         }
 
         return $inline_base64_values_for_sqlite
-            ? $scanner->get_result_with_mysql_hex_literals()
-            : $scanner->get_result();
+            ? $scanner->get_result_with_sqlite_compatible_literals()
+            : $scanner->get_result_with_base64_payload_replacements();
     }
 
     /**

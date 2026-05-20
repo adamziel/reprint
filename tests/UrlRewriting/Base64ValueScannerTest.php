@@ -106,7 +106,7 @@ class Base64ValueScannerTest extends TestCase
         while ($scanner->next_value()) {
             $scanner->set_value($new);
         }
-        $modified = $scanner->get_result();
+        $modified = $scanner->get_result_with_base64_payload_replacements();
 
         $expected_encoded = base64_encode($new);
         $this->assertStringContainsString("FROM_BASE64('{$expected_encoded}')", $modified);
@@ -124,7 +124,7 @@ class Base64ValueScannerTest extends TestCase
         while ($scanner->next_value()) {
             $scanner->set_value($new);
         }
-        $modified = $scanner->get_result();
+        $modified = $scanner->get_result_with_base64_payload_replacements();
 
         $expected_encoded = base64_encode($new);
         $this->assertStringContainsString("CONVERT(FROM_BASE64('{$expected_encoded}') USING utf8mb4)", $modified);
@@ -144,7 +144,7 @@ class Base64ValueScannerTest extends TestCase
         while ($scanner->next_value()) {
             $scanner->set_value(strtoupper($scanner->get_value()));
         }
-        $modified = $scanner->get_result();
+        $modified = $scanner->get_result_with_base64_payload_replacements();
 
         // Verify both replacements worked by re-scanning
         $new_values = $this->collectValues($modified);
@@ -165,17 +165,17 @@ class Base64ValueScannerTest extends TestCase
             $scanner->get_value();
         }
 
-        $this->assertSame($sql, $scanner->get_result());
+        $this->assertSame($sql, $scanner->get_result_with_base64_payload_replacements());
     }
 
-    public function testMysqlHexLiteralsReplaceWholeBase64Expression(): void
+    public function testSqliteCompatibleLiteralsReplaceWholeBase64Expression(): void
     {
         $value = "Bob's Test Blog";
         $encoded = base64_encode($value);
         $sql = "INSERT INTO t VALUES(1, CONVERT(FROM_BASE64('{$encoded}') USING utf8mb4));";
 
         $scanner = new Base64ValueScanner($sql);
-        $modified = $scanner->get_result_with_mysql_hex_literals();
+        $modified = $scanner->get_result_with_sqlite_compatible_literals();
 
         $this->assertSame(
             "INSERT INTO t VALUES(1, 0x" . bin2hex($value) . ");",
@@ -183,7 +183,7 @@ class Base64ValueScannerTest extends TestCase
         );
     }
 
-    public function testMysqlHexLiteralsUseRewrittenValues(): void
+    public function testSqliteCompatibleLiteralsUseRewrittenValues(): void
     {
         $old = 'https://old-site.com/page';
         $new = 'https://new-site.com/page';
@@ -195,11 +195,11 @@ class Base64ValueScannerTest extends TestCase
 
         $this->assertSame(
             "INSERT INTO t VALUES(0x" . bin2hex($new) . ");",
-            $scanner->get_result_with_mysql_hex_literals()
+            $scanner->get_result_with_sqlite_compatible_literals()
         );
     }
 
-    public function testMysqlHexLiteralsDoNotDropNonUsingConvertWrapper(): void
+    public function testSqliteCompatibleLiteralsDoNotDropNonUsingConvertWrapper(): void
     {
         $value = "Bob's Test Blog";
         $encoded = base64_encode($value);
@@ -209,11 +209,11 @@ class Base64ValueScannerTest extends TestCase
 
         $this->assertSame(
             "INSERT INTO t VALUES(CONVERT(0x" . bin2hex($value) . ", CHAR));",
-            $scanner->get_result_with_mysql_hex_literals()
+            $scanner->get_result_with_sqlite_compatible_literals()
         );
     }
 
-    public function testMysqlHexLiteralsOnlyCollapseUtf8mb4UsingConvertWrapper(): void
+    public function testSqliteCompatibleLiteralsOnlyCollapseUtf8mb4UsingConvertWrapper(): void
     {
         $value = "Bob's Test Blog";
         $encoded = base64_encode($value);
@@ -223,11 +223,11 @@ class Base64ValueScannerTest extends TestCase
 
         $this->assertSame(
             "INSERT INTO t VALUES(CONVERT(0x" . bin2hex($value) . " USING latin1));",
-            $scanner->get_result_with_mysql_hex_literals()
+            $scanner->get_result_with_sqlite_compatible_literals()
         );
     }
 
-    public function testMysqlHexLiteralsDecodeWhitespaceWrappedPayloads(): void
+    public function testSqliteCompatibleLiteralsDecodeWhitespaceWrappedPayloads(): void
     {
         $value = 'Hello World';
         $sql = "INSERT INTO t VALUES(FROM_BASE64('  SGVs\n bG8g\tV29ybGQ=  '));";
@@ -236,17 +236,17 @@ class Base64ValueScannerTest extends TestCase
 
         $this->assertSame(
             "INSERT INTO t VALUES(0x" . bin2hex($value) . ");",
-            $scanner->get_result_with_mysql_hex_literals()
+            $scanner->get_result_with_sqlite_compatible_literals()
         );
     }
 
-    public function testMysqlHexLiteralsPreserveMalformedPayloads(): void
+    public function testSqliteCompatibleLiteralsPreserveMalformedPayloads(): void
     {
         $sql = "INSERT INTO t VALUES(FROM_BASE64('ABCD='));";
 
         $scanner = new Base64ValueScanner($sql);
 
-        $this->assertSame($sql, $scanner->get_result_with_mysql_hex_literals());
+        $this->assertSame($sql, $scanner->get_result_with_sqlite_compatible_literals());
     }
 
     public function testHandlesEmptyString(): void

@@ -26,7 +26,7 @@
  *             $scanner->set_value($rewritten);
  *         }
  *     }
- *     $new_sql = $scanner->get_result();
+ *     $new_sql = $scanner->get_result_with_base64_payload_replacements();
  */
 class Base64ValueScanner
 {
@@ -138,7 +138,8 @@ class Base64ValueScanner
 
     /**
      * Replace the decoded value at the current cursor position.
-     * The new value will be base64-encoded when get_result() rebuilds the SQL.
+     * The new value will be base64-encoded when
+     * get_result_with_base64_payload_replacements() rebuilds the SQL.
      */
     public function set_value(string $new_value): void
     {
@@ -159,10 +160,12 @@ class Base64ValueScanner
     }
 
     /**
-     * Return the SQL with all set_value() replacements applied.
+     * Return SQL with all set_value() replacements applied as new base64
+     * payloads inside the original FROM_BASE64() calls.
+     *
      * Values that were not modified via set_value() are left unchanged.
      */
-    public function get_result(): string
+    public function get_result_with_base64_payload_replacements(): string
     {
         if (!$this->dirty) {
             return $this->sql;
@@ -184,17 +187,18 @@ class Base64ValueScanner
     }
 
     /**
-     * Return SQL with every FROM_BASE64()/CONVERT(FROM_BASE64()) expression
-     * replaced by a MySQL-compatible hex string literal.
+     * Return SQL with every decodable FROM_BASE64() expression replaced by a
+     * SQLite-compatible literal.
      *
      * The importer already decoded each payload for URL rewriting decisions.
      * For SQLite targets, preserving FROM_BASE64() would make SQLite call back
      * into PHP for every text value during statement execution. Emitting
      * 0x-prefixed hex keeps the MySQL-on-SQLite translator in charge of value
      * boundaries, preserves apostrophes and NUL bytes without quote escaping,
-     * and avoids any SQL-text regexp pass.
+     * and avoids any SQL-text regexp pass. The method name intentionally names
+     * the target behavior rather than the current 0x literal spelling.
      */
-    public function get_result_with_mysql_hex_literals(): string
+    public function get_result_with_sqlite_compatible_literals(): string
     {
         if (empty($this->entries)) {
             return $this->sql;
