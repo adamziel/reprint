@@ -10,10 +10,10 @@
  * Column-aware: for each FROM_BASE64() match, determines which column it belongs
  * to and passes the appropriate content type hint to StructuredDataUrlRewriter.
  * WordPress core columns known to contain block markup (post_content, comment_content,
- * etc.) get the 'block_markup' hint so wp_rewrite_urls() handles HTML attributes,
- * block comment JSON, and CSS url(). All other columns default to auto-detect with
- * plain text strtr() replacement, which is simpler and more predictable for columns
- * that contain serialized PHP, JSON, or plain strings.
+ * etc.) get the 'block_markup' hint so BlockMarkupUrlProcessor handles HTML
+ * attributes, block comment JSON, and CSS url(). All other columns default to
+ * auto-detect with URLInTextProcessor for leaf text, which is simpler and more
+ * predictable for columns that contain serialized PHP, JSON, or plain strings.
  *
  * Column resolution walks the lexer output directly. Both INSERT and UPDATE
  * statements emitted by MySQLDumpProducer follow a constrained set of shapes
@@ -31,7 +31,7 @@ class SqlStatementRewriter
 
     /**
      * WordPress core columns that contain block markup and benefit from
-     * wp_rewrite_urls() over simple string replacement. Keyed by table suffix
+     * BlockMarkupUrlProcessor over plain-text URL scanning. Keyed by table suffix
      * (without prefix) — the constructor prepends the actual table_prefix to
      * build full table names for exact matching.
      *
@@ -190,9 +190,10 @@ class SqlStatementRewriter
             ? $this->get_content_type($table, $column)
             : null;
 
-        // Rewrite URLs in the value. Known block-markup columns can first
-        // try a boundary-checked literal base URL swap before falling back
-        // to the full structured parser.
+        // Rewrite URLs in the value. Known block-markup columns go through
+        // the structured block parser so alternate URL spellings (for example
+        // escaped JSON, uppercase schemes/hosts, and IDNs) are handled by the
+        // URL model instead of byte-level replacement.
         return $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
             ? $this->url_rewriter->rewrite_known_block_markup_value($value)
             : $this->url_rewriter->rewrite($value, $content_type);

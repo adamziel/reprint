@@ -324,11 +324,11 @@ class StructuredDataUrlRewriterTest extends TestCase
 
     // --- Content type hint: 'block_markup' ---
 
-    public function testBlockMarkupHintUsesWpRewriteUrls(): void
+    public function testBlockMarkupHintUsesStructuredBlockParser(): void
     {
         $rewriter = $this->createRewriter();
-        // Block markup with JSON attribute — wp_rewrite_urls() handles the JSON
-        // inside the block comment, strtr() would not
+        // Block markup with JSON attribute — the block parser handles the JSON
+        // inside the block comment.
         $input = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
         $result = $rewriter->rewrite($input, 'block_markup');
         $this->assertStringNotContainsString('old-site.com', $result);
@@ -343,7 +343,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://new-site.com/page', $result);
     }
 
-    public function testKnownBlockMarkupFastPathRewritesEscapedBlockJsonAndHtml(): void
+    public function testKnownBlockMarkupRewritesEscapedBlockJsonAndHtml(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<!-- wp:image {"src":"https:\/\/old-site.com\/img.jpg"} -->'
@@ -357,7 +357,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
-    public function testKnownBlockMarkupFastPathFallsBackForEmbeddedQueryUrl(): void
+    public function testKnownBlockMarkupDoesNotRewriteEmbeddedQueryUrl(): void
     {
         $rewriter = $this->createRewriter();
         $input = '<a href="https://webarchive.org?url=https://old-site.com/about">Archive</a>';
@@ -365,12 +365,79 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
     }
 
-    // --- Content type hint: null (default) uses plain text replacement ---
-
-    public function testDefaultHintUsesPlainTextReplacement(): void
+    public function testKnownBlockMarkupRewritesMixedLiteralAndCaseVariantUrls(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL string — strtr() handles this fine
+        $input = '<a href="https://old-site.com/literal">Literal</a>'
+            . '<a href="HTTPS://OLD-SITE.COM/case-variant">Case variant</a>';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https://new-site.com/literal', $result);
+        $this->assertStringContainsString('https://new-site.com/case-variant', $result);
+        $this->assertStringNotContainsString('old-site.com', strtolower($result));
+    }
+
+    public function testKnownBlockMarkupRewritesCaseVariantHostWithoutLiteralSourceDomain(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<a href=\'https://OLD-SITE.COM/case-variant\'>Case variant</a>';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https://new-site.com/case-variant', $result);
+        $this->assertStringNotContainsString('old-site.com', strtolower($result));
+    }
+
+    public function testKnownBlockMarkupRewritesPunycodeAndUnicodeHostSpellings(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://xn--bcher-kva.example' => 'https://new.example',
+        ]);
+        $input = '<a href="https://xn--bcher-kva.example/punycode">Punycode</a>'
+            . '<a href="https://bücher.example/unicode">Unicode</a>';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https://new.example/punycode', $result);
+        $this->assertStringContainsString('https://new.example/unicode', $result);
+        $this->assertStringNotContainsString('xn--bcher-kva.example', $result);
+        $this->assertStringNotContainsString('bücher.example', $result);
+    }
+
+    public function testKnownBlockMarkupRewritesUnicodeHostInBlockCommentJson(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://xn--bcher-kva.example' => 'https://new.example',
+        ]);
+        $input = '<!-- wp:image {"src":"https://bücher.example/unicode"} -->';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https:\/\/new.example\/unicode', $result);
+        $this->assertStringNotContainsString('bücher.example', $result);
+    }
+
+    public function testKnownBlockMarkupRewritesEscapedJsonAndCaseVariantHtmlTogether(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:image {"src":"https:\/\/old-site.com\/img.jpg"} -->'
+            . '<figure><img src="HTTPS://OLD-SITE.COM/img.jpg"/></figure>'
+            . '<!-- /wp:image -->';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https:\/\/new-site.com\/img.jpg', $result);
+        $this->assertStringContainsString('src="https://new-site.com/img.jpg"', $result);
+        $this->assertStringNotContainsString('old-site.com', strtolower($result));
+    }
+
+    // --- Content type hint: null (default) uses plain text URL scanning ---
+
+    public function testDefaultHintUsesPlainTextUrlScanning(): void
+    {
+        $rewriter = $this->createRewriter();
+        // A plain URL string is handled by URLInTextProcessor.
         $input = 'Visit https://old-site.com/about for more.';
         $result = $rewriter->rewrite($input);
         $this->assertStringContainsString('https://new-site.com/about', $result);
@@ -402,7 +469,7 @@ class StructuredDataUrlRewriterTest extends TestCase
     {
         $rewriter = $this->createRewriter();
         // Serialized PHP containing a block markup string — the block_markup
-        // hint should propagate so the inner text gets wp_rewrite_urls()
+        // hint should propagate so the inner text gets the block parser.
         $markup = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} --><figure><img src="https://old-site.com/img.jpg"/></figure><!-- /wp:image -->';
         $input = serialize(['content' => $markup]);
         $result = $rewriter->rewrite($input, 'block_markup');
