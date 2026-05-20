@@ -136,9 +136,9 @@ class FastInsertScanner
                     return null;
                 }
                 $value_end = $cursor;
-                $column_map[] = [$value_start, $value_end, $columns[$col_idx]];
-
                 if (is_array($value_kind)) {
+                    $column_map[] = [$value_start, $value_end, $columns[$col_idx]];
+
                     // FROM_BASE64 payload: kind = [expr_start, expr_length, quote_start, quote_length, encoded_value]
                     $base64_entries[] = [
                         'expr_start' => $value_kind[0],
