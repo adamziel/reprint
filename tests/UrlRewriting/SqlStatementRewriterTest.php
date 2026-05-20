@@ -208,6 +208,32 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringContainsString('new-site.com/api/endpoint', $values[1]);
     }
 
+    public function testGuidColumnUsesWholeUrlRewriting(): void
+    {
+        $rewriter = $this->createRewriter();
+        $value = 'https://old-site.com/?p=123';
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO `wp_posts` (`ID`, `guid`) VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $values = $this->collectValues($result);
+        $this->assertSame('https://new-site.com/?p=123', $values[0]);
+    }
+
+    public function testGuidColumnDoesNotRewriteEmbeddedSourceUrl(): void
+    {
+        $rewriter = $this->createRewriter();
+        $value = 'https://webarchive.org/?url=https://old-site.com/?p=123';
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO `wp_posts` (`ID`, `guid`) VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql);
+
+        $values = $this->collectValues($result);
+        $this->assertSame($value, $values[0]);
+    }
+
     public function testSqliteInliningUsesScannerBoundariesAfterUrlRewrite(): void
     {
         $rewriter = $this->createRewriter();

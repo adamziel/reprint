@@ -33,6 +33,7 @@ class StructuredDataUrlRewriter
 {
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
+    const WHOLE_URL = 'whole_url';
     private const REWRITE_RESULT_CACHE_MAX = 4096;
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
@@ -133,6 +134,14 @@ class StructuredDataUrlRewriter
 
         if ($content_type === null) {
             $content_type = self::PLAIN_TEXT;
+        }
+
+        if ($content_type === self::WHOLE_URL) {
+            if (!$this->value_might_contain_source_domain($value)) {
+                return $value;
+            }
+
+            return $this->rewrite_whole_url($value);
         }
 
         // Unknown SQL columns can still contain WordPress block markup. If we
@@ -275,6 +284,60 @@ class StructuredDataUrlRewriter
         }
 
         $this->rewrite_result_cache[$cache_key] = $value;
+    }
+
+    private function rewrite_whole_url(string $value): string
+    {
+        if (
+            strpbrk($value, " \t\r\n") !== false ||
+            (
+                !WPURL::has_http_https_protocol($value) &&
+                strpos($value, '//') !== 0
+            )
+        ) {
+            return $value;
+        }
+
+        $cache_key = $this->mapping_cache_key . "\0" . self::WHOLE_URL . "\0" . $value;
+        $cached = $this->get_cached_rewrite_result($cache_key);
+        if ($cached !== null) {
+            return $cached === false ? $value : $cached['raw_url'];
+        }
+
+        $parsed_url = WPURL::parse($value, $this->base_url);
+        if ($parsed_url === false) {
+            $this->set_cached_rewrite_result($cache_key, false);
+            return $value;
+        }
+
+        foreach ($this->parsed_mapping as $mapping) {
+            if (!is_child_url_of($parsed_url, $mapping['from_url'])) {
+                continue;
+            }
+
+            $converted = WPURL::replace_base_url(
+                $parsed_url,
+                array(
+                    'old_base_url' => $mapping['from_url'],
+                    'new_base_url' => $mapping['to_url'],
+                    'raw_url'      => $value,
+                    'is_relative'  => false,
+                )
+            );
+            if ($converted === false) {
+                break;
+            }
+
+            $cache_value = [
+                'raw_url'    => (string) $converted,
+                'parsed_url' => $converted->new_url,
+            ];
+            $this->set_cached_rewrite_result($cache_key, $cache_value);
+            return $cache_value['raw_url'];
+        }
+
+        $this->set_cached_rewrite_result($cache_key, false);
+        return $value;
     }
 
     /**

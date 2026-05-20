@@ -19,15 +19,15 @@
  * statements emitted by MySQLDumpProducer follow a constrained set of shapes
  * the walker recognises; for any shape it doesn't, it returns null and every
  * FROM_BASE64() value falls back to plain-text URL rewriting (which is the
- * safe default anyway — block_markup is only ever assigned to a small set of
- * WordPress core columns).
+ * safe default anyway — content-type hints are only assigned to WordPress
+ * core columns with well-defined storage semantics).
  */
 class SqlStatementRewriter
 {
     private StructuredDataUrlRewriter $url_rewriter;
 
     /** @var array<string, array<string, string>> full_table_name => [column_name => content_type] */
-    private array $db_columns_with_block_markup;
+    private array $db_column_content_types;
 
     /**
      * WordPress core columns that contain block markup and benefit from
@@ -52,6 +52,25 @@ class SqlStatementRewriter
     ];
 
     /**
+     * WordPress core columns that store a single URL/URI value rather than a
+     * structured container. These can go straight to whole-URL parsing without
+     * probing for serialized PHP, JSON, or arbitrary text spans.
+     */
+    private const WP_WHOLE_URL_COLUMNS = [
+        'posts' => [
+            'guid' => 'whole_url',
+        ],
+        'comments' => [
+            'comment_author_url' => 'whole_url',
+        ],
+        'links' => [
+            'link_url' => 'whole_url',
+            'link_image' => 'whole_url',
+            'link_rss' => 'whole_url',
+        ],
+    ];
+
+    /**
      * @param StructuredDataUrlRewriter $url_rewriter
      * @param string $table_prefix WordPress table prefix (e.g. "wp_"), used to
      *        build full table names for exact matching.
@@ -68,14 +87,15 @@ class SqlStatementRewriter
         // for the same table+column (e.g. marking post_content as 'skip').
         $by_suffix = array_replace_recursive(
 			self::WP_BLOCK_MARKUP_COLUMNS,
+            self::WP_WHOLE_URL_COLUMNS,
 			$extra_db_columns_with_block_markup
         );
-        $this->db_columns_with_block_markup = [];
+        $this->db_column_content_types = [];
         foreach ($by_suffix as $suffix => $columns) {
             // Some plugins create unprefixed tables, so we match both with and without the table
             // prefix.
-            $this->db_columns_with_block_markup[$table_prefix . $suffix] = $columns;
-            $this->db_columns_with_block_markup[$suffix] = $columns;
+            $this->db_column_content_types[$table_prefix . $suffix] = $columns;
+            $this->db_column_content_types[$suffix] = $columns;
         }
     }
 
@@ -668,7 +688,7 @@ class SqlStatementRewriter
 
     /**
      * Look up the content type for a given table and column. The
-     * db_columns_with_block_markup map is keyed by full table name (prefix
+     * db_column_content_types map is keyed by full table name (prefix
      * already applied at construction time), so this is a direct lookup.
      *
      * Returns null if there's no entry for this table+column, meaning
@@ -676,6 +696,6 @@ class SqlStatementRewriter
      */
     private function get_content_type(string $table, string $column): ?string
     {
-        return $this->db_columns_with_block_markup[$table][$column] ?? null;
+        return $this->db_column_content_types[$table][$column] ?? null;
     }
 }
