@@ -172,7 +172,7 @@ class StructuredDataUrlRewriter
         }
 
         if ($content_type === self::PLAIN_TEXT) {
-            $literal_rewrite = $this->try_rewrite_plain_text_literal_origins($value);
+            $literal_rewrite = $this->rewrite_plain_text_literal_leaf($value);
             if ($literal_rewrite !== false) {
                 return $literal_rewrite;
             }
@@ -399,7 +399,7 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
-                $literal_rewrite = $this->try_rewrite_plain_text_literal_origins($content);
+                $literal_rewrite = $this->rewrite_plain_text_literal_leaf($content);
                 if ($literal_rewrite !== false) {
                     return $literal_rewrite;
                 }
@@ -484,6 +484,22 @@ class StructuredDataUrlRewriter
             $parent_pathname === $child_pathname_no_trailing_slash . '/' ||
             0 === strncmp( $child_pathname_no_trailing_slash . '/', $parent_pathname, strlen( $parent_pathname ) )
         );
+    }
+
+    /**
+     * Try the conservative plain leaf literal-origin fast path.
+     *
+     * This is safe to call before column-hint resolution. It only rewrites
+     * values that look like unstructured plain text; values containing syntax
+     * delimiters used by JSON, serialized PHP strings, HTML, block markup,
+     * shortcodes, CSS, Markdown links, or escaped URLs return false and must
+     * continue through the normal parser-owned path.
+     *
+     * @return false|string false when the generic parser path must handle it.
+     */
+    public function rewrite_plain_text_literal_leaf(string $content)
+    {
+        return $this->try_rewrite_plain_text_literal_origins($content);
     }
 
     /**

@@ -200,6 +200,14 @@ class SqlStatementRewriter
                     continue;
                 }
 
+                $literal_rewrite = $this->url_rewriter->rewrite_plain_text_literal_leaf($value);
+                if ($literal_rewrite !== false) {
+                    if ($literal_rewrite !== $value) {
+                        $scanner->set_value($literal_rewrite);
+                    }
+                    continue;
+                }
+
                 // Determine content type hint for this column
                 $content_type = null;
                 if ($value_to_column_map !== null) {
