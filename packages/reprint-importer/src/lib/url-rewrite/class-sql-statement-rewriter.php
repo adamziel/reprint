@@ -212,9 +212,10 @@ class SqlStatementRewriter
                     }
                 }
 
-                // Rewrite URLs in the value. Known block-markup columns can first
-                // try a boundary-checked literal base URL swap before falling back
-                // to the full structured parser.
+                // Rewrite URLs in the value. Known block-markup columns go
+                // through the block-markup processor; all other decoded values
+                // are treated as plain text or recursively decoded structured
+                // values by StructuredDataUrlRewriter.
                 $rewritten = $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
                     ? $this->url_rewriter->rewrite_known_block_markup_value($value)
                     : $this->url_rewriter->rewrite($value, $content_type);
