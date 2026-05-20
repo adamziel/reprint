@@ -37,7 +37,7 @@ class FastInsertScanner
      * @return array{
      *   table: string,
      *   column_map: list<array{int, int, string}>,
-     *   base64_entries: list<array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
+     *   base64_entries: list<array{expr_start: int, expr_length: ?int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
      * }|null
      *   Null when the SQL doesn't match the recognised shape.
      */
@@ -139,12 +139,13 @@ class FastInsertScanner
                 $column_map[] = [$value_start, $value_end, $columns[$col_idx]];
 
                 if (is_array($value_kind)) {
-                    // FROM_BASE64 payload: kind = [expr_start, quote_start, quote_length, encoded_value]
+                    // FROM_BASE64 payload: kind = [expr_start, expr_length, quote_start, quote_length, encoded_value]
                     $base64_entries[] = [
                         'expr_start' => $value_kind[0],
-                        'quote_start' => $value_kind[1],
-                        'quote_length' => $value_kind[2],
-                        'encoded_value' => $value_kind[3],
+                        'expr_length' => $value_kind[1],
+                        'quote_start' => $value_kind[2],
+                        'quote_length' => $value_kind[3],
+                        'encoded_value' => $value_kind[4],
                         'value' => null,
                         'new_value' => null,
                     ];
@@ -199,10 +200,10 @@ class FastInsertScanner
     /**
      * Scan one value in producer's tuple shape, advancing $cursor past it.
      *
-     * @return null|true|array{int,int,int,string}
+     * @return null|true|array{int,int,int,int,string}
      *   null = unrecognized shape (caller bails)
      *   true = recognised, no FROM_BASE64 entry to record
-     *   array = FROM_BASE64 payload, [expr_start, quote_start, quote_length, encoded]
+     *   array = FROM_BASE64 payload, [expr_start, expr_length, quote_start, quote_length, encoded]
      */
     private static function scan_value(string $sql, int $sql_len, int &$cursor)
     {
@@ -235,7 +236,7 @@ class FastInsertScanner
         ) {
             $expr_start = $cursor;
             $cursor += 12; // step past "FROM_BASE64("
-            return self::consume_base64_call($sql, $sql_len, $cursor, $expr_start, /*has_convert=*/false);
+            return self::consume_base64_call($sql, $sql_len, $cursor, $expr_start);
         }
 
         // CONVERT(FROM_BASE64('…') USING utf8mb4)
@@ -256,7 +257,7 @@ class FastInsertScanner
                 return null;
             }
             $cursor += 12;
-            $entry = self::consume_base64_call($sql, $sql_len, $cursor, $expr_start, /*has_convert=*/true);
+            $entry = self::consume_base64_call($sql, $sql_len, $cursor, $expr_start);
             if (!is_array($entry)) {
                 return null;
             }
@@ -282,6 +283,7 @@ class FastInsertScanner
                 return null;
             }
             $cursor++;
+            $entry[1] = $cursor - $expr_start;
             return $entry;
         }
 
@@ -319,11 +321,11 @@ class FastInsertScanner
     /**
      * Inside a FROM_BASE64( … ) call, with $cursor already past the opening
      * paren. Reads the quoted base64 string and the closing paren. Returns
-     * the [expr_start, quote_start, quote_length, encoded] tuple.
+     * the [expr_start, expr_length, quote_start, quote_length, encoded] tuple.
      *
-     * @return array{int,int,int,string}|null
+     * @return array{int,int,int,int,string}|null
      */
-    private static function consume_base64_call(string $sql, int $sql_len, int &$cursor, int $expr_start, bool $has_convert)
+    private static function consume_base64_call(string $sql, int $sql_len, int &$cursor, int $expr_start)
     {
         while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
             $cursor++;
@@ -348,17 +350,16 @@ class FastInsertScanner
         }
         $cursor = $close + 1;
         $quote_length = $cursor - $quote_start;
-        // The closing paren of FROM_BASE64( … )
-        if (!$has_convert) {
-            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                $cursor++;
-            }
-            if ($cursor >= $sql_len || $sql[$cursor] !== ')') {
-                return null;
-            }
+        // The closing paren of FROM_BASE64( … ). CONVERT(...) callers still
+        // need this consumed before they can verify the USING charset wrapper.
+        while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
             $cursor++;
         }
-        return [$expr_start, $quote_start, $quote_length, $payload];
+        if ($cursor >= $sql_len || $sql[$cursor] !== ')') {
+            return null;
+        }
+        $cursor++;
+        return [$expr_start, $cursor - $expr_start, $quote_start, $quote_length, $payload];
     }
 
     private static function is_ws(string $c): bool

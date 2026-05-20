@@ -5118,6 +5118,7 @@ class ImportClient
         }
 
         [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
+        $inline_base64_values_for_sqlite = strtolower((string) ($options["target_engine"] ?? "mysql")) === "sqlite";
 
         $this->audit_log(
             "CONNECTED | {$connection_label}",
@@ -5222,9 +5223,14 @@ class ImportClient
                         continue;
                     }
 
-                    // Rewrite URLs if mapping is configured
+                    // Rewrite URLs if mapping is configured. For SQLite,
+                    // also inline complete FROM_BASE64(...) expressions as
+                    // MySQL hex literals so the SQLite driver does not call a
+                    // PHP user-defined function for every encoded value.
                     if ($stmt_rewriter) {
-                        $query = $stmt_rewriter->rewrite($query);
+                        $query = $stmt_rewriter->rewrite($query, $inline_base64_values_for_sqlite);
+                    } elseif ($inline_base64_values_for_sqlite) {
+                        $query = SqlStatementRewriter::rewrite_base64_values_as_sqlite_literals($query);
                     }
 
                     // Execute against target database
@@ -5300,7 +5306,9 @@ class ImportClient
                 }
 
                 if ($stmt_rewriter) {
-                    $query = $stmt_rewriter->rewrite($query);
+                    $query = $stmt_rewriter->rewrite($query, $inline_base64_values_for_sqlite);
+                } elseif ($inline_base64_values_for_sqlite) {
+                    $query = SqlStatementRewriter::rewrite_base64_values_as_sqlite_literals($query);
                 }
 
                 try {

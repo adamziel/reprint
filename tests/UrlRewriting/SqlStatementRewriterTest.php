@@ -49,6 +49,45 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
+    public function testRewriteCanInlineSqliteCompatibleLiterals(): void
+    {
+        $rewriter = $this->createRewriter();
+        $html = '<a href="https://old-site.com/page">Link</a>';
+        $encoded = base64_encode($html);
+        $sql = "INSERT INTO `wp_posts` VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql, true);
+        $expected = '<a href="https://new-site.com/page">Link</a>';
+
+        $this->assertStringNotContainsString('FROM_BASE64', $result);
+        $this->assertStringContainsString("0x" . bin2hex($expected), $result);
+    }
+
+    public function testSqliteLiteralInliningDoesNotRequireUrlMappingHit(): void
+    {
+        $rewriter = $this->createRewriter();
+        $value = 'plain text without a URL';
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO `wp_options` VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = $rewriter->rewrite($sql, true);
+
+        $this->assertStringNotContainsString('FROM_BASE64', $result);
+        $this->assertStringContainsString("0x" . bin2hex($value), $result);
+    }
+
+    public function testStaticSqliteLiteralInliningWorksWithoutUrlRewriter(): void
+    {
+        $value = 'siteurl';
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO `wp_options` VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $result = SqlStatementRewriter::rewrite_base64_values_as_sqlite_literals($sql);
+
+        $this->assertStringNotContainsString('FROM_BASE64', $result);
+        $this->assertStringContainsString("0x" . bin2hex($value), $result);
+    }
+
     public function testPassesThroughDdlStatements(): void
     {
         $rewriter = $this->createRewriter();

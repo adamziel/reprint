@@ -130,6 +130,61 @@ class Base64ValueScannerTest extends TestCase
         $this->assertStringContainsString("CONVERT(FROM_BASE64('{$expected_encoded}') USING utf8mb4)", $modified);
     }
 
+    public function testSqliteCompatibleResultReplacesSimpleExpressionWithTextLiteral(): void
+    {
+        $value = 'hello world';
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO t VALUES(1, FROM_BASE64('{$encoded}'), NULL);";
+
+        $scanner = new Base64ValueScanner($sql);
+        $modified = $scanner->get_result_with_sqlite_compatible_literals();
+
+        $this->assertStringNotContainsString('FROM_BASE64', $modified);
+        $this->assertStringContainsString("0x" . bin2hex($value), $modified);
+    }
+
+    public function testSqliteCompatibleResultReplacesConvertWrapperWithTextLiteral(): void
+    {
+        $value = '{"key": "value"}';
+        $encoded = base64_encode($value);
+        $sql = "INSERT INTO t VALUES(1, CONVERT(FROM_BASE64('{$encoded}') USING utf8mb4));";
+
+        $scanner = new Base64ValueScanner($sql);
+        $modified = $scanner->get_result_with_sqlite_compatible_literals();
+
+        $this->assertStringNotContainsString('CONVERT', $modified);
+        $this->assertStringNotContainsString('FROM_BASE64', $modified);
+        $this->assertStringContainsString("0x" . bin2hex($value), $modified);
+    }
+
+    public function testSqliteCompatibleResultUsesUpdatedValueWhenSet(): void
+    {
+        $old = 'old value';
+        $new = 'new value';
+        $encoded_old = base64_encode($old);
+        $sql = "INSERT INTO t VALUES(FROM_BASE64('{$encoded_old}'));";
+
+        $scanner = new Base64ValueScanner($sql);
+        while ($scanner->next_value()) {
+            $scanner->set_value($new);
+        }
+        $modified = $scanner->get_result_with_sqlite_compatible_literals();
+
+        $this->assertStringNotContainsString('FROM_BASE64', $modified);
+        $this->assertStringContainsString("0x" . bin2hex($new), $modified);
+        $this->assertStringNotContainsString(bin2hex($old), $modified);
+    }
+
+    public function testSqliteCompatibleResultUsesQuotedLiteralForEmptyString(): void
+    {
+        $sql = "INSERT INTO t VALUES(FROM_BASE64(''));";
+
+        $scanner = new Base64ValueScanner($sql);
+        $modified = $scanner->get_result_with_sqlite_compatible_literals();
+
+        $this->assertSame("INSERT INTO t VALUES('');", $modified);
+    }
+
     public function testSetValueOnMultipleValues(): void
     {
         $v1 = 'first';

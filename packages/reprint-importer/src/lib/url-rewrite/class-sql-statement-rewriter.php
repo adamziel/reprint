@@ -88,9 +88,11 @@ class SqlStatementRewriter
      * without an http/https scheme will not be rewritten.
      *
      * @param string $sql The SQL statement.
+     * @param bool $inline_base64_values_for_sqlite Whether to replace complete
+     *        FROM_BASE64(...) expressions with SQLite-compatible text literals.
      * @return string The modified SQL statement.
      */
-    public function rewrite(string $sql): string
+    public function rewrite(string $sql, bool $inline_base64_values_for_sqlite = false): string
     {
         // Quick check: if no base64 values, nothing to rewrite
         if (strpos($sql, "FROM_BASE64(") === false) {
@@ -129,7 +131,9 @@ class SqlStatementRewriter
             && strpos($sql, 'dHBz') === false
             && strpos($sql, 'dHRw') === false
         ) {
-            return $sql;
+            return $inline_base64_values_for_sqlite
+                ? self::rewrite_base64_values_as_sqlite_literals($sql)
+                : $sql;
         }
 
         // Fast path: producer-shape INSERTs (the overwhelming majority of
@@ -145,7 +149,7 @@ class SqlStatementRewriter
                 'column_map' => $fast['column_map'],
             ];
             $scanner = Base64ValueScanner::from_entries($sql, $fast['base64_entries']);
-            return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+            return $this->rewrite_with_scanner($scanner, $value_to_column_map, $inline_base64_values_for_sqlite);
         }
 
         // Slow path: lex once, share the token array between the column
@@ -153,7 +157,30 @@ class SqlStatementRewriter
         $tokens = self::significant_tokens($sql);
         $value_to_column_map = $this->map_values_to_columns_from_tokens($tokens);
         $scanner = new Base64ValueScanner($sql, $tokens);
-        return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+        return $this->rewrite_with_scanner($scanner, $value_to_column_map, $inline_base64_values_for_sqlite);
+    }
+
+    /**
+     * Rewrite complete FROM_BASE64(...) expressions as SQLite-compatible MySQL
+     * hex literals without doing URL rewriting.
+     *
+     * This is used for SQLite db-apply even when there is no URL mapping. It
+     * preserves the same decoded bytes the registered FROM_BASE64
+     * user-defined function would return, but avoids invoking that PHP callback
+     * for every encoded value in a large INSERT batch.
+     */
+    public static function rewrite_base64_values_as_sqlite_literals(string $sql): string
+    {
+        if (strpos($sql, "FROM_BASE64(") === false) {
+            return $sql;
+        }
+
+        $fast = FastInsertScanner::scan($sql);
+        $scanner = $fast !== null
+            ? Base64ValueScanner::from_entries($sql, $fast['base64_entries'])
+            : new Base64ValueScanner($sql);
+
+        return $scanner->get_result_with_sqlite_compatible_literals();
     }
 
     /**
@@ -162,7 +189,7 @@ class SqlStatementRewriter
      *
      * @param array{table: string, column_map: list<array{int, int, string}>}|null $value_to_column_map
      */
-    private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
+    private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map, bool $inline_base64_values_for_sqlite = false): string
     {
         while ($scanner->next_value()) {
             if (!$scanner->encoded_payload_could_contain_http_scheme()) {
@@ -205,7 +232,9 @@ class SqlStatementRewriter
             }
         }
 
-        return $scanner->get_result();
+        return $inline_base64_values_for_sqlite
+            ? $scanner->get_result_with_sqlite_compatible_literals()
+            : $scanner->get_result();
     }
 
     /**

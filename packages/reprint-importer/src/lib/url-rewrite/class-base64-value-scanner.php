@@ -5,9 +5,12 @@
  * statement, letting the caller read and replace each decoded value.
  *
  * Uses WP_MySQL_Lexer for proper tokenization instead of string scanning.
- * Detects CONVERT(FROM_BASE64('...') USING utf8mb4) wrappers automatically —
+ * Detects CONVERT(FROM_BASE64('...') USING utf8mb4) wrappers automatically.
  * set_value() only replaces the base64 payload inside the quotes, so wrappers
- * are preserved without the caller needing to know about them.
+ * are preserved without the caller needing to know about them. The scanner also
+ * records the full expression range when the wrapper shape is complete, which
+ * lets SQLite callers replace the function call with a literal instead of
+ * invoking a per-row user-defined function.
  *
  * Values are decoded lazily. The scanner keeps the original encoded payload
  * until get_value() is called, so callers can skip obviously irrelevant values
@@ -32,13 +35,14 @@ class Base64ValueScanner
     /**
      * Each entry tracks one FROM_BASE64() value found in the SQL:
      *   'expr_start'   => int    Offset of the outermost expression (CONVERT or FROM_BASE64)
+     *   'expr_length'  => ?int   Length of the complete outer expression, when recognised
      *   'quote_start'  => int    Offset of the quoted string token (including quotes)
      *   'quote_length' => int    Length of the quoted string token
      *   'encoded_value'=> string The base64 payload
      *   'value'        => ?string The base64-decoded value, cached on demand
      *   'new_value'    => ?string Non-null when set_value() has been called
      *
-     * @var array<int, array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
+     * @var array<int, array{expr_start: int, expr_length: ?int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
      */
     private array $entries = [];
 
@@ -70,7 +74,7 @@ class Base64ValueScanner
      * already located every FROM_BASE64() expression and captured its payload,
      * the scanner skips the lexer and still decodes values lazily.
      *
-     * @param list<array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}> $entries
+     * @param list<array{expr_start: int, expr_length: ?int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}> $entries
      */
     public static function from_entries(string $sql, array $entries): self
     {
@@ -172,66 +176,64 @@ class Base64ValueScanner
     }
 
     /**
+     * Return SQL with every complete FROM_BASE64(...) expression rewritten as a
+     * MySQL hex literal that the SQLite driver can translate.
+     *
+     * The replacement is 0x..., not a quoted SQL string. Hex literals keep
+     * arbitrary decoded bytes out of the SQL text, and WP_PDO_MySQL_On_SQLite
+     * already translates MySQL hex literals into the SQLite representation it
+     * expects. Empty strings use '' because bare 0x is not a valid MySQL token.
+     */
+    public function get_result_with_sqlite_compatible_literals(): string
+    {
+        if (empty($this->entries)) {
+            return $this->sql;
+        }
+
+        $parts = [];
+        $cursor = 0;
+        $used_sqlite_literals = false;
+        foreach ($this->entries as $entry) {
+            if ($entry['expr_length'] !== null) {
+                $value = $entry['new_value'] ?? $entry['value'];
+                if ($value === null) {
+                    $decoded = base64_decode($entry['encoded_value'], true);
+                    $value = $decoded !== false ? $decoded : '';
+                }
+
+                $hex = bin2hex($value);
+                $replacement = $hex === '' ? "''" : '0x' . $hex;
+                $parts[] = substr($this->sql, $cursor, $entry['expr_start'] - $cursor);
+                $parts[] = $replacement;
+                $cursor = $entry['expr_start'] + $entry['expr_length'];
+                $used_sqlite_literals = true;
+            } elseif ($entry['new_value'] !== null) {
+                $replacement = "'" . base64_encode($entry['new_value']) . "'";
+                $parts[] = substr($this->sql, $cursor, $entry['quote_start'] - $cursor);
+                $parts[] = $replacement;
+                $cursor = $entry['quote_start'] + $entry['quote_length'];
+            }
+        }
+        $parts[] = substr($this->sql, $cursor);
+
+        return $used_sqlite_literals || $this->dirty ? implode('', $parts) : $this->sql;
+    }
+
+    /**
      * Tokenize the SQL and find all FROM_BASE64('...') expressions.
-     * Tracks whether each is wrapped in CONVERT(...) for correct expr_start offset.
      */
     private function scan(): void
     {
         $lexer = new WP_MySQL_Lexer($this->sql);
-
-        // Track the last two tokens so we can detect CONVERT( before FROM_BASE64.
-        // next_token() skips whitespace/comments, so CONVERT ( FROM_BASE64 appears
-        // as three consecutive tokens.
-        $prev = [null, null];
-
-        while ($lexer->next_token()) {
-            $token = $lexer->get_token();
-
-            if (
-                $token->id === WP_MySQL_Lexer::IDENTIFIER
-                && strtoupper($token->get_value()) === 'FROM_BASE64'
-            ) {
-                $expr_start = $token->start;
-
-                // If the previous tokens are CONVERT + (, the outer expression
-                // starts at CONVERT, not at FROM_BASE64.
-                if (
-                    $prev[1] !== null
-                    && $prev[1]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL
-                    && $prev[0] !== null
-                    && $prev[0]->id === WP_MySQL_Lexer::CONVERT_SYMBOL
-                ) {
-                    $expr_start = $prev[0]->start;
-                }
-
-                // Advance past ( to find the quoted base64 string
-                while ($lexer->next_token()) {
-                    $inner = $lexer->get_token();
-                    if (
-                        $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
-                        || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
-                    ) {
-                        $this->entries[] = [
-                            'expr_start' => $expr_start,
-                            'quote_start' => $inner->start,
-                            'quote_length' => $inner->length,
-                            'encoded_value' => $inner->get_value(),
-                            'value' => null,
-                            'new_value' => null,
-                        ];
-                        break;
-                    }
-                    // Skip the opening parenthesis of FROM_BASE64(
-                    if ($inner->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
-                        break;
-                    }
-                }
-            }
-
-            // Shift the two-token window
-            $prev[0] = $prev[1];
-            $prev[1] = $token;
+        $tokens = $lexer->remaining_tokens();
+        if (
+            !empty($tokens)
+            && end($tokens)->id === WP_MySQL_Lexer::EOF
+        ) {
+            array_pop($tokens);
         }
+
+        $this->scan_tokens($tokens);
     }
 
     /**
@@ -261,6 +263,7 @@ class Base64ValueScanner
                 && strtoupper($token->get_value()) === 'FROM_BASE64'
             ) {
                 $expr_start = $token->start;
+                $has_convert_wrapper = false;
 
                 if (
                     $prev[1] !== null
@@ -269,6 +272,7 @@ class Base64ValueScanner
                     && $prev[0]->id === WP_MySQL_Lexer::CONVERT_SYMBOL
                 ) {
                     $expr_start = $prev[0]->start;
+                    $has_convert_wrapper = true;
                 }
 
                 // Walk forward to find the quoted base64 payload, mirroring
@@ -280,8 +284,16 @@ class Base64ValueScanner
                         $inner->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
                         || $inner->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
                     ) {
+                        $expr_length = self::get_expression_length(
+                            $tokens,
+                            $i,
+                            $j,
+                            $expr_start,
+                            $has_convert_wrapper
+                        );
                         $this->entries[] = [
                             'expr_start' => $expr_start,
+                            'expr_length' => $expr_length,
                             'quote_start' => $inner->start,
                             'quote_length' => $inner->length,
                             'encoded_value' => $inner->get_value(),
@@ -299,6 +311,40 @@ class Base64ValueScanner
             $prev[0] = $prev[1];
             $prev[1] = $token;
         }
+    }
+
+    /**
+     * Return the byte length of the complete expression when the token stream
+     * contains a balanced FROM_BASE64(...) or CONVERT(FROM_BASE64(...) USING ...)
+     * expression. Null means the scanner can still rewrite the quoted payload,
+     * but SQLite literal inlining should leave the expression intact.
+     *
+     * @param WP_MySQL_Token[] $tokens
+     */
+    private static function get_expression_length(array $tokens, int $from_base64_index, int $quote_index, int $expr_start, bool $has_convert_wrapper): ?int
+    {
+        $open_index = $from_base64_index + 1;
+        if (
+            !isset($tokens[$open_index])
+            || $tokens[$open_index]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL
+        ) {
+            return null;
+        }
+
+        $depth = $has_convert_wrapper ? 2 : 1;
+        $token_count = count($tokens);
+        for ($i = $quote_index + 1; $i < $token_count; $i++) {
+            if ($tokens[$i]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+                $depth++;
+            } elseif ($tokens[$i]->id === WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+                $depth--;
+                if ($depth === 0) {
+                    return ($tokens[$i]->start + $tokens[$i]->length) - $expr_start;
+                }
+            }
+        }
+
+        return null;
     }
 
     private static function encoded_payload_could_decode_to_http_scheme(string $payload): bool
