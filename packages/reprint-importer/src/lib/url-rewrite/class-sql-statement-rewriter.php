@@ -89,9 +89,9 @@ class SqlStatementRewriter
      *
      * @param string $sql The SQL statement.
      * @param bool $inline_base64_values_for_sqlite Whether to replace
-     *        FROM_BASE64() expressions with native SQLite text expressions
-     *        while rewriting. This is only for SQLite targets; MySQL targets
-     *        need the original FROM_BASE64() calls.
+     *        decodable FROM_BASE64() expressions with SQLite-compatible
+     *        literals while rewriting. This is only for SQLite targets; MySQL
+     *        targets need the original FROM_BASE64() calls.
      * @return string The modified SQL statement.
      */
     public function rewrite(string $sql, bool $inline_base64_values_for_sqlite = false): string

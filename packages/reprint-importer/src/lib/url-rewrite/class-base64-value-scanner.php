@@ -213,9 +213,16 @@ class Base64ValueScanner
                 $value = self::decode_payload($entry['encoded_value']);
             }
             if ($value !== null) {
+                // Use 0x... for non-empty values so apostrophes, backslashes,
+                // and NUL bytes never enter SQL string-literal escaping.
+                // MySQL-on-SQLite rejects a bare 0x literal, so the empty
+                // string stays as a normal quoted SQL literal.
                 $replacement = $value === '' ? "''" : "0x" . bin2hex($value);
             }
 
+            // If strict base64 decoding fails, preserve the original expression.
+            // That keeps malformed or non-literal FROM_BASE64() cases on the
+            // existing SQLite UDF path instead of silently changing semantics.
             $parts[] = substr($this->sql, $cursor, $entry['expr_start'] - $cursor);
             $parts[] = $replacement ?? substr($this->sql, $entry['expr_start'], $entry['expr_length']);
             $cursor = $entry['expr_start'] + $entry['expr_length'];
@@ -242,7 +249,6 @@ class Base64ValueScanner
     private function scan_tokens(array $tokens): void
     {
         $token_count = count($tokens);
-        $prev = [null, null];
 
         for ($i = 0; $i < $token_count; $i++) {
             $token = $tokens[$i];
@@ -253,6 +259,10 @@ class Base64ValueScanner
             ) {
                 $expr_start = $token->start;
 
+                // Detect the producer's wrapper by looking behind the
+                // FROM_BASE64 token. The lexer has already removed whitespace
+                // and comments, so CONVERT ( FROM_BASE64 is represented as
+                // three adjacent significant tokens.
                 if (
                     $i >= 2
                     && $tokens[$i - 1]->id === WP_MySQL_Lexer::OPEN_PAR_SYMBOL
@@ -261,6 +271,10 @@ class Base64ValueScanner
                     $expr_start = $tokens[$i - 2]->start;
                 }
 
+                // Walk forward through the exact FROM_BASE64('...') shape:
+                // opening parenthesis, quoted payload, closing parenthesis.
+                // Any computed argument or malformed call is ignored here and
+                // left for normal SQL execution.
                 $open_index = $i + 1;
                 $payload_index = $i + 2;
                 $close_index = $i + 3;
@@ -278,6 +292,10 @@ class Base64ValueScanner
 
                 $expr_end = $tokens[$close_index]->start + $tokens[$close_index]->length;
                 if ($expr_start !== $token->start) {
+                    // Collapse only CONVERT(FROM_BASE64(...) USING utf8mb4),
+                    // the wrapper emitted by our dump producer. Other CONVERT
+                    // forms may perform meaningful casts, so SQLite inlining
+                    // replaces only the inner FROM_BASE64() call.
                     $convert_end = $this->find_utf8mb4_convert_using_end($tokens, $close_index);
                     if ($convert_end !== null) {
                         $expr_end = $convert_end;
@@ -297,9 +315,6 @@ class Base64ValueScanner
                     'new_value' => null,
                 ];
             }
-
-            $prev[0] = $prev[1];
-            $prev[1] = $token;
         }
     }
 
