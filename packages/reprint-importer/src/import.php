@@ -5166,6 +5166,7 @@ class ImportClient
         $skipped = 0;
         $save_every = 100;
         $stmts_since_save = 0;
+        $sqlite_prepared_statement_cache = [];
 
         // Load pre-computed statement count from db-pull for progress reporting
         $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
@@ -5237,6 +5238,7 @@ class ImportClient
                             $query,
                             $stmt_rewriter,
                             $sqlite_prepared_pdo,
+                            $sqlite_prepared_statement_cache,
                             $executed_query,
                         );
                     } catch (PDOException $e) {
@@ -5315,6 +5317,7 @@ class ImportClient
                         $query,
                         $stmt_rewriter,
                         $sqlite_prepared_pdo,
+                        $sqlite_prepared_statement_cache,
                         $executed_query,
                     );
                 } catch (PDOException $e) {
@@ -5420,6 +5423,7 @@ class ImportClient
         string $query,
         ?SqlStatementRewriter $stmt_rewriter,
         ?PDO $sqlite_prepared_pdo,
+        array &$sqlite_prepared_statement_cache,
         string &$executed_query
     ): void {
         $executed_query = $query;
@@ -5431,9 +5435,17 @@ class ImportClient
 
             if ($prepared_insert !== null) {
                 $executed_query = $prepared_insert['sql'];
-                $statement = $sqlite_prepared_pdo->prepare($prepared_insert['sql']);
-                if ($statement === false) {
-                    throw new PDOException('Failed to prepare SQLite INSERT statement.');
+                $statement = $sqlite_prepared_statement_cache[$prepared_insert['sql']] ?? null;
+                if (!$statement instanceof PDOStatement) {
+                    $statement = $sqlite_prepared_pdo->prepare($prepared_insert['sql']);
+                    if ($statement === false) {
+                        throw new PDOException('Failed to prepare SQLite INSERT statement.');
+                    }
+
+                    if (count($sqlite_prepared_statement_cache) >= 64) {
+                        array_shift($sqlite_prepared_statement_cache);
+                    }
+                    $sqlite_prepared_statement_cache[$prepared_insert['sql']] = $statement;
                 }
 
                 foreach ($prepared_insert['params'] as $index => $value) {
