@@ -432,6 +432,18 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
+    public function testRewriteCacheSeparatesPlainTextAndBlockMarkupSemantics(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<div data-note="https://old-site.com/not-a-url-attribute">Content</div>';
+
+        $plain_result = $rewriter->rewrite($input);
+        $block_result = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertStringContainsString('https://new-site.com/not-a-url-attribute', $plain_result);
+        $this->assertSame($input, $block_result);
+    }
+
     // --- Content type hint: null (default) uses plain text URL scanning ---
 
     public function testDefaultHintUsesPlainTextUrlScanning(): void

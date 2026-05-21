@@ -148,9 +148,11 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
+        // Avoid constructing the serialized-PHP parser for ordinary URL
+        // strings and block markup. The parser still owns validation once
+        // entered; this gate only skips impossible first-byte shapes that
+        // cannot expose string values for rewriting.
         if ($this->could_be_php_serialization_with_strings($value)) {
-            // Try serialized PHP: the parser validates the entire structure
-            // in the constructor. If it's not malformed, iterate and recurse.
             $p = new PhpSerializationProcessor($value);
             if (!$p->is_malformed()) {
                 while ($p->next_value()) {
