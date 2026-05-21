@@ -44,9 +44,68 @@ class SQLitePreparedInsertBuilder
             return null;
         }
 
-        $template_sql = self::get_template_sql($fast);
-        if ($template_sql === null) {
+        $column_count = count($fast['columns']);
+        $value_count = count($fast['value_entries']);
+        if ($column_count === 0 || $value_count === 0 || $value_count % $column_count !== 0) {
             return null;
+        }
+
+        $shape_key_parts = [
+            strlen($fast['table']) . ':' . $fast['table'],
+            (string) $column_count,
+        ];
+        foreach ($fast['columns'] as $column) {
+            $shape_key_parts[] = strlen($column) . ':' . $column;
+        }
+        foreach ($fast['value_entries'] as $entry) {
+            if ($entry['kind'] === 'numeric') {
+                $shape_key_parts[] = strpbrk($entry['raw'], '.eE') === false
+                    ? 'CAST(? AS NUMERIC)'
+                    : 'CAST(? AS REAL)';
+            } else {
+                $shape_key_parts[] = '?';
+            }
+        }
+
+        $shape_key = implode('|', $shape_key_parts);
+        $template_sql = self::$template_sql_cache[$shape_key] ?? null;
+        if ($template_sql === null) {
+            $quoted_columns = [];
+            foreach ($fast['columns'] as $column) {
+                $quoted_columns[] = self::quote_identifier($column);
+            }
+
+            $rows = [];
+            for ($offset = 0; $offset < $value_count; $offset += $column_count) {
+                $placeholders = [];
+                for ($i = 0; $i < $column_count; $i++) {
+                    $entry = $fast['value_entries'][$offset + $i];
+                    if ($entry['kind'] === 'numeric') {
+                        // Dotted/exponent literals need REAL to match SQLite's literal typing.
+                        $placeholders[] = strpbrk($entry['raw'], '.eE') === false
+                            ? 'CAST(? AS NUMERIC)'
+                            : 'CAST(? AS REAL)';
+                    } else {
+                        $placeholders[] = '?';
+                    }
+                }
+                $rows[] = '(' . implode(', ', $placeholders) . ')';
+            }
+
+            $template_sql = 'INSERT INTO '
+                . self::quote_identifier($fast['table'])
+                . ' (' . implode(', ', $quoted_columns) . ') VALUES'
+                . implode(',', $rows)
+                . ';';
+
+            self::$template_sql_cache[$shape_key] = $template_sql;
+            self::$template_sql_cache_order[] = $shape_key;
+            if (count(self::$template_sql_cache_order) > self::TEMPLATE_CACHE_MAX) {
+                $oldest_key = array_shift(self::$template_sql_cache_order);
+                if (is_string($oldest_key)) {
+                    unset(self::$template_sql_cache[$oldest_key]);
+                }
+            }
         }
 
         $params = [];
@@ -94,136 +153,9 @@ class SQLitePreparedInsertBuilder
         ];
     }
 
-    /**
-     * @param array{
-     *   table: string,
-     *   columns: list<string>,
-     *   value_entries: list<array{kind: string, raw?: string}>
-     * } $fast
-     */
-    private static function get_template_sql(array $fast): ?string
-    {
-        $shape_key = self::shape_key($fast);
-        $cached = self::$template_sql_cache[$shape_key] ?? null;
-        if ($cached !== null) {
-            return $cached;
-        }
-
-        $template_sql = self::build_template_sql($fast);
-        if ($template_sql === null) {
-            return null;
-        }
-
-        self::$template_sql_cache[$shape_key] = $template_sql;
-        self::$template_sql_cache_order[] = $shape_key;
-        if (count(self::$template_sql_cache_order) > self::TEMPLATE_CACHE_MAX) {
-            $oldest_key = array_shift(self::$template_sql_cache_order);
-            if (is_string($oldest_key)) {
-                unset(self::$template_sql_cache[$oldest_key]);
-            }
-        }
-
-        return $template_sql;
-    }
-
-    /**
-     * @param array{
-     *   table: string,
-     *   columns: list<string>,
-     *   value_entries: list<array{kind: string, raw?: string}>
-     * } $fast
-     */
-    private static function shape_key(array $fast): string
-    {
-        $parts = [
-            strlen($fast['table']) . ':' . $fast['table'],
-            (string) count($fast['columns']),
-        ];
-        foreach ($fast['columns'] as $column) {
-            $parts[] = strlen($column) . ':' . $column;
-        }
-        foreach ($fast['value_entries'] as $entry) {
-            $parts[] = self::shape_marker_for_value($entry);
-        }
-
-        return implode('|', $parts);
-    }
-
-    /**
-     * @param array{
-     *   table: string,
-     *   columns: list<string>,
-     *   value_entries: list<array{kind: string, raw?: string}>
-     * } $fast
-     */
-    private static function build_template_sql(array $fast): ?string
-    {
-        $column_count = count($fast['columns']);
-        $value_count = count($fast['value_entries']);
-        if ($column_count === 0 || $value_count === 0 || $value_count % $column_count !== 0) {
-            return null;
-        }
-
-        $quoted_columns = [];
-        foreach ($fast['columns'] as $column) {
-            $quoted_columns[] = self::quote_identifier($column);
-        }
-
-        $rows = [];
-        for ($offset = 0; $offset < $value_count; $offset += $column_count) {
-            $placeholders = [];
-            for ($i = 0; $i < $column_count; $i++) {
-                $placeholders[] = self::placeholder_sql_for_value($fast['value_entries'][$offset + $i]);
-            }
-            $rows[] = '(' . implode(', ', $placeholders) . ')';
-        }
-
-        return 'INSERT INTO '
-            . self::quote_identifier($fast['table'])
-            . ' (' . implode(', ', $quoted_columns) . ') VALUES'
-            . implode(',', $rows)
-            . ';';
-    }
-
-    /**
-     * @param array{kind: string, raw?: string} $entry
-     */
-    private static function placeholder_sql_for_value(array $entry): string
-    {
-        return $entry['kind'] === 'numeric'
-            ? self::numeric_placeholder_sql($entry['raw'])
-            : '?';
-    }
-
-    /**
-     * @param array{kind: string, raw?: string} $entry
-     */
-    private static function shape_marker_for_value(array $entry): string
-    {
-        return $entry['kind'] === 'numeric'
-            ? self::numeric_placeholder_sql($entry['raw'])
-            : '?';
-    }
-
     private static function quote_identifier(string $identifier): string
     {
         return '`' . str_replace('`', '``', $identifier) . '`';
-    }
-
-    /**
-     * Preserve SQLite's own numeric-literal storage class where it matters.
-     *
-     * SQLite parses dotted and exponent literals as REAL even when their
-     * numeric value is integral (`1.`, `1e2`, `-3.5e+2`). Plain integer
-     * literals are INTEGER until they overflow into REAL. CAST(? AS NUMERIC)
-     * matches the latter behavior, but would collapse exact dotted/exponent
-     * values to INTEGER, so those use REAL explicitly.
-     */
-    private static function numeric_placeholder_sql(string $raw): string
-    {
-        return strpbrk($raw, '.eE') === false
-            ? 'CAST(? AS NUMERIC)'
-            : 'CAST(? AS REAL)';
     }
 
 }
