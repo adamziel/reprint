@@ -470,6 +470,21 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
+    public function testKnownBlockMarkupMarkupOnlyFastPathIgnoresUnknownAttributesAndComments(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:html -->'
+            . '<!-- https://old-site.com/comment -->'
+            . '<a href="https://old-site.com/link" data-note="https://old-site.com/not-a-url-attribute">Link</a>'
+            . '<!-- /wp:html -->';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('href="https://new-site.com/link"', $result);
+        $this->assertStringContainsString('data-note="https://old-site.com/not-a-url-attribute"', $result);
+        $this->assertStringContainsString('https://old-site.com/comment', $result);
+    }
+
     // --- Content type hint: null (default) uses plain text URL scanning ---
 
     public function testDefaultHintUsesPlainTextUrlScanning(): void
