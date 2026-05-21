@@ -50,19 +50,34 @@ class SQLitePreparedInsertBuilder
             return null;
         }
 
+        // Describe the prepared SQL template, not the concrete bound values.
+        // The cache key must change when the generated SQL text changes, but
+        // must stay stable across batches that only differ by decoded payloads
+        // or numeric literal values.
         $shape_key_parts = [
+            // Table names are emitted into the SQL template, so they are part
+            // of the shape. Length-prefixing prevents separator collisions.
             strlen($fast['table']) . ':' . $fast['table'],
+            // The number of columns determines tuple width and avoids treating
+            // a prefix of one column list as the same shape as a shorter list.
             (string) $column_count,
         ];
         foreach ($fast['columns'] as $column) {
+            // Column order is part of INSERT semantics and of the generated SQL
+            // text, so each quoted identifier contributes to the template key.
             $shape_key_parts[] = strlen($column) . ':' . $column;
         }
         foreach ($fast['value_entries'] as $entry) {
             if ($entry['kind'] === 'numeric') {
+                // Numeric values are bound, not embedded. Only SQLite's target
+                // storage class affects the template: dotted/exponent literals
+                // need REAL while integer-looking literals use NUMERIC.
                 $shape_key_parts[] = strpbrk($entry['raw'], '.eE') === false
                     ? 'CAST(? AS NUMERIC)'
                     : 'CAST(? AS REAL)';
             } else {
+                // NULL, empty strings, and decoded base64 payloads all compile
+                // to the same bare placeholder; their values are supplied later.
                 $shape_key_parts[] = '?';
             }
         }
@@ -70,6 +85,9 @@ class SQLitePreparedInsertBuilder
         $shape_key = implode('|', $shape_key_parts);
         $template_sql = self::$template_sql_cache[$shape_key] ?? null;
         if ($template_sql === null) {
+            // Cache misses are the only time we build SQL text. Payload bytes
+            // and numeric literals still never become SQL; this only emits
+            // identifiers and placeholders for the producer-recognised shape.
             $quoted_columns = [];
             foreach ($fast['columns'] as $column) {
                 $quoted_columns[] = self::quote_identifier($column);
@@ -92,6 +110,8 @@ class SQLitePreparedInsertBuilder
                 $rows[] = '(' . implode(', ', $placeholders) . ')';
             }
 
+            // Preserve one reusable SQL string per table/column/value-shape so
+            // PDO and SQLite can reuse the compiled statement across dump rows.
             $template_sql = 'INSERT INTO '
                 . self::quote_identifier($fast['table'])
                 . ' (' . implode(', ', $quoted_columns) . ') VALUES'
@@ -101,6 +121,8 @@ class SQLitePreparedInsertBuilder
             self::$template_sql_cache[$shape_key] = $template_sql;
             self::$template_sql_cache_order[] = $shape_key;
             if (count(self::$template_sql_cache_order) > self::TEMPLATE_CACHE_MAX) {
+                // Bound cache growth: large imports can touch many plugin
+                // tables, but old shapes are cheap to rebuild if seen again.
                 $oldest_key = array_shift(self::$template_sql_cache_order);
                 if (is_string($oldest_key)) {
                     unset(self::$template_sql_cache[$oldest_key]);
@@ -108,6 +130,9 @@ class SQLitePreparedInsertBuilder
             }
         }
 
+        // Build the bound values after the template is selected. This keeps
+        // untrusted decoded bytes out of SQL text while still allowing URL
+        // rewriting to use table/column context for structured data.
         $params = [];
         $param_types = [];
 
