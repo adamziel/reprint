@@ -143,9 +143,7 @@ class SQLitePreparedInsertBuilder
             $parts[] = strlen($column) . ':' . $column;
         }
         foreach ($fast['value_entries'] as $entry) {
-            $parts[] = $entry['kind'] === 'numeric'
-                ? self::numeric_placeholder_sql($entry['raw'])
-                : '?';
+            $parts[] = self::shape_marker_for_value($entry);
         }
 
         return implode('|', $parts);
@@ -175,10 +173,7 @@ class SQLitePreparedInsertBuilder
         for ($offset = 0; $offset < $value_count; $offset += $column_count) {
             $placeholders = [];
             for ($i = 0; $i < $column_count; $i++) {
-                $entry = $fast['value_entries'][$offset + $i];
-                $placeholders[] = $entry['kind'] === 'numeric'
-                    ? self::numeric_placeholder_sql($entry['raw'])
-                    : '?';
+                $placeholders[] = self::placeholder_sql_for_value($fast['value_entries'][$offset + $i]);
             }
             $rows[] = '(' . implode(', ', $placeholders) . ')';
         }
@@ -188,6 +183,26 @@ class SQLitePreparedInsertBuilder
             . ' (' . implode(', ', $quoted_columns) . ') VALUES'
             . implode(',', $rows)
             . ';';
+    }
+
+    /**
+     * @param array{kind: string, raw?: string} $entry
+     */
+    private static function placeholder_sql_for_value(array $entry): string
+    {
+        return $entry['kind'] === 'numeric'
+            ? self::numeric_placeholder_sql($entry['raw'])
+            : '?';
+    }
+
+    /**
+     * @param array{kind: string, raw?: string} $entry
+     */
+    private static function shape_marker_for_value(array $entry): string
+    {
+        return $entry['kind'] === 'numeric'
+            ? self::numeric_placeholder_sql($entry['raw'])
+            : '?';
     }
 
     private static function quote_identifier(string $identifier): string
