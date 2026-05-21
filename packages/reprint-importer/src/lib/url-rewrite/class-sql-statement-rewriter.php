@@ -138,14 +138,14 @@ class SqlStatementRewriter
         // recognise — UPDATE, INSERT … SELECT, qualified names, hex
         // literals, escaped quotes — falls through to the lexer path
         // below with identical behaviour.
-        $fast = FastInsertScanner::scan($sql);
+        $fast = FastInsertScanner::scan($sql, true);
         if ($fast !== null) {
             $value_to_column_map = [
                 'table' => $fast['table'],
                 'column_map' => $fast['column_map'],
             ];
             $scanner = Base64ValueScanner::from_entries($sql, $fast['base64_entries']);
-            return $this->rewrite_with_scanner($scanner, $value_to_column_map);
+            return $this->rewrite_with_scanner($scanner, $value_to_column_map, true);
         }
 
         // Slow path: lex once, share the token array between the column
@@ -205,10 +205,10 @@ class SqlStatementRewriter
      *
      * @param array{table: string, column_map: list<array{int, int, string}>}|null $value_to_column_map
      */
-    private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
+    private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map, bool $payloads_prefiltered = false): string
     {
         while ($scanner->next_value()) {
-            if (!$scanner->encoded_payload_could_contain_http_scheme()) {
+            if (!$payloads_prefiltered && !$scanner->encoded_payload_could_contain_http_scheme()) {
                 continue;
             }
 
@@ -223,8 +223,8 @@ class SqlStatementRewriter
             }
 
             // Determine content type hint for this column.
-            $column_name = null;
-            if ($value_to_column_map !== null) {
+            $column_name = $scanner->get_column_name();
+            if ($column_name === null && $value_to_column_map !== null) {
                 $column_name = $this->find_column_at_offset(
                     $value_to_column_map['column_map'],
                     $scanner->get_match_offset()

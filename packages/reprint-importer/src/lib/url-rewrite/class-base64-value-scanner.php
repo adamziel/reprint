@@ -37,8 +37,9 @@ class Base64ValueScanner
      *   'encoded_value'=> string The base64 payload
      *   'value'        => ?string The base64-decoded value, cached on demand
      *   'new_value'    => ?string Non-null when set_value() has been called
+     *   'column_name'  => ?string Optional column name from tokenization-free scanners
      *
-     * @var array<int, array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
+     * @var array<int, array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string, column_name?: string}>
      */
     private array $entries = [];
 
@@ -70,7 +71,7 @@ class Base64ValueScanner
      * already located every FROM_BASE64() expression and captured its payload,
      * the scanner skips the lexer and still decodes values lazily.
      *
-     * @param list<array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}> $entries
+     * @param list<array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string, column_name?: string}> $entries
      */
     public static function from_entries(string $sql, array $entries): self
     {
@@ -144,6 +145,11 @@ class Base64ValueScanner
     public function get_match_offset(): int
     {
         return $this->entries[$this->cursor]['expr_start'];
+    }
+
+    public function get_column_name(): ?string
+    {
+        return $this->entries[$this->cursor]['column_name'] ?? null;
     }
 
     /**

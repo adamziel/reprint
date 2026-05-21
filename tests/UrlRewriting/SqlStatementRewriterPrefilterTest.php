@@ -149,6 +149,64 @@ class SqlStatementRewriterPrefilterTest extends TestCase
         $this->assertTrue($this->statementHasAnyPrefix($sql));
     }
 
+    public function testFastInsertScannerKeepsOnlyHttpCandidatePayloads(): void
+    {
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`, `post_type`) VALUES"
+            . "(1, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s')), "
+            . "(2, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('Plain title'),
+            base64_encode('No URL in this body'),
+            base64_encode('post'),
+            base64_encode('Another plain title'),
+            base64_encode('<a href="https://old-site.com/page">Link</a>'),
+            base64_encode('post')
+        );
+
+        $scan = FastInsertScanner::scan($sql, true);
+
+        $this->assertNotNull($scan);
+        $this->assertSame('wp_posts', $scan['table']);
+        $this->assertCount(1, $scan['base64_entries']);
+        $this->assertCount(0, $scan['column_map']);
+        $this->assertSame('post_content', $scan['base64_entries'][0]['column_name']);
+        $this->assertSame(
+            '<a href="https://old-site.com/page">Link</a>',
+            base64_decode($scan['base64_entries'][0]['encoded_value'], true)
+        );
+
+        $full_scan = FastInsertScanner::scan($sql);
+        $this->assertNotNull($full_scan);
+        $this->assertCount(6, $full_scan['base64_entries']);
+    }
+
+    public function testSparseFastInsertScannerDeduplicatesCandidatePrefixesInOnePayload(): void
+    {
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES"
+            . "(1, CONVERT(FROM_BASE64('%s') USING utf8mb4));",
+            base64_encode('<a href="https://old-site.com/a">A</a><img src="https://old-site.com/b">')
+        );
+
+        $scan = FastInsertScanner::scan($sql, true);
+
+        $this->assertNotNull($scan);
+        $this->assertCount(1, $scan['base64_entries']);
+        $this->assertSame('post_content', $scan['base64_entries'][0]['column_name']);
+    }
+
+    public function testSparseFastInsertScannerFallsBackForDuplicateKeyTrailer(): void
+    {
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES"
+            . "(1, FROM_BASE64('%s')) ON DUPLICATE KEY UPDATE `post_content` = FROM_BASE64('%s');",
+            base64_encode('Plain body'),
+            base64_encode('https://old-site.com/from-trailer')
+        );
+
+        $this->assertNull(FastInsertScanner::scan($sql, true));
+    }
+
     /**
      * Exhaustive fuzz: 200 random padding lengths × random URL paths × both
      * schemes. Padding bytes are chosen from a wide alphabet so each
