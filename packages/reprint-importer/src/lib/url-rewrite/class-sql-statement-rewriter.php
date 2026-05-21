@@ -172,6 +172,11 @@ class SqlStatementRewriter
             $sql,
             function (string $value, string $table, ?string $column): string {
                 return $this->rewrite_value_for_column($value, $table, $column);
+            },
+            function (string $encoded_value, string $decoded_value): bool {
+                unset($encoded_value);
+                return strpos($decoded_value, 'http') !== false
+                    && $this->url_rewriter->value_might_contain_source_domain($decoded_value);
             }
         );
     }

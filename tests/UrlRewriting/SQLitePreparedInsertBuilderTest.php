@@ -68,6 +68,66 @@ class SQLitePreparedInsertBuilderTest extends TestCase
         $this->assertSame(['after'], $prepared['params']);
     }
 
+    public function testRewritePredicateSkipsCallbackForDecodedNonUrlPayloads(): void
+    {
+        $false_positive = 'httle and tattle';
+        $url_value = '<a href="https://old-site.com/page">Link</a>';
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(1, FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode($false_positive),
+            base64_encode($url_value)
+        );
+
+        $this->assertStringContainsString('aHR0', base64_encode($false_positive));
+
+        $calls = [];
+        $prepared = SQLitePreparedInsertBuilder::build(
+            $sql,
+            function (string $value, string $table, ?string $column) use (&$calls): string {
+                $calls[] = [$value, $table, $column];
+                return str_replace('https://old-site.com', 'https://new-site.com', $value);
+            },
+            static function (string $encoded_value, string $decoded_value): bool {
+                unset($encoded_value);
+                return strpos($decoded_value, 'http') !== false
+                    && stripos($decoded_value, 'old-site.com') !== false;
+            }
+        );
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(
+            "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(1, ?, ?);",
+            $prepared['sql']
+        );
+        $this->assertSame([$false_positive, '<a href="https://new-site.com/page">Link</a>'], $prepared['params']);
+        $this->assertSame([[$url_value, 'wp_posts', 'post_content']], $calls);
+    }
+
+    public function testSqlStatementRewriterBuildsPreparedInsertWithMixedUrlAndNonUrlPayloads(): void
+    {
+        $rewriter = new SqlStatementRewriter(
+            new StructuredDataUrlRewriter([
+                'https://old-site.com' => 'https://new-site.com',
+            ])
+        );
+        $false_positive = 'httle and tattle';
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(1, FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode($false_positive),
+            base64_encode('<a href="https://old-site.com/page">Link</a>')
+        );
+
+        $prepared = $rewriter->build_sqlite_prepared_insert($sql);
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(
+            "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(1, ?, ?);",
+            $prepared['sql']
+        );
+        $this->assertSame($false_positive, $prepared['params'][0]);
+        $this->assertSame('<a href="https://new-site.com/page">Link</a>', $prepared['params'][1]);
+    }
+
     public function testUnknownInsertShapeReturnsNull(): void
     {
         $sql = sprintf(

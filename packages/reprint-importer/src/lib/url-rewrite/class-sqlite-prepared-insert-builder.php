@@ -20,9 +20,18 @@ class SQLitePreparedInsertBuilder
     /**
      * @param callable|null $rewrite_value Optional callback:
      *        fn(string $value, string $table, ?string $column): string
+     * @param callable|null $should_rewrite_value Optional callback:
+     *        fn(string $encoded_value, string $decoded_value): bool. When omitted,
+     *        $rewrite_value is applied to every decoded value. The decoded value
+     *        is passed so callers can reject URL-less payloads before resolving
+     *        column context and invoking the rewrite callback.
      * @return array{sql: string, params: list<string>}|null
      */
-    public static function build(string $sql, ?callable $rewrite_value = null): ?array
+    public static function build(
+        string $sql,
+        ?callable $rewrite_value = null,
+        ?callable $should_rewrite_value = null
+    ): ?array
     {
         if (strpos($sql, 'FROM_BASE64(') === false) {
             return null;
@@ -44,7 +53,10 @@ class SQLitePreparedInsertBuilder
 
             $decoded = base64_decode($entry['encoded_value'], true);
             $value = $decoded !== false ? $decoded : '';
-            if ($rewrite_value !== null) {
+            if (
+                $rewrite_value !== null
+                && ($should_rewrite_value === null || $should_rewrite_value($entry['encoded_value'], $value))
+            ) {
                 $column = self::find_column_at_offset($fast['column_map'], $entry['expr_start']);
                 $value = $rewrite_value($value, $fast['table'], $column);
             }
