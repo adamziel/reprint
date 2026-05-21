@@ -36,12 +36,14 @@ class FastInsertScanner
      *
      * @return array{
      *   table: string,
+     *   columns: list<string>,
      *   column_map: list<array{int, int, string}>,
-     *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
+     *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
+     *   value_entries: list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>
      * }|null
      *   Null when the SQL doesn't match the recognised shape.
      */
-    public static function scan(string $sql): ?array
+    public static function scan(string $sql, bool $include_column_map = true): ?array
     {
         // Header: optional leading whitespace, INSERT (no priority/IGNORE
         // modifiers — producer never emits those), INTO, backticked table,
@@ -93,6 +95,7 @@ class FastInsertScanner
 
         $column_map = [];
         $base64_entries = [];
+        $value_entries = [];
 
         $cursor = $values_end;
         $sql_len = strlen($sql);
@@ -136,16 +139,21 @@ class FastInsertScanner
                     return null;
                 }
                 $value_end = $cursor;
-                $column_map[] = [$value_start, $value_end, $columns[$col_idx]];
+                if ($include_column_map) {
+                    $column_map[] = [$value_start, $value_end, $columns[$col_idx]];
+                }
+                $value_kind['start'] = $value_start;
+                $value_kind['end'] = $value_end;
+                $value_kind['column'] = $columns[$col_idx];
+                $value_entries[] = $value_kind;
 
-                if (is_array($value_kind)) {
-                    // FROM_BASE64 payload: kind = [expr_start, expr_length, quote_start, quote_length, encoded_value]
+                if ($value_kind['kind'] === 'base64') {
                     $base64_entries[] = [
-                        'expr_start' => $value_kind[0],
-                        'expr_length' => $value_kind[1],
-                        'quote_start' => $value_kind[2],
-                        'quote_length' => $value_kind[3],
-                        'encoded_value' => $value_kind[4],
+                        'expr_start' => $value_kind['expr_start'],
+                        'expr_length' => $value_kind['expr_length'],
+                        'quote_start' => $value_kind['quote_start'],
+                        'quote_length' => $value_kind['quote_length'],
+                        'encoded_value' => $value_kind['encoded_value'],
                         'value' => null,
                         'new_value' => null,
                     ];
@@ -192,18 +200,18 @@ class FastInsertScanner
 
         return [
             'table' => $table,
+            'columns' => $columns,
             'column_map' => $column_map,
             'base64_entries' => $base64_entries,
+            'value_entries' => $value_entries,
         ];
     }
 
     /**
      * Scan one value in producer's tuple shape, advancing $cursor past it.
      *
-     * @return null|true|array{int,int,int,int,string}
+     * @return null|array{kind: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}
      *   null = unrecognized shape (caller bails)
-     *   true = recognised, no FROM_BASE64 entry to record
-     *   array = FROM_BASE64 payload, [expr_start, expr_length, quote_start, quote_length, encoded]
      */
     private static function scan_value(string $sql, int $sql_len, int &$cursor)
     {
@@ -219,13 +227,13 @@ class FastInsertScanner
             && substr_compare($sql, 'NULL', $cursor, 4, true) === 0
         ) {
             $cursor += 4;
-            return true;
+            return ['kind' => 'null'];
         }
 
         // Empty string literal
         if ($c === "'" && $cursor + 1 < $sql_len && $sql[$cursor + 1] === "'") {
             $cursor += 2;
-            return true;
+            return ['kind' => 'empty_string'];
         }
 
         // FROM_BASE64('…')
@@ -236,7 +244,18 @@ class FastInsertScanner
         ) {
             $expr_start = $cursor;
             $cursor += 12; // step past "FROM_BASE64("
-            return self::consume_base64_call($sql, $sql_len, $cursor, $expr_start);
+            $entry = self::consume_base64_call($sql, $sql_len, $cursor, $expr_start);
+            if ($entry === null) {
+                return null;
+            }
+            return [
+                'kind' => 'base64',
+                'expr_start' => $entry[0],
+                'expr_length' => $entry[1],
+                'quote_start' => $entry[2],
+                'quote_length' => $entry[3],
+                'encoded_value' => $entry[4],
+            ];
         }
 
         // CONVERT(FROM_BASE64('…') USING utf8mb4)
@@ -258,7 +277,7 @@ class FastInsertScanner
             }
             $cursor += 12;
             $entry = self::consume_base64_call($sql, $sql_len, $cursor, $expr_start);
-            if (!is_array($entry)) {
+            if ($entry === null) {
                 return null;
             }
             // Expect: USING utf8mb4 )
@@ -284,7 +303,14 @@ class FastInsertScanner
             }
             $cursor++;
             $entry[1] = $cursor - $expr_start;
-            return $entry;
+            return [
+                'kind' => 'base64',
+                'expr_start' => $entry[0],
+                'expr_length' => $entry[1],
+                'quote_start' => $entry[2],
+                'quote_length' => $entry[3],
+                'encoded_value' => $entry[4],
+            ];
         }
 
         // Numeric literal: optional sign, digits, optional fraction, optional exponent.
@@ -303,19 +329,27 @@ class FastInsertScanner
             }
         }
         if ($cursor < $sql_len && ($sql[$cursor] === 'e' || $sql[$cursor] === 'E')) {
+            $exponent_start = $cursor;
             $cursor++;
             if ($cursor < $sql_len && ($sql[$cursor] === '+' || $sql[$cursor] === '-')) {
                 $cursor++;
             }
+            $exponent_digit_start = $cursor;
             while ($cursor < $sql_len && $sql[$cursor] >= '0' && $sql[$cursor] <= '9') {
                 $cursor++;
+            }
+            if ($cursor === $exponent_digit_start) {
+                $cursor = $exponent_start;
             }
         }
         if ($cursor === $digit_start) {
             $cursor = $start;
             return null;
         }
-        return true;
+        return [
+            'kind' => 'numeric',
+            'raw' => substr($sql, $start, $cursor - $start),
+        ];
     }
 
     /**

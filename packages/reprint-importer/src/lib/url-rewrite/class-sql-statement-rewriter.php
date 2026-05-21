@@ -164,7 +164,7 @@ class SqlStatementRewriter
      * statement shapes return null so callers can fall back to the normal
      * MySQL-on-SQLite execution path.
      *
-     * @return array{sql: string, params: list<string>}|null
+     * @return array{sql: string, params: list<mixed>, param_types: list<int>}|null
      */
     public function build_sqlite_prepared_insert(string $sql): ?array
     {

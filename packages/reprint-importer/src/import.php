@@ -959,6 +959,7 @@ class ImportClient
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
+    private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
 
     /**
      * Maximum number of consecutive cURL timeouts with no cursor progress
@@ -5119,6 +5120,8 @@ class ImportClient
 
         [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
         $sqlite_prepared_pdo = null;
+        $sqlite_prepared_statement_cache = [];
+        $sqlite_prepared_statement_cache_order = [];
         if (
             strtolower((string) ($options["target_engine"] ?? "mysql")) === "sqlite"
             && method_exists($pdo, 'get_connection')
@@ -5245,6 +5248,8 @@ class ImportClient
                             $query,
                             $stmt_rewriter,
                             $sqlite_prepared_pdo,
+                            $sqlite_prepared_statement_cache,
+                            $sqlite_prepared_statement_cache_order,
                             $executed_query,
                         );
                     } catch (PDOException $e) {
@@ -5323,6 +5328,8 @@ class ImportClient
                         $query,
                         $stmt_rewriter,
                         $sqlite_prepared_pdo,
+                        $sqlite_prepared_statement_cache,
+                        $sqlite_prepared_statement_cache_order,
                         $executed_query,
                     );
                 } catch (PDOException $e) {
@@ -5428,6 +5435,8 @@ class ImportClient
         string $query,
         ?SqlStatementRewriter $stmt_rewriter,
         ?PDO $sqlite_prepared_pdo,
+        array &$sqlite_prepared_statement_cache,
+        array &$sqlite_prepared_statement_cache_order,
         string &$executed_query
     ): void {
         $executed_query = $query;
@@ -5439,13 +5448,31 @@ class ImportClient
 
             if ($prepared_insert !== null) {
                 $executed_query = $prepared_insert['sql'];
-                $statement = $sqlite_prepared_pdo->prepare($prepared_insert['sql']);
-                if ($statement === false) {
-                    throw new PDOException('Failed to prepare SQLite INSERT statement.');
+                $statement = $sqlite_prepared_statement_cache[$prepared_insert['sql']] ?? null;
+                if (!$statement instanceof PDOStatement) {
+                    $statement = $sqlite_prepared_pdo->prepare($prepared_insert['sql']);
+                    if ($statement === false) {
+                        throw new PDOException('Failed to prepare SQLite INSERT statement.');
+                    }
+
+                    $sqlite_prepared_statement_cache[$prepared_insert['sql']] = $statement;
+                    $sqlite_prepared_statement_cache_order[] = $prepared_insert['sql'];
+                    if (count($sqlite_prepared_statement_cache_order) > self::SQLITE_PREPARED_INSERT_CACHE_MAX) {
+                        $oldest_sql = array_shift($sqlite_prepared_statement_cache_order);
+                        if (is_string($oldest_sql)) {
+                            unset($sqlite_prepared_statement_cache[$oldest_sql]);
+                        }
+                    }
+                } else {
+                    $statement->closeCursor();
                 }
 
                 foreach ($prepared_insert['params'] as $index => $value) {
-                    $statement->bindValue($index + 1, $value, PDO::PARAM_STR);
+                    $statement->bindValue(
+                        $index + 1,
+                        $value,
+                        $prepared_insert['param_types'][$index] ?? PDO::PARAM_STR
+                    );
                 }
 
                 if ($statement->execute() === false) {
