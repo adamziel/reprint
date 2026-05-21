@@ -354,6 +354,76 @@ class StructuredDataUrlRewriter
     }
 
     /**
+     * Return true when every configured source-domain occurrence is inside
+     * HTML tag/comment markup, so block-markup rewriting can skip text-node
+     * URL scanning while still using structured setters for tags and blocks.
+     */
+    private function source_domain_occurrences_are_inside_markup(string $value): bool
+    {
+        if (strpos($value, '<') === false) {
+            return false;
+        }
+
+        $source_domain_offsets = [];
+        foreach ($this->source_domains as $domain) {
+            $offset = 0;
+            while (false !== ($found = stripos($value, $domain, $offset))) {
+                $source_domain_offsets[] = $found;
+                $offset = $found + strlen($domain);
+            }
+        }
+
+        if ($source_domain_offsets === []) {
+            return false;
+        }
+
+        sort($source_domain_offsets);
+        $next_source_domain = 0;
+        $source_domain_count = count($source_domain_offsets);
+        $length = strlen($value);
+        $in_markup = false;
+        $quote = null;
+
+        for ($i = 0; $i < $length && $next_source_domain < $source_domain_count; $i++) {
+            while (
+                $next_source_domain < $source_domain_count &&
+                $source_domain_offsets[$next_source_domain] === $i
+            ) {
+                if (!$in_markup) {
+                    return false;
+                }
+                $next_source_domain++;
+            }
+
+            $char = $value[$i];
+            if ($in_markup) {
+                if ($quote !== null) {
+                    if ($char === $quote) {
+                        $quote = null;
+                    }
+                    continue;
+                }
+
+                if ($char === '"' || $char === "'") {
+                    $quote = $char;
+                    continue;
+                }
+
+                if ($char === '>') {
+                    $in_markup = false;
+                }
+                continue;
+            }
+
+            if ($char === '<') {
+                $in_markup = true;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Return whether a decoded value may contain one of the configured source
      * domains. This intentionally checks hosts instead of full source URLs so
      * escaped spellings of `://` in block markup or JSON do not matter.
@@ -479,47 +549,21 @@ class StructuredDataUrlRewriter
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
                 $p = new BlockMarkupUrlProcessor( $content, $base_url );
-                while ( $p->next_url() ) {
-                    $raw_url = $p->get_raw_url();
-                    $token_type = $p->get_token_type() ?? '';
-                    $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
-                    $cached = $this->get_cached_rewrite_result($cache_key);
-                    if ($cached !== null) {
-                        if ($cached !== false) {
-                            $p->set_url($cached['raw_url'], $cached['parsed_url']);
-                        }
-                        continue;
+                $scan_text_nodes = !$this->source_domain_occurrences_are_inside_markup($content);
+                if ($scan_text_nodes) {
+                    while ( $p->next_url() ) {
+                        $this->rewrite_current_block_markup_url($p, $parsed_mapping, $base_url);
                     }
+                } else {
+                    while ($p->next_token()) {
+                        if ($p->get_token_type() === '#text') {
+                            continue;
+                        }
 
-                    $parsed_url = $p->get_parsed_url();
-                    $converted = false;
-                    foreach ( $parsed_mapping as $mapping ) {
-                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $converted = WPURL::replace_base_url(
-                                $parsed_url,
-                                array(
-                                    'old_base_url' => $base_url,
-                                    'new_base_url' => $mapping['to_url'],
-                                    'raw_url'      => $raw_url,
-                                    'is_relative'  => (
-                                        '#text' !== $token_type &&
-                                        ! WPURL::can_parse($raw_url)
-                                    ),
-                                )
-                            );
-                            break;
+                        while ($p->next_url_in_current_token()) {
+                            $this->rewrite_current_block_markup_url($p, $parsed_mapping, $base_url);
                         }
                     }
-
-                    $cache_value = false;
-                    if ($converted !== false) {
-                        $cache_value = [
-                            'raw_url'    => (string) $converted,
-                            'parsed_url' => $converted->new_url,
-                        ];
-                        $p->set_url($cache_value['raw_url'], $cache_value['parsed_url']);
-                    }
-                    $this->set_cached_rewrite_result($cache_key, $cache_value);
                 }
 
                 return $p->get_updated_html();
@@ -571,5 +615,52 @@ class StructuredDataUrlRewriter
                 _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
                 return '';
         }
+    }
+
+    /**
+     * @param array<int, array{from_url: mixed, to_url: mixed}> $parsed_mapping
+     */
+    private function rewrite_current_block_markup_url(BlockMarkupUrlProcessor $p, array $parsed_mapping, string $base_url): void
+    {
+        $raw_url = $p->get_raw_url();
+        $token_type = $p->get_token_type() ?? '';
+        $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
+        $cached = $this->get_cached_rewrite_result($cache_key);
+        if ($cached !== null) {
+            if ($cached !== false) {
+                $p->set_url($cached['raw_url'], $cached['parsed_url']);
+            }
+            return;
+        }
+
+        $parsed_url = $p->get_parsed_url();
+        $converted = false;
+        foreach ( $parsed_mapping as $mapping ) {
+            if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
+                $converted = WPURL::replace_base_url(
+                    $parsed_url,
+                    array(
+                        'old_base_url' => $base_url,
+                        'new_base_url' => $mapping['to_url'],
+                        'raw_url'      => $raw_url,
+                        'is_relative'  => (
+                            '#text' !== $token_type &&
+                            ! WPURL::can_parse($raw_url)
+                        ),
+                    )
+                );
+                break;
+            }
+        }
+
+        $cache_value = false;
+        if ($converted !== false) {
+            $cache_value = [
+                'raw_url'    => (string) $converted,
+                'parsed_url' => $converted->new_url,
+            ];
+            $p->set_url($cache_value['raw_url'], $cache_value['parsed_url']);
+        }
+        $this->set_cached_rewrite_result($cache_key, $cache_value);
     }
 }

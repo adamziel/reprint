@@ -465,6 +465,22 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
+    public function testKnownBlockMarkupRewritesMultipleUrlsInOneTagWhenTextHasNoSourceDomain(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:image {"src":"https:\/\/old-site.com\/img.jpg"} -->'
+            . '<figure><img src="https://old-site.com/img.jpg" style="background:url(https://old-site.com/bg.jpg);mask-image:url(https://old-site.com/mask.svg)" /></figure>'
+            . '<!-- /wp:image -->';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https:\/\/new-site.com\/img.jpg', $result);
+        $this->assertStringContainsString('src="https://new-site.com/img.jpg"', $result);
+        $this->assertStringContainsString('https://new-site.com/bg.jpg', $result);
+        $this->assertStringContainsString('https://new-site.com/mask.svg', $result);
+        $this->assertStringNotContainsString('old-site.com', $result);
+    }
+
     // --- Content type hint: null (default) uses plain text URL scanning ---
 
     public function testDefaultHintUsesPlainTextUrlScanning(): void
