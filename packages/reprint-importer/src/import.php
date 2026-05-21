@@ -5119,7 +5119,7 @@ class ImportClient
 
         [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
         $sqlite_prepared_pdo = null;
-        $sqlite_prepared_statement_cache = [];
+        $sqlite_insert_coalescer = null;
         if (
             strtolower((string) ($options["target_engine"] ?? "mysql")) === "sqlite"
             && method_exists($pdo, 'get_connection')
@@ -5133,6 +5133,7 @@ class ImportClient
                 'SQLite db-apply PRAGMAs | temp_store=MEMORY | cache_size=32768 KiB',
                 false,
             );
+            $sqlite_insert_coalescer = new SQLitePreparedInsertCoalescer($sqlite_prepared_pdo);
         }
 
         $this->audit_log(
@@ -5175,6 +5176,19 @@ class ImportClient
         $skipped = 0;
         $save_every = 100;
         $stmts_since_save = 0;
+        $last_applied_bytes_read = $bytes_read;
+        $record_apply_result = function (array $result) use (&$statements_executed, &$stmts_since_save, &$last_applied_bytes_read): void {
+            $count = (int) ($result['statements_executed'] ?? 0);
+            if ($count <= 0) {
+                return;
+            }
+
+            $statements_executed += $count;
+            $stmts_since_save += $count;
+            if (isset($result['bytes_read'])) {
+                $last_applied_bytes_read = (int) $result['bytes_read'];
+            }
+        };
 
         // Load pre-computed statement count from db-pull for progress reporting
         $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
@@ -5235,20 +5249,32 @@ class ImportClient
                     // Skip already-executed statements on resume
                     if ($stmts_to_skip > 0) {
                         $stmts_to_skip--;
+                        $last_applied_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
                         continue;
                     }
 
                     // Execute against target database
                     $executed_query = $query;
+                    $statement_end_offset = $seek_offset + $query_stream->get_bytes_consumed();
                     try {
-                        $this->execute_db_apply_query(
-                            $pdo,
-                            $query,
-                            $stmt_rewriter,
-                            $sqlite_prepared_pdo,
-                            $sqlite_prepared_statement_cache,
-                            $executed_query,
+                        $record_apply_result(
+                            $this->execute_db_apply_query(
+                                $pdo,
+                                $query,
+                                $stmt_rewriter,
+                                $sqlite_prepared_pdo,
+                                $sqlite_insert_coalescer,
+                                $statement_end_offset,
+                                $executed_query,
+                            )
                         );
+                        if (
+                            $sqlite_insert_coalescer !== null
+                            && $sqlite_insert_coalescer->pending_statement_count() > 0
+                            && $stmts_since_save + $sqlite_insert_coalescer->pending_statement_count() >= $save_every
+                        ) {
+                            $record_apply_result($sqlite_insert_coalescer->flush($executed_query));
+                        }
                     } catch (PDOException $e) {
                         $this->audit_log(
                             sprintf(
@@ -5265,9 +5291,6 @@ class ImportClient
                         );
                     }
 
-                    $statements_executed++;
-                    $stmts_since_save++;
-
                     // Save state periodically. bytes_read is the file offset
                     // right after the last extracted query — NOT total_bytes_read,
                     // which includes bytes buffered in the query stream that haven't
@@ -5275,7 +5298,7 @@ class ImportClient
                     // the exact boundary between executed and un-executed queries.
                     if ($stmts_since_save >= $save_every) {
                         $this->state["apply"]["statements_executed"] = $statements_executed;
-                        $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
+                        $this->state["apply"]["bytes_read"] = $last_applied_bytes_read;
                         $this->save_state($this->state);
                         $stmts_since_save = 0;
 
@@ -5315,18 +5338,23 @@ class ImportClient
 
                 if ($stmts_to_skip > 0) {
                     $stmts_to_skip--;
+                    $last_applied_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
                     continue;
                 }
 
                 $executed_query = $query;
+                $statement_end_offset = $seek_offset + $query_stream->get_bytes_consumed();
                 try {
-                    $this->execute_db_apply_query(
-                        $pdo,
-                        $query,
-                        $stmt_rewriter,
-                        $sqlite_prepared_pdo,
-                        $sqlite_prepared_statement_cache,
-                        $executed_query,
+                    $record_apply_result(
+                        $this->execute_db_apply_query(
+                            $pdo,
+                            $query,
+                            $stmt_rewriter,
+                            $sqlite_prepared_pdo,
+                            $sqlite_insert_coalescer,
+                            $statement_end_offset,
+                            $executed_query,
+                        )
                     );
                 } catch (PDOException $e) {
                     $this->audit_log(
@@ -5343,14 +5371,33 @@ class ImportClient
                         $e->getMessage(),
                     );
                 }
+            }
 
-                $statements_executed++;
+            if ($sqlite_insert_coalescer !== null && $sqlite_insert_coalescer->pending_statement_count() > 0) {
+                $executed_query = '(coalesced SQLite INSERT flush)';
+                try {
+                    $record_apply_result($sqlite_insert_coalescer->flush($executed_query));
+                } catch (PDOException $e) {
+                    $this->audit_log(
+                        sprintf(
+                            "SQL ERROR | stmt=%d | %s | query=%.200s",
+                            $stmt_count,
+                            $e->getMessage(),
+                            $executed_query,
+                        ),
+                        true,
+                    );
+                    throw new RuntimeException(
+                        "SQL execution error at statement {$stmt_count}: " .
+                        $e->getMessage(),
+                    );
+                }
             }
 
             if ($this->shutdown_requested) {
                 // Save partial progress
                 $this->state["apply"]["statements_executed"] = $statements_executed;
-                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
+                $this->state["apply"]["bytes_read"] = $last_applied_bytes_read;
                 $this->state["status"] = "partial";
                 $this->save_state($this->state);
                 $this->audit_log(
@@ -5395,7 +5442,7 @@ class ImportClient
 
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
-                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
+                $this->state["apply"]["bytes_read"] = $last_applied_bytes_read;
                 $this->state["status"] = "complete";
                 $this->save_state($this->state);
 
@@ -5431,10 +5478,15 @@ class ImportClient
         string $query,
         ?SqlStatementRewriter $stmt_rewriter,
         ?PDO $sqlite_prepared_pdo,
-        array &$sqlite_prepared_statement_cache,
+        ?SQLitePreparedInsertCoalescer $sqlite_insert_coalescer,
+        int $statement_end_offset,
         string &$executed_query
-    ): void {
+    ): array {
         $executed_query = $query;
+        $result = [
+            'statements_executed' => 0,
+            'bytes_read' => null,
+        ];
 
         if ($sqlite_prepared_pdo !== null) {
             $structured_insert = $stmt_rewriter !== null
@@ -5442,32 +5494,22 @@ class ImportClient
                 : SQLitePreparedInsertBuilder::build_structured($query);
 
             if ($structured_insert !== null) {
-                $executed_query = $structured_insert['sql'];
-                $statement = $sqlite_prepared_statement_cache[$structured_insert['sql']] ?? null;
-                if ($statement === null) {
-                    $statement = $sqlite_prepared_pdo->prepare($structured_insert['sql']);
-                    if ($statement === false) {
-                        throw new PDOException('Failed to prepare structured SQLite INSERT statement.');
-                    }
+                if ($sqlite_insert_coalescer === null) {
+                    $one_off_coalescer = new SQLitePreparedInsertCoalescer($sqlite_prepared_pdo);
+                    $append_result = $one_off_coalescer->append($structured_insert, $statement_end_offset, $executed_query);
+                    $flush_result = $one_off_coalescer->flush($executed_query);
 
-                    if (count($sqlite_prepared_statement_cache) < 64) {
-                        $sqlite_prepared_statement_cache[$structured_insert['sql']] = $statement;
-                    }
+                    return [
+                        'statements_executed' => (int) $append_result['statements_executed'] + (int) $flush_result['statements_executed'],
+                        'bytes_read' => $flush_result['bytes_read'] ?? $append_result['bytes_read'],
+                    ];
                 }
+                return $sqlite_insert_coalescer->append($structured_insert, $statement_end_offset, $executed_query);
+            }
 
-                foreach ($structured_insert['params'] as $index => $value) {
-                    $statement->bindValue(
-                        $index + 1,
-                        $value,
-                        $structured_insert['param_types'][$index] ?? PDO::PARAM_STR
-                    );
-                }
-
-                if ($statement->execute() === false) {
-                    throw new PDOException('Failed to execute structured SQLite INSERT statement.');
-                }
-                $statement->closeCursor();
-                return;
+            if ($sqlite_insert_coalescer !== null && $sqlite_insert_coalescer->pending_statement_count() > 0) {
+                $result = $sqlite_insert_coalescer->flush($executed_query);
+                $executed_query = $query;
             }
 
             $prepared_insert = $stmt_rewriter !== null
@@ -5488,7 +5530,9 @@ class ImportClient
                 if ($statement->execute() === false) {
                     throw new PDOException('Failed to execute SQLite INSERT statement.');
                 }
-                return;
+                $result['statements_executed']++;
+                $result['bytes_read'] = $statement_end_offset;
+                return $result;
             }
         }
 
@@ -5497,6 +5541,9 @@ class ImportClient
         }
 
         $pdo->exec($executed_query);
+        $result['statements_executed']++;
+        $result['bytes_read'] = $statement_end_offset;
+        return $result;
     }
 
     /**

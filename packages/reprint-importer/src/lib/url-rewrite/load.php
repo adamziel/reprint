@@ -22,3 +22,6 @@ require_once __DIR__ . '/class-domain-collector.php';
 
 // Depends on StructuredDataUrlRewriter + Base64ValueScanner
 require_once __DIR__ . '/class-sql-statement-rewriter.php';
+
+// Depends on PR #244 structured prepared INSERT arrays.
+require_once __DIR__ . '/class-sqlite-prepared-insert-coalescer.php';
