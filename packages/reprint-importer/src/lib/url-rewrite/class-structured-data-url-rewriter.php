@@ -364,9 +364,10 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Return true when every configured source-domain occurrence is inside
-     * HTML tag/comment markup, so block-markup rewriting can skip text-node
-     * URL scanning while still using structured setters for tags and blocks.
+     * Return true when the raw source-domain occurrences are confined to
+     * closed HTML tag/comment markup, so block-markup rewriting can skip
+     * text-node URL scanning while still using structured setters for tags
+     * and blocks.
      */
     private function source_domain_occurrences_are_inside_markup(string $value): bool
     {
@@ -374,63 +375,133 @@ class StructuredDataUrlRewriter
             return false;
         }
 
-        $source_domain_offsets = [];
+        $has_source_domain = false;
         foreach ($this->source_domains as $domain) {
-            $offset = 0;
-            while (false !== ($found = stripos($value, $domain, $offset))) {
-                $source_domain_offsets[] = $found;
-                $offset = $found + strlen($domain);
+            if (stripos($value, $domain) !== false) {
+                $has_source_domain = true;
+                break;
             }
         }
 
-        if ($source_domain_offsets === []) {
+        if (!$has_source_domain) {
             return false;
         }
 
-        sort($source_domain_offsets);
-        $next_source_domain = 0;
-        $source_domain_count = count($source_domain_offsets);
         $length = strlen($value);
-        $in_markup = false;
-        $quote = null;
+        $text_start = 0;
 
-        for ($i = 0; $i < $length && $next_source_domain < $source_domain_count; $i++) {
-            while (
-                $next_source_domain < $source_domain_count &&
-                $source_domain_offsets[$next_source_domain] === $i
-            ) {
-                if (!$in_markup) {
-                    return false;
-                }
-                $next_source_domain++;
+        for ($i = 0; $i < $length; $i++) {
+            if ($value[$i] !== '<' || !$this->is_likely_markup_opener_at($value, $i)) {
+                continue;
             }
 
+            $markup_end = $this->find_likely_markup_end($value, $i);
+            if ($markup_end === null) {
+                continue;
+            }
+
+            if ($this->text_span_might_contain_source_domain($value, $text_start, $i - $text_start)) {
+                return false;
+            }
+
+            $i = $markup_end;
+            $text_start = $markup_end + 1;
+        }
+
+        return !$this->text_span_might_contain_source_domain($value, $text_start, $length - $text_start);
+    }
+
+    private function is_likely_markup_opener_at(string $value, int $offset): bool
+    {
+        $next = $value[$offset + 1] ?? '';
+        if ($next === '') {
+            return false;
+        }
+
+        if ($this->is_ascii_alpha($next) || $next === '!' || $next === '?') {
+            return true;
+        }
+
+        if ($next === '/') {
+            return $this->is_ascii_alpha($value[$offset + 2] ?? '');
+        }
+
+        return false;
+    }
+
+    private function is_ascii_alpha(string $char): bool
+    {
+        if ($char === '') {
+            return false;
+        }
+
+        $ord = ord($char);
+        return ($ord >= 65 && $ord <= 90) || ($ord >= 97 && $ord <= 122);
+    }
+
+    private function find_likely_markup_end(string $value, int $offset): ?int
+    {
+        if (substr($value, $offset, 4) === '<!--') {
+            $comment_end = strpos($value, '-->', $offset + 4);
+            return $comment_end === false ? null : $comment_end + 2;
+        }
+
+        $length = strlen($value);
+        $quote = null;
+        for ($i = $offset + 1; $i < $length; $i++) {
             $char = $value[$i];
-            if ($in_markup) {
-                if ($quote !== null) {
-                    if ($char === $quote) {
-                        $quote = null;
-                    }
-                    continue;
-                }
-
-                if ($char === '"' || $char === "'") {
-                    $quote = $char;
-                    continue;
-                }
-
-                if ($char === '>') {
-                    $in_markup = false;
+            if ($quote !== null) {
+                if ($char === $quote) {
+                    $quote = null;
                 }
                 continue;
             }
 
-            if ($char === '<') {
-                $in_markup = true;
+            if ($char === '"' || $char === "'") {
+                $quote = $char;
+                continue;
+            }
+
+            if ($char === '>') {
+                return $i;
             }
         }
 
-        return true;
+        return null;
+    }
+
+    private function text_span_might_contain_source_domain(string $value, int $offset, int $length): bool
+    {
+        if ($length <= 0) {
+            return false;
+        }
+
+        $end = $offset + $length;
+        foreach ($this->source_domains as $domain) {
+            $found = stripos($value, $domain, $offset);
+            if ($found !== false && $found < $end) {
+                return true;
+            }
+        }
+
+        $first_entity = strpos($value, '&', $offset);
+        if ($first_entity === false || $first_entity >= $end) {
+            return false;
+        }
+
+        $text = substr($value, $offset, $length);
+        $decoded = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        if ($decoded === $text) {
+            return false;
+        }
+
+        foreach ($this->source_domains as $domain) {
+            if (stripos($decoded, $domain) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

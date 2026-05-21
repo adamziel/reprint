@@ -485,6 +485,28 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringContainsString('https://old-site.com/comment', $result);
     }
 
+    public function testKnownBlockMarkupRewritesTextUrlAfterLiteralLessThan(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'Plain text < https://old-site.com/page > after comparison.';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https://new-site.com/page', $result);
+        $this->assertStringNotContainsString('old-site.com/page', $result);
+    }
+
+    public function testKnownBlockMarkupRewritesEntityDecodedTextUrlWhenRawSourceDomainIsOnlyInMarkup(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<a data-note="https://old-site.com/not-a-url-attribute">https://old&#45;site.com/text</a>';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('data-note="https://old-site.com/not-a-url-attribute"', $result);
+        $this->assertStringContainsString('https://new-site.com/text', $result);
+    }
+
     // --- Content type hint: null (default) uses plain text URL scanning ---
 
     public function testDefaultHintUsesPlainTextUrlScanning(): void
