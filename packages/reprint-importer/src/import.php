@@ -960,6 +960,7 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    private const SQLITE_ROW_STREAM_SIDECAR = ".import-sqlite-row-stream.jsonl";
 
     /**
      * Maximum number of consecutive cURL timeouts with no cursor progress
@@ -1180,6 +1181,9 @@ class ImportClient
 
     /** @var string SQL output mode: 'file' (default), 'stdout', or 'mysql'. */
     private $sql_output_mode = 'file';
+
+    /** @var bool Enable the non-default SQLite row-stream sidecar path. */
+    private $experimental_sqlite_row_stream = false;
 
     /** @var string|null MySQL host for --sql-output=mysql. */
     private $mysql_host;
@@ -1703,6 +1707,24 @@ class ImportClient
             );
         }
 
+        if (array_key_exists("experimental_sqlite_row_stream", $options)) {
+            $this->experimental_sqlite_row_stream = (bool) $options["experimental_sqlite_row_stream"];
+            $this->state["experimental_sqlite_row_stream"] = $this->experimental_sqlite_row_stream;
+            $this->save_state($this->state);
+        } else {
+            $this->experimental_sqlite_row_stream = (bool) ($this->state["experimental_sqlite_row_stream"] ?? false);
+        }
+
+        if (
+            $this->experimental_sqlite_row_stream &&
+            in_array($command, ["pull", "db-pull"], true) &&
+            $this->sql_output_mode !== "file"
+        ) {
+            throw new InvalidArgumentException(
+                "--experimental-sqlite-row-stream requires --sql-output=file so fallback SQL byte ranges remain available.",
+            );
+        }
+
         $this->initialize_tuner($options);
 
         // Initialize HMAC authentication if a shared secret was provided.
@@ -1950,6 +1972,15 @@ class ImportClient
                         "FILE DELETE | {$domains_file} | abort db-pull",
                     );
                 }
+                $row_stream_file = $this->state_dir . "/" . self::SQLITE_ROW_STREAM_SIDECAR;
+                if (file_exists($row_stream_file)) {
+                    unlink($row_stream_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$row_stream_file} | abort db-pull",
+                    );
+                }
+                $this->state["sqlite_row_stream"] = $this->default_state()["sqlite_row_stream"];
+                $this->save_state($this->state);
                 break;
 
             case "db-index":
@@ -3572,6 +3603,10 @@ class ImportClient
             return;
         }
 
+        if ($this->experimental_sqlite_row_stream && $this->sql_output_mode === "file") {
+            $this->build_sqlite_row_stream_sidecar($sql_file);
+        }
+
         // Mark as complete
         $this->state["status"] = "complete";
         $this->save_state($this->state);
@@ -5118,6 +5153,16 @@ class ImportClient
             );
         }
 
+        // Load pre-computed statement count from db-pull for progress reporting.
+        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
+        $statements_total = null;
+        if (file_exists($sql_stats_file)) {
+            $stats = json_decode(file_get_contents($sql_stats_file), true);
+            if (is_array($stats) && isset($stats["statements_total"])) {
+                $statements_total = (int) $stats["statements_total"];
+            }
+        }
+
         [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
         $sqlite_prepared_pdo = null;
         $sqlite_prepared_statement_cache = [];
@@ -5141,6 +5186,25 @@ class ImportClient
             "CONNECTED | {$connection_label}",
             false,
         );
+
+        if ($this->experimental_sqlite_row_stream) {
+            if ($sqlite_prepared_pdo === null) {
+                throw new RuntimeException(
+                    "--experimental-sqlite-row-stream is only supported with --target-engine=sqlite.",
+                );
+            }
+            $this->run_db_apply_sqlite_row_stream(
+                $pdo,
+                $sqlite_prepared_pdo,
+                $stmt_rewriter,
+                $sqlite_prepared_statement_cache,
+                $sqlite_prepared_statement_cache_order,
+                $options,
+                $statements_executed,
+                $statements_total,
+            );
+            return;
+        }
 
         // Stream db.sql through the query stream and execute. Use the
         // fast strcspn-based parser by default; it self-falls-back to
@@ -5177,16 +5241,6 @@ class ImportClient
         $skipped = 0;
         $save_every = 100;
         $stmts_since_save = 0;
-
-        // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
-        $statements_total = null;
-        if (file_exists($sql_stats_file)) {
-            $stats = json_decode(file_get_contents($sql_stats_file), true);
-            if (is_array($stats) && isset($stats["statements_total"])) {
-                $statements_total = (int) $stats["statements_total"];
-            }
-        }
 
         // If resuming, seek to saved position. bytes_read is the byte offset
         // right after the last successfully executed query (tracked via
@@ -5430,6 +5484,393 @@ class ImportClient
         }
     }
 
+    private function run_db_apply_sqlite_row_stream(
+        PDO $pdo,
+        PDO $sqlite_prepared_pdo,
+        ?SqlStatementRewriter $stmt_rewriter,
+        array &$sqlite_prepared_statement_cache,
+        array &$sqlite_prepared_statement_cache_order,
+        array $options,
+        int $statements_executed,
+        ?int $statements_total
+    ): void {
+        $sql_file = $this->state_dir . "/db.sql";
+        $sidecar_file = $this->state_dir . "/" . self::SQLITE_ROW_STREAM_SIDECAR;
+        if (!file_exists($sidecar_file)) {
+            throw new RuntimeException(
+                "SQLite row stream sidecar not found. Run db-pull with --experimental-sqlite-row-stream first.",
+            );
+        }
+
+        $sql_file_size = filesize($sql_file);
+        $sidecar_file_size = filesize($sidecar_file);
+        if ($sql_file_size === false || $sidecar_file_size === false) {
+            throw new RuntimeException("Cannot stat SQLite row stream inputs.");
+        }
+
+        $sidecar_handle = fopen($sidecar_file, "r");
+        if (!$sidecar_handle) {
+            throw new RuntimeException("Cannot open SQLite row stream sidecar: {$sidecar_file}");
+        }
+        $sql_handle = fopen($sql_file, "r");
+        if (!$sql_handle) {
+            fclose($sidecar_handle);
+            throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+        }
+
+        $meta_line = fgets($sidecar_handle);
+        if ($meta_line === false) {
+            fclose($sidecar_handle);
+            fclose($sql_handle);
+            throw new RuntimeException("SQLite row stream sidecar is empty.");
+        }
+        $meta = json_decode($meta_line, true);
+        if (
+            !is_array($meta) ||
+            ($meta['kind'] ?? null) !== 'meta' ||
+            ($meta['v'] ?? null) !== SQLiteRowStreamSidecar::VERSION
+        ) {
+            fclose($sidecar_handle);
+            fclose($sql_handle);
+            throw new RuntimeException("SQLite row stream sidecar has invalid metadata.");
+        }
+        if ((int) ($meta['sql_bytes'] ?? -1) !== (int) $sql_file_size) {
+            fclose($sidecar_handle);
+            fclose($sql_handle);
+            throw new RuntimeException(
+                "SQLite row stream sidecar does not match db.sql size. Re-run db-pull with --abort.",
+            );
+        }
+
+        $first_record_offset = ftell($sidecar_handle);
+        if ($first_record_offset === false) {
+            $first_record_offset = strlen($meta_line);
+        }
+
+        $row_stream_state = $this->state["sqlite_row_stream"] ?? [];
+        if (
+            $statements_total === null &&
+            isset($row_stream_state["statements_total"]) &&
+            (int) $row_stream_state["statements_total"] > 0
+        ) {
+            $statements_total = (int) $row_stream_state["statements_total"];
+        }
+
+        $apply_state = $this->state["apply"] ?? $this->default_state()["apply"];
+        $row_stream_bytes_read = (int) ($apply_state["row_stream_bytes_read"] ?? 0);
+        $last_sql_bytes_read = (int) ($apply_state["bytes_read"] ?? 0);
+        $stmt_count = 0;
+        $stmts_to_skip = 0;
+        if (
+            $row_stream_bytes_read > $first_record_offset &&
+            $row_stream_bytes_read < $sidecar_file_size
+        ) {
+            fseek($sidecar_handle, $row_stream_bytes_read);
+            $stmt_count = $statements_executed;
+        } elseif ($statements_executed > 0) {
+            fseek($sidecar_handle, $first_record_offset);
+            $stmts_to_skip = $statements_executed;
+        } else {
+            fseek($sidecar_handle, $first_record_offset);
+        }
+
+        $this->audit_log(
+            sprintf(
+                "SQLITE ROW STREAM db-apply | sidecar=%s | resume_statements=%d | row_stream_offset=%d",
+                $sidecar_file,
+                $statements_executed,
+                $row_stream_bytes_read,
+            ),
+            false,
+        );
+
+        $this->output_progress([
+            "status" => "starting",
+            "phase" => "db-apply",
+            "statements_total" => $statements_total,
+            "message" => "Applying SQLite row stream" . ($statements_total !== null ? " ({$statements_total} statements)" : ""),
+        ]);
+
+        $save_every = 100;
+        $stmts_since_save = 0;
+
+        try {
+            while (($line = fgets($sidecar_handle)) !== false) {
+                if ($this->shutdown_requested) {
+                    $this->audit_log("SHUTDOWN REQUESTED | saving SQLite row stream state", true);
+                    break;
+                }
+                if (function_exists("pcntl_signal_dispatch")) {
+                    pcntl_signal_dispatch();
+                }
+
+                $trimmed = trim($line);
+                if ($trimmed === '') {
+                    continue;
+                }
+                $record = json_decode($trimmed, true);
+                if (!is_array($record)) {
+                    throw new RuntimeException("Invalid SQLite row stream JSON record at statement " . ($stmt_count + 1));
+                }
+                if (($record['kind'] ?? null) === 'meta') {
+                    continue;
+                }
+
+                $stmt_count++;
+                if ($stmts_to_skip > 0) {
+                    $stmts_to_skip--;
+                    continue;
+                }
+
+                $executed_query = '';
+                try {
+                    $this->execute_db_apply_row_stream_record(
+                        $pdo,
+                        $sqlite_prepared_pdo,
+                        $sql_handle,
+                        $record,
+                        $stmt_rewriter,
+                        $sqlite_prepared_statement_cache,
+                        $sqlite_prepared_statement_cache_order,
+                        $executed_query,
+                    );
+                } catch (PDOException $e) {
+                    $this->audit_log(
+                        sprintf(
+                            "SQL ERROR | stmt=%d | %s | query=%.200s",
+                            $stmt_count,
+                            $e->getMessage(),
+                            $executed_query,
+                        ),
+                        true,
+                    );
+                    throw new RuntimeException(
+                        "SQL execution error at statement {$stmt_count}: " .
+                        $e->getMessage(),
+                    );
+                }
+
+                $statements_executed++;
+                $stmts_since_save++;
+                if (isset($record['sql_offset'], $record['sql_length'])) {
+                    $last_sql_bytes_read = (int) $record['sql_offset'] + (int) $record['sql_length'];
+                }
+
+                if ($stmts_since_save >= $save_every) {
+                    $this->state["apply"]["statements_executed"] = $statements_executed;
+                    $this->state["apply"]["bytes_read"] = $last_sql_bytes_read;
+                    $this->state["apply"]["row_stream_bytes_read"] = ftell($sidecar_handle) ?: 0;
+                    $this->save_state($this->state);
+                    $stmts_since_save = 0;
+
+                    $apply_fraction = $sql_file_size > 0
+                        ? $last_sql_bytes_read / $sql_file_size
+                        : null;
+                    $pct = $apply_fraction !== null ? round($apply_fraction * 100, 1) : 0;
+                    $progress_message = sprintf(
+                        "%s statements",
+                        $statements_total === null
+                            ? number_format($statements_executed)
+                            : number_format($statements_executed) . " / " . number_format($statements_total),
+                    );
+
+                    $this->output_progress([
+                        "phase" => "db-apply",
+                        "statements_executed" => $statements_executed,
+                        "bytes_read" => $last_sql_bytes_read,
+                        "bytes_total" => $sql_file_size,
+                        "pct" => $pct,
+                        "statements_total" => $statements_total,
+                        "message" => $progress_message,
+                    ]);
+                    $this->progress->show_progress_line($progress_message, $apply_fraction);
+                }
+            }
+
+            if ($this->shutdown_requested) {
+                $this->state["apply"]["statements_executed"] = $statements_executed;
+                $this->state["apply"]["bytes_read"] = $last_sql_bytes_read;
+                $this->state["apply"]["row_stream_bytes_read"] = ftell($sidecar_handle) ?: 0;
+                $this->state["status"] = "partial";
+                $this->save_state($this->state);
+                $this->audit_log(
+                    sprintf(
+                        "PARTIAL SQLite row stream db-apply | %d statements executed",
+                        $statements_executed,
+                    ),
+                    true,
+                );
+                $this->output_progress([
+                    "status" => "partial",
+                    "phase" => "db-apply",
+                    "statements_executed" => $statements_executed,
+                    "statements_total" => $statements_total,
+                    "message" => "db-apply partial: {$statements_executed} statements executed",
+                ], true);
+                return;
+            }
+
+            $deactivated = $this->deactivate_host_plugins($pdo);
+            foreach ($deactivated as $basename) {
+                $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
+            }
+
+            $deactivated = $this->deactivate_path_incompatible_plugins(
+                $pdo,
+                (string) ($options["new_site_url"] ?? ""),
+            );
+            foreach ($deactivated as $basename) {
+                $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
+            }
+
+            $this->state["apply"]["statements_executed"] = $statements_executed;
+            $this->state["apply"]["bytes_read"] = (int) $sql_file_size;
+            $this->state["apply"]["row_stream_bytes_read"] = (int) $sidecar_file_size;
+            $this->state["status"] = "complete";
+            $this->save_state($this->state);
+
+            $this->audit_log(
+                sprintf(
+                    "SQLite row stream db-apply complete | %d statements executed",
+                    $statements_executed,
+                ),
+                true,
+            );
+
+            $this->output_progress([
+                "status" => "complete",
+                "phase" => "db-apply",
+                "statements_executed" => $statements_executed,
+                "statements_total" => $statements_total,
+                "message" => "db-apply complete ({$statements_executed} statements executed)",
+            ]);
+
+            if (!$this->progress->is_quiet_lifecycle()) {
+                $this->progress->clear_progress_line();
+            }
+            $this->progress->show_lifecycle_line("db-apply complete ({$statements_executed} statements executed)\n");
+        } finally {
+            fclose($sidecar_handle);
+            fclose($sql_handle);
+        }
+    }
+
+    private function execute_db_apply_row_stream_record(
+        PDO $pdo,
+        PDO $sqlite_prepared_pdo,
+        $sql_handle,
+        array $record,
+        ?SqlStatementRewriter $stmt_rewriter,
+        array &$sqlite_prepared_statement_cache,
+        array &$sqlite_prepared_statement_cache_order,
+        string &$executed_query
+    ): void {
+        $executed_query = '';
+
+        if (SQLiteRowStreamSidecar::is_insert_record($record)) {
+            $rewrite_value = $stmt_rewriter !== null
+                ? function (string $value, string $table, ?string $column) use ($stmt_rewriter): string {
+                    return $stmt_rewriter->rewrite_sqlite_row_stream_value($value, $table, $column);
+                }
+                : null;
+            $prepared_insert = SQLiteRowStreamSidecar::record_to_prepared_insert($record, $rewrite_value);
+            if ($prepared_insert !== null) {
+                $executed_query = $prepared_insert['sql'];
+                $this->execute_sqlite_prepared_insert(
+                    $sqlite_prepared_pdo,
+                    $prepared_insert,
+                    $sqlite_prepared_statement_cache,
+                    $sqlite_prepared_statement_cache_order,
+                );
+                return;
+            }
+        }
+
+        $query = $this->read_sql_record_slice($sql_handle, $record);
+        $this->execute_db_apply_query(
+            $pdo,
+            $query,
+            $stmt_rewriter,
+            $sqlite_prepared_pdo,
+            $sqlite_prepared_statement_cache,
+            $sqlite_prepared_statement_cache_order,
+            $executed_query,
+        );
+    }
+
+    private function read_sql_record_slice($sql_handle, array $record): string
+    {
+        if (!isset($record['sql_offset'], $record['sql_length'])) {
+            throw new RuntimeException("SQLite row stream fallback record is missing SQL byte range.");
+        }
+
+        $offset = (int) $record['sql_offset'];
+        $length = (int) $record['sql_length'];
+        if ($offset < 0 || $length < 0) {
+            throw new RuntimeException("SQLite row stream fallback record has an invalid SQL byte range.");
+        }
+
+        if (fseek($sql_handle, $offset) !== 0) {
+            throw new RuntimeException("Failed to seek db.sql for SQLite row stream fallback.");
+        }
+
+        $sql = '';
+        while (strlen($sql) < $length) {
+            $chunk = fread($sql_handle, $length - strlen($sql));
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            $sql .= $chunk;
+        }
+
+        if (strlen($sql) !== $length) {
+            throw new RuntimeException("Failed to read complete SQL fallback statement from db.sql.");
+        }
+
+        return $sql;
+    }
+
+    /**
+     * @param array{sql: string, params: list<mixed>, param_types: list<int>} $prepared_insert
+     */
+    private function execute_sqlite_prepared_insert(
+        PDO $sqlite_prepared_pdo,
+        array $prepared_insert,
+        array &$sqlite_prepared_statement_cache,
+        array &$sqlite_prepared_statement_cache_order
+    ): void {
+        $statement = $sqlite_prepared_statement_cache[$prepared_insert['sql']] ?? null;
+        if (!$statement instanceof PDOStatement) {
+            $statement = $sqlite_prepared_pdo->prepare($prepared_insert['sql']);
+            if ($statement === false) {
+                throw new PDOException('Failed to prepare SQLite INSERT statement.');
+            }
+
+            $sqlite_prepared_statement_cache[$prepared_insert['sql']] = $statement;
+            $sqlite_prepared_statement_cache_order[] = $prepared_insert['sql'];
+            if (count($sqlite_prepared_statement_cache_order) > self::SQLITE_PREPARED_INSERT_CACHE_MAX) {
+                $oldest_sql = array_shift($sqlite_prepared_statement_cache_order);
+                if (is_string($oldest_sql)) {
+                    unset($sqlite_prepared_statement_cache[$oldest_sql]);
+                }
+            }
+        } else {
+            $statement->closeCursor();
+        }
+
+        foreach ($prepared_insert['params'] as $index => $value) {
+            $statement->bindValue(
+                $index + 1,
+                $value,
+                $prepared_insert['param_types'][$index] ?? PDO::PARAM_STR
+            );
+        }
+
+        if ($statement->execute() === false) {
+            throw new PDOException('Failed to execute SQLite INSERT statement.');
+        }
+    }
+
     private function execute_db_apply_query(
         PDO $pdo,
         string $query,
@@ -5448,36 +5889,12 @@ class ImportClient
 
             if ($prepared_insert !== null) {
                 $executed_query = $prepared_insert['sql'];
-                $statement = $sqlite_prepared_statement_cache[$prepared_insert['sql']] ?? null;
-                if (!$statement instanceof PDOStatement) {
-                    $statement = $sqlite_prepared_pdo->prepare($prepared_insert['sql']);
-                    if ($statement === false) {
-                        throw new PDOException('Failed to prepare SQLite INSERT statement.');
-                    }
-
-                    $sqlite_prepared_statement_cache[$prepared_insert['sql']] = $statement;
-                    $sqlite_prepared_statement_cache_order[] = $prepared_insert['sql'];
-                    if (count($sqlite_prepared_statement_cache_order) > self::SQLITE_PREPARED_INSERT_CACHE_MAX) {
-                        $oldest_sql = array_shift($sqlite_prepared_statement_cache_order);
-                        if (is_string($oldest_sql)) {
-                            unset($sqlite_prepared_statement_cache[$oldest_sql]);
-                        }
-                    }
-                } else {
-                    $statement->closeCursor();
-                }
-
-                foreach ($prepared_insert['params'] as $index => $value) {
-                    $statement->bindValue(
-                        $index + 1,
-                        $value,
-                        $prepared_insert['param_types'][$index] ?? PDO::PARAM_STR
-                    );
-                }
-
-                if ($statement->execute() === false) {
-                    throw new PDOException('Failed to execute SQLite INSERT statement.');
-                }
+                $this->execute_sqlite_prepared_insert(
+                    $sqlite_prepared_pdo,
+                    $prepared_insert,
+                    $sqlite_prepared_statement_cache,
+                    $sqlite_prepared_statement_cache_order,
+                );
                 return;
             }
         }
@@ -7244,11 +7661,14 @@ class ImportClient
             }
         }
 
-        // Domain discovery and statement counting: scan SQL for URLs during download
-        $query_stream = class_exists('WP_MySQL_Naive_Query_Stream')
+        // Domain discovery and statement counting: scan SQL for URLs during download.
+        // The experimental SQLite row-stream path does one fast full-file pass
+        // after db.sql is complete, so avoid the older lexer stream here.
+        $defer_sql_scan = $this->experimental_sqlite_row_stream && $mode === "file";
+        $query_stream = !$defer_sql_scan && class_exists('WP_MySQL_Naive_Query_Stream')
             ? new \WP_MySQL_Naive_Query_Stream()
             : null;
-        $domain_collector = class_exists('DomainCollector')
+        $domain_collector = !$defer_sql_scan && class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
         $domains_file = $this->state_dir . "/.import-domains.json";
@@ -7688,6 +8108,174 @@ class ImportClient
         }
     }
 
+    private function build_sqlite_row_stream_sidecar(string $sql_file): void
+    {
+        if (!file_exists($sql_file)) {
+            throw new RuntimeException("Cannot build SQLite row stream sidecar: db.sql not found.");
+        }
+
+        $sidecar_file = $this->state_dir . "/" . self::SQLITE_ROW_STREAM_SIDECAR;
+        $tmp_file = $sidecar_file . ".tmp";
+        $sql_bytes = filesize($sql_file);
+        if ($sql_bytes === false) {
+            throw new RuntimeException("Cannot stat SQL file: {$sql_file}");
+        }
+
+        $this->progress->show_lifecycle_line("Building SQLite row stream sidecar\n");
+        $this->audit_log(
+            sprintf("SQLITE ROW STREAM | building sidecar from %s (%d bytes)", $sql_file, $sql_bytes),
+            false,
+        );
+
+        $sql_handle = fopen($sql_file, "r");
+        if (!$sql_handle) {
+            throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+        }
+        $sidecar_handle = fopen($tmp_file, "w");
+        if (!$sidecar_handle) {
+            fclose($sql_handle);
+            throw new RuntimeException("Cannot open SQLite row stream sidecar: {$tmp_file}");
+        }
+
+        $query_stream = new \WP_MySQL_FastQueryStream();
+        $statements_total = 0;
+        $structured_inserts = 0;
+        $fallback_statements = 0;
+        $query_stream->set_error_logger(function (array $err) use (&$statements_total) {
+            $this->audit_log(
+                sprintf(
+                    "SQLITE ROW STREAM query stream fallback | reason=%s | byte_offset=%d | stmt=%d | %s | context=%.200s",
+                    $err['reason'] ?? '?',
+                    $err['byte_offset'] ?? 0,
+                    $statements_total,
+                    $err['message'] ?? '',
+                    $err['context'] ?? ''
+                ),
+                true
+            );
+        });
+
+        $domain_collector = new \DomainCollector();
+        $parsed_url = parse_url($this->remote_url);
+        if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
+            $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
+            if (!empty($parsed_url['port'])) {
+                $source_origin .= ':' . $parsed_url['port'];
+            }
+            $domain_collector->merge([$source_origin]);
+        }
+
+        $write_record = function (array $record) use ($sidecar_handle, &$structured_inserts, &$fallback_statements): void {
+            $is_insert = SQLiteRowStreamSidecar::is_insert_record($record);
+            $line = SQLiteRowStreamSidecar::encode_record($record);
+            if ($line === null && $is_insert) {
+                $record = SQLiteRowStreamSidecar::sql_range_record(
+                    (int) ($record['sql_offset'] ?? 0),
+                    (int) ($record['sql_length'] ?? 0)
+                );
+                $is_insert = false;
+                $line = SQLiteRowStreamSidecar::encode_record($record);
+            }
+            if ($line === null) {
+                throw new RuntimeException("Failed to encode SQLite row stream sidecar record.");
+            }
+            $bytes = fwrite($sidecar_handle, $line);
+            if ($bytes === false || $bytes !== strlen($line)) {
+                throw new RuntimeException("Failed to write SQLite row stream sidecar record.");
+            }
+            if ($is_insert) {
+                $structured_inserts++;
+            } else {
+                $fallback_statements++;
+            }
+        };
+
+        $meta_line = SQLiteRowStreamSidecar::encode_record(
+            SQLiteRowStreamSidecar::meta_record((int) $sql_bytes)
+        );
+        if ($meta_line === null || fwrite($sidecar_handle, $meta_line) !== strlen($meta_line)) {
+            fclose($sql_handle);
+            fclose($sidecar_handle);
+            @unlink($tmp_file);
+            throw new RuntimeException("Failed to write SQLite row stream sidecar metadata.");
+        }
+
+        try {
+            $chunk_size = 64 * 1024;
+            while (!feof($sql_handle)) {
+                $data = fread($sql_handle, $chunk_size);
+                if ($data === false || $data === '') {
+                    break;
+                }
+                $query_stream->append_sql($data);
+
+                while ($query_stream->next_query()) {
+                    $query = $query_stream->get_query();
+                    $statement_end = $query_stream->get_bytes_consumed();
+                    $statement_offset = $statement_end - strlen($query);
+                    $record = SQLiteRowStreamSidecar::record_from_sql($query, $statement_offset);
+                    $write_record($record);
+                    $statements_total++;
+                    $this->scan_query_for_domains($query, $domain_collector);
+                }
+            }
+
+            $query_stream->mark_input_complete();
+            while ($query_stream->next_query()) {
+                $query = $query_stream->get_query();
+                $statement_end = $query_stream->get_bytes_consumed();
+                $statement_offset = $statement_end - strlen($query);
+                $record = SQLiteRowStreamSidecar::record_from_sql($query, $statement_offset);
+                $write_record($record);
+                $statements_total++;
+                $this->scan_query_for_domains($query, $domain_collector);
+            }
+        } finally {
+            fclose($sql_handle);
+            fclose($sidecar_handle);
+        }
+
+        if (!rename($tmp_file, $sidecar_file)) {
+            @unlink($tmp_file);
+            throw new RuntimeException("Failed to finalize SQLite row stream sidecar: {$sidecar_file}");
+        }
+
+        $domains = $domain_collector->get_domains();
+        if (!empty($domains)) {
+            file_put_contents(
+                $this->state_dir . "/.import-domains.json",
+                json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+            );
+        }
+
+        if ($statements_total > 0) {
+            file_put_contents(
+                $this->state_dir . "/.import-sql-stats.json",
+                json_encode(["statements_total" => $statements_total]) . "\n",
+            );
+        }
+
+        $this->state["sqlite_row_stream"] = [
+            "file" => self::SQLITE_ROW_STREAM_SIDECAR,
+            "sql_bytes" => (int) $sql_bytes,
+            "statements_total" => $statements_total,
+            "structured_inserts" => $structured_inserts,
+            "fallback_statements" => $fallback_statements,
+            "updated_at" => date("c"),
+        ];
+        $this->save_state($this->state);
+
+        $this->audit_log(
+            sprintf(
+                "SQLITE ROW STREAM | complete | statements=%d structured_inserts=%d fallback=%d",
+                $statements_total,
+                $structured_inserts,
+                $fallback_statements,
+            ),
+            false,
+        );
+    }
+
     /**
      * Drain complete SQL statements from a query stream and scan their
      * base64-decoded values for URL domains.
@@ -7702,57 +8290,64 @@ class ImportClient
             if ($statements_counted !== null) {
                 $statements_counted++;
             }
-            // Only scan INSERT statements (they contain data values).
-            if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
+            $this->scan_query_for_domains($query, $domain_collector);
+        }
+    }
+
+    private function scan_query_for_domains(string $query, \DomainCollector $domain_collector): void
+    {
+        // Only scan INSERT statements (they contain data values).
+        if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
+            return;
+        }
+        // Only scan statements with base64 values.
+        if (strpos($query, "FROM_BASE64(") === false) {
+            return;
+        }
+
+        $table = self::extract_insert_table($query);
+        $is_options_table = substr($table, -8) === '_options';
+
+        $scanner = new \Base64ValueScanner($query);
+        while ($scanner->next_value()) {
+            // For _options tables, extract the option_name (second column)
+            // and skip transients — they contain ephemeral cached data
+            // that would pollute the domain list.
+            $option_name = null;
+            $match_offset = $scanner->get_match_offset();
+            if ($is_options_table) {
+                $option_name = self::extract_option_name($query, $match_offset);
+                if ($option_name !== null && (
+                    strpos($option_name, '_transient') === 0 ||
+                    strpos($option_name, '_site_transient') === 0
+                )) {
+                    continue;
+                }
+            }
+
+            $new_domains = $domain_collector->scan($scanner->get_value());
+            if (empty($new_domains)) {
                 continue;
             }
-            // Only scan statements with base64 values
-            if (strpos($query, "FROM_BASE64(") === false) {
-                continue;
+
+            $row_id = self::extract_row_identifier($query, $match_offset);
+
+            $option_ctx = '';
+            if ($option_name !== null) {
+                $option_ctx = ' option=' . $option_name;
             }
 
-            $table = self::extract_insert_table($query);
-            $is_options_table = substr($table, -8) === '_options';
-
-            $scanner = new \Base64ValueScanner($query);
-            while ($scanner->next_value()) {
-                // For _options tables, extract the option_name (second column)
-                // and skip transients — they contain ephemeral cached data
-                // that would pollute the domain list.
-                $option_name = null;
-                $match_offset = $scanner->get_match_offset();
-                if ($is_options_table) {
-                    $option_name = self::extract_option_name($query, $match_offset);
-                    if ($option_name !== null && (
-                        strpos($option_name, '_transient') === 0 ||
-                        strpos($option_name, '_site_transient') === 0
-                    )) {
-                        continue;
-                    }
-                }
-
-                $new_domains = $domain_collector->scan($scanner->get_value());
-                if (!empty($new_domains)) {
-                    $row_id = self::extract_row_identifier($query, $match_offset);
-
-                    $option_ctx = '';
-                    if ($option_name !== null) {
-                        $option_ctx = ' option=' . $option_name;
-                    }
-
-                    foreach ($new_domains as $domain) {
-                        $this->audit_log(
-                            sprintf(
-                                "NEW DOMAIN | %s | table=%s %s%s",
-                                $domain,
-                                $table,
-                                $row_id,
-                                $option_ctx,
-                            ),
-                            false,
-                        );
-                    }
-                }
+            foreach ($new_domains as $domain) {
+                $this->audit_log(
+                    sprintf(
+                        "NEW DOMAIN | %s | table=%s %s%s",
+                        $domain,
+                        $table,
+                        $row_id,
+                        $option_ctx,
+                    ),
+                    false,
+                );
             }
         }
     }
@@ -10197,6 +10792,8 @@ class ImportClient
         $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
         $pull = $this->state["pull"] ?? null;
+        $experimental_row_stream = $this->state["experimental_sqlite_row_stream"] ?? false;
+        $sqlite_row_stream = $this->state["sqlite_row_stream"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
         $this->state["version"] = $version;
@@ -10204,6 +10801,10 @@ class ImportClient
         $this->state["follow_symlinks"] = $follow;
         $this->state["fs_root_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
+        $this->state["experimental_sqlite_row_stream"] = $experimental_row_stream;
+        if ($sqlite_row_stream !== null) {
+            $this->state["sqlite_row_stream"] = $sqlite_row_stream;
+        }
         if ($pull !== null) {
             $this->state["pull"] = $pull;
         }
@@ -10225,6 +10826,15 @@ class ImportClient
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "max_allowed_packet" => null,
+            "experimental_sqlite_row_stream" => false,
+            "sqlite_row_stream" => [
+                "file" => null,
+                "sql_bytes" => 0,
+                "statements_total" => 0,
+                "structured_inserts" => 0,
+                "fallback_statements" => 0,
+                "updated_at" => null,
+            ],
             "db_index" => [
                 "file" => null,
                 "tables" => 0,
@@ -10261,6 +10871,7 @@ class ImportClient
             "apply" => [
                 "statements_executed" => 0,
                 "bytes_read" => 0,
+                "row_stream_bytes_read" => 0,
                 "rewrite_url" => null,
                 // Target database configuration — persisted by db-apply
                 // so that apply-runtime can generate DB_* constants.
@@ -10353,6 +10964,18 @@ class ImportClient
         }
         $apply = array_intersect_key($apply, $defaults["apply"]);
         $state["apply"] = array_merge($defaults["apply"], $apply);
+        $sqlite_row_stream = $state["sqlite_row_stream"] ?? [];
+        if (!is_array($sqlite_row_stream)) {
+            $sqlite_row_stream = [];
+        }
+        $sqlite_row_stream = array_intersect_key(
+            $sqlite_row_stream,
+            $defaults["sqlite_row_stream"],
+        );
+        $state["sqlite_row_stream"] = array_merge(
+            $defaults["sqlite_row_stream"],
+            $sqlite_row_stream,
+        );
         $pull = $state["pull"] ?? [];
         if (!is_array($pull)) {
             $pull = [];
@@ -11166,6 +11789,22 @@ if (
             'placeholder' => 'DB',
             'help' => 'MySQL database (required for --sql-output=mysql)',
             'commands' => ['db-pull'],
+        ],
+        [
+            'name' => 'experimental-sqlite-row-stream',
+            'type' => 'flag',
+            'target' => 'experimental_sqlite_row_stream',
+            'flag_value' => true,
+            'help' => 'Experimental: write/use a SQLite row-stream sidecar for faster SQLite db-apply',
+            'commands' => ['pull', 'db-pull', 'db-apply'],
+        ],
+        [
+            'name' => 'no-experimental-sqlite-row-stream',
+            'type' => 'flag',
+            'target' => 'experimental_sqlite_row_stream',
+            'flag_value' => false,
+            'help' => null,
+            'commands' => [],
         ],
 
         // ── db-apply options ─────────────────────────────────────

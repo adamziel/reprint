@@ -176,6 +176,11 @@ class SqlStatementRewriter
         );
     }
 
+    public function rewrite_sqlite_row_stream_value(string $value, string $table, ?string $column): string
+    {
+        return $this->rewrite_value_for_column($value, $table, $column);
+    }
+
     private function rewrite_value_for_column(string $value, string $table, ?string $column): string
     {
         if (strpos($value, 'http') === false) {

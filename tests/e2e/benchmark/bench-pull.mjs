@@ -49,6 +49,15 @@ const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PR
 const PLAYGROUND_PHP_VERSION = process.env.PLAYGROUND_PHP_VERSION || '8.3';
 const REGISTRY = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'site-registry.json'), 'utf-8'));
 const MYSQL_PARSER_MANIFEST = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST || '';
+const DB_PULL_EXTRA_ARGS = envArgs('BENCH_DB_PULL_EXTRA_ARGS');
+const DB_APPLY_EXTRA_ARGS = envArgs('BENCH_DB_APPLY_EXTRA_ARGS');
+
+function envArgs(name) {
+    return (process.env[name] || '')
+        .split(/\s+/)
+        .map((arg) => arg.trim())
+        .filter(Boolean);
+}
 
 async function seedSourceDb() {
     const dbName = `e2e_${SITE.replace(/-/g, '_')}`;
@@ -276,7 +285,7 @@ function runPlaygroundSqliteDbPullBenchmark() {
         return proofFailureResult('playground-sqlite-db-pull', start, proof, baseDetails);
     }
 
-    const result = runStage('db-pull', stateDir, [], {
+    const result = runStage('db-pull', stateDir, DB_PULL_EXTRA_ARGS, {
         phpBinary: PLAYGROUND_PHP_BINARY,
         env: playgroundPhpEnv(),
     });
@@ -302,7 +311,7 @@ function runPlaygroundSqliteDbApplyBenchmark() {
         'playground sqlite benchmark preflight',
     );
     requireBenchStageOk(
-        runStage('db-pull', stateDir),
+        runStage('db-pull', stateDir, DB_PULL_EXTRA_ARGS),
         'playground sqlite benchmark db-pull',
     );
     const proof = runNativeMysqlParserProof({ requireParser: true });
@@ -327,6 +336,7 @@ function runPlaygroundSqliteDbApplyBenchmark() {
         `--target-sqlite-path=${sqlitePath}`,
         '--target-db=playground_sqlite_bench',
         '--new-site-url=http://localhost:9999',
+        ...DB_APPLY_EXTRA_ARGS,
     ], {
         phpBinary: PLAYGROUND_PHP_BINARY,
         env: playgroundPhpEnv(),
@@ -629,8 +639,8 @@ async function main() {
     const stages = [
         { name: 'preflight', extra: [] },
         { name: 'files-pull', extra: [] },
-        { name: 'db-pull', extra: [] },
-        { name: 'db-apply', extra: dbApplyArgs },
+        { name: 'db-pull', extra: DB_PULL_EXTRA_ARGS },
+        { name: 'db-apply', extra: [...dbApplyArgs, ...DB_APPLY_EXTRA_ARGS] },
         // apply-runtime is local-only; it doesn't take a remote URL.
         { name: 'apply-runtime', extra: runtimeArgs, includeUrl: false },
     ];
