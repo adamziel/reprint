@@ -9,9 +9,10 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * Rewrites URLs in a single decoded database value by detecting the data
  * format and applying the appropriate rewriting strategy.
  *
- * Format detection is try-and-fail: construct the real parser, check if
- * it accepted the input. No heuristic pre-checks, no format detection
- * class — the parsers themselves are the authority on what's valid.
+ * Format detection is try-and-fail after conservative syntax gates: construct
+ * the real parser, check if it accepted the input. The gates only skip parser
+ * attempts for byte prefixes that cannot contain string leaves for that format;
+ * the parsers themselves remain the authority on what's valid.
  *
  * 1. Serialized PHP → construct PhpSerializationProcessor, if not malformed,
  *    iterate string values and recurse on each
@@ -31,6 +32,7 @@ class StructuredDataUrlRewriter
 {
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
+    private const STRUCTURED_REWRITE_CACHE_MAX = 4096;
     private const REWRITE_RESULT_CACHE_MAX = 4096;
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
@@ -60,6 +62,14 @@ class StructuredDataUrlRewriter
 
     /** @var string Cache namespace for this rewriter's URL mapping. */
     private string $mapping_cache_key;
+
+    /** @var array<string, array{content_type: string, input: string, output: string}> */
+    private array $structured_rewrite_cache = [];
+
+    /** @var string[] */
+    private array $structured_rewrite_cache_ring = [];
+
+    private int $structured_rewrite_cache_next = 0;
 
     /** @var array<string, false|array{raw_url: string, parsed_url: mixed}> */
     private array $rewrite_result_cache = [];
@@ -124,6 +134,12 @@ class StructuredDataUrlRewriter
             $content_type = self::PLAIN_TEXT;
         }
 
+        $structured_cache_key = sha1($content_type . "\0" . $value);
+        $cached = $this->get_cached_structured_rewrite($structured_cache_key, $content_type, $value);
+        if ($cached !== null) {
+            return $cached;
+        }
+
         // Quick-reject: if the value doesn't contain href=", src=", or any
         // source domain, there's nothing to rewrite. This avoids expensive
         // parsing (serialized PHP, JSON, block markup) for the vast majority
@@ -132,32 +148,42 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
-        // Try serialized PHP: the parser validates the entire structure
-        // in the constructor. If it's not malformed, iterate and recurse.
-        $p = new PhpSerializationProcessor($value);
-        if (!$p->is_malformed()) {
-            while ($p->next_value()) {
-                $original = $p->get_value();
-                $rewritten = $this->rewrite($original, $content_type);
-                if ($rewritten !== $original) {
-                    $p->set_value($rewritten);
+        // Avoid constructing the serialized-PHP parser for ordinary URL
+        // strings and block markup. The parser still owns validation once
+        // entered; this gate only skips impossible first-byte shapes that
+        // cannot expose string values for rewriting.
+        if ($this->could_be_php_serialization_with_strings($value)) {
+            $p = new PhpSerializationProcessor($value);
+            if (!$p->is_malformed()) {
+                while ($p->next_value()) {
+                    $original = $p->get_value();
+                    $rewritten = $this->rewrite($original, $content_type);
+                    if ($rewritten !== $original) {
+                        $p->set_value($rewritten);
+                    }
                 }
+                $rewritten_value = $p->get_updated_serialization();
+                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+                return $rewritten_value;
             }
-            return $p->get_updated_serialization();
         }
 
-        // Try JSON: the iterator calls json_decode in the constructor.
-        // If it's not malformed, iterate and recurse.
-        $iter = new JsonStringIterator($value);
-        if (!$iter->is_malformed()) {
-            while ($iter->next_value()) {
-                $original = $iter->get_value();
-                $rewritten = $this->rewrite($original, $content_type);
-                if ($rewritten !== $original) {
-                    $iter->set_value($rewritten);
+        if ($this->could_be_json_container($value)) {
+            // Try JSON: the iterator calls json_decode in the constructor.
+            // If it's not malformed, iterate and recurse.
+            $iter = new JsonStringIterator($value);
+            if (!$iter->is_malformed()) {
+                while ($iter->next_value()) {
+                    $original = $iter->get_value();
+                    $rewritten = $this->rewrite($original, $content_type);
+                    if ($rewritten !== $original) {
+                        $iter->set_value($rewritten);
+                    }
                 }
+                $rewritten_value = $iter->get_result();
+                $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+                return $rewritten_value;
             }
-            return $iter->get_result();
         }
 
         // Base64 decoding is temporarily disabled for performance.
@@ -165,7 +191,9 @@ class StructuredDataUrlRewriter
         // Base64ValueScanner in SqlStatementRewriter — this block
         // was for base64-within-base64 nesting which is rare in practice.
 
-        return $this->rewrite_urls($value, $content_type);
+        $rewritten_value = $this->rewrite_urls($value, $content_type);
+        $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
+        return $rewritten_value;
     }
 
     /**
@@ -186,6 +214,31 @@ class StructuredDataUrlRewriter
                 return true;
             }
         }
+        return false;
+    }
+
+    private function could_be_php_serialization_with_strings(string $value): bool
+    {
+        $first_byte = $value[0] ?? '';
+
+        return $first_byte === 'a'
+            || $first_byte === 's'
+            || $first_byte === 'O'
+            || $first_byte === 'C';
+    }
+
+    private function could_be_json_container(string $value): bool
+    {
+        $length = strlen($value);
+        for ($i = 0; $i < $length; $i++) {
+            $byte = $value[$i];
+            if ($byte === ' ' || $byte === "\n" || $byte === "\r" || $byte === "\t") {
+                continue;
+            }
+
+            return $byte === '{' || $byte === '[';
+        }
+
         return false;
     }
 
@@ -219,6 +272,41 @@ class StructuredDataUrlRewriter
         }
     }
 
+    private function get_cached_structured_rewrite(string $cache_key, string $content_type, string $value): ?string
+    {
+        if (!array_key_exists($cache_key, $this->structured_rewrite_cache)) {
+            return null;
+        }
+
+        $entry = $this->structured_rewrite_cache[$cache_key];
+        if ($entry['content_type'] !== $content_type || $entry['input'] !== $value) {
+            return null;
+        }
+
+        return $entry['output'];
+    }
+
+    private function set_cached_structured_rewrite(string $cache_key, string $content_type, string $input, string $output): void
+    {
+        if (!array_key_exists($cache_key, $this->structured_rewrite_cache)) {
+            if (count($this->structured_rewrite_cache_ring) < self::STRUCTURED_REWRITE_CACHE_MAX) {
+                $this->structured_rewrite_cache_ring[] = $cache_key;
+            } else {
+                $evicted_key = $this->structured_rewrite_cache_ring[$this->structured_rewrite_cache_next];
+                unset($this->structured_rewrite_cache[$evicted_key]);
+                $this->structured_rewrite_cache_ring[$this->structured_rewrite_cache_next] = $cache_key;
+            }
+
+            $this->structured_rewrite_cache_next = ($this->structured_rewrite_cache_next + 1) % self::STRUCTURED_REWRITE_CACHE_MAX;
+        }
+
+        $this->structured_rewrite_cache[$cache_key] = [
+            'content_type' => $content_type,
+            'input'       => $input,
+            'output'      => $output,
+        ];
+    }
+
     /**
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
@@ -232,6 +320,26 @@ class StructuredDataUrlRewriter
     public function rewrite_known_block_markup_value(string $value): string
     {
         return $this->rewrite($value, self::BLOCK_MARKUP);
+    }
+
+    /**
+     * Rewrite a decoded value known from schema context to be scalar text.
+     *
+     * This still routes through URLInTextProcessor; it only skips the
+     * serialized-PHP and JSON container probes that are impossible for narrow
+     * core URL columns such as wp_posts.guid or wp_users.user_url.
+     */
+    public function rewrite_known_plain_text_value(string $value): string
+    {
+        if ($value === '') {
+            return $value;
+        }
+
+        if (!$this->maybe_contains_rewritable_urls($value)) {
+            return $value;
+        }
+
+        return $this->rewrite_urls($value, self::PLAIN_TEXT);
     }
 
     /**
