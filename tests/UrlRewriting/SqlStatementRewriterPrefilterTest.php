@@ -207,6 +207,14 @@ class SqlStatementRewriterPrefilterTest extends TestCase
         $this->assertNull(FastInsertScanner::scan($sql, true));
     }
 
+    public function testSparseFastInsertScannerRejectsMalformedCandidatePayload(): void
+    {
+        $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES"
+            . "(1, FROM_BASE64('aHR0!not-base64'));";
+
+        $this->assertNull(FastInsertScanner::scan($sql, true));
+    }
+
     /**
      * Exhaustive fuzz: 200 random padding lengths × random URL paths × both
      * schemes. Padding bytes are chosen from a wide alphabet so each
