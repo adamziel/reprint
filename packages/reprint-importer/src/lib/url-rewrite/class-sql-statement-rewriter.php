@@ -176,12 +176,27 @@ class SqlStatementRewriter
         );
     }
 
+    /**
+     * Build a fully parameterized SQLite INSERT for producer-shaped rows.
+     *
+     * This keeps the same URL-rewrite semantics as build_sqlite_prepared_insert()
+     * while producing a stable statement shape that callers can cache. Unknown
+     * shapes return null so the caller can fall back to the legacy SQL-text path.
+     *
+     * @return array{sql: string, params: list<mixed>, param_types: list<int>, table: string, columns: list<string>, row_count: int}|null
+     */
+    public function build_sqlite_structured_insert(string $sql): ?array
+    {
+        return SQLitePreparedInsertBuilder::build_structured(
+            $sql,
+            function (string $value, string $table, ?string $column): string {
+                return $this->rewrite_value_for_column($value, $table, $column);
+            }
+        );
+    }
+
     private function rewrite_value_for_column(string $value, string $table, ?string $column): string
     {
-        if (strpos($value, 'http') === false) {
-            return $value;
-        }
-
         if (!$this->url_rewriter->value_might_contain_source_domain($value)) {
             return $value;
         }

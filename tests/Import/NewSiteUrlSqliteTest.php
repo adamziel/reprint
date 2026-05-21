@@ -135,7 +135,7 @@ class NewSiteUrlSqliteTest extends TestCase
             return $data === null ? null : base64_decode($data);
         });
 
-        return $pdo->query($sql)->fetchAll();
+        return $pdo->query($sql)->fetchAll(\PDO::FETCH_ASSOC);
     }
 
     /**
@@ -413,5 +413,106 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertSame('complete', $state['status']);
         $this->assertSame(3, $state['apply']['statements_executed']);
         $this->assertSame(strlen($sql), $state['apply']['bytes_read']);
+    }
+
+    public function testSqliteDbApplyResumeCountsStructuredInsertStatementsNotRows(): void
+    {
+        $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
+        mkdir(dirname($sqlitePath), 0777, true);
+
+        $drop = "DROP TABLE IF EXISTS `wp_options`;";
+        $create = "CREATE TABLE `wp_options` ("
+            . "`option_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT, "
+            . "`option_name` varchar(191) NOT NULL DEFAULT '', "
+            . "`option_value` longtext NOT NULL, "
+            . "`autoload` varchar(20) NOT NULL DEFAULT 'yes', "
+            . "PRIMARY KEY (`option_id`)"
+            . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+        $insert1 = sprintf(
+            "INSERT INTO `wp_options` (`option_id`, `option_name`, `option_value`, `autoload`) VALUES "
+            . "(1, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s')), "
+            . "(2, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('first'),
+            base64_encode('one'),
+            base64_encode('yes'),
+            base64_encode('second'),
+            base64_encode('two'),
+            base64_encode('yes')
+        );
+        $insert2 = sprintf(
+            "INSERT INTO `wp_options` (`option_id`, `option_name`, `option_value`, `autoload`) VALUES "
+            . "(3, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s')), "
+            . "(4, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('third'),
+            base64_encode('three'),
+            base64_encode('yes'),
+            base64_encode('fourth'),
+            base64_encode('four'),
+            base64_encode('yes')
+        );
+
+        $prefix = $drop . "\n" . $create . "\n" . $insert1 . "\n";
+        file_put_contents($this->tempDir . '/db.sql', $prefix . $insert2 . "\n");
+
+        $pdo = new \PDO('sqlite:' . $sqlitePath);
+        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $pdo->exec(
+            "CREATE TABLE wp_options ("
+            . "option_id INTEGER PRIMARY KEY, "
+            . "option_name TEXT NOT NULL, "
+            . "option_value BLOB NOT NULL, "
+            . "autoload TEXT NOT NULL"
+            . ")"
+        );
+        $seed = $pdo->prepare(
+            "INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (?, ?, ?, ?)"
+        );
+        $seed->execute([1, 'first', 'one', 'yes']);
+        $seed->execute([2, 'second', 'two', 'yes']);
+
+        $this->writeState([
+            'command' => 'db-apply',
+            'status' => 'in_progress',
+            'apply' => [
+                'statements_executed' => 3,
+                'bytes_read' => strlen($prefix),
+            ],
+        ]);
+
+        $client = new \ImportClient(
+            'https://old-site.example.com/?reprint-api',
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $client->run([
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $sqlitePath,
+            'target_db' => 'wp_test',
+        ]);
+
+        $rows = $this->querySqlite(
+            $sqlitePath,
+            "SELECT option_id, option_name, option_value FROM wp_options ORDER BY option_id",
+            'wp_test',
+        );
+        $this->assertSame(
+            [
+                ['option_id' => 1, 'option_name' => 'first', 'option_value' => 'one'],
+                ['option_id' => 2, 'option_name' => 'second', 'option_value' => 'two'],
+                ['option_id' => 3, 'option_name' => 'third', 'option_value' => 'three'],
+                ['option_id' => 4, 'option_name' => 'fourth', 'option_value' => 'four'],
+            ],
+            $rows
+        );
+
+        $state = json_decode(file_get_contents($this->tempDir . '/.import-state.json'), true);
+        $this->assertSame('complete', $state['status']);
+        $this->assertSame(4, $state['apply']['statements_executed']);
+        $this->assertGreaterThanOrEqual(strlen($prefix), $state['apply']['bytes_read']);
     }
 }

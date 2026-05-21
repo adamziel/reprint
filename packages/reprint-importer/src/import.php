@@ -5119,6 +5119,7 @@ class ImportClient
 
         [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
         $sqlite_prepared_pdo = null;
+        $sqlite_prepared_statement_cache = [];
         if (
             strtolower((string) ($options["target_engine"] ?? "mysql")) === "sqlite"
             && method_exists($pdo, 'get_connection')
@@ -5245,6 +5246,7 @@ class ImportClient
                             $query,
                             $stmt_rewriter,
                             $sqlite_prepared_pdo,
+                            $sqlite_prepared_statement_cache,
                             $executed_query,
                         );
                     } catch (PDOException $e) {
@@ -5323,6 +5325,7 @@ class ImportClient
                         $query,
                         $stmt_rewriter,
                         $sqlite_prepared_pdo,
+                        $sqlite_prepared_statement_cache,
                         $executed_query,
                     );
                 } catch (PDOException $e) {
@@ -5428,11 +5431,45 @@ class ImportClient
         string $query,
         ?SqlStatementRewriter $stmt_rewriter,
         ?PDO $sqlite_prepared_pdo,
+        array &$sqlite_prepared_statement_cache,
         string &$executed_query
     ): void {
         $executed_query = $query;
 
         if ($sqlite_prepared_pdo !== null) {
+            $structured_insert = $stmt_rewriter !== null
+                ? $stmt_rewriter->build_sqlite_structured_insert($query)
+                : SQLitePreparedInsertBuilder::build_structured($query);
+
+            if ($structured_insert !== null) {
+                $executed_query = $structured_insert['sql'];
+                $statement = $sqlite_prepared_statement_cache[$structured_insert['sql']] ?? null;
+                if ($statement === null) {
+                    $statement = $sqlite_prepared_pdo->prepare($structured_insert['sql']);
+                    if ($statement === false) {
+                        throw new PDOException('Failed to prepare structured SQLite INSERT statement.');
+                    }
+
+                    if (count($sqlite_prepared_statement_cache) < 64) {
+                        $sqlite_prepared_statement_cache[$structured_insert['sql']] = $statement;
+                    }
+                }
+
+                foreach ($structured_insert['params'] as $index => $value) {
+                    $statement->bindValue(
+                        $index + 1,
+                        $value,
+                        $structured_insert['param_types'][$index] ?? PDO::PARAM_STR
+                    );
+                }
+
+                if ($statement->execute() === false) {
+                    throw new PDOException('Failed to execute structured SQLite INSERT statement.');
+                }
+                $statement->closeCursor();
+                return;
+            }
+
             $prepared_insert = $stmt_rewriter !== null
                 ? $stmt_rewriter->build_sqlite_prepared_insert($query)
                 : SQLitePreparedInsertBuilder::build($query);
