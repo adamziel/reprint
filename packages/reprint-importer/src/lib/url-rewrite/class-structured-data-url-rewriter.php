@@ -5,8 +5,6 @@ use WordPress\DataLiberation\URL\URLInTextProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
 use function WordPress\DataLiberation\URL\is_child_url_of;
-use function WordPress\DataLiberation\URL\wp_rewrite_urls;
-
 /**
  * Rewrites URLs in a single decoded database value by detecting the data
  * format and applying the appropriate rewriting strategy.
@@ -20,12 +18,14 @@ use function WordPress\DataLiberation\URL\wp_rewrite_urls;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → wp_rewrite_urls() (block_markup hint) or strtr() (default)
+ * 4. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or
+ *    URLInTextProcessor (default)
  *
  * HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
  * The hint propagates through recursive calls so that leaf strings inside
- * serialized PHP, JSON, or base64 eventually reach wp_rewrite_urls().
+ * serialized PHP, JSON, or base64 eventually reach the same block-markup
+ * parser.
  */
 class StructuredDataUrlRewriter
 {
@@ -35,12 +35,6 @@ class StructuredDataUrlRewriter
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
-
-    /** @var array<string, string> Literal base URL replacements for the block-markup fast path. */
-    private array $literal_base_url_replacements;
-
-    /** @var string[] Unescaped source base URLs, used to avoid changing block-comment JSON formatting. */
-    private array $literal_source_base_urls;
 
     /**
      * Pre-parsed url_mapping: each entry is
@@ -85,7 +79,7 @@ class StructuredDataUrlRewriter
         foreach (array_keys($url_mapping) as $from_url) {
             $host = parse_url($from_url, PHP_URL_HOST);
             if ($host !== null && $host !== false) {
-                $domains[$host] = true;
+                $this->add_source_domain_variants($domains, $host);
             }
         }
         $this->source_domains = array_keys($domains);
@@ -94,22 +88,12 @@ class StructuredDataUrlRewriter
         // (scheme/host/path tokenisation, punycode, etc.) and used to be
         // repeated on every leaf we rewrote.
         $this->parsed_mapping = [];
-        $this->literal_base_url_replacements = [];
-        $this->literal_source_base_urls = [];
         foreach ($url_mapping as $from_url_string => $to_url_string) {
             $this->parsed_mapping[] = [
                 'from_url' => WPURL::parse($from_url_string),
                 'to_url'   => WPURL::parse($to_url_string),
             ];
-
-            $this->literal_source_base_urls[] = $from_url_string;
-            $this->literal_base_url_replacements[$from_url_string] = $to_url_string;
-            $this->literal_base_url_replacements[str_replace('/', '\/', $from_url_string)] = str_replace('/', '\/', $to_url_string);
         }
-        uksort(
-            $this->literal_base_url_replacements,
-            static fn ($a, $b) => strlen($b) <=> strlen($a)
-        );
         $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
 
         // Default base_url: first from-url in the mapping. Preserves the
@@ -123,7 +107,7 @@ class StructuredDataUrlRewriter
      *
      * @param string      $value        The decoded database value.
      * @param string|null $content_type Content type hint: null (auto-detect, plain text default),
-     *                                  'block_markup' (use wp_rewrite_urls), or 'skip' (no-op).
+     *                                  'block_markup' (use BlockMarkupUrlProcessor), or 'skip' (no-op).
      * @return string The rewritten value, or the original if no changes were made.
      */
     public function rewrite(string $value, ?string $content_type = null): string
@@ -194,11 +178,11 @@ class StructuredDataUrlRewriter
      */
     private function maybe_contains_rewritable_urls(string $value): bool
     {
-        if (strpos($value, 'href="') !== false || strpos($value, 'src="') !== false) {
+        if (stripos($value, 'href=') !== false || stripos($value, 'src=') !== false) {
             return true;
         }
         foreach ($this->source_domains as $domain) {
-            if (strpos($value, $domain) !== false) {
+            if (stripos($value, $domain) !== false) {
                 return true;
             }
         }
@@ -206,103 +190,48 @@ class StructuredDataUrlRewriter
     }
 
     /**
+     * @param array<string, true> $domains
+     */
+    private function add_source_domain_variants(array &$domains, string $host): void
+    {
+        if ($host === '') {
+            return;
+        }
+
+        $domains[$host] = true;
+
+        if (function_exists('idn_to_ascii')) {
+            $ascii = defined('INTL_IDNA_VARIANT_UTS46')
+                ? @idn_to_ascii($host, 0, INTL_IDNA_VARIANT_UTS46)
+                : @idn_to_ascii($host);
+            if (is_string($ascii) && $ascii !== '') {
+                $domains[$ascii] = true;
+            }
+        }
+
+        if (function_exists('idn_to_utf8')) {
+            $unicode = defined('INTL_IDNA_VARIANT_UTS46')
+                ? @idn_to_utf8($host, 0, INTL_IDNA_VARIANT_UTS46)
+                : @idn_to_utf8($host);
+            if (is_string($unicode) && $unicode !== '') {
+                $domains[$unicode] = true;
+            }
+        }
+    }
+
+    /**
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
-     * This takes a conservative fast path for the common dump shape where the
-     * value contains literal absolute source URLs in HTML attributes, text, CSS,
-     * or block-comment JSON. In that case a boundary-checked base URL swap gives
-     * the same result as BlockMarkupUrlProcessor without constructing the full
-     * parser stack for every row. If any source URL occurrence is not at a URL
-     * boundary, we fall back to the full structured rewriter.
+     * Block markup owns HTML attributes, block-comment JSON, CSS url() values,
+     * text URLs, entity decoding, URL casing, and IDN canonicalization. This
+     * intentionally routes through the structured parser instead of doing a
+     * literal source-base replacement, because one database value may contain
+     * multiple spellings of the same URL that only the parser can recognize as
+     * equivalent.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
-        if ($value === '') {
-            return $value;
-        }
-
-        if (!$this->maybe_contains_rewritable_urls($value)) {
-            return $value;
-        }
-
-        $literal_rewrite = $this->try_rewrite_literal_base_urls($value);
-        if ($literal_rewrite !== null) {
-            return $literal_rewrite;
-        }
-
         return $this->rewrite($value, self::BLOCK_MARKUP);
-    }
-
-    private function try_rewrite_literal_base_urls(string $value): ?string
-    {
-        if ($this->has_unescaped_source_url_in_block_comment($value)) {
-            return null;
-        }
-
-        $matched = false;
-        foreach ($this->literal_base_url_replacements as $from => $_to) {
-            $offset = 0;
-            while (true) {
-                $pos = strpos($value, $from, $offset);
-                if ($pos === false) {
-                    break;
-                }
-                if (!$this->is_literal_base_url_boundary($value, $pos, strlen($from))) {
-                    return null;
-                }
-                $matched = true;
-                $offset = $pos + strlen($from);
-            }
-        }
-
-        return $matched ? strtr($value, $this->literal_base_url_replacements) : null;
-    }
-
-    private function has_unescaped_source_url_in_block_comment(string $value): bool
-    {
-        $comment_start = 0;
-        while (true) {
-            $comment_start = strpos($value, '<!-- wp:', $comment_start);
-            if ($comment_start === false) {
-                return false;
-            }
-
-            $comment_end = strpos($value, '-->', $comment_start);
-            if ($comment_end === false) {
-                return false;
-            }
-
-            foreach ($this->literal_source_base_urls as $source_url) {
-                $source_pos = strpos($value, $source_url, $comment_start);
-                if ($source_pos !== false && $source_pos < $comment_end) {
-                    return true;
-                }
-            }
-
-            $comment_start = $comment_end + 3;
-        }
-    }
-
-    private function is_literal_base_url_boundary(string $value, int $pos, int $length): bool
-    {
-        if ($pos > 0) {
-            $prev = $value[$pos - 1];
-            if (
-                !ctype_space($prev)
-                && strpos('"\'([{,:>', $prev) === false
-            ) {
-                return false;
-            }
-        }
-
-        $next_pos = $pos + $length;
-        if ($next_pos >= strlen($value)) {
-            return true;
-        }
-
-        $next = $value[$next_pos];
-        return ctype_space($next)
-            || strpos('/\\?#"\'<)]},;', $next) !== false;
     }
 
     /**
