@@ -121,6 +121,16 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertTrue($decoded['active']);
     }
 
+    public function testRewritesUrlInJsonStringScalar(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '"https:\/\/old-site.com\/api"';
+
+        $result = $rewriter->rewrite($input);
+
+        $this->assertSame('https://new-site.com/api', json_decode($result, true));
+    }
+
     public function testJsonOutputUsesUnescapedSlashes(): void
     {
         $rewriter = $this->createRewriter();

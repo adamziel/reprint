@@ -37,6 +37,16 @@ class JsonStringIteratorTest extends TestCase
         );
     }
 
+    public function testCollectsJsonStringScalar(): void
+    {
+        $json = json_encode('https://old-site.com/page', JSON_UNESCAPED_SLASHES);
+
+        $this->assertSame(
+            ['https://old-site.com/page'],
+            $this->collectValues($json)
+        );
+    }
+
     public function testNoChangeReturnsOriginalJson(): void
     {
         $json = '{"title":"Hello","items":["first","second"]}';
@@ -65,6 +75,18 @@ class JsonStringIteratorTest extends TestCase
         $decoded = json_decode($iter->get_result(), true);
         $this->assertSame('https://new-site.com/page', $decoded['nested']['url']);
         $this->assertSame(['keep'], $decoded['items']);
+    }
+
+    public function testSetValueUpdatesJsonStringScalar(): void
+    {
+        $iter = new JsonStringIterator('"https:\/\/old-site.com\/page"');
+
+        $this->assertTrue($iter->next_value());
+        $this->assertSame('https://old-site.com/page', $iter->get_value());
+
+        $iter->set_value('https://new-site.com/page');
+
+        $this->assertSame('https://new-site.com/page', json_decode($iter->get_result(), true));
     }
 
     public function testMalformedJsonIsMalformed(): void

@@ -1,15 +1,16 @@
 <?php
 
 /**
- * Cursor-based iterator over string leaf values in a JSON object or array.
+ * Cursor-based iterator over string leaf values in a JSON value.
  *
  * Mirrors the PhpSerializationProcessor API: construct with the raw JSON,
  * then loop with next_value()/get_value()/set_value(). Call get_result()
  * to retrieve the (possibly modified) JSON string.
  *
  * Only string values are exposed — numbers, booleans, and nulls are skipped.
- * Both object values and array elements are visited. Object keys are NOT
- * visited (they're structural, not content), matching the PHP serialization
+ * JSON string scalars are exposed as a single value. For objects and arrays,
+ * object values and array elements are visited. Object keys are NOT visited
+ * (they're structural, not content), matching the PHP serialization
  * processor's behavior of skipping array keys and property names.
  *
  * Usage:
@@ -25,7 +26,7 @@ class JsonStringIterator
     /** @var string The original JSON string. */
     private string $original;
 
-    /** @var mixed The decoded JSON structure (array or object decoded as array). */
+    /** @var mixed The decoded JSON value (object decoded as array). */
     private $decoded;
 
     /** @var bool Whether decoding succeeded. */
@@ -49,7 +50,7 @@ class JsonStringIterator
         $this->original = $json;
         $this->decoded = json_decode($json, true);
 
-        if (json_last_error() !== JSON_ERROR_NONE || !is_array($this->decoded)) {
+        if (json_last_error() !== JSON_ERROR_NONE || (!is_array($this->decoded) && !is_string($this->decoded))) {
             $this->valid = false;
             return;
         }
@@ -59,7 +60,7 @@ class JsonStringIterator
     }
 
     /**
-     * Whether the input was not valid JSON (or was a scalar, not an object/array).
+     * Whether the input was not valid JSON or had no string leaves.
      *
      * Mirrors PhpSerializationProcessor::is_malformed() so both iterators
      * can be used with the same try-and-fail pattern.
