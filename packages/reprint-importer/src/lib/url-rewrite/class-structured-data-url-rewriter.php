@@ -236,6 +236,7 @@ class StructuredDataUrlRewriter
 
         if (
             !$looks_like_structured_envelope &&
+            !$this->contains_raw_text_element($value) &&
             $this->source_domain_occurrences_are_outside_markup($value)
         ) {
             if (strpos($value, '<') === false) {
@@ -256,6 +257,14 @@ class StructuredDataUrlRewriter
         return $looks_like_structured_envelope
             ? $this->rewrite($value, self::BLOCK_MARKUP)
             : $this->rewrite_urls($value, self::BLOCK_MARKUP);
+    }
+
+    private function contains_raw_text_element(string $value): bool
+    {
+        return stripos($value, '<script') !== false
+            || stripos($value, '<style') !== false
+            || stripos($value, '<textarea') !== false
+            || stripos($value, '<title') !== false;
     }
 
     private function looks_like_structured_envelope(string $value): bool

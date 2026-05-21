@@ -397,6 +397,20 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
     }
 
+    public function testKnownBlockMarkupTextFastPathDoesNotRewriteRawTextContainers(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<script>const url = "https://old-site.com/script";</script>'
+            . '<textarea>https://old-site.com/form-value</textarea>'
+            . '<p>Visit https://old-site.com/text-node.</p>';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https://old-site.com/script', $result);
+        $this->assertStringContainsString('https://old-site.com/form-value', $result);
+        $this->assertStringContainsString('https://new-site.com/text-node', $result);
+    }
+
     public function testKnownBlockMarkupRewritesCaseVariantHostWithoutLiteralSourceDomain(): void
     {
         $rewriter = $this->createRewriter();
