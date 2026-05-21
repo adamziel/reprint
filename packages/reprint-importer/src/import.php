@@ -5125,6 +5125,48 @@ class ImportClient
         ) {
             $sqlite_prepared_pdo = $pdo->get_connection()->get_pdo();
         }
+        $use_sqlite_apply_transactions = $sqlite_prepared_pdo !== null;
+        $sqlite_apply_transaction_active = false;
+        $begin_sqlite_apply_transaction = function () use (
+            $pdo,
+            $use_sqlite_apply_transactions,
+            &$sqlite_apply_transaction_active
+        ): void {
+            if (!$use_sqlite_apply_transactions || $sqlite_apply_transaction_active) {
+                return;
+            }
+            if (method_exists($pdo, 'inTransaction') && $pdo->inTransaction()) {
+                return;
+            }
+            $pdo->beginTransaction();
+            $sqlite_apply_transaction_active = true;
+        };
+        $commit_sqlite_apply_transaction = function () use (
+            $pdo,
+            $use_sqlite_apply_transactions,
+            &$sqlite_apply_transaction_active
+        ): void {
+            if (!$use_sqlite_apply_transactions || !$sqlite_apply_transaction_active) {
+                return;
+            }
+            if (method_exists($pdo, 'inTransaction') && $pdo->inTransaction()) {
+                $pdo->commit();
+            }
+            $sqlite_apply_transaction_active = false;
+        };
+        $rollback_sqlite_apply_transaction = function () use (
+            $pdo,
+            $use_sqlite_apply_transactions,
+            &$sqlite_apply_transaction_active
+        ): void {
+            if (!$use_sqlite_apply_transactions || !$sqlite_apply_transaction_active) {
+                return;
+            }
+            if (method_exists($pdo, 'inTransaction') && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $sqlite_apply_transaction_active = false;
+        };
 
         $this->audit_log(
             "CONNECTED | {$connection_label}",
@@ -5201,6 +5243,7 @@ class ImportClient
 
         try {
             $chunk_size = 64 * 1024; // 64KB read chunks
+            $begin_sqlite_apply_transaction();
 
             while (!feof($sql_handle)) {
                 // Check shutdown
@@ -5264,9 +5307,11 @@ class ImportClient
                     // formed a complete query yet. This ensures resumption starts at
                     // the exact boundary between executed and un-executed queries.
                     if ($stmts_since_save >= $save_every) {
+                        $commit_sqlite_apply_transaction();
                         $this->state["apply"]["statements_executed"] = $statements_executed;
                         $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
                         $this->save_state($this->state);
+                        $begin_sqlite_apply_transaction();
                         $stmts_since_save = 0;
 
                         // Progress output
@@ -5338,6 +5383,7 @@ class ImportClient
 
             if ($this->shutdown_requested) {
                 // Save partial progress
+                $commit_sqlite_apply_transaction();
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
                 $this->state["status"] = "partial";
@@ -5366,6 +5412,7 @@ class ImportClient
                 // We skip deactivate_plugins() because the plugin files will
                 // be gone by the time WordPress boots — firing deactivation
                 // hooks into absent code is pointless.
+                $commit_sqlite_apply_transaction();
                 $deactivated = $this->deactivate_host_plugins($pdo);
                 foreach ($deactivated as $basename) {
                     $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
@@ -5410,6 +5457,9 @@ class ImportClient
                 }
                 $this->progress->show_lifecycle_line("db-apply complete ({$statements_executed} statements executed)\n");
             }
+        } catch (Throwable $e) {
+            $rollback_sqlite_apply_transaction();
+            throw $e;
         } finally {
             fclose($sql_handle);
         }

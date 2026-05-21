@@ -369,4 +369,91 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertCount(1, $rows);
         $this->assertSame(strtoupper(bin2hex($bytes)), $rows[0]['hex_value']);
     }
+
+    public function testSqliteDbApplyRollsBackOnlyUncheckpointedWindowAndCanResume(): void
+    {
+        $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
+        $buildDump = function (string $tailStatement): string {
+            $stmts = [];
+            $stmts[] = "CREATE TABLE `wp_txn_window` ("
+                . "`id` int NOT NULL, "
+                . "`payload` longtext NOT NULL, "
+                . "PRIMARY KEY (`id`)"
+                . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+            for ($i = 1; $i <= 104; $i++) {
+                $stmts[] = sprintf(
+                    "INSERT INTO `wp_txn_window` (`id`, `payload`) VALUES (%d, FROM_BASE64('%s'));",
+                    $i,
+                    base64_encode("row-{$i}")
+                );
+            }
+            $stmts[] = $tailStatement;
+
+            return implode("\n", $stmts) . "\n";
+        };
+
+        file_put_contents(
+            $this->tempDir . '/db.sql',
+            $buildDump("INSERT INTO `wp_missing_table` (`id`) VALUES (1);")
+        );
+        $this->writeState();
+
+        $client = new \ImportClient(
+            'https://old-site.example.com/?reprint-api',
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $options = [
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $sqlitePath,
+            'target_db' => 'wp_test',
+        ];
+
+        try {
+            $client->run($options);
+            $this->fail('Expected db-apply to fail after the first checkpoint.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('wp_missing_table', $e->getMessage());
+        }
+
+        $state = json_decode(file_get_contents($this->tempDir . '/.import-state.json'), true);
+        $this->assertSame('in_progress', $state['status']);
+        $this->assertSame(100, $state['apply']['statements_executed']);
+
+        $rowsAfterFailure = $this->querySqlite(
+            $sqlitePath,
+            "SELECT COUNT(*) AS c, MAX(id) AS max_id FROM wp_txn_window",
+            'wp_test',
+        );
+        $this->assertSame(99, (int) $rowsAfterFailure[0]['c']);
+        $this->assertSame(99, (int) $rowsAfterFailure[0]['max_id']);
+
+        file_put_contents(
+            $this->tempDir . '/db.sql',
+            $buildDump("INSERT INTO `wp_txn_window` (`id`, `payload`) VALUES (105, FROM_BASE64('" . base64_encode('row-105') . "'));")
+        );
+
+        $client = new \ImportClient(
+            'https://old-site.example.com/?reprint-api',
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $client->run($options);
+
+        $rowsAfterResume = $this->querySqlite(
+            $sqlitePath,
+            "SELECT COUNT(*) AS c, MAX(id) AS max_id FROM wp_txn_window",
+            'wp_test',
+        );
+        $this->assertSame(105, (int) $rowsAfterResume[0]['c']);
+        $this->assertSame(105, (int) $rowsAfterResume[0]['max_id']);
+
+        $state = json_decode(file_get_contents($this->tempDir . '/.import-state.json'), true);
+        $this->assertSame('complete', $state['status']);
+    }
 }
