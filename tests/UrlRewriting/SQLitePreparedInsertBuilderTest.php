@@ -68,6 +68,49 @@ class SQLitePreparedInsertBuilderTest extends TestCase
         $this->assertSame(['after'], $prepared['params']);
     }
 
+    public function testRejectsMalformedBase64InsteadOfBindingEmptyString(): void
+    {
+        $sql = "INSERT INTO `wp_options` (`option_value`) VALUES(FROM_BASE64('valid'));";
+
+        $this->assertNull(SQLitePreparedInsertBuilder::build($sql));
+    }
+
+    public function testRejectsMalformedBase64AfterSameShapeWasBuilt(): void
+    {
+        $valid_sql = sprintf(
+            "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('name'),
+            base64_encode('value')
+        );
+        $this->assertNotNull(SQLitePreparedInsertBuilder::build($valid_sql));
+
+        // Guards both the current rescan path and any future same-shape cache.
+        $invalid_sql = sprintf(
+            "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('%s'), FROM_BASE64('valid'));",
+            base64_encode('name')
+        );
+
+        $this->assertNull(SQLitePreparedInsertBuilder::build($invalid_sql));
+    }
+
+    public function testRejectsNonAlphabetPayloadAfterSameShapeWasBuilt(): void
+    {
+        $valid_sql = sprintf(
+            "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('name'),
+            base64_encode('value')
+        );
+        $this->assertNotNull(SQLitePreparedInsertBuilder::build($valid_sql));
+
+        // Guards both the current rescan path and any future same-shape cache.
+        $invalid_sql = sprintf(
+            "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('%s'), FROM_BASE64('not-valid!'));",
+            base64_encode('name')
+        );
+
+        $this->assertNull(SQLitePreparedInsertBuilder::build($invalid_sql));
+    }
+
     public function testUnknownInsertShapeReturnsNull(): void
     {
         $sql = sprintf(

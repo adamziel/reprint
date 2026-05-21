@@ -43,7 +43,10 @@ class SQLitePreparedInsertBuilder
             }
 
             $decoded = base64_decode($entry['encoded_value'], true);
-            $value = $decoded !== false ? $decoded : '';
+            if ($decoded === false) {
+                return null;
+            }
+            $value = $decoded;
             if ($rewrite_value !== null) {
                 $column = self::find_column_at_offset($fast['column_map'], $entry['expr_start']);
                 $value = $rewrite_value($value, $fast['table'], $column);
