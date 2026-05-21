@@ -373,6 +373,14 @@ class WP_MySQL_FastQueryStream {
 			}
 
 			if ( $c === '-' ) {
+				if ( $i + 1 >= $buf_len ) {
+					if ( ! $this->input_complete ) {
+						$this->scan_cursor = $i;
+						return false;
+					}
+					$i++;
+					continue;
+				}
 				if ( $i + 1 < $buf_len && $buf[$i + 1] === '-' ) {
 					if ( $i + 2 >= $buf_len ) {
 						$this->scan_cursor = $i;
@@ -404,6 +412,14 @@ class WP_MySQL_FastQueryStream {
 			}
 
 			if ( $c === '/' ) {
+				if ( $i + 1 >= $buf_len ) {
+					if ( ! $this->input_complete ) {
+						$this->scan_cursor = $i;
+						return false;
+					}
+					$i++;
+					continue;
+				}
 				if ( $i + 1 < $buf_len && $buf[$i + 1] === '*' ) {
 					$end = strpos( $buf, '*/', $i + 2 );
 					if ( $end === false ) {
@@ -439,31 +455,35 @@ class WP_MySQL_FastQueryStream {
 	private function skip_string( string $buf, int $buf_len, int $start, string $quote ) {
 		$i = $start + 1;
 		while ( $i < $buf_len ) {
-			// Fast-skip over the bulk of the string body. Inside a
-			// quoted literal only `\` and the matching $quote can end
-			// the run; a strcspn over those two bytes lets PHP's libc
-			// devour 4 KB blocks of base64 payload in microseconds.
-			$skip = strcspn( $buf, "\\" . $quote, $i );
-			$i += $skip;
-			if ( $i >= $buf_len ) {
+			// Fast-skip over the bulk of the string body. Only the
+			// matching quote can close the literal; backslashes only
+			// matter when they immediately precede that candidate quote.
+			$pos = strpos( $buf, $quote, $i );
+			if ( $pos === false ) {
 				return false;
 			}
-			$c = $buf[$i];
-			if ( $c === '\\' ) {
-				if ( $i + 1 >= $buf_len ) {
-					return false;
-				}
-				$i += 2; // skip the backslash + escaped byte
+
+			if ( $this->is_quote_escaped_by_backslashes( $buf, $start, $pos ) ) {
+				$i = $pos + 1;
 				continue;
 			}
+
 			// Found the matching $quote. Doubled-quote escape: keep going.
-			if ( $i + 1 < $buf_len && $buf[$i + 1] === $quote ) {
-				$i += 2;
+			if ( $pos + 1 < $buf_len && $buf[$pos + 1] === $quote ) {
+				$i = $pos + 2;
 				continue;
 			}
-			return $i + 1;
+			return $pos + 1;
 		}
 		return false;
+	}
+
+	private function is_quote_escaped_by_backslashes( string $buf, int $string_start, int $quote_pos ): bool {
+		$slashes = 0;
+		for ( $i = $quote_pos - 1; $i > $string_start && $buf[$i] === '\\'; $i-- ) {
+			$slashes++;
+		}
+		return ( $slashes % 2 ) === 1;
 	}
 
 	/**

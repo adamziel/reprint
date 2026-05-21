@@ -197,4 +197,80 @@ SQL;
         $this->assertSame($naive['queries'], $fast_queries);
         $this->assertFalse($fast->has_fallen_back());
     }
+
+    private function adversarialBoundaryFixture(): string
+    {
+        $multi_byte = "\xE2\x98\x83 text; \xF0\x9F\x98\x80";
+        $base64_payload = base64_encode(str_repeat(
+            "semicolon; quote ' double \" backslash \\ multibyte {$multi_byte}\n",
+            8
+        ));
+
+        return <<<'SQL'
+-- line comment with ; and 'quotes'
+/* block comment with ; and "quotes" */
+INSERT INTO t (a, b, c) VALUES ('semi;colon', "double;colon", 'doubled '' quote; still string');
+INSERT INTO t (a, b, c) VALUES ('escaped quote \' and semicolon; still string', 'two backslashes before close \\', 'odd backslashes before quote \\\' and semicolon; still string');
+# hash comment with ; and `ticks`
+INSERT INTO `semi;table` (`weird``name`, `plain`) VALUES ('value', '/* not comment; */');
+SQL
+            . "INSERT INTO t (a) VALUES ('{$multi_byte}');\n"
+            . "INSERT INTO t (a) VALUES (FROM_BASE64('{$base64_payload}'));\n"
+            . "SELECT 'final; statement without trailing semicolon'";
+    }
+
+    public function testAdversarialStatementBoundariesMatchNaive(): void
+    {
+        $sql = $this->adversarialBoundaryFixture();
+        $fast  = $this->drain(new WP_MySQL_FastQueryStream(), $sql);
+        $naive = $this->drain(new WP_MySQL_Naive_Query_Stream(), $sql);
+
+        $this->assertSame($naive['queries'], $fast['queries']);
+        $this->assertSame($naive['bytes_consumed'], $fast['bytes_consumed']);
+        $this->assertCount(6, $fast['queries']);
+    }
+
+    public function testAdversarialStatementBoundariesAcrossSmallChunks(): void
+    {
+        $sql = $this->adversarialBoundaryFixture();
+        $expected = $this->drain(new WP_MySQL_Naive_Query_Stream(), $sql);
+
+        foreach ([1, 3, 17, 64] as $chunk_size) {
+            $fast = new WP_MySQL_FastQueryStream();
+            $queries = [];
+
+            for ($i = 0, $len = strlen($sql); $i < $len; $i += $chunk_size) {
+                $fast->append_sql(substr($sql, $i, $chunk_size));
+                while ($fast->next_query()) {
+                    $queries[] = $fast->get_query();
+                }
+            }
+
+            $fast->mark_input_complete();
+            while ($fast->next_query()) {
+                $queries[] = $fast->get_query();
+            }
+
+            $this->assertSame($expected['queries'], $queries, "chunk size {$chunk_size}");
+            $this->assertSame($expected['bytes_consumed'], $fast->get_bytes_consumed(), "chunk size {$chunk_size}");
+            $this->assertFalse($fast->has_fallen_back(), "chunk size {$chunk_size}");
+        }
+    }
+
+    public function testFinalUnterminatedStringWithTrailingBackslashFallsBack(): void
+    {
+        $fast = new WP_MySQL_FastQueryStream();
+        $errors = [];
+        $fast->set_error_logger(function (array $err) use (&$errors) {
+            $errors[] = $err;
+        });
+
+        $fast->append_sql("SELECT 'unterminated\\");
+        $fast->mark_input_complete();
+        $fast->next_query();
+
+        $this->assertTrue($fast->has_fallen_back());
+        $this->assertCount(1, $errors);
+        $this->assertSame('input complete but parser paused', $errors[0]['reason']);
+    }
 }
