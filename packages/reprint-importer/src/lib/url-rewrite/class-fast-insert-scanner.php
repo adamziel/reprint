@@ -392,8 +392,7 @@ class FastInsertScanner
             return null;
         }
 
-        $offsets = self::http_prefix_offsets($sql, $values_end);
-        if ($offsets === []) {
+        if (!preg_match('/aHR0|dHA6|dHBz|dHRw/', $sql, $match, PREG_OFFSET_CAPTURE, $values_end)) {
             return [
                 'table' => $table,
                 'column_map' => [],
@@ -402,22 +401,22 @@ class FastInsertScanner
         }
 
         $entries = [];
-        $seen_quotes = [];
+        $search_offset = $match[0][1];
         $column_count = count($columns);
-        foreach ($offsets as $prefix_offset) {
+        do {
+            $prefix_offset = $match[0][1];
             $entry = self::entry_for_http_prefix_offset($sql, $sql_len, $prefix_offset, $values_end, $columns, $column_count);
             if ($entry === false) {
                 return null;
             }
             if ($entry === null) {
+                $search_offset = $prefix_offset + 1;
                 continue;
             }
-            if (isset($seen_quotes[$entry['quote_start']])) {
-                continue;
-            }
-            $seen_quotes[$entry['quote_start']] = true;
+
+            $search_offset = $entry['quote_start'] + $entry['quote_length'];
             $entries[] = $entry;
-        }
+        } while (preg_match('/aHR0|dHA6|dHBz|dHRw/', $sql, $match, PREG_OFFSET_CAPTURE, $search_offset));
 
         usort(
             $entries,
@@ -603,21 +602,4 @@ class FastInsertScanner
         return null;
     }
 
-    /**
-     * @return list<int>
-     */
-    private static function http_prefix_offsets(string $sql, int $offset = 0): array
-    {
-        $offsets = [];
-        foreach (['aHR0', 'dHA6', 'dHBz', 'dHRw'] as $prefix) {
-            $cursor = $offset;
-            while (($cursor = strpos($sql, $prefix, $cursor)) !== false) {
-                $offsets[] = $cursor;
-                $cursor++;
-            }
-        }
-
-        sort($offsets);
-        return $offsets;
-    }
 }
