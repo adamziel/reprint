@@ -5127,6 +5127,14 @@ class ImportClient
             && method_exists($pdo, 'get_connection')
         ) {
             $sqlite_prepared_pdo = $pdo->get_connection()->get_pdo();
+            // These are connection-local import hints. Avoid journal/sync/locking
+            // PRAGMAs because they alter durability or observable database state.
+            $sqlite_prepared_pdo->exec('PRAGMA temp_store = MEMORY');
+            $sqlite_prepared_pdo->exec('PRAGMA cache_size = -32768');
+            $this->audit_log(
+                'SQLite db-apply PRAGMAs | temp_store=MEMORY | cache_size=32768 KiB',
+                false,
+            );
         }
 
         $this->audit_log(

@@ -369,4 +369,49 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertCount(1, $rows);
         $this->assertSame(strtoupper(bin2hex($bytes)), $rows[0]['hex_value']);
     }
+
+    public function testSqliteImportPragmasDoNotChangeProgressCounters(): void
+    {
+        $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
+        $drop = "DROP TABLE IF EXISTS `wp_options`;";
+        $create = "CREATE TABLE `wp_options` ("
+            . "`option_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT, "
+            . "`option_name` varchar(191) NOT NULL DEFAULT '', "
+            . "`option_value` longtext NOT NULL, "
+            . "`autoload` varchar(20) NOT NULL DEFAULT 'yes', "
+            . "PRIMARY KEY (`option_id`)"
+            . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+        $insert = sprintf(
+            "INSERT INTO `wp_options` (`option_id`, `option_name`, `option_value`, `autoload`) VALUES "
+            . "(1, FROM_BASE64('%s'), FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('siteurl'),
+            base64_encode('https://example.com'),
+            base64_encode('yes')
+        );
+        $sql = implode("\n", [$drop, $create, $insert]);
+
+        file_put_contents($this->tempDir . '/db.sql', $sql);
+        $this->writeState();
+
+        $client = new \ImportClient(
+            'https://old-site.example.com/?reprint-api',
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $client->run([
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $sqlitePath,
+            'target_db' => 'wp_test',
+        ]);
+
+        $state = json_decode(file_get_contents($this->tempDir . '/.import-state.json'), true);
+        $this->assertSame('complete', $state['status']);
+        $this->assertSame(3, $state['apply']['statements_executed']);
+        $this->assertSame(strlen($sql), $state['apply']['bytes_read']);
+    }
 }
