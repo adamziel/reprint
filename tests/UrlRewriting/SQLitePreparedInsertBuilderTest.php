@@ -7,6 +7,19 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/loa
 
 class SQLitePreparedInsertBuilderTest extends TestCase
 {
+    protected function setUp(): void
+    {
+        self::clearShapeCache();
+    }
+
+    private static function clearShapeCache(): void
+    {
+        $reflection = new ReflectionClass(SQLitePreparedInsertBuilder::class);
+        $property = $reflection->getProperty('shape_cache');
+        $property->setAccessible(true);
+        $property->setValue(null, []);
+    }
+
     public function testBuildsPreparedInsertForArbitraryBytes(): void
     {
         $bytes = '';
@@ -66,6 +79,104 @@ class SQLitePreparedInsertBuilderTest extends TestCase
 
         $this->assertNotNull($prepared);
         $this->assertSame(['after'], $prepared['params']);
+    }
+
+    public function testRewriteCallbackCanBePrefilteredByEncodedPayload(): void
+    {
+        $sql = sprintf(
+            "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('plain value'),
+            base64_encode('http://old-site.example.com')
+        );
+        $calls = 0;
+
+        $prepared = SQLitePreparedInsertBuilder::build(
+            $sql,
+            function (string $value, string $table, ?string $column) use (&$calls): string {
+                $calls++;
+                return str_replace('old-site', 'new-site', $value);
+            },
+            function (string $encoded_value): bool {
+                return strpos($encoded_value, 'aHR0') !== false;
+            }
+        );
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(1, $calls);
+        $this->assertSame(
+            ['plain value', 'http://new-site.example.com'],
+            $prepared['params']
+        );
+    }
+
+    public function testRewritePrefilterReceivesDecodedPayloadOnCachedShape(): void
+    {
+        $make_sql = static function (string $first, string $second): string {
+            return sprintf(
+                "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('%s'), FROM_BASE64('%s'));",
+                base64_encode($first),
+                base64_encode($second)
+            );
+        };
+
+        SQLitePreparedInsertBuilder::build($make_sql('seed', 'seed'));
+
+        $calls = 0;
+        $seen_decoded = [];
+        $prepared = SQLitePreparedInsertBuilder::build(
+            $make_sql('plain value', 'http://old-site.example.com'),
+            function (string $value, string $table, ?string $column) use (&$calls): string {
+                $calls++;
+                return str_replace('old-site', 'new-site', $value);
+            },
+            function (string $encoded_value, string $decoded_value) use (&$seen_decoded): bool {
+                unset($encoded_value);
+                $seen_decoded[] = $decoded_value;
+                return strpos($decoded_value, 'http') !== false;
+            }
+        );
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(['plain value', 'http://old-site.example.com'], $seen_decoded);
+        $this->assertSame(1, $calls);
+        $this->assertSame(
+            ['plain value', 'http://new-site.example.com'],
+            $prepared['params']
+        );
+    }
+
+    public function testCachedShapeRejectsPayloadThatFastScannerWouldReject(): void
+    {
+        $valid_sql = sprintf(
+            "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('%s'), FROM_BASE64('%s'));",
+            base64_encode('seed'),
+            base64_encode('value')
+        );
+        SQLitePreparedInsertBuilder::build($valid_sql);
+
+        $invalid_sql = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('valid'), FROM_BASE64('not-valid!'));";
+
+        $this->assertNull(SQLitePreparedInsertBuilder::build($invalid_sql));
+    }
+
+    public function testUncachedShapeRejectsInvalidBase64PaddingInsteadOfBindingEmptyString(): void
+    {
+        $sql = "INSERT INTO `wp_options` (`option_value`) VALUES(FROM_BASE64('valid'));";
+
+        $this->assertNull(SQLitePreparedInsertBuilder::build($sql));
+    }
+
+    public function testCachedShapeRejectsInvalidBase64PaddingInsteadOfBindingEmptyString(): void
+    {
+        $valid_sql = sprintf(
+            "INSERT INTO `wp_options` (`option_value`) VALUES(FROM_BASE64('%s'));",
+            base64_encode('seed')
+        );
+        SQLitePreparedInsertBuilder::build($valid_sql);
+
+        $invalid_sql = "INSERT INTO `wp_options` (`option_value`) VALUES(FROM_BASE64('valid'));";
+
+        $this->assertNull(SQLitePreparedInsertBuilder::build($invalid_sql));
     }
 
     public function testUnknownInsertShapeReturnsNull(): void

@@ -123,12 +123,7 @@ class SqlStatementRewriter
         // that finds nothing. False negatives would silently leave URLs
         // un-rewritten; the four prefixes above are the minimum set that
         // covers every alignment×scheme combination, so no real URL escapes.
-        if (
-            strpos($sql, 'aHR0') === false
-            && strpos($sql, 'dHA6') === false
-            && strpos($sql, 'dHBz') === false
-            && strpos($sql, 'dHRw') === false
-        ) {
+        if (!self::encoded_payload_could_contain_http_scheme($sql)) {
             return $sql;
         }
 
@@ -172,8 +167,21 @@ class SqlStatementRewriter
             $sql,
             function (string $value, string $table, ?string $column): string {
                 return $this->rewrite_value_for_column($value, $table, $column);
+            },
+            function (string $encoded_value, string $decoded_value): bool {
+                unset($encoded_value);
+                return strpos($decoded_value, 'http') !== false
+                    && $this->url_rewriter->value_might_contain_source_domain($decoded_value);
             }
         );
+    }
+
+    private static function encoded_payload_could_contain_http_scheme(string $encoded_value): bool
+    {
+        return strpos($encoded_value, 'aHR0') !== false
+            || strpos($encoded_value, 'dHA6') !== false
+            || strpos($encoded_value, 'dHBz') !== false
+            || strpos($encoded_value, 'dHRw') !== false;
     }
 
     private function rewrite_value_for_column(string $value, string $table, ?string $column): string
