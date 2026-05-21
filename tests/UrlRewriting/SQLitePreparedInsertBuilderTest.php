@@ -107,6 +107,70 @@ class SQLitePreparedInsertBuilderTest extends TestCase
         $this->assertSame(['999', '888', 'second_key', 'second_value'], $prepared_b['params']);
     }
 
+    public function testStructuredInsertTokenizesCommentsAndEscapedIdentifiers(): void
+    {
+        $sql = sprintf(
+            "/* leading FROM_BASE64('ignored') */ INSERT INTO `wp``odd` (`id`, `meta``key`, `value`) "
+            . "VALUES /* tuple */ (1, FROM_BASE64('%s'), CONVERT(FROM_BASE64('%s') USING utf8mb4));",
+            base64_encode('key'),
+            base64_encode('value')
+        );
+
+        $calls = [];
+        $prepared = SQLitePreparedInsertBuilder::build_structured(
+            $sql,
+            function (string $value, string $table, ?string $column) use (&$calls): string {
+                $calls[] = [$value, $table, $column];
+                return $value;
+            }
+        );
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(
+            "INSERT INTO `wp``odd` (`id`,`meta``key`,`value`) VALUES (?,?,?);",
+            $prepared['sql']
+        );
+        $this->assertSame(['1', 'key', 'value'], $prepared['params']);
+        $this->assertSame(
+            [
+                ['key', 'wp`odd', 'meta`key'],
+                ['value', 'wp`odd', 'value'],
+            ],
+            $calls
+        );
+    }
+
+    public function testStructuredInsertDoesNotTreatStringLiteralsAsSqlShape(): void
+    {
+        $sql = sprintf(
+            "INSERT INTO `wp_options` (`option_id`, `option_name`, `option_value`) VALUES "
+            . "(1, '', FROM_BASE64('%s'));",
+            base64_encode("literal text with ),( and FROM_BASE64('ignored') inside")
+        );
+
+        $prepared = SQLitePreparedInsertBuilder::build_structured($sql);
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(
+            ['1', '', "literal text with ),( and FROM_BASE64('ignored') inside"],
+            $prepared['params']
+        );
+    }
+
+    public function testStructuredInsertRejectsNestedExpressionsFallbackSafely(): void
+    {
+        $cases = [
+            "INSERT INTO `wp_options` (`option_id`, `option_value`) VALUES((1 + 2), FROM_BASE64('" . base64_encode('value') . "'));",
+            "INSERT INTO `wp_options` (`option_id`, `option_value`) VALUES(ABS(-1), FROM_BASE64('" . base64_encode('value') . "'));",
+            "INSERT INTO `wp_options` (`option_id`, `option_value`) VALUES(1, CONCAT(FROM_BASE64('" . base64_encode('value') . "'), 'x'));",
+            "INSERT INTO `wp_options` (`option_id`, `option_value`) VALUES(1, CONVERT('plain' USING utf8mb4));",
+        ];
+
+        foreach ($cases as $case) {
+            $this->assertNull(SQLitePreparedInsertBuilder::build_structured($case), $case);
+        }
+    }
+
     public function testStructuredUrlRewriteReceivesColumnContextForEveryBase64Value(): void
     {
         $sql = sprintf(

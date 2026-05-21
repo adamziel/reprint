@@ -38,60 +38,72 @@ class SQLitePreparedInsertBuilder
             return null;
         }
 
-        if (!preg_match(
-            '/\A\s*INSERT\s+INTO\s+`((?:[^`]|``)+)`\s*\(([^)]+)\)\s*VALUES\b/i',
-            $sql,
-            $m,
-            PREG_OFFSET_CAPTURE
-        )) {
+        $tokens = self::significant_tokens($sql);
+        $token_count = count($tokens);
+        $cursor = 0;
+
+        if (
+            $token_count < 8
+            || $tokens[$cursor]->id !== WP_MySQL_Lexer::INSERT_SYMBOL
+        ) {
+            return null;
+        }
+        $cursor++;
+
+        if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::INTO_SYMBOL) {
+            return null;
+        }
+        $cursor++;
+
+        if ($cursor >= $token_count) {
             return null;
         }
 
-        $table = str_replace('``', '`', $m[1][0]);
-        $columns = self::parse_column_list($m[2][0]);
+        $table = self::identifier_token_value($tokens[$cursor]);
+        if ($table === null) {
+            return null;
+        }
+        $cursor++;
+
+        if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::DOT_SYMBOL) {
+            return null;
+        }
+
+        $columns = self::consume_column_list($tokens, $token_count, $cursor);
         if ($columns === null || empty($columns)) {
             return null;
         }
 
-        $column_count = count($columns);
-        $cursor = $m[0][1] + strlen($m[0][0]);
-        $sql_len = strlen($sql);
+        if (
+            $cursor >= $token_count
+            || (
+                $tokens[$cursor]->id !== WP_MySQL_Lexer::VALUES_SYMBOL
+                && $tokens[$cursor]->id !== WP_MySQL_Lexer::VALUE_SYMBOL
+            )
+        ) {
+            return null;
+        }
+        $cursor++;
+
         $params = [];
         $param_types = [];
+        $column_count = count($columns);
         $row_count = 0;
         $saw_base64 = false;
 
-        while (true) {
-            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
+        while ($cursor < $token_count) {
+            if ($tokens[$cursor]->id === WP_MySQL_Lexer::SEMICOLON_SYMBOL) {
                 $cursor++;
-            }
-
-            if ($cursor >= $sql_len) {
                 break;
             }
 
-            if ($sql[$cursor] === ';') {
-                $cursor++;
-                while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                    $cursor++;
-                }
-                if ($cursor !== $sql_len) {
-                    return null;
-                }
-                break;
-            }
-
-            if ($sql[$cursor] !== '(') {
+            if ($tokens[$cursor]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
                 return null;
             }
             $cursor++;
 
             for ($col_idx = 0; $col_idx < $column_count; $col_idx++) {
-                while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                    $cursor++;
-                }
-
-                $value = self::scan_structured_value($sql, $sql_len, $cursor);
+                $value = self::consume_structured_value($tokens, $token_count, $cursor, $sql);
                 if ($value === null) {
                     return null;
                 }
@@ -114,15 +126,11 @@ class SQLitePreparedInsertBuilder
                     $param_types[] = $value['pdo_type'];
                 }
 
-                while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                    $cursor++;
-                }
-
-                if ($cursor >= $sql_len) {
+                if ($cursor >= $token_count) {
                     return null;
                 }
 
-                if ($sql[$cursor] === ',') {
+                if ($tokens[$cursor]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
                     if ($col_idx === $column_count - 1) {
                         return null;
                     }
@@ -130,7 +138,7 @@ class SQLitePreparedInsertBuilder
                     continue;
                 }
 
-                if ($sql[$cursor] === ')') {
+                if ($tokens[$cursor]->id === WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
                     if ($col_idx !== $column_count - 1) {
                         return null;
                     }
@@ -140,40 +148,30 @@ class SQLitePreparedInsertBuilder
                 return null;
             }
 
-            if ($cursor >= $sql_len || $sql[$cursor] !== ')') {
+            if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
                 return null;
             }
             $cursor++;
             $row_count++;
 
-            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                $cursor++;
-            }
-
-            if ($cursor < $sql_len && $sql[$cursor] === ',') {
+            if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
                 $cursor++;
                 continue;
             }
 
-            if ($cursor < $sql_len && $sql[$cursor] === ';') {
+            if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::SEMICOLON_SYMBOL) {
                 $cursor++;
-                while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                    $cursor++;
-                }
-                if ($cursor !== $sql_len) {
-                    return null;
-                }
                 break;
             }
 
-            if ($cursor >= $sql_len) {
+            if ($cursor >= $token_count) {
                 break;
             }
 
             return null;
         }
 
-        if ($row_count === 0 || !$saw_base64) {
+        if ($cursor !== $token_count || $row_count === 0 || !$saw_base64) {
             return null;
         }
 
@@ -267,46 +265,18 @@ class SQLitePreparedInsertBuilder
     }
 
     /**
-     * @return list<string>|null
-     */
-    private static function parse_column_list(string $columns_body): ?array
-    {
-        $columns = [];
-        if (!preg_match_all(
-            '/\s*`((?:[^`]|``)+)`\s*(,|$)/A',
-            $columns_body,
-            $matches,
-            PREG_SET_ORDER
-        )) {
-            return null;
-        }
-
-        $offset = 0;
-        foreach ($matches as $match) {
-            $columns[] = str_replace('``', '`', $match[1]);
-            $offset += strlen($match[0]);
-        }
-
-        return $offset === strlen($columns_body) ? $columns : null;
-    }
-
-    /**
      * @return array{kind: string, value?: mixed, pdo_type?: int, encoded_value?: string}|null
      */
-    private static function scan_structured_value(string $sql, int $sql_len, int &$cursor): ?array
+    private static function consume_structured_value(array $tokens, int $token_count, int &$cursor, string $sql): ?array
     {
-        if ($cursor >= $sql_len) {
+        if ($cursor >= $token_count) {
             return null;
         }
 
-        $c = $sql[$cursor];
+        $token = $tokens[$cursor];
 
-        if (
-            ($c === 'N' || $c === 'n')
-            && $cursor + 4 <= $sql_len
-            && substr_compare($sql, 'NULL', $cursor, 4, true) === 0
-        ) {
-            $cursor += 4;
+        if ($token->id === WP_MySQL_Lexer::NULL_SYMBOL) {
+            $cursor++;
             return [
                 'kind' => 'null',
                 'value' => null,
@@ -314,8 +284,14 @@ class SQLitePreparedInsertBuilder
             ];
         }
 
-        if ($c === "'" && $cursor + 1 < $sql_len && $sql[$cursor + 1] === "'") {
-            $cursor += 2;
+        if (
+            (
+                $token->id === WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
+                || $token->id === WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
+            )
+            && $token->get_value() === ''
+        ) {
+            $cursor++;
             return [
                 'kind' => 'empty',
                 'value' => '',
@@ -323,13 +299,8 @@ class SQLitePreparedInsertBuilder
             ];
         }
 
-        if (
-            ($c === 'F' || $c === 'f')
-            && $cursor + 13 <= $sql_len
-            && substr_compare($sql, 'FROM_BASE64(', $cursor, 12, true) === 0
-        ) {
-            $cursor += 12;
-            $encoded = self::consume_base64_payload($sql, $sql_len, $cursor);
+        if (self::is_from_base64_token($token)) {
+            $encoded = self::consume_base64_call($tokens, $token_count, $cursor);
             return $encoded === null
                 ? null
                 : [
@@ -338,45 +309,32 @@ class SQLitePreparedInsertBuilder
                 ];
         }
 
-        if (
-            ($c === 'C' || $c === 'c')
-            && $cursor + 8 <= $sql_len
-            && substr_compare($sql, 'CONVERT(', $cursor, 8, true) === 0
-        ) {
-            $cursor += 8;
-            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                $cursor++;
-            }
-            if (
-                $cursor + 12 > $sql_len
-                || substr_compare($sql, 'FROM_BASE64(', $cursor, 12, true) !== 0
-            ) {
+        if ($token->id === WP_MySQL_Lexer::CONVERT_SYMBOL) {
+            $cursor++;
+            if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
                 return null;
             }
-            $cursor += 12;
-            $encoded = self::consume_base64_payload($sql, $sql_len, $cursor);
+            $cursor++;
+
+            if ($cursor >= $token_count || !self::is_from_base64_token($tokens[$cursor])) {
+                return null;
+            }
+            $encoded = self::consume_base64_call($tokens, $token_count, $cursor);
             if ($encoded === null) {
                 return null;
             }
 
-            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                $cursor++;
-            }
-            if ($cursor + 5 > $sql_len || substr_compare($sql, 'USING', $cursor, 5, true) !== 0) {
+            if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::USING_SYMBOL) {
                 return null;
             }
-            $cursor += 5;
-            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                $cursor++;
-            }
-            if ($cursor + 7 > $sql_len || substr_compare($sql, 'utf8mb4', $cursor, 7, true) !== 0) {
+            $cursor++;
+
+            if ($cursor >= $token_count || strcasecmp($tokens[$cursor]->get_value(), 'utf8mb4') !== 0) {
                 return null;
             }
-            $cursor += 7;
-            while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-                $cursor++;
-            }
-            if ($cursor >= $sql_len || $sql[$cursor] !== ')') {
+            $cursor++;
+
+            if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
                 return null;
             }
             $cursor++;
@@ -387,81 +345,99 @@ class SQLitePreparedInsertBuilder
             ];
         }
 
-        $start = $cursor;
-        if ($c === '+' || $c === '-') {
+        $first_token = $token;
+        if (
+            $token->id === WP_MySQL_Lexer::PLUS_OPERATOR
+            || $token->id === WP_MySQL_Lexer::MINUS_OPERATOR
+        ) {
             $cursor++;
-        }
-
-        $digits_before_decimal = 0;
-        while ($cursor < $sql_len && $sql[$cursor] >= '0' && $sql[$cursor] <= '9') {
-            $cursor++;
-            $digits_before_decimal++;
-        }
-
-        $digits_after_decimal = 0;
-        if ($cursor < $sql_len && $sql[$cursor] === '.') {
-            $cursor++;
-            while ($cursor < $sql_len && $sql[$cursor] >= '0' && $sql[$cursor] <= '9') {
-                $cursor++;
-                $digits_after_decimal++;
-            }
-        }
-
-        if ($digits_before_decimal === 0 && $digits_after_decimal === 0) {
-            $cursor = $start;
-            return null;
-        }
-
-        if ($cursor < $sql_len && ($sql[$cursor] === 'e' || $sql[$cursor] === 'E')) {
-            $cursor++;
-            if ($cursor < $sql_len && ($sql[$cursor] === '+' || $sql[$cursor] === '-')) {
-                $cursor++;
-            }
-
-            $exponent_start = $cursor;
-            while ($cursor < $sql_len && $sql[$cursor] >= '0' && $sql[$cursor] <= '9') {
-                $cursor++;
-            }
-
-            if ($cursor === $exponent_start) {
-                $cursor = $start;
+            if (
+                $cursor >= $token_count
+                || !self::is_numeric_token($tokens[$cursor])
+                || $first_token->start + $first_token->length !== $tokens[$cursor]->start
+            ) {
                 return null;
             }
+            $token = $tokens[$cursor];
+        } elseif (!self::is_numeric_token($token)) {
+            return null;
         }
+        $cursor++;
 
         return [
             'kind' => 'numeric',
-            'value' => substr($sql, $start, $cursor - $start),
+            'value' => substr($sql, $first_token->start, ($token->start + $token->length) - $first_token->start),
             'pdo_type' => PDO::PARAM_STR,
         ];
     }
 
-    private static function consume_base64_payload(string $sql, int $sql_len, int &$cursor): ?string
+    /**
+     * @param WP_MySQL_Token[] $tokens
+     * @return list<string>|null
+     */
+    private static function consume_column_list(array $tokens, int $token_count, int &$cursor): ?array
     {
-        while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-            $cursor++;
-        }
-        if ($cursor >= $sql_len || $sql[$cursor] !== "'") {
+        if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
             return null;
         }
-
         $cursor++;
-        $payload_start = $cursor;
-        $close = strpos($sql, "'", $cursor);
-        if ($close === false) {
-            return null;
+
+        $columns = [];
+        while ($cursor < $token_count && $tokens[$cursor]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+            $column = self::identifier_token_value($tokens[$cursor]);
+            if ($column === null) {
+                return null;
+            }
+            $columns[] = $column;
+            $cursor++;
+
+            if ($cursor < $token_count && $tokens[$cursor]->id === WP_MySQL_Lexer::COMMA_SYMBOL) {
+                $cursor++;
+                continue;
+            }
+            break;
         }
 
-        $payload = substr($sql, $payload_start, $close - $payload_start);
+        if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
+            return null;
+        }
+        $cursor++;
+
+        return $columns;
+    }
+
+    /**
+     * @param WP_MySQL_Token[] $tokens
+     */
+    private static function consume_base64_call(array $tokens, int $token_count, int &$cursor): ?string
+    {
+        if ($cursor >= $token_count || !self::is_from_base64_token($tokens[$cursor])) {
+            return null;
+        }
+        $cursor++;
+
+        if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
+            return null;
+        }
+        $cursor++;
+
+        if (
+            $cursor >= $token_count
+            || (
+                $tokens[$cursor]->id !== WP_MySQL_Lexer::SINGLE_QUOTED_TEXT
+                && $tokens[$cursor]->id !== WP_MySQL_Lexer::DOUBLE_QUOTED_TEXT
+            )
+        ) {
+            return null;
+        }
+        $payload = $tokens[$cursor]->get_value();
+        $cursor++;
+
         if ($payload !== '' && !preg_match('/\A[A-Za-z0-9+\/=]*\z/', $payload)) {
             return null;
         }
 
-        $cursor = $close + 1;
-        while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
-            $cursor++;
-        }
-        if ($cursor >= $sql_len || $sql[$cursor] !== ')') {
+        if ($cursor >= $token_count || $tokens[$cursor]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL) {
             return null;
         }
         $cursor++;
@@ -474,8 +450,44 @@ class SQLitePreparedInsertBuilder
         return '`' . str_replace('`', '``', $identifier) . '`';
     }
 
-    private static function is_ws(string $c): bool
+    private static function identifier_token_value(WP_MySQL_Token $token): ?string
     {
-        return $c === ' ' || $c === "\t" || $c === "\n" || $c === "\r";
+        return (
+            $token->id === WP_MySQL_Lexer::BACK_TICK_QUOTED_ID
+            || $token->id === WP_MySQL_Lexer::IDENTIFIER
+        )
+            ? $token->get_value()
+            : null;
+    }
+
+    private static function is_from_base64_token(WP_MySQL_Token $token): bool
+    {
+        return $token->id === WP_MySQL_Lexer::IDENTIFIER
+            && strcasecmp($token->get_value(), 'FROM_BASE64') === 0;
+    }
+
+    private static function is_numeric_token(WP_MySQL_Token $token): bool
+    {
+        return $token->id === WP_MySQL_Lexer::INT_NUMBER
+            || $token->id === WP_MySQL_Lexer::LONG_NUMBER
+            || $token->id === WP_MySQL_Lexer::ULONGLONG_NUMBER
+            || $token->id === WP_MySQL_Lexer::DECIMAL_NUMBER
+            || $token->id === WP_MySQL_Lexer::FLOAT_NUMBER;
+    }
+
+    /**
+     * @return WP_MySQL_Token[]
+     */
+    private static function significant_tokens(string $sql): array
+    {
+        $lexer = new WP_MySQL_Lexer($sql);
+        $tokens = $lexer->remaining_tokens();
+        if (
+            !empty($tokens)
+            && end($tokens)->id === WP_MySQL_Lexer::EOF
+        ) {
+            array_pop($tokens);
+        }
+        return $tokens;
     }
 }
