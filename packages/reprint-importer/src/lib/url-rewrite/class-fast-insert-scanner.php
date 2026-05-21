@@ -37,7 +37,8 @@ class FastInsertScanner
      * @return array{
      *   table: string,
      *   column_map: list<array{int, int, string}>,
-     *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>
+     *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
+     *   value_entries: list<array{start: int, length: int, kind: string, column: string, quote_start?: int, quote_length?: int, encoded_value?: string}>
      * }|null
      *   Null when the SQL doesn't match the recognised shape.
      */
@@ -93,6 +94,7 @@ class FastInsertScanner
 
         $column_map = [];
         $base64_entries = [];
+        $value_entries = [];
 
         $cursor = $values_end;
         $sql_len = strlen($sql);
@@ -149,6 +151,22 @@ class FastInsertScanner
                         'value' => null,
                         'new_value' => null,
                     ];
+                    $value_entries[] = [
+                        'start' => $value_start,
+                        'length' => $value_end - $value_start,
+                        'kind' => 'base64',
+                        'column' => $columns[$col_idx],
+                        'quote_start' => $value_kind[2],
+                        'quote_length' => $value_kind[3],
+                        'encoded_value' => $value_kind[4],
+                    ];
+                } else {
+                    $value_entries[] = [
+                        'start' => $value_start,
+                        'length' => $value_end - $value_start,
+                        'kind' => self::classify_static_value($sql, $value_start, $value_end),
+                        'column' => $columns[$col_idx],
+                    ];
                 }
 
                 while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
@@ -194,7 +212,25 @@ class FastInsertScanner
             'table' => $table,
             'column_map' => $column_map,
             'base64_entries' => $base64_entries,
+            'value_entries' => $value_entries,
         ];
+    }
+
+    private static function classify_static_value(string $sql, int $start, int $end): string
+    {
+        if ($start >= $end) {
+            return 'unknown';
+        }
+
+        $c = $sql[$start];
+        if ($c === "'") {
+            return 'empty';
+        }
+        if ($c === 'N' || $c === 'n') {
+            return 'null';
+        }
+
+        return 'number';
     }
 
     /**
@@ -296,24 +332,35 @@ class FastInsertScanner
         while ($cursor < $sql_len && $sql[$cursor] >= '0' && $sql[$cursor] <= '9') {
             $cursor++;
         }
+        $digits_before_decimal = $cursor > $digit_start;
         if ($cursor < $sql_len && $sql[$cursor] === '.') {
             $cursor++;
+            $fraction_start = $cursor;
             while ($cursor < $sql_len && $sql[$cursor] >= '0' && $sql[$cursor] <= '9') {
                 $cursor++;
             }
+            if (!$digits_before_decimal && $cursor === $fraction_start) {
+                $cursor = $start;
+                return null;
+            }
+        }
+        if (!$digits_before_decimal && $cursor === $digit_start) {
+            $cursor = $start;
+            return null;
         }
         if ($cursor < $sql_len && ($sql[$cursor] === 'e' || $sql[$cursor] === 'E')) {
+            $exponent_start = $cursor;
             $cursor++;
             if ($cursor < $sql_len && ($sql[$cursor] === '+' || $sql[$cursor] === '-')) {
                 $cursor++;
             }
+            $exponent_digits_start = $cursor;
             while ($cursor < $sql_len && $sql[$cursor] >= '0' && $sql[$cursor] <= '9') {
                 $cursor++;
             }
-        }
-        if ($cursor === $digit_start) {
-            $cursor = $start;
-            return null;
+            if ($cursor === $exponent_digits_start) {
+                $cursor = $exponent_start;
+            }
         }
         return true;
     }

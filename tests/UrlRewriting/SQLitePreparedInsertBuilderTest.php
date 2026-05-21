@@ -68,6 +68,68 @@ class SQLitePreparedInsertBuilderTest extends TestCase
         $this->assertSame(['after'], $prepared['params']);
     }
 
+    public function testCachedShapeKeepsDynamicLiteralsAndPerValueColumns(): void
+    {
+        $seen = [];
+        $callback = function (string $value, string $table, ?string $column) use (&$seen): string {
+            $seen[] = [$value, $table, $column];
+            return strtoupper($value);
+        };
+
+        $first = SQLitePreparedInsertBuilder::build(
+            sprintf(
+                "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(1, FROM_BASE64('%s'), CONVERT(FROM_BASE64('%s') USING utf8mb4));",
+                base64_encode('first title'),
+                base64_encode('first body')
+            ),
+            $callback
+        );
+        $second = SQLitePreparedInsertBuilder::build(
+            sprintf(
+                "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(245, FROM_BASE64('%s'), CONVERT(FROM_BASE64('%s') USING utf8mb4));",
+                base64_encode('second title'),
+                base64_encode('second body')
+            ),
+            $callback
+        );
+
+        $this->assertNotNull($first);
+        $this->assertNotNull($second);
+        $this->assertSame(
+            "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES(245, ?, ?);",
+            $second['sql']
+        );
+        $this->assertSame(['SECOND TITLE', 'SECOND BODY'], $second['params']);
+        $this->assertSame(
+            [
+                ['first title', 'wp_posts', 'post_title'],
+                ['first body', 'wp_posts', 'post_content'],
+                ['second title', 'wp_posts', 'post_title'],
+                ['second body', 'wp_posts', 'post_content'],
+            ],
+            $seen
+        );
+    }
+
+    public function testCachedShapeRejectsMalformedNumericSlots(): void
+    {
+        $first = SQLitePreparedInsertBuilder::build(
+            sprintf(
+                "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('%s'));",
+                base64_encode('first body')
+            )
+        );
+        $second = SQLitePreparedInsertBuilder::build(
+            sprintf(
+                "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1e, FROM_BASE64('%s'));",
+                base64_encode('second body')
+            )
+        );
+
+        $this->assertNotNull($first);
+        $this->assertNull($second);
+    }
+
     public function testUnknownInsertShapeReturnsNull(): void
     {
         $sql = sprintf(
