@@ -333,19 +333,11 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
-        $structured_cache_key = self::PLAIN_TEXT . "\0scalar\0" . $value;
-        $cached = $this->get_cached_structured_rewrite($structured_cache_key);
-        if ($cached !== null) {
-            return $cached;
-        }
-
         if (!$this->maybe_contains_rewritable_urls($value)) {
             return $value;
         }
 
-        $rewritten_value = $this->rewrite_urls($value, self::PLAIN_TEXT);
-        $this->set_cached_structured_rewrite($structured_cache_key, $rewritten_value);
-        return $rewritten_value;
+        return $this->rewrite_urls($value, self::PLAIN_TEXT);
     }
 
     /**
