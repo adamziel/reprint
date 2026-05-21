@@ -148,10 +148,10 @@ class StructuredDataUrlRewriter
             return $value;
         }
 
-        // Avoid constructing the serialized-PHP parser for ordinary URL
-        // strings and block markup. The parser still owns validation once
-        // entered; this gate only skips impossible first-byte shapes that
-        // cannot expose string values for rewriting.
+        // Performance guard: avoid constructing the serialized-PHP parser for
+        // ordinary URL strings and block markup. The parser still owns
+        // validation once entered; this gate only skips first-byte shapes that
+        // cannot expose serialized string values for rewriting.
         if ($this->could_be_php_serialization_with_strings($value)) {
             $p = new PhpSerializationProcessor($value);
             if (!$p->is_malformed()) {
@@ -168,9 +168,11 @@ class StructuredDataUrlRewriter
             }
         }
 
-        if ($this->could_be_json_container($value)) {
-            // Try JSON: the iterator calls json_decode in the constructor.
-            // If it's not malformed, iterate and recurse.
+        // Performance guard: avoid calling json_decode() for ordinary URL
+        // strings and block markup. JsonStringIterator still owns validation
+        // once entered; this gate only skips first non-whitespace bytes that
+        // cannot start a JSON value containing string leaves.
+        if ($this->could_be_json_with_strings($value)) {
             $iter = new JsonStringIterator($value);
             if (!$iter->is_malformed()) {
                 while ($iter->next_value()) {
@@ -217,6 +219,15 @@ class StructuredDataUrlRewriter
         return false;
     }
 
+    /**
+     * Return whether the value starts with a PHP serialization token that may
+     * expose string values to rewrite.
+     *
+     * This is a speed guard before constructing PhpSerializationProcessor. It
+     * deliberately omits scalar serialized types such as i:, d:, b:, N;, r:,
+     * and R: because they cannot contain string leaves. The processor remains
+     * responsible for full validation once this coarse first-byte check passes.
+     */
     private function could_be_php_serialization_with_strings(string $value): bool
     {
         $first_byte = $value[0] ?? '';
@@ -227,7 +238,17 @@ class StructuredDataUrlRewriter
             || $first_byte === 'C';
     }
 
-    private function could_be_json_container(string $value): bool
+    /**
+     * Return whether the value starts with a JSON token that may expose string
+     * leaves to rewrite.
+     *
+     * This is a speed guard before constructing JsonStringIterator, whose
+     * constructor calls json_decode(). Objects and arrays can contain nested
+     * string leaves, and JSON string scalars can themselves be rewritten. The
+     * iterator remains responsible for full JSON validation after this coarse
+     * first-byte check passes.
+     */
+    private function could_be_json_with_strings(string $value): bool
     {
         $length = strlen($value);
         for ($i = 0; $i < $length; $i++) {
@@ -236,7 +257,7 @@ class StructuredDataUrlRewriter
                 continue;
             }
 
-            return $byte === '{' || $byte === '[';
+            return $byte === '{' || $byte === '[' || $byte === '"';
         }
 
         return false;
