@@ -5135,7 +5135,7 @@ class ImportClient
             if (!$use_sqlite_apply_transactions || $sqlite_apply_transaction_active) {
                 return;
             }
-            if (method_exists($pdo, 'inTransaction') && $pdo->inTransaction()) {
+            if ($pdo->inTransaction()) {
                 return;
             }
             $pdo->beginTransaction();
@@ -5149,7 +5149,7 @@ class ImportClient
             if (!$use_sqlite_apply_transactions || !$sqlite_apply_transaction_active) {
                 return;
             }
-            if (method_exists($pdo, 'inTransaction') && $pdo->inTransaction()) {
+            if ($pdo->inTransaction()) {
                 $pdo->commit();
             }
             $sqlite_apply_transaction_active = false;
@@ -5162,7 +5162,7 @@ class ImportClient
             if (!$use_sqlite_apply_transactions || !$sqlite_apply_transaction_active) {
                 return;
             }
-            if (method_exists($pdo, 'inTransaction') && $pdo->inTransaction()) {
+            if ($pdo->inTransaction()) {
                 $pdo->rollBack();
             }
             $sqlite_apply_transaction_active = false;
