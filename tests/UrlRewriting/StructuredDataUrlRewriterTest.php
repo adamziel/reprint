@@ -378,6 +378,25 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
+    public function testKnownBlockMarkupRewritesSourceDomainInTextNodes(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:paragraph --><p>Visit https://old-site.com/text-node.</p><!-- /wp:paragraph -->';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https://new-site.com/text-node', $result);
+        $this->assertStringNotContainsString('old-site.com', $result);
+    }
+
+    public function testKnownBlockMarkupDoesNotRewriteSourceDomainInUnknownHtmlAttribute(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<div data-note="https://old-site.com/not-a-url-attribute">Content</div>';
+
+        $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
+    }
+
     public function testKnownBlockMarkupRewritesCaseVariantHostWithoutLiteralSourceDomain(): void
     {
         $rewriter = $this->createRewriter();

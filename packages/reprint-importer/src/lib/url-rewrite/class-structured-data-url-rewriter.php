@@ -32,27 +32,12 @@ class StructuredDataUrlRewriter
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
     private const REWRITE_RESULT_CACHE_MAX = 4096;
+    private const VALUE_REWRITE_CACHE_MAX = 1024;
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
 
-    /**
-     * Pre-parsed url_mapping: each entry is
-     *   [ 'from_url' => <parsed URL>, 'to_url' => <parsed URL> ]
-     * where <parsed URL> is whatever WPURL::parse() returns (declared as
-     * mixed here because is_child_url_of() and WPURL::replace_base_url()
-     * both accept either a string or the parsed object form — we pass the
-     * object form for performance).
-     *
-     * Parsing is pure, deterministic work that used to happen inside
-     * rewrite_urls() on every leaf-value call. With N mappings and L leaves
-     * that's 2·N·L WPURL::parse() invocations. On a wp.com-shaped dump
-     * (N=120, L≈28k) that single loop dominated 94 % of db-apply wall time
-     * under WASM PHP. Hoisting it into the constructor collapses it to 2·N,
-     * which is effectively free.
-     *
-     * @var array<int, array{from_url: mixed, to_url: mixed}>
-     */
+    /** @var array<int, array{from_url: mixed, to_url: mixed}> Pre-parsed URL mappings in caller-provided order. */
     private array $parsed_mapping;
 
     /** @var string Default base_url used by the URL processors (first from-url). */
@@ -68,6 +53,14 @@ class StructuredDataUrlRewriter
     private array $rewrite_result_cache_ring = [];
 
     private int $rewrite_result_cache_next = 0;
+
+    /** @var array<string, array{content_type: string, input: string, output: string}> */
+    private array $value_rewrite_cache = [];
+
+    /** @var string[] */
+    private array $value_rewrite_cache_ring = [];
+
+    private int $value_rewrite_cache_next = 0;
 
     /**
      * @param array<string, string> $url_mapping Source URL => target URL mapping.
@@ -231,7 +224,124 @@ class StructuredDataUrlRewriter
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
-        return $this->rewrite($value, self::BLOCK_MARKUP);
+        if ($value === '') {
+            return $value;
+        }
+
+        if (!$this->maybe_contains_rewritable_urls($value)) {
+            return $value;
+        }
+
+        $looks_like_structured_envelope = $this->looks_like_structured_envelope($value);
+
+        if (
+            !$looks_like_structured_envelope &&
+            $this->source_domain_occurrences_are_outside_markup($value)
+        ) {
+            if (strpos($value, '<') === false) {
+                return $this->rewrite_urls($value, self::PLAIN_TEXT);
+            }
+
+            $cache_key = $this->get_value_rewrite_cache_key(self::BLOCK_MARKUP, $value);
+            $cached = $this->get_cached_value_rewrite($cache_key, self::BLOCK_MARKUP, $value);
+            if ($cached !== null) {
+                return $cached;
+            }
+
+            $rewritten = $this->rewrite_urls($value, self::PLAIN_TEXT);
+            $this->set_cached_value_rewrite($cache_key, self::BLOCK_MARKUP, $value, $rewritten);
+            return $rewritten;
+        }
+
+        return $looks_like_structured_envelope
+            ? $this->rewrite($value, self::BLOCK_MARKUP)
+            : $this->rewrite_urls($value, self::BLOCK_MARKUP);
+    }
+
+    private function looks_like_structured_envelope(string $value): bool
+    {
+        return preg_match('/^\s*(?:[aOsbidNCR]:|N;|[\\[{"])/', $value) === 1;
+    }
+
+    /**
+     * Return true when every configured source-domain occurrence is outside
+     * HTML tag/comment markup, so block-markup rewriting can safely reduce to
+     * text-node URL rewriting.
+     */
+    private function source_domain_occurrences_are_outside_markup(string $value): bool
+    {
+        if (strpos($value, '<') === false) {
+            return true;
+        }
+
+        if (
+            stripos($value, 'href=') !== false ||
+            stripos($value, 'src=') !== false ||
+            stripos($value, 'srcset=') !== false ||
+            stripos($value, 'poster=') !== false ||
+            stripos($value, 'style=') !== false ||
+            stripos($value, 'url(') !== false
+        ) {
+            return false;
+        }
+
+        $source_domain_offsets = [];
+        foreach ($this->source_domains as $domain) {
+            $offset = 0;
+            while (false !== ($found = stripos($value, $domain, $offset))) {
+                $source_domain_offsets[] = $found;
+                $offset = $found + strlen($domain);
+            }
+        }
+
+        if ($source_domain_offsets === []) {
+            return false;
+        }
+
+        sort($source_domain_offsets);
+        $next_source_domain = 0;
+        $source_domain_count = count($source_domain_offsets);
+        $length = strlen($value);
+        $in_markup = false;
+        $quote = null;
+
+        for ($i = 0; $i < $length && $next_source_domain < $source_domain_count; $i++) {
+            while (
+                $next_source_domain < $source_domain_count &&
+                $source_domain_offsets[$next_source_domain] === $i
+            ) {
+                if ($in_markup) {
+                    return false;
+                }
+                $next_source_domain++;
+            }
+
+            $char = $value[$i];
+            if ($in_markup) {
+                if ($quote !== null) {
+                    if ($char === $quote) {
+                        $quote = null;
+                    }
+                    continue;
+                }
+
+                if ($char === '"' || $char === "'") {
+                    $quote = $char;
+                    continue;
+                }
+
+                if ($char === '>') {
+                    $in_markup = false;
+                }
+                continue;
+            }
+
+            if ($char === '<') {
+                $in_markup = true;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -281,6 +391,46 @@ class StructuredDataUrlRewriter
         $this->rewrite_result_cache[$cache_key] = $value;
     }
 
+    private function get_value_rewrite_cache_key(string $content_type, string $value): string
+    {
+        return $content_type . "\0" . strlen($value) . "\0" . sha1($value);
+    }
+
+    private function get_cached_value_rewrite(string $cache_key, string $content_type, string $value): ?string
+    {
+        if (!array_key_exists($cache_key, $this->value_rewrite_cache)) {
+            return null;
+        }
+
+        $entry = $this->value_rewrite_cache[$cache_key];
+        if ($entry['content_type'] !== $content_type || $entry['input'] !== $value) {
+            return null;
+        }
+
+        return $entry['output'];
+    }
+
+    private function set_cached_value_rewrite(string $cache_key, string $content_type, string $input, string $output): void
+    {
+        if (!array_key_exists($cache_key, $this->value_rewrite_cache)) {
+            if (count($this->value_rewrite_cache_ring) < self::VALUE_REWRITE_CACHE_MAX) {
+                $this->value_rewrite_cache_ring[] = $cache_key;
+            } else {
+                $evicted_key = $this->value_rewrite_cache_ring[$this->value_rewrite_cache_next];
+                unset($this->value_rewrite_cache[$evicted_key]);
+                $this->value_rewrite_cache_ring[$this->value_rewrite_cache_next] = $cache_key;
+            }
+
+            $this->value_rewrite_cache_next = ($this->value_rewrite_cache_next + 1) % self::VALUE_REWRITE_CACHE_MAX;
+        }
+
+        $this->value_rewrite_cache[$cache_key] = [
+            'content_type' => $content_type,
+            'input'       => $input,
+            'output'      => $output,
+        ];
+    }
+
     /**
      * Migrate URLs in post content. See WPRewriteUrlsTests for
      * specific examples. TODO: A better description.
@@ -314,9 +464,6 @@ class StructuredDataUrlRewriter
      * TODO: Migrate these changes back into the php-toolkit repo
      */
     private function rewrite_urls( string $content, string $content_type ): string {
-        // $this->parsed_mapping is built once in the constructor and reused
-        // here on every call, avoiding a fresh round of WPURL::parse() per
-        // leaf value.
         $parsed_mapping = $this->parsed_mapping;
         $base_url       = $this->base_url;
 
