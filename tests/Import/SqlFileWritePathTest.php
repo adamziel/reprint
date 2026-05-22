@@ -173,6 +173,28 @@ class SqlFileWritePathTest extends TestCase
         $this->assertSame(2, $stats['statements_total']);
     }
 
+    public function testResumeRefusesSqlFileShorterThanCheckpoint(): void
+    {
+        $prefix = "CREATE TABLE `wp_posts` (`ID` bigint unsigned NOT NULL, `post_title` text);\n";
+
+        $this->writeState([
+            'cursor' => 'cursor-after-prefix',
+            'sql_bytes' => strlen($prefix),
+            'sql_statements_counted' => 1,
+        ]);
+        file_put_contents($this->stateDir . '/db.sql', substr($prefix, 0, 12));
+
+        [$client, $reflection] = $this->prepareClient([
+            ['body' => "INSERT INTO `wp_posts` VALUES (1,FROM_BASE64('aGVsbG8='));\n", 'cursor' => 'cursor-after-suffix'],
+        ]);
+
+        $downloadSql = $reflection->getMethod('download_sql');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('db.sql is smaller than the saved checkpoint');
+        $downloadSql->invoke($client);
+    }
+
     public function testRetryablePartialResponseFlushesCheckpointedBytesForResume(): void
     {
         $first = "CREATE TABLE `wp_comments` (`comment_ID` bigint unsigned NOT NULL);\n";

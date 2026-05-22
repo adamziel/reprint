@@ -7180,7 +7180,22 @@ class ImportClient
                         fclose($handle);
                     }
                     $actual_size = $tracked_bytes;
+                } elseif ($actual_size < $tracked_bytes) {
+                    throw new RuntimeException(
+                        sprintf(
+                            "Cannot resume SQL download: db.sql is smaller than the saved checkpoint (%d < %d bytes). Use --abort to restart db-pull.",
+                            $actual_size,
+                            $tracked_bytes,
+                        )
+                    );
                 }
+            } elseif ($cursor && $tracked_bytes !== null && $tracked_bytes > 0) {
+                throw new RuntimeException(
+                    sprintf(
+                        "Cannot resume SQL download: db.sql is missing but the saved checkpoint expects %d bytes. Use --abort to restart db-pull.",
+                        $tracked_bytes,
+                    )
+                );
             }
 
             $sql_bytes_written = $cursor ? $actual_size : 0;
