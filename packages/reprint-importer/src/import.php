@@ -7702,12 +7702,20 @@ class ImportClient
             if ($statements_counted !== null) {
                 $statements_counted++;
             }
-            // Only scan INSERT statements (they contain data values).
-            if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
-                continue;
-            }
             // Only scan statements with base64 values
             if (strpos($query, "FROM_BASE64(") === false) {
+                continue;
+            }
+
+            $fast_insert = \FastInsertScanner::scan_with_reusable_plan($query, false);
+            if ($fast_insert !== null && $this->drain_fast_insert_for_domains($fast_insert, $domain_collector)) {
+                continue;
+            }
+
+            // Only scan INSERT statements (they contain data values). The
+            // producer-shaped INSERT path above already proved its statement
+            // shape, so the lexer check is only needed for fallback.
+            if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
                 continue;
             }
 
@@ -7755,6 +7763,147 @@ class ImportClient
                 }
             }
         }
+    }
+
+    /**
+     * Scan a FastInsertScanner-proven INSERT shape using its reusable plan.
+     *
+     * @param array{
+     *   table: string,
+     *   columns: list<string>,
+     *   value_entries: list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
+     *   shape_plan: array{
+     *     table: string,
+     *     columns: list<string>,
+     *     column_count: int,
+     *     row_count: int,
+     *     base64_value_indexes: list<int>,
+     *     option_name_value_indexes: list<int|null>,
+     *     row_identifier_value_indexes: list<int>
+     *   }
+     * } $fast_insert
+     */
+    private function drain_fast_insert_for_domains(
+        array $fast_insert,
+        \DomainCollector $domain_collector
+    ): bool {
+        $plan = $fast_insert['shape_plan'];
+        $value_entries = $fast_insert['value_entries'];
+        $table = $plan['table'];
+        $column_count = $plan['column_count'];
+        if ($column_count <= 0) {
+            return false;
+        }
+
+        $is_options_table = substr($table, -8) === '_options';
+        if ($is_options_table) {
+            foreach ($plan['option_name_value_indexes'] as $option_name_value_index) {
+                if ($option_name_value_index === null) {
+                    return false;
+                }
+            }
+        }
+
+        foreach ($plan['base64_value_indexes'] as $value_index) {
+            if (!isset($value_entries[$value_index])) {
+                return false;
+            }
+            $entry = $value_entries[$value_index];
+            if (!isset($entry['encoded_value'])) {
+                return false;
+            }
+
+            $row_index = intdiv($value_index, $column_count);
+            $option_name = null;
+            if ($is_options_table) {
+                $option_name_value_index = $plan['option_name_value_indexes'][$row_index] ?? null;
+                if ($option_name_value_index === null || !isset($value_entries[$option_name_value_index])) {
+                    return false;
+                }
+                $option_name = self::fast_insert_value_as_string($value_entries[$option_name_value_index], 80);
+                if ($option_name !== null && (
+                    strpos($option_name, '_transient') === 0 ||
+                    strpos($option_name, '_site_transient') === 0
+                )) {
+                    continue;
+                }
+            }
+
+            $decoded = base64_decode($entry['encoded_value'], true);
+            $new_domains = $domain_collector->scan($decoded === false ? '' : $decoded);
+            if (!empty($new_domains)) {
+                $row_identifier_value_index = $plan['row_identifier_value_indexes'][$row_index] ?? null;
+                $row_id = is_int($row_identifier_value_index) && isset($value_entries[$row_identifier_value_index])
+                    ? self::fast_insert_row_identifier($value_entries[$row_identifier_value_index])
+                    : 'offset=?';
+
+                $option_ctx = '';
+                if ($option_name !== null) {
+                    $option_ctx = ' option=' . $option_name;
+                }
+
+                foreach ($new_domains as $domain) {
+                    $this->audit_log(
+                        sprintf(
+                            "NEW DOMAIN | %s | table=%s %s%s",
+                            $domain,
+                            $table,
+                            $row_id,
+                            $option_ctx,
+                        ),
+                        false,
+                    );
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @param array{kind: string, raw?: string, encoded_value?: string} $entry
+     */
+    private static function fast_insert_value_as_string(array $entry, int $max_length): ?string
+    {
+        switch ($entry['kind']) {
+            case 'base64':
+                if (!isset($entry['encoded_value'])) {
+                    return null;
+                }
+                $decoded = base64_decode($entry['encoded_value'], true);
+                return $decoded === false ? null : substr($decoded, 0, $max_length);
+
+            case 'empty_string':
+                return '';
+
+            case 'numeric':
+                return $entry['raw'] ?? null;
+
+            case 'null':
+                return null;
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array{kind: string, raw?: string} $entry
+     */
+    private static function fast_insert_row_identifier(array $entry): string
+    {
+        switch ($entry['kind']) {
+            case 'numeric':
+                $raw = $entry['raw'] ?? '';
+                return preg_match('/^-?\d+$/', $raw) ? 'pk=' . $raw : 'offset=?';
+
+            case 'empty_string':
+                return 'pk=';
+
+            case 'null':
+                return 'pk=NULL';
+        }
+
+        return 'offset=?';
     }
 
     /**

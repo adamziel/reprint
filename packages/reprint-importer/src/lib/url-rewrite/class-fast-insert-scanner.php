@@ -31,6 +31,26 @@
  */
 class FastInsertScanner
 {
+    private const SHAPE_PLAN_CACHE_MAX = 256;
+
+    /**
+     * Reusable plans keyed by table, column order, row count, and value kinds.
+     *
+     * @var array<string, array{
+     *   table: string,
+     *   columns: list<string>,
+     *   column_count: int,
+     *   row_count: int,
+     *   base64_value_indexes: list<int>,
+     *   option_name_value_indexes: list<int|null>,
+     *   row_identifier_value_indexes: list<int>
+     * }>
+     */
+    private static array $shape_plan_cache = [];
+
+    /** @var string[] */
+    private static array $shape_plan_cache_order = [];
+
     /**
      * Try to scan a producer-shape INSERT statement.
      *
@@ -44,6 +64,64 @@ class FastInsertScanner
      *   Null when the SQL doesn't match the recognised shape.
      */
     public static function scan(string $sql, bool $include_column_map = true): ?array
+    {
+        return self::scan_internal($sql, $include_column_map, false);
+    }
+
+    /**
+     * Try to scan a producer-shape INSERT and attach a reusable shape plan.
+     *
+     * The current SQL is still parsed first; only successfully recognised
+     * producer INSERTs can enter the cache. That keeps unsupported SQL on the
+     * caller's existing fallback path while avoiding repeated planning for
+     * recurring table/column/value shapes.
+     *
+     * @return array{
+     *   table: string,
+     *   columns: list<string>,
+     *   column_map: list<array{int, int, string}>,
+     *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
+     *   value_entries: list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
+     *   shape_key: string,
+     *   shape_plan_cache_hit: bool,
+     *   shape_plan: array{
+     *     table: string,
+     *     columns: list<string>,
+     *     column_count: int,
+     *     row_count: int,
+     *     base64_value_indexes: list<int>,
+     *     option_name_value_indexes: list<int|null>,
+     *     row_identifier_value_indexes: list<int>
+     *   }
+     * }|null
+     *   Null when the SQL doesn't match the recognised shape.
+     */
+    public static function scan_with_reusable_plan(string $sql, bool $include_column_map = true): ?array
+    {
+        return self::scan_internal($sql, $include_column_map, true);
+    }
+
+    /**
+     * @return array{
+     *   table: string,
+     *   columns: list<string>,
+     *   column_map: list<array{int, int, string}>,
+     *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
+     *   value_entries: list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
+     *   shape_key?: string,
+     *   shape_plan_cache_hit?: bool,
+     *   shape_plan?: array{
+     *     table: string,
+     *     columns: list<string>,
+     *     column_count: int,
+     *     row_count: int,
+     *     base64_value_indexes: list<int>,
+     *     option_name_value_indexes: list<int|null>,
+     *     row_identifier_value_indexes: list<int>
+     *   }
+     * }|null
+     */
+    private static function scan_internal(string $sql, bool $include_column_map, bool $include_shape_plan): ?array
     {
         // Header: optional leading whitespace, INSERT (no priority/IGNORE
         // modifiers — producer never emits those), INTO, backticked table,
@@ -198,13 +276,36 @@ class FastInsertScanner
             // Either ';' or end-of-string (or whitespace then either) loops back.
         }
 
-        return [
+        $result = [
             'table' => $table,
             'columns' => $columns,
             'column_map' => $column_map,
             'base64_entries' => $base64_entries,
             'value_entries' => $value_entries,
         ];
+
+        if ($include_shape_plan) {
+            $shape_key = self::shape_key($table, $columns, $value_entries);
+            $shape_plan = self::$shape_plan_cache[$shape_key] ?? null;
+            $cache_hit = $shape_plan !== null;
+            if ($shape_plan === null) {
+                $shape_plan = self::build_shape_plan($table, $columns, $value_entries);
+                self::$shape_plan_cache[$shape_key] = $shape_plan;
+                self::$shape_plan_cache_order[] = $shape_key;
+                if (count(self::$shape_plan_cache_order) > self::SHAPE_PLAN_CACHE_MAX) {
+                    $oldest_key = array_shift(self::$shape_plan_cache_order);
+                    if (is_string($oldest_key)) {
+                        unset(self::$shape_plan_cache[$oldest_key]);
+                    }
+                }
+            }
+
+            $result['shape_key'] = $shape_key;
+            $result['shape_plan_cache_hit'] = $cache_hit;
+            $result['shape_plan'] = $shape_plan;
+        }
+
+        return $result;
     }
 
     /**
@@ -399,5 +500,86 @@ class FastInsertScanner
     private static function is_ws(string $c): bool
     {
         return $c === ' ' || $c === "\t" || $c === "\n" || $c === "\r";
+    }
+
+    /**
+     * @param list<string> $columns
+     * @param list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}> $value_entries
+     */
+    private static function shape_key(string $table, array $columns, array $value_entries): string
+    {
+        $parts = [
+            strlen($table) . ':' . $table,
+            (string) count($columns),
+        ];
+        foreach ($columns as $column) {
+            $parts[] = strlen($column) . ':' . $column;
+        }
+        $parts[] = (string) count($value_entries);
+        foreach ($value_entries as $entry) {
+            $kind = $entry['kind'];
+            if ($kind === 'numeric') {
+                $kind .= isset($entry['raw']) && strpbrk($entry['raw'], '.eE') === false
+                    ? ':integer'
+                    : ':real';
+            }
+            $parts[] = $kind;
+        }
+
+        return implode('|', $parts);
+    }
+
+    /**
+     * @param list<string> $columns
+     * @param list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}> $value_entries
+     * @return array{
+     *   table: string,
+     *   columns: list<string>,
+     *   column_count: int,
+     *   row_count: int,
+     *   base64_value_indexes: list<int>,
+     *   option_name_value_indexes: list<int|null>,
+     *   row_identifier_value_indexes: list<int>
+     * }
+     */
+    private static function build_shape_plan(string $table, array $columns, array $value_entries): array
+    {
+        $column_count = count($columns);
+        $value_count = count($value_entries);
+        $row_count = $column_count > 0 ? (int) ($value_count / $column_count) : 0;
+        $option_name_column_index = null;
+        foreach ($columns as $index => $column) {
+            if ($column === 'option_name') {
+                $option_name_column_index = $index;
+                break;
+            }
+        }
+
+        $base64_value_indexes = [];
+        foreach ($value_entries as $index => $entry) {
+            if ($entry['kind'] === 'base64') {
+                $base64_value_indexes[] = $index;
+            }
+        }
+
+        $option_name_value_indexes = [];
+        $row_identifier_value_indexes = [];
+        for ($row = 0; $row < $row_count; $row++) {
+            $row_start = $row * $column_count;
+            $row_identifier_value_indexes[] = $row_start;
+            $option_name_value_indexes[] = $option_name_column_index === null
+                ? null
+                : $row_start + $option_name_column_index;
+        }
+
+        return [
+            'table' => $table,
+            'columns' => $columns,
+            'column_count' => $column_count,
+            'row_count' => $row_count,
+            'base64_value_indexes' => $base64_value_indexes,
+            'option_name_value_indexes' => $option_name_value_indexes,
+            'row_identifier_value_indexes' => $row_identifier_value_indexes,
+        ];
     }
 }
