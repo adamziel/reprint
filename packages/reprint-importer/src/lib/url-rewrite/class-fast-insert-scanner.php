@@ -40,11 +40,20 @@ class FastInsertScanner
      *   column_map: list<array{int, int, string}>,
      *   has_base64: bool,
      *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
-     *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>
+     *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
+     *   value_count?: int,
+     *   value_codes?: string,
+     *   value_shape_codes?: string,
+     *   value_payloads?: list<string>
      * }|null
      *   Null when the SQL doesn't match the recognised shape.
      */
-    public static function scan(string $sql, bool $include_column_map = true, bool $include_base64_entries = true): ?array
+    public static function scan(
+        string $sql,
+        bool $include_column_map = true,
+        bool $include_base64_entries = true,
+        bool $compact_values = false
+    ): ?array
     {
         // Header: optional leading whitespace, INSERT (no priority/IGNORE
         // modifiers — producer never emits those), INTO, backticked table,
@@ -97,6 +106,10 @@ class FastInsertScanner
         $column_map = [];
         $base64_entries = [];
         $value_entries = [];
+        $value_payloads = [];
+        $value_codes = '';
+        $value_shape_codes = '';
+        $value_count = 0;
         $has_base64 = false;
 
         $cursor = $values_end;
@@ -143,11 +156,45 @@ class FastInsertScanner
                 $value_end = $cursor;
                 if ($include_column_map) {
                     $column_map[] = [$value_start, $value_end, $columns[$col_idx]];
-                    $value_kind['start'] = $value_start;
-                    $value_kind['end'] = $value_end;
+                    if (!$compact_values) {
+                        $value_kind['start'] = $value_start;
+                        $value_kind['end'] = $value_end;
+                    }
                 }
-                $value_kind['column'] = $columns[$col_idx];
-                $value_entries[] = $value_kind;
+
+                if ($compact_values) {
+                    $value_count++;
+                    switch ($value_kind['kind']) {
+                        case 'null':
+                            $value_codes .= 'n';
+                            $value_shape_codes .= 's';
+                            break;
+
+                        case 'empty_string':
+                            $value_codes .= 'e';
+                            $value_shape_codes .= 's';
+                            break;
+
+                        case 'numeric':
+                            $is_real = strpbrk($value_kind['raw'], '.eE') !== false;
+                            $value_codes .= $is_real ? 'r' : 'i';
+                            $value_shape_codes .= $is_real ? 'r' : 'i';
+                            $value_payloads[] = $value_kind['raw'];
+                            break;
+
+                        case 'base64':
+                            $value_codes .= 'b';
+                            $value_shape_codes .= 's';
+                            $value_payloads[] = $value_kind['encoded_value'];
+                            break;
+
+                        default:
+                            return null;
+                    }
+                } else {
+                    $value_kind['column'] = $columns[$col_idx];
+                    $value_entries[] = $value_kind;
+                }
 
                 if ($value_kind['kind'] === 'base64') {
                     $has_base64 = true;
@@ -210,6 +257,10 @@ class FastInsertScanner
             'has_base64' => $has_base64,
             'base64_entries' => $base64_entries,
             'value_entries' => $value_entries,
+            'value_count' => $value_count,
+            'value_codes' => $value_codes,
+            'value_shape_codes' => $value_shape_codes,
+            'value_payloads' => $value_payloads,
         ];
     }
 
@@ -254,18 +305,18 @@ class FastInsertScanner
             if ($entry === null) {
                 return null;
             }
-            if ($include_base64_offsets) {
+            if (!$include_base64_offsets) {
                 return [
                     'kind' => 'base64',
-                    'expr_start' => $entry[0],
-                    'expr_length' => $entry[1],
-                    'quote_start' => $entry[2],
-                    'quote_length' => $entry[3],
                     'encoded_value' => $entry[4],
                 ];
             }
             return [
                 'kind' => 'base64',
+                'expr_start' => $entry[0],
+                'expr_length' => $entry[1],
+                'quote_start' => $entry[2],
+                'quote_length' => $entry[3],
                 'encoded_value' => $entry[4],
             ];
         }
@@ -315,18 +366,18 @@ class FastInsertScanner
             }
             $cursor++;
             $entry[1] = $cursor - $expr_start;
-            if ($include_base64_offsets) {
+            if (!$include_base64_offsets) {
                 return [
                     'kind' => 'base64',
-                    'expr_start' => $entry[0],
-                    'expr_length' => $entry[1],
-                    'quote_start' => $entry[2],
-                    'quote_length' => $entry[3],
                     'encoded_value' => $entry[4],
                 ];
             }
             return [
                 'kind' => 'base64',
+                'expr_start' => $entry[0],
+                'expr_length' => $entry[1],
+                'quote_start' => $entry[2],
+                'quote_length' => $entry[3],
                 'encoded_value' => $entry[4],
             ];
         }

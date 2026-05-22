@@ -35,7 +35,7 @@ class SQLitePreparedInsertBuilder
      */
     public static function build(string $sql, ?callable $rewrite_value = null): ?array
     {
-        if (strpos($sql, 'FROM_BASE64(') === false) {
+        if (stripos($sql, 'FROM_BASE64(') === false) {
             return null;
         }
 
@@ -49,69 +49,31 @@ class SQLitePreparedInsertBuilder
      */
     private static function build_with_fast_insert_scanner(string $sql, ?callable $rewrite_value): ?array
     {
-        $fast = FastInsertScanner::scan($sql, false, false);
-        if ($fast === null || empty($fast['has_base64']) || empty($fast['value_entries'])) {
+        $fast = FastInsertScanner::scan($sql, false, false, true);
+        if ($fast === null || empty($fast['has_base64'])) {
+            return null;
+        }
+
+        $value_count = $fast['value_count'] ?? 0;
+        $value_codes = $fast['value_codes'] ?? '';
+        $value_shape_codes = $fast['value_shape_codes'] ?? '';
+        $value_payloads = $fast['value_payloads'] ?? [];
+        if ($value_codes === '') {
             return null;
         }
 
         $column_count = count($fast['columns']);
-        $value_count = count($fast['value_entries']);
-        if ($column_count === 0 || $value_count === 0 || $value_count % $column_count !== 0) {
+        if (
+            $column_count === 0
+            || $value_count === 0
+            || $value_count % $column_count !== 0
+            || strlen($value_codes) !== $value_count
+            || strlen($value_shape_codes) !== $value_count
+        ) {
             return null;
         }
 
-        // Describe the prepared SQL template, not the concrete bound values.
-        // The cache key must change when the generated SQL text changes, but
-        // must stay stable across batches that only differ by decoded payloads
-        // or numeric literal values.
-        $shape_value_codes = '';
-        $params = [];
-        $param_types = [];
-        foreach ($fast['value_entries'] as $entry) {
-            switch ($entry['kind']) {
-                case 'null':
-                    // NULL, empty strings, and decoded base64 payloads all compile
-                    // to the same bare placeholder; their values are supplied later.
-                    $shape_value_codes .= 's';
-                    $params[] = null;
-                    $param_types[] = PDO::PARAM_NULL;
-                    break;
-
-                case 'empty_string':
-                    $shape_value_codes .= 's';
-                    $params[] = '';
-                    $param_types[] = PDO::PARAM_STR;
-                    break;
-
-                case 'numeric':
-                    // Numeric values are bound, not embedded. Only SQLite's target
-                    // storage class affects the template: dotted/exponent literals
-                    // need REAL while integer-looking literals use NUMERIC.
-                    $shape_value_codes .= strpbrk($entry['raw'], '.eE') === false ? 'i' : 'r';
-                    $params[] = $entry['raw'];
-                    $param_types[] = PDO::PARAM_STR;
-                    break;
-
-                case 'base64':
-                    $shape_value_codes .= 's';
-                    $decoded = base64_decode($entry['encoded_value'], true);
-                    if ($decoded === false) {
-                        return null;
-                    }
-                    $value = $decoded;
-                    if ($rewrite_value !== null) {
-                        $value = $rewrite_value($value, $fast['table'], $entry['column']);
-                    }
-                    $params[] = $value;
-                    $param_types[] = PDO::PARAM_STR;
-                    break;
-
-                default:
-                    return null;
-            }
-        }
-
-        $shape_key = self::compact_shape_key($fast['table'], $fast['columns'], $shape_value_codes);
+        $shape_key = self::compact_shape_key($fast['table'], $fast['columns'], $value_shape_codes);
         $template_sql = self::$template_sql_cache[$shape_key] ?? null;
         if ($template_sql === null) {
             // Cache misses are the only time we build SQL text. Payload bytes
@@ -119,7 +81,7 @@ class SQLitePreparedInsertBuilder
             // identifiers and placeholders for the producer-recognised shape.
             // Preserve one reusable SQL string per table/column/value-shape so
             // PDO and SQLite can reuse the compiled statement across dump rows.
-            $template_sql = self::template_sql_from_shape($fast['table'], $fast['columns'], $shape_value_codes);
+            $template_sql = self::template_sql_from_shape($fast['table'], $fast['columns'], $value_shape_codes);
 
             self::$template_sql_cache[$shape_key] = $template_sql;
             self::$template_sql_cache_order[] = $shape_key;
@@ -131,6 +93,61 @@ class SQLitePreparedInsertBuilder
                     unset(self::$template_sql_cache[$oldest_key]);
                 }
             }
+        }
+
+        // Build the bound values after the template is selected. This keeps
+        // untrusted decoded bytes out of SQL text while still allowing URL
+        // rewriting to use table/column context for structured data.
+        $params = [];
+        $param_types = [];
+        $payload_index = 0;
+
+        for ($i = 0; $i < $value_count; $i++) {
+            switch ($value_codes[$i]) {
+                case 'n':
+                    $params[] = null;
+                    $param_types[] = PDO::PARAM_NULL;
+                    break;
+
+                case 'e':
+                    $params[] = '';
+                    $param_types[] = PDO::PARAM_STR;
+                    break;
+
+                case 'i':
+                case 'r':
+                    if (!array_key_exists($payload_index, $value_payloads)) {
+                        return null;
+                    }
+                    $params[] = $value_payloads[$payload_index];
+                    $payload_index++;
+                    $param_types[] = PDO::PARAM_STR;
+                    break;
+
+                case 'b':
+                    if (!array_key_exists($payload_index, $value_payloads)) {
+                        return null;
+                    }
+                    $decoded = base64_decode($value_payloads[$payload_index], true);
+                    $payload_index++;
+                    if ($decoded === false) {
+                        return null;
+                    }
+                    $value = $decoded;
+                    if ($rewrite_value !== null) {
+                        $value = $rewrite_value($value, $fast['table'], $fast['columns'][$i % $column_count]);
+                    }
+                    $params[] = $value;
+                    $param_types[] = PDO::PARAM_STR;
+                    break;
+
+                default:
+                    return null;
+            }
+        }
+
+        if ($payload_index !== count($value_payloads)) {
+            return null;
         }
 
         return [
@@ -145,7 +162,9 @@ class SQLitePreparedInsertBuilder
      */
     private static function compact_shape_key(string $table, array $columns, string $shape_value_codes): string
     {
-        $key = 'compact|' . strlen($table) . ':' . $table . '|' . count($columns);
+        // Describe the prepared SQL template, not the concrete bound values.
+        // Length-prefixing identifiers prevents separator collisions.
+        $key = 'stream1|' . strlen($table) . ':' . $table . '|' . count($columns);
         foreach ($columns as $column) {
             $key .= '|' . strlen($column) . ':' . $column;
         }
@@ -157,38 +176,51 @@ class SQLitePreparedInsertBuilder
      */
     private static function template_sql_from_shape(string $table, array $columns, string $shape_value_codes): string
     {
-        $quoted_columns = [];
-        foreach ($columns as $column) {
-            $quoted_columns[] = self::quote_identifier($column);
-        }
-
         $column_count = count($columns);
         $value_count = strlen($shape_value_codes);
-        $rows = [];
-        for ($offset = 0; $offset < $value_count; $offset += $column_count) {
-            $placeholders = [];
-            for ($i = 0; $i < $column_count; $i++) {
-                $code = $shape_value_codes[$offset + $i];
-                if ($code === 'i') {
-                    $placeholders[] = 'CAST(? AS NUMERIC)';
-                } elseif ($code === 'r') {
-                    $placeholders[] = 'CAST(? AS REAL)';
-                } else {
-                    $placeholders[] = '?';
-                }
+
+        $template_sql = 'INSERT INTO ' . self::quote_identifier($table) . ' (';
+        foreach ($columns as $index => $column) {
+            if ($index > 0) {
+                $template_sql .= ', ';
             }
-            $rows[] = '(' . implode(', ', $placeholders) . ')';
+            $template_sql .= self::quote_identifier($column);
+        }
+        $template_sql .= ') VALUES';
+
+        for ($offset = 0; $offset < $value_count; $offset += $column_count) {
+            if ($offset > 0) {
+                $template_sql .= ',';
+            }
+            $template_sql .= '(';
+            for ($i = 0; $i < $column_count; $i++) {
+                if ($i > 0) {
+                    $template_sql .= ', ';
+                }
+                $template_sql .= self::placeholder_for_shape_code($shape_value_codes[$offset + $i]);
+            }
+            $template_sql .= ')';
         }
 
-        return 'INSERT INTO '
-            . self::quote_identifier($table)
-            . ' (' . implode(', ', $quoted_columns) . ') VALUES'
-            . implode(',', $rows)
-            . ';';
+        return $template_sql . ';';
+    }
+
+    private static function placeholder_for_shape_code(string $code): string
+    {
+        if ($code === 'i') {
+            return 'CAST(? AS NUMERIC)';
+        }
+        if ($code === 'r') {
+            return 'CAST(? AS REAL)';
+        }
+        return '?';
     }
 
     private static function quote_identifier(string $identifier): string
     {
+        if (strpos($identifier, '`') === false) {
+            return '`' . $identifier . '`';
+        }
         return '`' . str_replace('`', '``', $identifier) . '`';
     }
 

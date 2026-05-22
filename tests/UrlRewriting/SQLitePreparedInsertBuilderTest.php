@@ -87,6 +87,23 @@ class SQLitePreparedInsertBuilderTest extends TestCase
         $this->assertSame([$value], $prepared['params']);
     }
 
+    public function testBuildsPreparedInsertForLowercaseFromBase64Function(): void
+    {
+        $sql = sprintf(
+            "INSERT INTO `wp_options` (`option_id`, `option_value`) VALUES(1, from_base64('%s'));",
+            base64_encode('value')
+        );
+
+        $prepared = SQLitePreparedInsertBuilder::build($sql);
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(
+            "INSERT INTO `wp_options` (`option_id`, `option_value`) VALUES(CAST(? AS NUMERIC), ?);",
+            $prepared['sql']
+        );
+        $this->assertSame(['1', 'value'], $prepared['params']);
+    }
+
     public function testRewriteCallbackReceivesTableAndColumn(): void
     {
         $sql = sprintf(
@@ -180,6 +197,53 @@ class SQLitePreparedInsertBuilderTest extends TestCase
             ],
             $prepared_a['param_types']
         );
+    }
+
+    public function testBuildsPreparedInsertForEscapedIdentifiersAndMixedCasts(): void
+    {
+        $value = "payload\nbytes";
+        $sql = sprintf(
+            "INSERT INTO `wp``odd` (`id``num`, `ratio`, `content``bytes`, `empty_value`, `missing_value`) VALUES(+42, -1.25E+3, FROM_BASE64('%s'), '', NULL);",
+            base64_encode($value)
+        );
+
+        $prepared = SQLitePreparedInsertBuilder::build($sql);
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(
+            "INSERT INTO `wp``odd` (`id``num`, `ratio`, `content``bytes`, `empty_value`, `missing_value`) VALUES(CAST(? AS NUMERIC), CAST(? AS REAL), ?, ?, ?);",
+            $prepared['sql']
+        );
+        $this->assertSame(['+42', '-1.25E+3', $value, '', null], $prepared['params']);
+        $this->assertSame(
+            [PDO::PARAM_STR, PDO::PARAM_STR, PDO::PARAM_STR, PDO::PARAM_STR, PDO::PARAM_NULL],
+            $prepared['param_types']
+        );
+    }
+
+    public function testPlaceholderShapeStaysStableAcrossNullEmptyAndBase64Values(): void
+    {
+        $sql_a = sprintf(
+            "INSERT INTO `wp_options` (`option_id`, `option_name`, `option_value`) VALUES(1, FROM_BASE64('%s'), NULL);",
+            base64_encode('alpha')
+        );
+        $sql_b = sprintf(
+            "INSERT INTO `wp_options` (`option_id`, `option_name`, `option_value`) VALUES(999, '', FROM_BASE64('%s'));",
+            base64_encode('bravo')
+        );
+
+        $prepared_a = SQLitePreparedInsertBuilder::build($sql_a);
+        $prepared_b = SQLitePreparedInsertBuilder::build($sql_b);
+
+        $this->assertNotNull($prepared_a);
+        $this->assertNotNull($prepared_b);
+        $this->assertSame(
+            "INSERT INTO `wp_options` (`option_id`, `option_name`, `option_value`) VALUES(CAST(? AS NUMERIC), ?, ?);",
+            $prepared_a['sql']
+        );
+        $this->assertSame($prepared_a['sql'], $prepared_b['sql']);
+        $this->assertSame(['1', 'alpha', null], $prepared_a['params']);
+        $this->assertSame(['999', '', 'bravo'], $prepared_b['params']);
     }
 
     public function testRejectsMalformedBase64InsteadOfBindingEmptyString(): void
@@ -349,6 +413,27 @@ class SQLitePreparedInsertBuilderTest extends TestCase
         );
         $this->assertSame('1', $prepared['params'][0]);
         $this->assertSame('<a href="https://new-site.com/page">Link</a>', $prepared['params'][1]);
+    }
+
+    public function testCommentsAndStringLiteralShapesUseStatementFallback(): void
+    {
+        $rewriter = new SqlStatementRewriter(
+            new StructuredDataUrlRewriter([
+                'https://old-site.com' => 'https://new-site.com',
+            ])
+        );
+        $sql = sprintf(
+            "/* dump comment */ INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`) VALUES (1, 'literal ''FROM_BASE64(''fake'')''', FROM_BASE64('%s'));",
+            base64_encode('<a href="https://old-site.com/page">Link</a>')
+        );
+
+        $this->assertNull($rewriter->build_sqlite_prepared_insert($sql));
+
+        $rewritten = $rewriter->rewrite($sql);
+        $this->assertStringContainsString("'literal ''FROM_BASE64(''fake'')'''", $rewritten);
+        $values = $this->collectValues($rewritten);
+        $this->assertCount(1, $values);
+        $this->assertSame('<a href="https://new-site.com/page">Link</a>', $values[0]);
     }
 
     public function testSqlStatementRewriterUsesColumnOrderWhenCompilingTemplate(): void
