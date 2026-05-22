@@ -121,6 +121,20 @@ class NewSiteUrlSqliteTest extends TestCase
         $method->invoke($client, $sqlFile);
     }
 
+    private function sidecarOffsetAfterRecords(string $sidecarPath, int $records): int
+    {
+        $handle = fopen($sidecarPath, 'r');
+        $this->assertIsResource($handle);
+        for ($i = 0; $i <= $records; $i++) {
+            $line = fgets($handle);
+            $this->assertNotFalse($line);
+        }
+        $offset = ftell($handle);
+        fclose($handle);
+        $this->assertIsInt($offset);
+        return $offset;
+    }
+
     /**
      * Read a value from the SQLite database using the MySQL-on-SQLite driver.
      */
@@ -475,6 +489,103 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertSame('complete', $state['status']);
         $this->assertSame(count($stmts), $state['apply']['statements_executed']);
         $this->assertSame(strlen($sql), $state['apply']['bytes_read']);
+        $this->assertSame(filesize($sidecarPath), $state['apply']['row_stream_bytes_read']);
+    }
+
+    public function testExperimentalRowStreamResumesPartialState(): void
+    {
+        $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
+        $create = "CREATE TABLE `wp_resume` (" .
+            "`id` bigint(20) unsigned NOT NULL, " .
+            "`name` longtext NOT NULL, " .
+            "PRIMARY KEY (`id`)" .
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+        $firstInsert = sprintf(
+            "INSERT INTO `wp_resume` (`id`, `name`) VALUES (1, FROM_BASE64('%s'));",
+            base64_encode('one'),
+        );
+        $secondInsert = sprintf(
+            "INSERT INTO `wp_resume` (`id`, `name`) VALUES (2, FROM_BASE64('%s'));",
+            base64_encode('two'),
+        );
+        $prefixSql = implode("\n", [$create, $firstInsert]);
+        $fullSql = implode("\n", [$create, $firstInsert, $secondInsert]);
+        $sqlFile = $this->tempDir . '/db.sql';
+
+        file_put_contents($sqlFile, $prefixSql);
+        $this->writeState();
+        $client = new \ImportClient(
+            'https://old-site.example.com/?reprint-api',
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $client->run([
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $sqlitePath,
+            'target_db' => 'wp_test',
+        ]);
+
+        file_put_contents($sqlFile, $fullSql);
+        $client = new \ImportClient(
+            'https://old-site.example.com/?reprint-api',
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $this->buildRowStreamSidecar($client, $sqlFile);
+        $sidecarPath = $this->tempDir . '/.import-sqlite-row-stream.jsonl';
+        $this->writeState([
+            'command' => 'db-apply',
+            'status' => 'partial',
+            'apply' => [
+                'statements_executed' => 2,
+                'bytes_read' => strlen($prefixSql),
+                'row_stream_bytes_read' => $this->sidecarOffsetAfterRecords($sidecarPath, 2),
+                'target_engine' => 'sqlite',
+                'target_db' => 'wp_test',
+                'target_sqlite_path' => $sqlitePath,
+            ],
+        ]);
+
+        $client = new \ImportClient(
+            'https://old-site.example.com/?reprint-api',
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+        $client->run([
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $sqlitePath,
+            'target_db' => 'wp_test',
+            'experimental_sqlite_row_stream' => true,
+        ]);
+
+        $rows = $this->querySqlite(
+            $sqlitePath,
+            'SELECT id, name FROM wp_resume ORDER BY id',
+            'wp_test',
+        );
+        $rows = array_map(
+            fn(array $row): array => ['id' => $row['id'], 'name' => $row['name']],
+            $rows,
+        );
+        $this->assertSame([
+            ['id' => 1, 'name' => 'one'],
+            ['id' => 2, 'name' => 'two'],
+        ], $rows);
+
+        $state = json_decode(file_get_contents($this->tempDir . '/.import-state.json'), true);
+        $this->assertSame('complete', $state['status']);
+        $this->assertSame(3, $state['apply']['statements_executed']);
+        $this->assertSame(strlen($fullSql), $state['apply']['bytes_read']);
         $this->assertSame(filesize($sidecarPath), $state['apply']['row_stream_bytes_read']);
     }
 
