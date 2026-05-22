@@ -18,7 +18,8 @@ class FastInsertScannerShapePlanTest extends TestCase
      *   columns: list<string>,
      *   column_map: list<array{int, int, string}>,
      *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
-     *   value_entries: list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
+     *   has_base64: bool,
+     *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
      *   shape_key: string,
      *   shape_plan_cache_hit: bool,
      *   shape_plan: array{
@@ -154,6 +155,25 @@ class FastInsertScannerShapePlanTest extends TestCase
 
         $this->assertSame([0, 1], $scan['shape_plan']['base64_value_indexes']);
         $this->assertSame([1], $scan['shape_plan']['option_name_value_indexes']);
+    }
+
+    public function testReusablePlanCanSkipBase64Offsets(): void
+    {
+        $encoded = $this->b64('https://offset-skip.example/image.jpg');
+        $sql = sprintf(
+            "INSERT INTO `shape_offset_skip` (`id`, `payload`) VALUES(1, FROM_BASE64('%s'));",
+            $encoded
+        );
+
+        $scan = FastInsertScanner::scan_with_reusable_plan($sql, false, false);
+
+        $this->assertNotNull($scan);
+        $this->assertTrue($scan['has_base64']);
+        $this->assertSame([], $scan['base64_entries']);
+        $this->assertSame([1], $scan['shape_plan']['base64_value_indexes']);
+        $this->assertSame('base64', $scan['value_entries'][1]['kind']);
+        $this->assertSame($encoded, $scan['value_entries'][1]['encoded_value']);
+        $this->assertArrayNotHasKey('expr_start', $scan['value_entries'][1]);
     }
 
     public function testUnsupportedShapeStillReturnsNullForFallback(): void

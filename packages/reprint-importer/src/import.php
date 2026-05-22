@@ -7707,7 +7707,7 @@ class ImportClient
                 continue;
             }
 
-            $fast_insert = \FastInsertScanner::scan_with_reusable_plan($query, false);
+            $fast_insert = \FastInsertScanner::scan_with_reusable_plan($query, false, false);
             if ($fast_insert !== null && $this->drain_fast_insert_for_domains($fast_insert, $domain_collector)) {
                 continue;
             }
@@ -7771,7 +7771,7 @@ class ImportClient
      * @param array{
      *   table: string,
      *   columns: list<string>,
-     *   value_entries: list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
+     *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
      *   shape_plan: array{
      *     table: string,
      *     columns: list<string>,

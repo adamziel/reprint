@@ -58,14 +58,15 @@ class FastInsertScanner
      *   table: string,
      *   columns: list<string>,
      *   column_map: list<array{int, int, string}>,
+     *   has_base64: bool,
      *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
-     *   value_entries: list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>
+     *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>
      * }|null
      *   Null when the SQL doesn't match the recognised shape.
      */
-    public static function scan(string $sql, bool $include_column_map = true): ?array
+    public static function scan(string $sql, bool $include_column_map = true, bool $include_base64_entries = true): ?array
     {
-        return self::scan_internal($sql, $include_column_map, false);
+        return self::scan_internal($sql, $include_column_map, $include_base64_entries, false);
     }
 
     /**
@@ -81,7 +82,8 @@ class FastInsertScanner
      *   columns: list<string>,
      *   column_map: list<array{int, int, string}>,
      *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
-     *   value_entries: list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
+     *   has_base64: bool,
+     *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
      *   shape_key: string,
      *   shape_plan_cache_hit: bool,
      *   shape_plan: array{
@@ -96,9 +98,9 @@ class FastInsertScanner
      * }|null
      *   Null when the SQL doesn't match the recognised shape.
      */
-    public static function scan_with_reusable_plan(string $sql, bool $include_column_map = true): ?array
+    public static function scan_with_reusable_plan(string $sql, bool $include_column_map = true, bool $include_base64_entries = true): ?array
     {
-        return self::scan_internal($sql, $include_column_map, true);
+        return self::scan_internal($sql, $include_column_map, $include_base64_entries, true);
     }
 
     /**
@@ -107,7 +109,8 @@ class FastInsertScanner
      *   columns: list<string>,
      *   column_map: list<array{int, int, string}>,
      *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
-     *   value_entries: list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
+     *   has_base64: bool,
+     *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>,
      *   shape_key?: string,
      *   shape_plan_cache_hit?: bool,
      *   shape_plan?: array{
@@ -121,7 +124,12 @@ class FastInsertScanner
      *   }
      * }|null
      */
-    private static function scan_internal(string $sql, bool $include_column_map, bool $include_shape_plan): ?array
+    private static function scan_internal(
+        string $sql,
+        bool $include_column_map,
+        bool $include_base64_entries,
+        bool $include_shape_plan
+    ): ?array
     {
         // Header: optional leading whitespace, INSERT (no priority/IGNORE
         // modifiers — producer never emits those), INTO, backticked table,
@@ -174,6 +182,7 @@ class FastInsertScanner
         $column_map = [];
         $base64_entries = [];
         $value_entries = [];
+        $has_base64 = false;
 
         $cursor = $values_end;
         $sql_len = strlen($sql);
@@ -212,29 +221,32 @@ class FastInsertScanner
                     $cursor++;
                 }
                 $value_start = $cursor;
-                $value_kind = self::scan_value($sql, $sql_len, $cursor);
+                $value_kind = self::scan_value($sql, $sql_len, $cursor, $include_base64_entries);
                 if ($value_kind === null) {
                     return null;
                 }
                 $value_end = $cursor;
                 if ($include_column_map) {
                     $column_map[] = [$value_start, $value_end, $columns[$col_idx]];
+                    $value_kind['start'] = $value_start;
+                    $value_kind['end'] = $value_end;
                 }
-                $value_kind['start'] = $value_start;
-                $value_kind['end'] = $value_end;
                 $value_kind['column'] = $columns[$col_idx];
                 $value_entries[] = $value_kind;
 
                 if ($value_kind['kind'] === 'base64') {
-                    $base64_entries[] = [
-                        'expr_start' => $value_kind['expr_start'],
-                        'expr_length' => $value_kind['expr_length'],
-                        'quote_start' => $value_kind['quote_start'],
-                        'quote_length' => $value_kind['quote_length'],
-                        'encoded_value' => $value_kind['encoded_value'],
-                        'value' => null,
-                        'new_value' => null,
-                    ];
+                    $has_base64 = true;
+                    if ($include_base64_entries) {
+                        $base64_entries[] = [
+                            'expr_start' => $value_kind['expr_start'],
+                            'expr_length' => $value_kind['expr_length'],
+                            'quote_start' => $value_kind['quote_start'],
+                            'quote_length' => $value_kind['quote_length'],
+                            'encoded_value' => $value_kind['encoded_value'],
+                            'value' => null,
+                            'new_value' => null,
+                        ];
+                    }
                 }
 
                 while ($cursor < $sql_len && self::is_ws($sql[$cursor])) {
@@ -280,6 +292,7 @@ class FastInsertScanner
             'table' => $table,
             'columns' => $columns,
             'column_map' => $column_map,
+            'has_base64' => $has_base64,
             'base64_entries' => $base64_entries,
             'value_entries' => $value_entries,
         ];
@@ -314,7 +327,7 @@ class FastInsertScanner
      * @return null|array{kind: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}
      *   null = unrecognized shape (caller bails)
      */
-    private static function scan_value(string $sql, int $sql_len, int &$cursor)
+    private static function scan_value(string $sql, int $sql_len, int &$cursor, bool $include_base64_offsets = true)
     {
         if ($cursor >= $sql_len) {
             return null;
@@ -349,12 +362,18 @@ class FastInsertScanner
             if ($entry === null) {
                 return null;
             }
+            if ($include_base64_offsets) {
+                return [
+                    'kind' => 'base64',
+                    'expr_start' => $entry[0],
+                    'expr_length' => $entry[1],
+                    'quote_start' => $entry[2],
+                    'quote_length' => $entry[3],
+                    'encoded_value' => $entry[4],
+                ];
+            }
             return [
                 'kind' => 'base64',
-                'expr_start' => $entry[0],
-                'expr_length' => $entry[1],
-                'quote_start' => $entry[2],
-                'quote_length' => $entry[3],
                 'encoded_value' => $entry[4],
             ];
         }
@@ -404,12 +423,18 @@ class FastInsertScanner
             }
             $cursor++;
             $entry[1] = $cursor - $expr_start;
+            if ($include_base64_offsets) {
+                return [
+                    'kind' => 'base64',
+                    'expr_start' => $entry[0],
+                    'expr_length' => $entry[1],
+                    'quote_start' => $entry[2],
+                    'quote_length' => $entry[3],
+                    'encoded_value' => $entry[4],
+                ];
+            }
             return [
                 'kind' => 'base64',
-                'expr_start' => $entry[0],
-                'expr_length' => $entry[1],
-                'quote_start' => $entry[2],
-                'quote_length' => $entry[3],
                 'encoded_value' => $entry[4],
             ];
         }
@@ -504,7 +529,7 @@ class FastInsertScanner
 
     /**
      * @param list<string> $columns
-     * @param list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}> $value_entries
+     * @param list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}> $value_entries
      */
     private static function shape_key(string $table, array $columns, array $value_entries): string
     {
@@ -531,7 +556,7 @@ class FastInsertScanner
 
     /**
      * @param list<string> $columns
-     * @param list<array{kind: string, start: int, end: int, column: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}> $value_entries
+     * @param list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}> $value_entries
      * @return array{
      *   table: string,
      *   columns: list<string>,
