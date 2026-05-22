@@ -67,18 +67,18 @@ class SqliteDbApplyBatchingTest extends TestCase
         $this->assertSame(count($statements), $state['apply']['statements_executed']);
     }
 
-    public function testPreparedInsertFastPathHonorsRollbackAndCommit(): void
+    public function testSQLiteBatchOwnsDumpTransactionControlStatements(): void
     {
         $sqlitePath = $this->tempDir . '/target.sqlite';
         $statements = array_merge(
             $this->schemaStatements(),
             [
-                "START TRANSACTION;",
+                "-- dump transaction wrapper\nSTART TRANSACTION;",
                 $this->insertStatement(1, 'rolled back'),
-                "ROLLBACK;",
-                "START TRANSACTION;",
+                "/* dump transaction wrapper */ ROLLBACK;",
+                "/*!40101 START TRANSACTION */;",
                 $this->insertStatement(2, 'committed'),
-                "COMMIT;",
+                "/*!40101 COMMIT */;",
             ],
         );
 
@@ -88,6 +88,7 @@ class SqliteDbApplyBatchingTest extends TestCase
 
         $rows = $this->queryTarget($sqlitePath, "SELECT id, name FROM wp_batch ORDER BY id");
         $this->assertSame([
+            ['id' => 1, 'name' => 'rolled back'],
             ['id' => 2, 'name' => 'committed'],
         ], $rows);
     }
@@ -144,16 +145,16 @@ class SqliteDbApplyBatchingTest extends TestCase
             $this->runDbApply($sqlitePath);
         } finally {
             $rows = $this->queryTarget($sqlitePath, "SELECT COUNT(*) AS c FROM wp_batch");
-            $this->assertSame(500, (int) $rows[0]['c']);
+            $this->assertSame(498, (int) $rows[0]['c']);
 
-            $rows = $this->queryTarget($sqlitePath, "SELECT id, name FROM wp_batch WHERE id IN (500, 501) ORDER BY id");
+            $rows = $this->queryTarget($sqlitePath, "SELECT id, name FROM wp_batch WHERE id IN (498, 499, 501) ORDER BY id");
             $this->assertSame([
-                ['id' => 500, 'name' => 'row 500'],
+                ['id' => 498, 'name' => 'row 498'],
             ], $rows);
 
             $committedStatements = array_merge(
                 $this->schemaStatements(),
-                array_slice($insertStatements, 0, 500),
+                array_slice($insertStatements, 0, 498),
             );
             $marker = $this->readMarker($sqlitePath);
             $this->assertSame(count($committedStatements), $marker['statements_executed']);
