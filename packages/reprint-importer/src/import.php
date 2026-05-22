@@ -5308,8 +5308,7 @@ class ImportClient
         $apply_state = $this->state["apply"] ?? $this->default_state()["apply"];
         $statements_executed = (int) ($apply_state["statements_executed"] ?? 0);
         $bytes_read = (int) ($apply_state["bytes_read"] ?? 0);
-        $is_resume = in_array($current_status, ["in_progress", "partial"], true)
-            && ($statements_executed > 0 || $bytes_read > 0);
+        $is_resume = in_array($current_status, ["in_progress", "partial"], true);
 
         if ($is_resume) {
             $this->audit_log(

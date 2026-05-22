@@ -211,6 +211,58 @@ class SqliteDbApplyBatchingTest extends TestCase
         );
     }
 
+    public function testResumeReconcilesCommittedMarkerAheadOfZeroJsonState(): void
+    {
+        $sqlitePath = $this->tempDir . '/target.sqlite';
+        $createTable = "CREATE TABLE `wp_batch` (" .
+            "`id` bigint(20) unsigned NOT NULL, " .
+            "`name` longtext NOT NULL, " .
+            "PRIMARY KEY (`id`)" .
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+        $prefixStatements = [
+            $createTable,
+            $this->insertStatement(1, 'one'),
+        ];
+        $fullStatements = array_merge(
+            $prefixStatements,
+            [
+                $this->insertStatement(2, 'two'),
+            ],
+        );
+
+        $this->writeSql($prefixStatements);
+        $this->writeState();
+        $this->runDbApply($sqlitePath);
+
+        $this->writeSql($fullStatements);
+        $this->writeState([
+            'command' => 'db-apply',
+            'status' => 'in_progress',
+            'apply' => [
+                'statements_executed' => 0,
+                'bytes_read' => 0,
+                'target_engine' => 'sqlite',
+                'target_db' => 'wp_test',
+                'target_sqlite_path' => $sqlitePath,
+            ],
+        ]);
+        $this->runDbApply($sqlitePath);
+
+        $rows = $this->queryTarget($sqlitePath, "SELECT id, name FROM wp_batch ORDER BY id");
+        $this->assertSame([
+            ['id' => 1, 'name' => 'one'],
+            ['id' => 2, 'name' => 'two'],
+        ], $rows);
+
+        $state = $this->readState();
+        $this->assertSame('complete', $state['status']);
+        $this->assertSame(count($fullStatements), $state['apply']['statements_executed']);
+        $this->assertSame(
+            $this->bytesThroughStatements($fullStatements, count($fullStatements)),
+            $state['apply']['bytes_read'],
+        );
+    }
+
     /**
      * @return string[]
      */
