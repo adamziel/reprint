@@ -421,7 +421,9 @@ class Pull
 
         foreach ([
             $state_dir . "/db.sql",
+            $state_dir . "/.import-sql-metadata.json",
             $state_dir . "/.import-domains.json",
+            $state_dir . "/.import-sql-stats.json",
             $state_dir . "/.import-remote-index.jsonl",
             $state_dir . "/.import-download-list.jsonl",
             $state_dir . "/.import-download-list-skipped.jsonl",

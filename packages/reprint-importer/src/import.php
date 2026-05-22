@@ -1943,12 +1943,17 @@ class ImportClient
                         "FILE DELETE | {$tables_file} | abort db-pull",
                     );
                 }
-                $domains_file = $this->state_dir . "/.import-domains.json";
-                if (file_exists($domains_file)) {
-                    unlink($domains_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$domains_file} | abort db-pull",
-                    );
+                foreach ([
+                    SqlPullMetadata::path($this->state_dir),
+                    SqlPullMetadata::legacy_domains_path($this->state_dir),
+                    SqlPullMetadata::legacy_stats_path($this->state_dir),
+                ] as $metadata_file) {
+                    if (file_exists($metadata_file)) {
+                        unlink($metadata_file);
+                        $this->audit_log(
+                            "FILE DELETE | {$metadata_file} | abort db-pull",
+                        );
+                    }
                 }
                 break;
 
@@ -3515,6 +3520,16 @@ class ImportClient
             $this->state["stage"] = "db-index";
             $this->state["diff"] = $this->default_state()["diff"];
             $this->state["db_index"] = $this->default_state()["db_index"];
+            $this->state["sql_statements_counted"] = 0;
+            foreach ([
+                SqlPullMetadata::path($this->state_dir),
+                SqlPullMetadata::legacy_domains_path($this->state_dir),
+                SqlPullMetadata::legacy_stats_path($this->state_dir),
+            ] as $metadata_file) {
+                if (file_exists($metadata_file)) {
+                    @unlink($metadata_file);
+                }
+            }
             $this->save_state($this->state);
 
             $this->audit_log("START db-pull", true);
@@ -3614,56 +3629,18 @@ class ImportClient
      */
     private function run_db_domains(): void
     {
-        $domains_file = $this->state_dir . "/.import-domains.json";
         $sql_file = $this->state_dir . "/db.sql";
+        $metadata = $this->load_valid_sql_pull_metadata($sql_file);
 
-        if (file_exists($domains_file)) {
-            // Fast path: domains were already discovered during db-pull
-            $domains = json_decode(file_get_contents($domains_file), true);
-            if (!is_array($domains)) {
-                throw new RuntimeException(
-                    "Failed to parse {$domains_file}",
-                );
-            }
+        if ($metadata !== null) {
+            $domains = $metadata['domains'];
         } elseif (file_exists($sql_file)) {
-            // Scan db.sql for domains using the same pipeline as db-pull
-            $query_stream = new \WP_MySQL_Naive_Query_Stream();
-            $domain_collector = new \DomainCollector();
-
-            $sql_handle = fopen($sql_file, "r");
-            if (!$sql_handle) {
-                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
-            }
-
-            try {
-                $chunk_size = 64 * 1024;
-                while (!feof($sql_handle)) {
-                    $data = fread($sql_handle, $chunk_size);
-                    if ($data === false || $data === '') {
-                        break;
-                    }
-                    $query_stream->append_sql($data);
-                    $this->drain_query_stream_for_domains(
-                        $query_stream,
-                        $domain_collector,
-                    );
-                }
-
-                $query_stream->mark_input_complete();
-                $this->drain_query_stream_for_domains(
-                    $query_stream,
-                    $domain_collector,
-                );
-            } finally {
-                fclose($sql_handle);
-            }
-
-            $domains = $domain_collector->get_domains();
-
-            // Save for future calls
-            file_put_contents(
-                $domains_file,
-                json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+            $scanned = $this->scan_sql_file_for_pull_metadata($sql_file);
+            $domains = $scanned['domains'];
+            $this->write_sql_pull_metadata(
+                $sql_file,
+                $domains,
+                $scanned['statements_total'],
             );
         } else {
             throw new RuntimeException(
@@ -3675,6 +3652,92 @@ class ImportClient
         foreach ($domains as $domain) {
             echo $domain . "\n";
         }
+    }
+
+    /**
+     * @return array{domains: list<string>, statements_total: int}
+     */
+    private function scan_sql_file_for_pull_metadata(string $sql_file): array
+    {
+        $query_stream = new \WP_MySQL_Naive_Query_Stream();
+        $domain_collector = new \DomainCollector();
+        $statements_total = 0;
+
+        $sql_handle = fopen($sql_file, "r");
+        if (!$sql_handle) {
+            throw new RuntimeException("Cannot open SQL file: {$sql_file}");
+        }
+
+        try {
+            $chunk_size = 64 * 1024;
+            while (!feof($sql_handle)) {
+                $data = fread($sql_handle, $chunk_size);
+                if ($data === false || $data === '') {
+                    break;
+                }
+                $query_stream->append_sql($data);
+                $this->drain_query_stream_for_domains(
+                    $query_stream,
+                    $domain_collector,
+                    $statements_total,
+                );
+            }
+
+            $query_stream->mark_input_complete();
+            $this->drain_query_stream_for_domains(
+                $query_stream,
+                $domain_collector,
+                $statements_total,
+            );
+        } finally {
+            fclose($sql_handle);
+        }
+
+        return [
+            'domains' => $domain_collector->get_domains(),
+            'statements_total' => $statements_total,
+        ];
+    }
+
+    /**
+     * @return array{domains: list<string>, statements_total: int}|null
+     */
+    private function load_valid_sql_pull_metadata(string $sql_file): ?array
+    {
+        $metadata_file = SqlPullMetadata::path($this->state_dir);
+        $reason = null;
+        $metadata = SqlPullMetadata::read_complete($metadata_file, $sql_file, $reason);
+        if ($metadata === null && file_exists($metadata_file)) {
+            $this->audit_log(
+                "SQL METADATA ignored | {$reason}",
+                false,
+            );
+        }
+        return $metadata;
+    }
+
+    /**
+     * @param string[] $domains
+     */
+    private function write_sql_pull_metadata(
+        string $sql_file,
+        array $domains,
+        int $statements_total
+    ): void {
+        SqlPullMetadata::write_complete(
+            SqlPullMetadata::path($this->state_dir),
+            $sql_file,
+            $domains,
+            $statements_total,
+        );
+        SqlPullMetadata::write_legacy_domains(
+            SqlPullMetadata::legacy_domains_path($this->state_dir),
+            $domains,
+        );
+        SqlPullMetadata::write_legacy_stats(
+            SqlPullMetadata::legacy_stats_path($this->state_dir),
+            $statements_total,
+        );
     }
 
     /**
@@ -5010,31 +5073,32 @@ class ImportClient
             }
         }
 
-        // Show discovered domains if available
-        $domains_file = $this->state_dir . "/.import-domains.json";
-        if (file_exists($domains_file)) {
-            $domains = json_decode(file_get_contents($domains_file), true);
-            if (is_array($domains) && !empty($domains)) {
-                $this->audit_log(
-                    sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
-                    false,
-                );
-                $this->progress->show_lifecycle_line("Discovered domains in SQL dump:\n");
-                foreach ($domains as $domain) {
-                    $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
-                    $this->progress->show_lifecycle_line("  {$domain}{$mapped}\n");
-                }
-                $this->progress->show_lifecycle_line("\n");
-                $domain_map = [];
-                foreach ($domains as $domain) {
-                    $domain_map[$domain] = $url_mapping[$domain] ?? null;
-                }
-                $this->output_progress([
-                    "type" => "domains_discovered",
-                    "domains" => $domain_map,
-                    "message" => "Discovered " . count($domains) . " domain(s) in SQL dump",
-                ], true);
+        $sql_pull_metadata = $this->load_valid_sql_pull_metadata($sql_file);
+
+        // Show discovered domains only when the db-pull metadata validates
+        // against the current db.sql. Stale or malformed side-channel data is
+        // advisory and ignored; db-apply remains correct without it.
+        if ($sql_pull_metadata !== null && !empty($sql_pull_metadata['domains'])) {
+            $domains = $sql_pull_metadata['domains'];
+            $this->audit_log(
+                sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
+                false,
+            );
+            $this->progress->show_lifecycle_line("Discovered domains in SQL dump:\n");
+            foreach ($domains as $domain) {
+                $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
+                $this->progress->show_lifecycle_line("  {$domain}{$mapped}\n");
             }
+            $this->progress->show_lifecycle_line("\n");
+            $domain_map = [];
+            foreach ($domains as $domain) {
+                $domain_map[$domain] = $url_mapping[$domain] ?? null;
+            }
+            $this->output_progress([
+                "type" => "domains_discovered",
+                "domains" => $domain_map,
+                "message" => "Discovered " . count($domains) . " domain(s) in SQL dump",
+            ], true);
         }
 
         // Check state for resume
@@ -5178,15 +5242,10 @@ class ImportClient
         $save_every = 100;
         $stmts_since_save = 0;
 
-        // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
-        $statements_total = null;
-        if (file_exists($sql_stats_file)) {
-            $stats = json_decode(file_get_contents($sql_stats_file), true);
-            if (is_array($stats) && isset($stats["statements_total"])) {
-                $statements_total = (int) $stats["statements_total"];
-            }
-        }
+        // Load pre-computed statement count from validated db-pull metadata
+        // for progress reporting. When absent/stale, progress falls back to
+        // executed statement count only.
+        $statements_total = $sql_pull_metadata['statements_total'] ?? null;
 
         // If resuming, seek to saved position. bytes_read is the byte offset
         // right after the last successfully executed query (tracked via
@@ -7146,6 +7205,7 @@ class ImportClient
         $cursor = $this->state["cursor"] ?? null;
         $complete = false;
         $mode = $this->sql_output_mode;
+        $sql_file = $this->state_dir . "/db.sql";
 
         // ── Set up write strategy based on output mode ──────────────
 
@@ -7156,8 +7216,6 @@ class ImportClient
         $sql_buffer = "";
 
         if ($mode === "file") {
-            $sql_file = $this->state_dir . "/db.sql";
-
             // Crash recovery: if SQL file is larger than expected, truncate it.
             // This happens if we crashed after writing but before saving the new cursor.
             $tracked_bytes = $this->state["sql_bytes"] ?? null;
@@ -7180,7 +7238,7 @@ class ImportClient
                 }
             }
 
-            $sql_bytes_written = file_exists($sql_file) ? filesize($sql_file) : 0;
+            $sql_bytes_written = $cursor && file_exists($sql_file) ? (int) filesize($sql_file) : 0;
 
             // Open in write mode if no cursor (starting fresh), append mode if resuming
             $sql_handle = fopen($sql_file, $cursor ? "a" : "w");
@@ -7251,13 +7309,14 @@ class ImportClient
         $domain_collector = class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
-        $domains_file = $this->state_dir . "/.import-domains.json";
-        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
+        $metadata_file = SqlPullMetadata::path($this->state_dir);
+        $domains_file = SqlPullMetadata::legacy_domains_path($this->state_dir);
+        $sql_stats_file = SqlPullMetadata::legacy_stats_path($this->state_dir);
         $sql_statements_counted = (int) ($this->state["sql_statements_counted"] ?? 0);
 
-        // Auto-detect the source site domain from the export URL so it
-        // always appears in .import-domains.json even if the SQL dump
-        // hasn't been fully scanned yet.
+        // Auto-detect the source site domain from the export URL so it is
+        // present in partial metadata even if the SQL dump has not been
+        // fully scanned yet.
         if ($domain_collector) {
             $parsed_url = parse_url($this->remote_url);
             if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
@@ -7269,10 +7328,15 @@ class ImportClient
             }
         }
 
-        // Load previously discovered domains (from earlier partial downloads)
-        if ($domain_collector && file_exists($domains_file)) {
-            $prev = json_decode(file_get_contents($domains_file), true);
-            if (is_array($prev)) {
+        // Load previously discovered domains (from earlier partial downloads).
+        // Prefer the versioned metadata envelope, then accept a validated
+        // legacy list only for resume migration.
+        if ($domain_collector && ($cursor !== null || $sql_statements_counted > 0)) {
+            $prev = SqlPullMetadata::read_resume_domains($metadata_file);
+            if (empty($prev)) {
+                $prev = SqlPullMetadata::read_legacy_domains($domains_file);
+            }
+            if (!empty($prev)) {
                 $domain_collector->merge($prev);
             }
         }
@@ -7312,6 +7376,7 @@ class ImportClient
                     $context,
                     $query_stream,
                     $domain_collector,
+                    $metadata_file,
                     $domains_file,
                     &$sql_statements_counted,
                     &$chunks_since_save
@@ -7352,12 +7417,13 @@ class ImportClient
                         // earlier data would be lost without periodic saves.
                         if ($domain_collector) {
                             $domains = $domain_collector->get_domains();
-                            if (!empty($domains)) {
-                                file_put_contents(
-                                    $domains_file,
-                                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                                );
-                            }
+                            SqlPullMetadata::write_partial(
+                                $metadata_file,
+                                $domains,
+                                $sql_statements_counted,
+                                $sql_bytes_written,
+                            );
+                            SqlPullMetadata::write_legacy_domains($domains_file, $domains);
                         }
                     }
 
@@ -7512,6 +7578,16 @@ class ImportClient
                     $this->state["sql_statements_counted"] = $sql_statements_counted;
                     $this->state["status"] = "partial";
                     $this->save_state($this->state);
+                    if ($domain_collector) {
+                        $domains = $domain_collector->get_domains();
+                        SqlPullMetadata::write_partial(
+                            $metadata_file,
+                            $domains,
+                            $sql_statements_counted,
+                            $sql_bytes_written,
+                        );
+                        SqlPullMetadata::write_legacy_domains($domains_file, $domains);
+                    }
                     // Discard any pending SQL buffer — it's incomplete and
                     // will be re-fetched on the next invocation. Setting
                     // this to "" also prevents the finally block from
@@ -7563,6 +7639,16 @@ class ImportClient
                         $this->state["sql_statements_counted"] = $sql_statements_counted;
                         $this->state["status"] = "partial";
                         $this->save_state($this->state);
+                        if ($domain_collector) {
+                            $domains = $domain_collector->get_domains();
+                            SqlPullMetadata::write_partial(
+                                $metadata_file,
+                                $domains,
+                                $sql_statements_counted,
+                                $sql_bytes_written,
+                            );
+                            SqlPullMetadata::write_legacy_domains($domains_file, $domains);
+                        }
                         $curl_timed_out = true;
                         break;
                     }
@@ -7584,6 +7670,7 @@ class ImportClient
                 $this->state["cursor"] = $cursor;
                 // Clear sql_bytes when complete, otherwise save current position
                 $this->state["sql_bytes"] = $complete ? null : $sql_bytes_written;
+                $this->state["sql_statements_counted"] = $sql_statements_counted;
                 $this->save_state($this->state);
             }
 
@@ -7598,26 +7685,30 @@ class ImportClient
 
                 // Save discovered domains
                 $domains = $domain_collector->get_domains();
-                if (!empty($domains)) {
-                    file_put_contents(
-                        $domains_file,
-                        json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+                if ($mode === "file") {
+                    if ($sql_handle) {
+                        fflush($sql_handle);
+                    }
+                    $this->write_sql_pull_metadata(
+                        $sql_file,
+                        $domains,
+                        $sql_statements_counted,
                     );
                     $this->audit_log(
                         sprintf(
-                            "DOMAINS DISCOVERED | %d unique domains saved to .import-domains.json",
+                            "SQL METADATA | %d domains and %d statements saved to .import-sql-metadata.json",
                             count($domains),
+                            $sql_statements_counted,
                         ),
                         false,
                     );
+                } elseif (!empty($domains)) {
+                    SqlPullMetadata::write_legacy_domains($domains_file, $domains);
                 }
 
                 // Save statement count for db-apply progress reporting
                 if ($sql_statements_counted > 0) {
-                    file_put_contents(
-                        $sql_stats_file,
-                        json_encode(["statements_total" => $sql_statements_counted]) . "\n",
-                    );
+                    SqlPullMetadata::write_legacy_stats($sql_stats_file, $sql_statements_counted);
                     $this->audit_log(
                         sprintf(
                             "SQL STATS | %d statements counted during download",
@@ -10257,6 +10348,7 @@ class ImportClient
             "current_file_bytes" => null,  // Expected bytes written so far
             // Crash recovery: track SQL file size
             "sql_bytes" => null,           // Expected SQL file size
+            "sql_statements_counted" => 0, // Complete SQL statements counted during db-pull
             // db-apply state
             "apply" => [
                 "statements_executed" => 0,
@@ -11870,7 +11962,8 @@ if (
                 "Indexes remote tables, then streams the full SQL dump into\n" .
                 "--state-dir/db.sql (default), to stdout, or directly into a\n" .
                 "MySQL connection. Resumes from the last cursor if interrupted.\n" .
-                "Discovered domains are cached for later use by db-apply.\n",
+                "Validated domain and statement-count metadata is cached for later\n" .
+                "use by db-apply.\n",
             "extra" =>
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
@@ -11894,9 +11987,9 @@ if (
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
                 "\n" .
-                "If .import-domains.json exists (cached by db-pull), it is read\n" .
-                "directly. Otherwise, db.sql is scanned and the result is cached\n" .
-                "for future calls. No network calls.\n" .
+                "If validated .import-sql-metadata.json exists (cached by db-pull),\n" .
+                "it is read directly. Otherwise, db.sql is scanned and the result\n" .
+                "is cached for future calls. No network calls.\n" .
                 "\n" .
                 "Example:\n" .
                 "  reprint db-domains - --state-dir=/path/to/state\n",
