@@ -5467,16 +5467,31 @@ class ImportClient
                     $statement->closeCursor();
                 }
 
-                foreach ($prepared_insert['params'] as $index => $value) {
-                    $statement->bindValue(
-                        $index + 1,
-                        $value,
-                        $prepared_insert['param_types'][$index] ?? PDO::PARAM_STR
-                    );
-                }
+                $param_count = count($prepared_insert['params']);
+                $primary_error = null;
+                try {
+                    foreach ($prepared_insert['params'] as $index => $value) {
+                        $statement->bindValue(
+                            $index + 1,
+                            $value,
+                            $prepared_insert['param_types'][$index] ?? PDO::PARAM_STR
+                        );
+                    }
 
-                if ($statement->execute() === false) {
-                    throw new PDOException('Failed to execute SQLite INSERT statement.');
+                    if ($statement->execute() === false) {
+                        throw new PDOException('Failed to execute SQLite INSERT statement.');
+                    }
+                } catch (Throwable $e) {
+                    $primary_error = $e;
+                    throw $e;
+                } finally {
+                    try {
+                        $this->clear_sqlite_prepared_statement_values($statement, $param_count);
+                    } catch (Throwable $clear_error) {
+                        if ($primary_error === null) {
+                            throw $clear_error;
+                        }
+                    }
                 }
                 return;
             }
@@ -5487,6 +5502,14 @@ class ImportClient
         }
 
         $pdo->exec($executed_query);
+    }
+
+    private function clear_sqlite_prepared_statement_values(PDOStatement $statement, int $param_count): void
+    {
+        $statement->closeCursor();
+        for ($index = 1; $index <= $param_count; $index++) {
+            $statement->bindValue($index, null, PDO::PARAM_NULL);
+        }
     }
 
     /**
