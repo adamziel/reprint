@@ -108,6 +108,28 @@ class SQLitePreparedInsertBuilderTest extends TestCase
         $this->assertSame(['1', 'after'], $prepared['params']);
     }
 
+    public function testBuildsPreparedInsertForEscapedIdentifiersAndMixedParams(): void
+    {
+        $payload = "\x00https://example.com/value\xff";
+        $sql = sprintf(
+            "INSERT INTO `wp``options` (`id`, `empty`, `nullable`, `ratio`, `payload``blob`) VALUES(+7, '', NULL, -3.5e+2, FROM_BASE64('%s'));",
+            base64_encode($payload)
+        );
+
+        $prepared = SQLitePreparedInsertBuilder::build($sql);
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(
+            "INSERT INTO `wp``options` (`id`, `empty`, `nullable`, `ratio`, `payload``blob`) VALUES(CAST(? AS NUMERIC), ?, ?, CAST(? AS REAL), ?);",
+            $prepared['sql']
+        );
+        $this->assertSame(['+7', '', null, '-3.5e+2', $payload], $prepared['params']);
+        $this->assertSame(
+            [PDO::PARAM_STR, PDO::PARAM_STR, PDO::PARAM_NULL, PDO::PARAM_STR, PDO::PARAM_STR],
+            $prepared['param_types']
+        );
+    }
+
     public function testRepeatedShapesCompileToSameTemplateWithDifferentValues(): void
     {
         $sql_a = sprintf(
@@ -211,6 +233,37 @@ class SQLitePreparedInsertBuilderTest extends TestCase
         );
 
         $this->assertNull(SQLitePreparedInsertBuilder::build($sql));
+    }
+
+    public function testRejectsFromBase64InsideStringLiteral(): void
+    {
+        $sql = "INSERT INTO `wp_options` (`option_value`) VALUES('FROM_BASE64(''dmFsdWU='')');";
+
+        $this->assertNull(SQLitePreparedInsertBuilder::build($sql));
+    }
+
+    public function testRejectsFromBase64InsideComment(): void
+    {
+        $sql = "INSERT INTO `wp_options` (`option_id`, `option_value`) VALUES(/* FROM_BASE64('dmFsdWU=') */ 1, '');";
+
+        $this->assertNull(SQLitePreparedInsertBuilder::build($sql));
+    }
+
+    public function testFastInsertScannerHeaderWhitespaceStillBuildsPreparedInsert(): void
+    {
+        $sql = sprintf(
+            "INSERT\fINTO `wp_options` (`option_id`, `option_value`) VALUES(1, FROM_BASE64('%s'));",
+            base64_encode('value')
+        );
+
+        $prepared = SQLitePreparedInsertBuilder::build($sql);
+
+        $this->assertNotNull($prepared);
+        $this->assertSame(
+            "INSERT INTO `wp_options` (`option_id`, `option_value`) VALUES(CAST(? AS NUMERIC), ?);",
+            $prepared['sql']
+        );
+        $this->assertSame(['1', 'value'], $prepared['params']);
     }
 
     public function testMalformedProducerShapesReturnNull(): void
