@@ -960,6 +960,7 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    private const SQL_FILE_WRITE_BUFFER_BYTES = 1024 * 1024;
 
     /**
      * Maximum number of consecutive cURL timeouts with no cursor progress
@@ -7157,12 +7158,13 @@ class ImportClient
 
         if ($mode === "file") {
             $sql_file = $this->state_dir . "/db.sql";
+            $sql_file_exists = file_exists($sql_file);
+            $actual_size = $sql_file_exists ? (int) filesize($sql_file) : 0;
 
             // Crash recovery: if SQL file is larger than expected, truncate it.
             // This happens if we crashed after writing but before saving the new cursor.
             $tracked_bytes = $this->state["sql_bytes"] ?? null;
-            if ($tracked_bytes !== null && file_exists($sql_file)) {
-                $actual_size = filesize($sql_file);
+            if ($tracked_bytes !== null && $sql_file_exists) {
                 if ($actual_size > $tracked_bytes) {
                     $this->audit_log(
                         sprintf(
@@ -7177,16 +7179,23 @@ class ImportClient
                         ftruncate($handle, $tracked_bytes);
                         fclose($handle);
                     }
+                    $actual_size = $tracked_bytes;
                 }
             }
 
-            $sql_bytes_written = file_exists($sql_file) ? filesize($sql_file) : 0;
+            $sql_bytes_written = $cursor ? $actual_size : 0;
 
-            // Open in write mode if no cursor (starting fresh), append mode if resuming
-            $sql_handle = fopen($sql_file, $cursor ? "a" : "w");
+            // Open in write mode if no cursor (starting fresh). When resuming,
+            // seek once to the known end instead of using append mode for every
+            // write; PHP.wasm's mounted filesystem pays more for append writes.
+            $sql_handle = fopen($sql_file, $cursor ? "c" : "w");
             if (!$sql_handle) {
                 throw new RuntimeException("Cannot open SQL file: {$sql_file}");
             }
+            if ($cursor && $sql_bytes_written > 0 && fseek($sql_handle, $sql_bytes_written) !== 0) {
+                throw new RuntimeException("Cannot seek SQL file: {$sql_file}");
+            }
+            stream_set_write_buffer($sql_handle, self::SQL_FILE_WRITE_BUFFER_BYTES);
 
         } elseif ($mode === "stdout") {
             $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
@@ -10257,6 +10266,7 @@ class ImportClient
             "current_file_bytes" => null,  // Expected bytes written so far
             // Crash recovery: track SQL file size
             "sql_bytes" => null,           // Expected SQL file size
+            "sql_statements_counted" => 0, // Statements counted during db-pull
             // db-apply state
             "apply" => [
                 "statements_executed" => 0,
