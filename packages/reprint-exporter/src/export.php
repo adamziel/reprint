@@ -321,6 +321,12 @@ function create_db_connection(array $creds, array $options = [])
         return create_sqlite_pdo_adapter();
     }
 
+    // Gate on pdo_mysql, not pdo: ext-pdo core without the mysql driver
+    // can't drive MySQL exports.
+    if (!extension_loaded('pdo_mysql')) {
+        return create_wpdb_pdo_adapter();
+    }
+
     // MySQL path (also works for HyperDB — wp-config.php credentials
     // point to the write master).
     $default_options = [
@@ -379,6 +385,29 @@ function create_sqlite_pdo_adapter()
     $raw_pdo = $driver->get_connection()->get_pdo();
 
     return new SqliteDriverPDO($driver, $raw_pdo);
+}
+
+/**
+ * Wraps the global $wpdb in a PDO-shaped adapter.
+ *
+ * Used on hosts without ext-pdo_mysql. Requires WordPress to be loaded
+ * (so $wpdb is available); throws otherwise.
+ */
+function create_wpdb_pdo_adapter()
+{
+    global $wpdb;
+
+    require_once __DIR__ . "/class-wpdb-driver-pdo.php";
+
+    // Guard against a clobbered/half-initialized $wpdb: isset() alone passes
+    // for non-object scalars, which would fatal inside the adapter constructor.
+    if (!isset($wpdb) || !is_object($wpdb)) {
+        throw new RuntimeException(
+            "MySQL export without PDO requires WordPress \$wpdb to be initialized."
+        );
+    }
+
+    return new WpdbDriverPDO($wpdb);
 }
 
 // Guard with existence checks: when loaded via Composer autoloader, both
