@@ -3448,6 +3448,10 @@ function file_fetch_paths_should_gzip(array $paths): bool
             // shouldn't compress around. Treat as a hard reject.
             return false;
         }
+        // Once true, we can skip checking the subsequent files.
+        if ($any_compressible) {
+            continue;
+        }
         $ext = path_extension_compressibility($path);
         if ($ext === 'yes') {
             $any_compressible = true;
@@ -3562,6 +3566,9 @@ function path_extension_compressibility(string $path): string
  */
 function path_head_looks_like_text(string $path): bool
 {
+    if (!is_file($path)) {
+        return false;
+    }
     $fp = @fopen($path, 'rb');
     if ($fp === false) {
         // Producer will surface a clearer error later; don't compress on
