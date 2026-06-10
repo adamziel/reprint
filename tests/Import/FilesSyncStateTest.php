@@ -9,7 +9,8 @@ require_once __DIR__ . '/../../importer/import.php';
 /**
  * Test files-pull state transitions and preserve-local diff behavior.
  *
- * A completed files-pull should refuse to re-run without --abort.
+ * A completed files-pull re-run starts a delta sync (re-index, diff,
+ * fetch changes) instead of no-oping.
  * After --abort, the next run should start fresh (not "already complete").
  * In preserve-local mode, previously-synced files that changed remotely
  * must still be re-downloaded (not skipped).
@@ -153,10 +154,19 @@ class FilesSyncStateTest extends TestCase
     // ---------------------------------------------------------------
 
     /**
-     * A completed files-pull should refuse to re-run.
+     * A completed files-pull re-run starts a delta sync instead of
+     * no-oping, and clears the stale remote index first
+     * (download_remote_index appends when the file already exists).
      */
-    public function testCompletedFilesSyncRefusesToRerun()
+    public function testCompletedFilesSyncRerunsAsDelta()
     {
+        $indexFile = $this->stateDir . '/.import-index.jsonl';
+        file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
+
+        $staleRemoteLine = $this->indexLine('/stale-from-last-run.php', 1000, 100);
+        $remoteIndexFile = $this->stateDir . '/.import-remote-index.jsonl';
+        file_put_contents($remoteIndexFile, $staleRemoteLine);
+
         $this->writeState([
             "command" => "files-pull",
             "status" => "complete",
@@ -164,12 +174,36 @@ class FilesSyncStateTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $method = $reflection->getMethod('run_files_sync');
-        $method->invoke($client);
+        try {
+            $reflection->getMethod('run_files_sync')->invoke($client);
+        } catch (\Exception $e) {
+            // Expected: contacting the fake URL fails after the reset.
+        }
 
         $state = $this->readState();
-        $this->assertEquals("complete", $state["status"]);
+        $this->assertNotEquals(
+            "complete",
+            $state["status"],
+            "A completed files-pull re-run must start a delta sync, not no-op",
+        );
         $this->assertEquals("files-pull", $state["command"]);
+        $this->assertEquals(
+            "in_progress",
+            $state["status"],
+            "The delta re-sync should be in progress after the reset",
+        );
+
+        // The local index must survive (it's what makes the re-run a delta).
+        $this->assertFileExists($indexFile);
+
+        // The stale remote index must have been cleared before re-indexing.
+        if (file_exists($remoteIndexFile)) {
+            $this->assertStringNotContainsString(
+                trim($staleRemoteLine),
+                file_get_contents($remoteIndexFile),
+                "Stale remote index entries must not survive into the delta re-sync",
+            );
+        }
     }
 
     /**

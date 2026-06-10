@@ -1567,6 +1567,27 @@ class ImportClient
 
         $this->state = $this->load_state();
 
+        // Legacy state repair: older versions never marked a
+        // --filter=skipped-earlier run complete, leaving the state stuck at
+        // "in_progress" forever after a fully successful fetch (stage reset
+        // to null and the skipped download list deleted on completion).
+        // Detect that terminal shape and mark it complete so re-runs take
+        // the delta path instead of tripping the mid-flight filter guard.
+        if (
+            ($this->state["command"] ?? null) === "files-pull" &&
+            ($this->state["status"] ?? null) === "in_progress" &&
+            ($this->state["stage"] ?? null) === null &&
+            ($this->state["filter"] ?? null) === "skipped-earlier" &&
+            !file_exists($this->skipped_download_list_file)
+        ) {
+            $this->audit_log(
+                "STATE REPAIR | skipped-earlier run finished but was never marked complete — marking complete",
+                true,
+            );
+            $this->state["status"] = "complete";
+            $this->save_state($this->state);
+        }
+
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
         if (isset($options["follow_symlinks"])) {
@@ -1888,10 +1909,7 @@ class ImportClient
                     @unlink($this->download_list_file);
                     $this->audit_log("FILE DELETE | {$this->download_list_file}");
                 }
-                if (file_exists($this->skipped_download_list_file)) {
-                    @unlink($this->skipped_download_list_file);
-                    $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
-                }
+                $this->clear_skipped_download_list("abort files-pull");
                 if (file_exists($this->volatile_files_file)) {
                     @unlink($this->volatile_files_file);
                     $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
@@ -2615,35 +2633,64 @@ class ImportClient
                 $this->state["stage"] = "fetch-skipped";
                 $this->save_state($this->state);
                 $this->run_files_sync_pipeline();
+
+                // Pipeline returns early with partial status if interrupted.
+                if (($this->state["status"] ?? null) === "partial") {
+                    return;
+                }
+
+                // Mark the run complete — without this, the state stays
+                // "in_progress" forever after a successful skipped-files
+                // fetch, and later runs take the resume path instead of
+                // the complete/delta path.
+                $this->state["status"] = "complete";
+                $this->save_state($this->state);
+
+                $this->audit_log("files-pull (skipped files) complete", true);
+                $this->progress->show_lifecycle_line("files-pull (skipped files) complete\n");
+                $this->output_progress([
+                    "type" => "lifecycle",
+                    "event" => "complete",
+                    "command" => "files-pull",
+                    "stage" => "fetch-skipped",
+                    "message" => "files-pull (skipped files) complete",
+                ], true);
                 return;
             }
 
-            $index_size = $this->index_count();
-            $this->progress->clear_progress_line();
-
-            $skipped_note = $has_skipped
-                ? " (some files were skipped — re-run with --filter=skipped-earlier to download them)"
-                : "";
+            // Re-run on a completed sync = delta sync (matches the composite
+            // pull's re-pull behavior). Reset run state and fall through to
+            // the fresh-start path below, where $is_delta picks up the local
+            // index and turns the run into re-index → diff → fetch changes.
             $this->audit_log(
-                sprintf("files-pull already complete: %d files indexed%s", $index_size, $skipped_note),
+                "files-pull re-run on completed state — starting delta sync",
                 true,
             );
+            $this->mutate_state(function (array $state) {
+                $state["command"] = null;
+                $state["status"] = null;
+                $state["cursor"] = null;
+                $state["stage"] = null;
+                return $state;
+            });
 
-            $this->progress->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
-            if ($has_skipped) {
-                $this->progress->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
-            } else {
-                $this->progress->show_lifecycle_line("To re-sync, run with --abort first to clear state.\n");
+            // download_remote_index() appends when the remote index file
+            // exists, so a fresh delta start must clear it (and the derived
+            // download lists) — same as Pull::prepare_repull().
+            foreach ([
+                $this->remote_index_file,
+                $this->download_list_file,
+            ] as $stale_file) {
+                if (file_exists($stale_file)) {
+                    @unlink($stale_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$stale_file} | clearing for delta re-sync",
+                    );
+                }
             }
-            $this->output_progress([
-                "type" => "lifecycle",
-                "event" => "already_complete",
-                "command" => "files-pull",
-                "files_indexed" => $index_size,
-                "has_skipped" => $has_skipped,
-                "message" => "files-pull already complete: {$index_size} files indexed",
-            ], true);
-            return;
+            $this->clear_skipped_download_list("clearing for delta re-sync");
+
+            $current_status = null;
         }
 
         // --filter=skipped-earlier is only valid after a completed
@@ -2828,12 +2875,7 @@ class ImportClient
                     "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
                 );
             }
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | clearing before diff stage",
-                );
-            }
+            $this->clear_skipped_download_list("clearing before diff stage");
             $this->save_state($this->state);
             $stage = "diff";
         }
@@ -2887,11 +2929,8 @@ class ImportClient
                     "FILE DELETE | {$this->download_list_file} | no files to fetch",
                 );
             }
-            if (!$has_skipped && file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | no skipped files to fetch",
-                );
+            if (!$has_skipped) {
+                $this->clear_skipped_download_list("no skipped files to fetch");
             }
         }
 
@@ -2960,12 +2999,7 @@ class ImportClient
             $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
             $this->save_state($this->state);
 
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | skipped files fetch complete",
-                );
-            }
+            $this->clear_skipped_download_list("skipped files fetch complete");
         }
 
         // Recreate intermediate path symlinks so the full symlink chain
@@ -3449,8 +3483,8 @@ class ImportClient
      *
      * Rules:
      * - Stream next portion of SQL from last saved cursor
-     * - If already completed and db.sql exists: require --abort flag
-     * - If db.sql missing but state says complete: warn and require --abort flag
+     * - If already completed: reset DB state and start a full refresh
+     *   (re-download). Matches the composite pull's re-pull behavior.
      * - Otherwise: error
      */
     public function run_db_sync(): void
@@ -3466,24 +3500,18 @@ class ImportClient
                 ? $this->state["status"] ?? null
                 : null;
 
-        // Check if already completed
+        // Re-run on a completed pull = full database refresh (matches the
+        // composite pull's re-pull behavior). The dump is idempotent
+        // (DROP TABLE IF EXISTS + full INSERTs), so resetting state and
+        // re-downloading reproduces the remote exactly — updates, inserts,
+        // and deletes included.
         if ($current_status === "complete") {
-            if ($this->sql_output_mode === "file") {
-                $sql_exists = file_exists($sql_file);
-                if ($sql_exists) {
-                    throw new RuntimeException(
-                        "db-pull already completed and db.sql exists. Use --abort flag to start over.",
-                    );
-                } else {
-                    throw new RuntimeException(
-                        "db-pull marked complete but db.sql is missing. Use --abort flag to re-sync.",
-                    );
-                }
-            } else {
-                throw new RuntimeException(
-                    "db-pull already completed. Use --abort flag to start over.",
-                );
-            }
+            $this->audit_log(
+                "db-pull re-run on completed state — starting full refresh",
+                true,
+            );
+            $this->reset_db_pull_state();
+            $current_status = null;
         }
 
         if ($has_progress) {
@@ -5041,10 +5069,16 @@ class ImportClient
         $state_command = $this->state["command"] ?? null;
         $current_status = $state_command === "db-apply" ? ($this->state["status"] ?? null) : null;
 
+        // Re-run on a completed apply = re-apply the dump from the top
+        // (matches the composite pull's re-pull behavior). The dump carries
+        // DROP TABLE IF EXISTS, so re-applying rebuilds every table in it.
+        // Taking the fresh-apply path below resets apply progress to 0.
         if ($current_status === "complete") {
-            throw new RuntimeException(
-                "db-apply already completed. Use --abort flag to re-run.",
+            $this->audit_log(
+                "db-apply re-run on completed state — re-applying dump",
+                true,
             );
+            $current_status = null;
         }
 
         $apply_state = $this->state["apply"] ?? $this->default_state()["apply"];
@@ -5397,6 +5431,11 @@ class ImportClient
                     $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
                 }
 
+                // Drop editor locks captured from the remote — on the
+                // imported copy they only produce phantom "X is currently
+                // editing" badges.
+                $this->strip_ephemeral_edit_locks($pdo);
+
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
@@ -5633,6 +5672,49 @@ class ImportClient
         );
 
         return $deactivated_plugins;
+    }
+
+    /**
+     * Delete ephemeral editor locks from the imported database.
+     *
+     * `_edit_lock` postmeta is runtime state — "user X has this post open
+     * in the editor right now" — that the SQL dump captures verbatim. On
+     * the imported copy the lock is meaningless (the remote editing
+     * session has no relationship to the local site), but WordPress
+     * renders it as a "X is currently editing" badge for up to 150
+     * seconds after the captured timestamp whenever the pull ran while a
+     * post was open remotely. WordPress regenerates the meta locally on
+     * the next edit, and core's own WXR exporter skips it too, so
+     * deleting it loses nothing.
+     *
+     * Runs at the end of db-apply while the PDO connection is open.
+     * A dump without a postmeta table is tolerated.
+     */
+    private function strip_ephemeral_edit_locks(PDO $pdo): void
+    {
+        $preflight_data = $this->state["preflight"]["data"] ?? [];
+        $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
+        // Quote the table name to prevent SQL injection from a crafted prefix.
+        $postmeta_table = '`' . str_replace('`', '``', $table_prefix . 'postmeta') . '`';
+
+        try {
+            $deleted = $pdo->exec(
+                "DELETE FROM {$postmeta_table} WHERE meta_key = '_edit_lock'"
+            );
+            // The SQL dump runs with AUTOCOMMIT=0 and issues a final COMMIT,
+            // but autocommit stays off. Our DELETE needs an explicit COMMIT.
+            $pdo->exec('COMMIT');
+            if ($deleted) {
+                $this->audit_log(
+                    "DB-APPLY | removed {$deleted} _edit_lock meta(s) (ephemeral editor locks)",
+                );
+            }
+        } catch (\Throwable $e) {
+            // A dump without the postmeta table isn't an error.
+            $this->audit_log(
+                "DB-APPLY | skipped _edit_lock cleanup: " . $e->getMessage(),
+            );
+        }
     }
 
     /**
@@ -10188,6 +10270,68 @@ class ImportClient
      * Reset state to defaults while preserving cross-command data like
      * preflight results, version, and follow_symlinks.
      */
+    /**
+     * Empty the skipped-files download list by truncating it in place
+     * rather than deleting it.
+     *
+     * apply-runtime mounts this file into the generated runtime — the
+     * temporary remote-uploads proxy reads it to decide which paths are
+     * still remote-only. A running server re-resolves its mounts on every
+     * PHP runtime rotation (and on restart from a persisted config), so
+     * deleting the file breaks the mount with ENOENT. An empty file means
+     * "no remote-only files left", which is exactly what every caller
+     * wants — all has-skipped checks test for size > 0.
+     */
+    public function clear_skipped_download_list(string $reason): void
+    {
+        if (!file_exists($this->skipped_download_list_file)) {
+            return;
+        }
+        file_put_contents($this->skipped_download_list_file, "");
+        $this->audit_log(
+            "FILE TRUNCATE | {$this->skipped_download_list_file} | {$reason}",
+        );
+    }
+
+    /**
+     * Reset database pull/apply state so the next db-pull performs a full
+     * refresh (re-dump + re-apply) instead of resuming or refusing.
+     *
+     * Used by the db-pull auto-refresh path and by Pull::prepare_repull().
+     * Files-pull state (diff/fetch/index) is intentionally left alone —
+     * this helper is DB-scoped.
+     */
+    public function reset_db_pull_state(): void
+    {
+        $defaults = $this->default_state();
+        $this->mutate_state(function (array $state) use ($defaults) {
+            $state["command"] = null;
+            $state["status"] = null;
+            $state["cursor"] = null;
+            $state["stage"] = null;
+            $state["consecutive_timeouts"] = 0;
+            // Stale sql_bytes would corrupt the crash-recovery truncate and
+            // the stdout/mysql byte offsets on the next fresh download.
+            $state["sql_bytes"] = null;
+            $state["db_index"] = $defaults["db_index"];
+            $state["apply"] = $defaults["apply"];
+            return $state;
+        });
+
+        // .sql-buffer is the --sql-output=mysql crash-recovery buffer; a
+        // leftover from an interrupted run would be replayed into the
+        // target on the next fresh download.
+        foreach (["/db.sql", "/.import-domains.json", "/.sql-buffer"] as $name) {
+            $path = $this->state_dir . $name;
+            if (file_exists($path)) {
+                @unlink($path);
+                $this->audit_log(
+                    "FILE DELETE | {$path} | clearing for db refresh",
+                );
+            }
+        }
+    }
+
     private function reset_state(): void
     {
         $preflight = $this->state["preflight"] ?? null;
@@ -11812,8 +11956,9 @@ if (
                 "Downloads files from the remote site into --fs-root.\n" .
                 "\n" .
                 "On the first run, indexes the full remote directory tree and then\n" .
-                "downloads every file. On subsequent runs, re-indexes the remote tree,\n" .
-                "diffs against the local index, and downloads only what changed.\n" .
+                "downloads every file. On subsequent runs (including re-runs after a\n" .
+                "completed sync), re-indexes the remote tree, diffs against the local\n" .
+                "index, and downloads only what changed.\n" .
                 "Interrupted pulls resume from the last saved cursor.\n" .
                 "\n" .
                 "Runs files-index internally when no index exists yet.\n",
@@ -11870,6 +12015,7 @@ if (
                 "Indexes remote tables, then streams the full SQL dump into\n" .
                 "--state-dir/db.sql (default), to stdout, or directly into a\n" .
                 "MySQL connection. Resumes from the last cursor if interrupted.\n" .
+                "Re-running after completion performs a full refresh (re-dump).\n" .
                 "Discovered domains are cached for later use by db-apply.\n",
             "extra" =>
                 "Output modes:\n" .
@@ -11907,7 +12053,8 @@ if (
             "short" => "Import the SQL dump into a local MySQL or SQLite database",
             "description" =>
                 "Reads db.sql from --state-dir, optionally rewrites URLs, and executes\n" .
-                "all statements against a target database. Resumable. Saves target\n" .
+                "all statements against a target database. Resumable. Re-running after\n" .
+                "completion re-applies the dump from the top. Saves target\n" .
                 "database credentials to state for use by apply-runtime.\n",
             "extra" =>
                 "MySQL example:\n" .

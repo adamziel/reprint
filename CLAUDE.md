@@ -120,6 +120,16 @@ In `preserve-local` mode:
 
 MySQLDumpProducer accumulates rows internally (default 250 rows per batch) and emits complete multi-row INSERT statements. This is memory-efficient and produces dumps compatible with standard MySQL import tools.
 
+### Re-run / Refresh Semantics
+
+Re-invoking a sub-command on a **completed** state performs a refresh instead of erroring or no-oping (matching the composite `pull` orchestrator's re-pull behavior):
+
+- `files-pull`: runs a **delta sync** — keeps the local index, re-indexes the remote, diffs, and fetches only changes. The stale remote index and download lists are deleted first (`download_remote_index()` appends when the file exists).
+- `db-pull`: runs a **full refresh** — `reset_db_pull_state()` clears DB state (`sql_bytes`, cursor, `db_index`, `apply`) and deletes `db.sql`, `.import-domains.json`, and the `.sql-buffer` crash-recovery file, then re-downloads the entire dump. There is no row-level DB delta; the dump is idempotent (`DROP TABLE IF EXISTS` + full INSERTs), so a re-dump + re-apply reproduces remote edits, inserts, and deletes exactly.
+- `db-apply`: re-applies the dump from statement 0.
+
+In-progress/partial states still resume from their cursors — the refresh only triggers on `status === "complete"` of the same command. `--abort` remains the way to clear state without running. Known limitation: a table dropped on the remote between pulls lingers in the local target (the new dump no longer mentions it).
+
 ### File Synchronization Phases
 
 FileTreeProducer operates in three phases visible via get_progress():

@@ -397,39 +397,37 @@ class Pull
     private function prepare_repull(): void
     {
         $state_dir = $this->client->state_dir;
+
+        // DB-scoped reset (command/status/cursor/stage, db_index, apply,
+        // sql_bytes) plus deletion of db.sql, .import-domains.json and the
+        // .sql-buffer crash-recovery file.
+        $this->client->reset_db_pull_state();
+
         $defaults = $this->client->default_state();
         $this->client->mutate_state(function (array $state) use ($defaults) {
             $state['pull']['stage'] = null;
             $state['pull']['files_filter'] = null;
             $state['pull']['skipped_pending'] = false;
-            $state['command'] = null;
-            $state['status'] = null;
-            $state['cursor'] = null;
-            $state['stage'] = null;
-            $state['consecutive_timeouts'] = 0;
-            $state['sql_bytes'] = null;
             $state['current_file'] = null;
             $state['current_file_bytes'] = null;
-            $state['db_index'] = $defaults['db_index'];
             $state['diff'] = $defaults['diff'];
             $state['fetch'] = $defaults['fetch'];
             $state['fetch_skipped'] = $defaults['fetch_skipped'];
-            $state['apply'] = $defaults['apply'];
             $state['sql_output'] = null;
             return $state;
         });
 
         foreach ([
-            $state_dir . "/db.sql",
-            $state_dir . "/.import-domains.json",
             $state_dir . "/.import-remote-index.jsonl",
             $state_dir . "/.import-download-list.jsonl",
-            $state_dir . "/.import-download-list-skipped.jsonl",
         ] as $path) {
             if (file_exists($path)) {
                 @unlink($path);
             }
         }
+        // Truncated, not deleted: the generated runtime may hold a mount
+        // of this file for the remote-uploads proxy.
+        $this->client->clear_skipped_download_list("prepared for delta re-pull");
 
         $this->client->audit_log("PULL | prepared for delta re-pull", true);
     }
