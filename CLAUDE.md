@@ -81,11 +81,11 @@ composer lint:php:compat
 # From tests/e2e directory
 cd tests/e2e
 
-# Verify Docker and dependencies are installed
-./verify-setup.sh
+# Install JavaScript dependencies
+npm install
 
 # Run all end-to-end scenarios
-./run-all-tests.sh
+npm run test
 
 # Run a single scenario
 npm run test -- tests/import-01-basic-file-sync.test.js
