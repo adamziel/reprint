@@ -48,12 +48,6 @@ Uses multipart/mixed content-type to split large files into chunks while transmi
 # Run all PHPUnit tests
 composer test
 
-# Run only fast tests (skip large dataset tests)
-composer test:fast
-
-# Run only large dataset tests
-composer test:large
-
 # Run with coverage (requires Xdebug)
 composer test:coverage
 
@@ -64,17 +58,34 @@ cd tests && vendor/bin/phpunit MySQLDumpProducer/BasicDumpTest.php
 cd tests && vendor/bin/phpunit --filter testRoundTripIntegrity
 ```
 
+### Coding Standards
+
+This repo uses WordPress Coding Standards for PHP. The ruleset lives in
+`phpcs.xml.dist` and has temporary exclusions so cleanup can happen in focused
+passes.
+
+```bash
+# Run WPCS
+composer lint:php
+
+# Apply PHPCS auto-fixes from the ruleset
+composer lint:php:fix
+
+# Run PHP 7.4+ compatibility
+composer lint:php:compat
+```
+
 ### Running E2E Tests
 
 ```bash
 # From tests/e2e directory
 cd tests/e2e
 
-# Verify Docker and dependencies are installed
-./verify-setup.sh
+# Install JavaScript dependencies
+npm install
 
 # Run all end-to-end scenarios
-./run-all-tests.sh
+npm run test
 
 # Run a single scenario
 npm run test -- tests/import-01-basic-file-sync.test.js

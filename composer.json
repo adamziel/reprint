@@ -32,17 +32,19 @@
         "phpunit/phpunit": "^10.0",
         "phpstan/phpstan": "^1.0",
         "phpcompatibility/php-compatibility": "^9.3",
-        "dealerdirect/phpcodesniffer-composer-installer": "^1.2"
+        "dealerdirect/phpcodesniffer-composer-installer": "^1.2",
+        "wp-coding-standards/wpcs": "^3.3"
     },
     "scripts": {
         "test": "cd tests && phpunit --testdox --colors",
-        "test:fast": "cd tests && ./run-tests.sh fast",
-        "test:large": "cd tests && ./run-tests.sh large",
-        "test:coverage": "cd tests && ./run-tests.sh coverage",
+        "test:coverage": "cd tests && phpunit --coverage-html coverage/ --coverage-text",
         "build:phar": "./bin/build-reprint-phar.sh",
         "build:exporter-plugin": "cd reprint-exporter-wp && composer install --no-dev && cd .. && zip -r reprint-exporter-wp.zip reprint-exporter-wp -x 'reprint-exporter-wp/secret.php'",
         "analyze": "phpstan analyze --memory-limit=1G",
-        "compat": "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps packages/reprint-exporter/src packages/reprint-importer/src reprint-exporter-wp --ignore=reprint-exporter-wp/wordpress"
+        "lint:php": "phpcs --standard=phpcs.xml.dist",
+        "lint:php:fix": "phpcbf --standard=phpcs.xml.dist",
+        "lint:php:compat": "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps packages/reprint-exporter/src packages/reprint-importer/src reprint-exporter-wp --ignore=reprint-exporter-wp/wordpress",
+        "compat": "@lint:php:compat"
     },
     "config": {
         "allow-plugins": {

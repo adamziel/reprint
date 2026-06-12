@@ -168,64 +168,6 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
 }
 
 /**
- * Extract a DB-related constant value from wp-config.php contents.
- */
-function extract_wp_config_define(string $config_contents, string $constant): ?string
-{
-    $pattern =
-        '/define\\s*\\(\\s*[\'"]' .
-        preg_quote($constant, "/") .
-        '[\'"]\\s*,\\s*([\'"])(.*?)\\1\\s*\\)\\s*;?/is';
-    if (preg_match($pattern, $config_contents, $matches) === 1) {
-        return stripcslashes($matches[2]);
-    }
-    return null;
-}
-
-function extract_wp_table_prefix(string $config_contents): ?string
-{
-    $pattern = '/\\$table_prefix\\s*=\\s*([\'"])(.*?)\\1\\s*;/is';
-    if (preg_match($pattern, $config_contents, $matches) === 1) {
-        return stripcslashes($matches[2]);
-    }
-    return null;
-}
-
-function find_wp_config_paths(array $roots): array
-{
-    $candidates = [];
-    foreach ($roots as $root) {
-        if (!is_string($root) || $root === "") {
-            continue;
-        }
-        $current = realpath($root);
-        if ($current === false) {
-            $current = $root;
-        }
-        $current = rtrim($current, "/");
-        if ($current === "") {
-            $current = "/";
-        }
-        for ($i = 0; $i < 12; $i++) {
-            $candidate = $current === "/" ? "/wp-config.php" : $current . "/wp-config.php";
-            if (
-                is_file($candidate) &&
-                is_readable($candidate) &&
-                !in_array($candidate, $candidates, true)
-            ) {
-                $candidates[] = $candidate;
-            }
-            $parent = dirname($current);
-            if ($parent === $current) {
-                break;
-            }
-            $current = $parent;
-        }
-    }
-    return $candidates;
-}
-
-/**
  * Resolves database credentials from PHP constants and environment variables.
  *
  * Never reads from $config / HTTP parameters — credentials must come from
@@ -2562,37 +2504,6 @@ function normalize_dot_segments(string $path): string
         $normalized[] = $p;
     }
     return implode("/", $normalized);
-}
-
-/**
- * Convert a potentially relative path to an absolute path.
- * 
- * @param string $path The path to convert.
- * @param string $base The base path to resolve against.
- * @return string The absolute path.
- */
-function to_absolute_path(string $path, string $base): string
-{
-    if(!strlen($path)) {
-        return $base;
-    }
-
-	// If it's not an absolute path already, make it absolute by prepending
-	// the base path
-    if ($path[0] !== '/') {
-        $path = rtrim($base, '/') . '/' . $path;
-    }
-
-	// If we have '..' or '.' segments, normalize them out.
-    $path = normalize_dot_segments($path);
-
-	// An empty path after normalization means we've got to the root or
-	// tried to go even higher than the root.
-    if($path === '') {
-        return '/';
-    }
-
-	return $path;
 }
 
 /**

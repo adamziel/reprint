@@ -70,28 +70,6 @@ function _site_export_load_exporter_runtime(): ?string {
     return null;
 }
 
-/**
- * Reads a request header by name, trying both Apache (getallheaders) and
- * CGI/FastCGI ($_SERVER HTTP_ prefix) conventions.
- */
-function _site_export_get_header(string $name): ?string {
-    if (function_exists('getallheaders')) {
-        $headers = getallheaders();
-        foreach ($headers as $key => $value) {
-            if (strcasecmp($key, $name) === 0) {
-                return $value;
-            }
-        }
-    }
-
-    $server_key = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
-    if (isset($_SERVER[$server_key])) {
-        return $_SERVER[$server_key];
-    }
-
-    return null;
-}
-
 /** Returns whether the legacy secret.php override exists. */
 function _site_export_has_secret_file(): bool {
     return file_exists(SITE_EXPORT_SECRET_FILE);

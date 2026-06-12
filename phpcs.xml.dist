@@ -1,0 +1,89 @@
+<?xml version="1.0"?>
+<ruleset name="Reprint">
+	<description>
+		Reprint PHP uses WordPress Coding Standards. These temporary excludes keep
+		the first audit focused while cleanup lands in smaller passes.
+	</description>
+
+	<arg name="basepath" value="."/>
+	<arg name="extensions" value="php"/>
+	<arg name="parallel" value="8"/>
+	<arg value="ps"/>
+
+	<config name="text_domain" value="reprint"/>
+
+	<file>packages/reprint-exporter/src</file>
+	<file>packages/reprint-importer/src</file>
+	<file>reprint-exporter-wp</file>
+	<file>importer/import.php</file>
+
+	<exclude-pattern>*/vendor/*</exclude-pattern>
+
+	<rule ref="WordPress">
+		<!-- Formatting debt. Most of these are auto-fixable; remove the excludes in cleanup batches. -->
+		<exclude name="Generic.WhiteSpace.DisallowSpaceIndent"/>
+		<exclude name="Generic.WhiteSpace.ScopeIndent"/>
+		<exclude name="Generic.Formatting.MultipleStatementAlignment"/>
+		<exclude name="Generic.Functions.FunctionCallArgumentSpacing"/>
+		<exclude name="Generic.Functions.OpeningFunctionBraceKernighanRitchie"/>
+		<exclude name="NormalizedArrays.Arrays.ArrayBraceSpacing"/>
+		<exclude name="NormalizedArrays.Arrays.CommaAfterLast"/>
+		<exclude name="PEAR.Functions.FunctionCallSignature"/>
+		<exclude name="Squiz.ControlStructures.ControlSignature"/>
+		<exclude name="Squiz.Functions.FunctionDeclarationArgumentSpacing"/>
+		<exclude name="Squiz.Functions.MultiLineFunctionDeclaration"/>
+		<exclude name="Squiz.Strings.ConcatenationSpacing"/>
+		<exclude name="Squiz.Strings.DoubleQuoteUsage"/>
+		<exclude name="Squiz.WhiteSpace.SuperfluousWhitespace"/>
+		<exclude name="Universal.Arrays.DisallowShortArraySyntax"/>
+		<exclude name="Universal.WhiteSpace.CommaSpacing"/>
+		<exclude name="Universal.WhiteSpace.PrecisionAlignment"/>
+		<exclude name="WordPress.Arrays.ArrayDeclarationSpacing"/>
+		<exclude name="WordPress.Arrays.ArrayIndentation"/>
+		<exclude name="WordPress.Arrays.ArrayKeySpacingRestrictions"/>
+		<exclude name="WordPress.Arrays.MultipleStatementAlignment"/>
+		<exclude name="WordPress.PHP.YodaConditions"/>
+		<exclude name="WordPress.WhiteSpace.ControlStructureSpacing"/>
+		<exclude name="WordPress.WhiteSpace.OperatorSpacing"/>
+
+		<!-- Project-policy debt for migration tooling that runs outside a normal WordPress request. -->
+		<exclude name="Universal.Operators.DisallowShortTernary"/>
+		<exclude name="Universal.Operators.StrictComparisons"/>
+		<exclude name="WordPress.DB.DirectDatabaseQuery"/>
+		<exclude name="WordPress.DB.RestrictedClasses"/>
+		<exclude name="WordPress.DB.RestrictedFunctions"/>
+		<exclude name="WordPress.DateTime.RestrictedFunctions"/>
+		<exclude name="WordPress.Files.FileName"/>
+		<exclude name="WordPress.NamingConventions.ValidFunctionName"/>
+		<exclude name="WordPress.NamingConventions.ValidVariableName"/>
+		<exclude name="WordPress.PHP.DiscouragedPHPFunctions"/>
+		<exclude name="WordPress.PHP.IniSet"/>
+		<exclude name="WordPress.PHP.NoSilencedErrors"/>
+		<exclude name="WordPress.WP.AlternativeFunctions"/>
+		<exclude name="WordPress.WP.CapitalPDangit"/>
+
+		<!-- Documentation debt. Re-enable after the code-level issues are under control. -->
+		<exclude name="Generic.Commenting.DocComment"/>
+		<exclude name="PSR12.Files.FileHeader"/>
+		<exclude name="Squiz.Commenting.BlockComment"/>
+		<exclude name="Squiz.Commenting.ClassComment"/>
+		<exclude name="Squiz.Commenting.ClosingDeclarationComment"/>
+		<exclude name="Squiz.Commenting.DocCommentAlignment"/>
+		<exclude name="Squiz.Commenting.EmptyCatchComment"/>
+		<exclude name="Squiz.Commenting.FileComment"/>
+		<exclude name="Squiz.Commenting.FunctionComment"/>
+		<exclude name="Squiz.Commenting.FunctionCommentThrowTag"/>
+		<exclude name="Squiz.Commenting.InlineComment"/>
+		<exclude name="Squiz.Commenting.VariableComment"/>
+	</rule>
+
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<properties>
+			<property name="prefixes" type="array">
+				<element value="reprint"/>
+				<element value="site_export"/>
+				<element value="_site_export"/>
+			</property>
+		</properties>
+	</rule>
+</ruleset>
