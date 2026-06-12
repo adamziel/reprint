@@ -123,6 +123,18 @@ On the **migration target** side:
  - ext-pdo + ext-pdo_mysql — for MySQL targets
  - ext-pdo + ext-pdo_sqlite — for SQLite targets via sqlite-database-integration
 
+### Coding standards
+
+This repo uses WordPress Coding Standards for PHP. The ruleset lives in
+`phpcs.xml.dist`; run `composer lint:php` for the WPCS audit and
+`composer lint:php:fix` for the available PHPCS auto-fixes.
+
+The ruleset has temporary exclusions for existing standards debt so cleanup can
+happen in focused passes instead of one giant formatting change. New or touched
+code should follow WPCS unless the ruleset explicitly excludes that sniff.
+
+Run `composer lint:php:compat` for the separate PHP 7.4+ compatibility check.
+
 ---
 
 ## Integrating with a hosting platform

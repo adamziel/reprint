@@ -64,6 +64,23 @@ cd tests && vendor/bin/phpunit MySQLDumpProducer/BasicDumpTest.php
 cd tests && vendor/bin/phpunit --filter testRoundTripIntegrity
 ```
 
+### Coding Standards
+
+This repo uses WordPress Coding Standards for PHP. The ruleset lives in
+`phpcs.xml.dist` and has temporary exclusions so cleanup can happen in focused
+passes.
+
+```bash
+# Run WPCS
+composer lint:php
+
+# Apply PHPCS auto-fixes from the ruleset
+composer lint:php:fix
+
+# Run PHP 7.4+ compatibility
+composer lint:php:compat
+```
+
 ### Running E2E Tests
 
 ```bash
