@@ -48,12 +48,6 @@ Uses multipart/mixed content-type to split large files into chunks while transmi
 # Run all PHPUnit tests
 composer test
 
-# Run only fast tests (skip large dataset tests)
-composer test:fast
-
-# Run only large dataset tests
-composer test:large
-
 # Run with coverage (requires Xdebug)
 composer test:coverage
 
