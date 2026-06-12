@@ -3942,6 +3942,11 @@ class ImportClient
             $manifest->has_db_constants = true;
         } elseif ($target_engine === "sqlite") {
             $sqlite_path = $apply_state["target_sqlite_path"] ?? null;
+            $manifest->constants["DB_NAME"] = $apply_state["target_db"] ?? "sqlite_database";
+            // The SQLite integration still requires a non-empty DB_NAME
+            // for its MySQL information-schema emulation, even though the
+            // physical database location comes from DB_DIR/DB_FILE.
+            $manifest->has_db_constants = true;
             if ($sqlite_path !== null && $sqlite_path !== '') {
                 $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
                 $db_file = basename($sqlite_path);
