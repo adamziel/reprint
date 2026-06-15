@@ -188,6 +188,27 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertStringContainsString('pretend-png-bytes', $decoded);
     }
 
+    public function testFileFetchDoesNotCrashOnDirectoryInList(): void
+    {
+        // A directory can appear in a file_fetch batch, and
+        // when the name has an unrecognized dotted extension
+        // (e.g. a theme dir like "sometheme-2.4.5") then the
+        // gzip heuristic probes its bytes: fopen() succeeds on a directory but
+        // the unguarded fread() would fatal, crashing the whole request.
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $dirPath = $siteDir . '/storefront-2.4.5';
+        mkdir($dirPath, 0755, true);
+
+        // runFileFetch asserts the worker exits 0 — without the guard it exits
+        // 1 (the fread fatal is escalated by export.php's error handler).
+        $stdout = $this->runFileFetch($siteDir, [$dirPath]);
+
+        // The directory is handled (a 0-byte directory chunk), not read; the
+        // identity-framed multipart response is well-formed.
+        $this->assertStringStartsWith('--boundary-', $stdout);
+    }
+
     public function testFileFetchEmptyListStaysIdentity(): void
     {
         // Empty path list — nothing to compress → identity. (The endpoint
@@ -219,6 +240,12 @@ final class FileFetchCompressionTest extends TestCase
             'non-string entry rejects the batch');
         $this->assertFalse(file_fetch_paths_should_gzip([42]),                         /** @phpstan-ignore-line */
             'numeric entry rejects the batch');
+
+        // A non-string AFTER a compressible file must still reject — the
+        // any-compressible short-circuit skips classification work but must not
+        // skip the is_string check (i.e. it's a loop-skip, not a return-true).
+        $this->assertFalse(file_fetch_paths_should_gzip(['a.php', null]),              /** @phpstan-ignore-line */
+            'non-string after a compressible entry still rejects the batch');
     }
 
     public function testUnknownExtensionWithTextContentGetsGzipped(): void
