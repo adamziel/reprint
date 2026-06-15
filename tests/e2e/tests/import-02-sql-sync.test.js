@@ -93,12 +93,32 @@ describe('Import: SQL Sync', () => {
         }
     });
 
-    it('re-running db-sync without --abort fails with useful message', () => {
+    it('re-running db-sync after completion refreshes instead of failing', () => {
+        // The 'db-sync completes' test above left tempDir in a completed
+        // state. Re-running used to error ("use --abort"); it now performs
+        // a full refresh (re-dump) and succeeds — parity with files-sync
+        // and the composite pull's re-pull behavior.
         const result = runImporter(importUrl(), tempDir, 'db-sync', {
             secret: getSiteSecret(site),
         });
-        assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code');
+        assert.equal(result.exitCode, 0,
+            `Expected exit 0 (refresh), got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+
         const output = result.stdout + result.stderr;
-        assert.ok(output.includes('--abort'), `Expected message mentioning --abort, got: ${output}`);
+        assert.ok(!output.includes('--abort'),
+            `Re-run should no longer print the old --abort error, got: ${output}`);
+
+        // The refresh re-produces a complete dump.
+        const sqlFile = join(tempDir, 'db.sql');
+        assert.ok(existsSync(sqlFile), 'Expected db.sql to exist after refresh');
+        const sql = readFileSync(sqlFile, 'utf-8');
+        assert.ok(sql.includes('CREATE TABLE') && sql.includes('INSERT INTO'),
+            'Expected a complete dump after the refresh');
+
+        // The audit log records that the refresh path was taken (not a no-op).
+        const auditLog = join(tempDir, '.import-audit.log');
+        assert.ok(existsSync(auditLog), 'Expected an audit log');
+        assert.match(readFileSync(auditLog, 'utf-8'), /full refresh/,
+            'Expected the audit log to record the db-pull full refresh');
     });
 });

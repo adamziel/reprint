@@ -71,17 +71,17 @@ describe('Import: Basic File Sync', () => {
         assertSiteMirror(join(fsRootDir(tempDir), getSiteDir(site)));
     });
 
-    it('re-running after completion refuses without --abort', () => {
+    it('re-running after completion performs a delta sync', () => {
+        // A completed files-sync used to refuse re-runs ("use --abort").
+        // It now re-runs as a delta (re-index → diff → fetch changes); with
+        // no remote changes it finishes with status "complete".
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
-            autoResume: false,
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
-        // In non-tty mode, the JSON output shows {"status":"complete"}
-        // confirming the importer detected the completed state and returned early.
         assert.ok(
-            result.stdout.includes('"status":"complete"') || result.stdout.includes('already complete'),
-            `Expected completed status in output, got stdout: ${result.stdout}\nstderr: ${result.stderr}`,
+            result.stdout.includes('"status":"complete"'),
+            `Expected completed status after delta re-sync, got stdout: ${result.stdout}\nstderr: ${result.stderr}`,
         );
     });
 
