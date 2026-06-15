@@ -1131,6 +1131,13 @@ class ImportClient
     /** @var string|null Extra remote directory to include in the export (--extra-directory). */
     private $extra_directory = null;
 
+    /**
+     * @var array<int,array{source:string,target:string}> Resolved remap rules:
+     * a full source path → its full local target path (both absolute). Empty =
+     * no remapping (files land nested based on their source).
+     */
+    private $remap_rules = [];
+
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
@@ -1791,6 +1798,12 @@ class ImportClient
 
         // All other commands require a prior preflight run.
         $this->require_preflight();
+
+        // Resolve the `--remap` rules (requires preflight to be available first)
+        $remap_raw = $options["remap"] ?? [];
+        if (!empty($remap_raw)) {
+            $this->remap_rules = $this->resolve_remap($remap_raw);
+        }
 
         // Handle --abort: clear state for the command and exit immediately.
         // To abort a sync, run `<command> --abort` (clears state), then
@@ -8269,6 +8282,158 @@ class ImportClient
         return $real;
     }
 
+    /**
+     * Build and return the remap rules from the raw remap pairs + preflight
+     * data. Each rule is a full source path → full local target path (both
+     * absolute); the caller's docroot-relative TGT is rooted under the docroot
+     * here.
+     *
+     * @param array<int,array{0:string,1:string}> $remap_raw Raw (SRC, TGT) pairs.
+     * @return array<int,array{source:string,target:string}>
+     */
+    private function resolve_remap(array $remap_raw): array
+    {
+        $source_paths = $this->wp_component_source_paths();
+        $docroot = rtrim($this->get_filesystem_root_path(), "/");
+
+        $rules = [];
+        $explicit_sources = [];
+        $wp_content_target = null;
+        foreach ($remap_raw as $pair) {
+            [$src, $tgt] = $pair;
+
+            $wp_path = trim(trim($src), "/");
+            if ($wp_path === "") {
+                throw new InvalidArgumentException("--remap source cannot be empty");
+            }
+
+            // Accept a target given as a full absolute path that includes the
+            // docroot — strip the docroot prefix so it's treated as relative.
+            $tgt = trim($tgt);
+            $under_docroot = self::path_remainder_under(rtrim($tgt, "/"), $docroot);
+            if ($under_docroot !== null) {
+                $tgt = $under_docroot;
+            }
+
+            $tgt_rel = trim($tgt, "/");
+
+            $source = $this->resolve_source_path($wp_path, $source_paths);
+            $target = $tgt_rel === "" ? $docroot : $docroot . "/" . $tgt_rel;
+            $rules[] = ["source" => $source, "target" => $target];
+
+            $explicit_sources[$source] = true;
+            if ($wp_path === "wp-content") {
+                $wp_content_target = $target;
+            }
+        }
+
+        // Pass 2: Do a whole tree remap for wp-content's components if needed.
+        if ($wp_content_target !== null) {
+            foreach (["plugins", "mu-plugins", "uploads"] as $name) {
+                $source = $source_paths[$name];
+                $detached = self::path_remainder_under($source, $source_paths["content"]) === null;
+                if ($detached && !isset($explicit_sources[$source])) {
+                    $rules[] = ["source" => $source, "target" => $wp_content_target . "/" . $name];
+                }
+            }
+        }
+
+        return $rules;
+    }
+
+    /**
+     * The source site's real component locations from preflight data, as
+     * name => absolute path (abspath, content, plugins, mu-plugins, uploads).
+     * Each wp-content component falls back to its conventional spot under
+     * content_dir; one resolving outside content_dir is "detached". abspath
+     * anchors any path outside wp-content and may be null if undetermined.
+     */
+    private function wp_component_source_paths(): array
+    {
+        $preflight = $this->state["preflight"]["data"] ?? [];
+        $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
+
+        $content_dir = $this->flatten_clean_path($paths["content_dir"] ?? null);
+        if ($content_dir === null) {
+            throw new InvalidArgumentException(
+                "Cannot resolve --remap: preflight has no content_dir. Run preflight first.",
+            );
+        }
+
+        $abspath = $this->flatten_clean_path($paths["abspath"] ?? null);
+        if ($abspath === null) {
+            $abspath = $this->flatten_clean_path($preflight["wp_detect"]["roots"][0]["path"] ?? null);
+        }
+
+        return [
+            "abspath" => $abspath,
+            "content" => $content_dir,
+            "plugins" => $this->flatten_clean_path($paths["plugins_dir"] ?? null) ?? $content_dir . "/plugins",
+            "mu-plugins" => $this->flatten_clean_path($paths["mu_plugins_dir"] ?? null) ?? $content_dir . "/mu-plugins",
+            "uploads" => $this->flatten_clean_path($paths["uploads"]["basedir"] ?? null) ?? $content_dir . "/uploads",
+        ];
+    }
+
+    /**
+     * Resolve a WordPress-layout path (e.g. "wp-content/plugins/woocommerce",
+     * "wp-admin", "wp-config.php") to the source site's real absolute path.
+     * wp-content and its components resolve via their (possibly relocated) real
+     * dirs; anything else is taken relative to ABSPATH.
+     *
+     * @param string $wp_path The WordPress-layout path to resolve.
+     * @param array<string,string|null> $source_paths From wp_component_source_paths().
+     */
+    private function resolve_source_path(string $wp_path, array $source_paths): string
+    {
+        // Longest WP-path prefix first, each mapped to its real source location.
+        $bases = [
+            "wp-content/plugins" => $source_paths["plugins"],
+            "wp-content/mu-plugins" => $source_paths["mu-plugins"],
+            "wp-content/uploads" => $source_paths["uploads"],
+            "wp-content" => $source_paths["content"],
+        ];
+
+        foreach ($bases as $prefix => $base) {
+            $rest = self::path_remainder_under($wp_path, $prefix);
+            if ($rest !== null) {
+                return $base . $rest;
+            }
+        }
+        // Anything outside wp-content (wp-admin, core, a root file, ...) is
+        // taken relative to ABSPATH.
+        if ($source_paths["abspath"] === null) {
+            throw new InvalidArgumentException(
+                "Cannot resolve --remap {$wp_path}: preflight has no ABSPATH. Run preflight first.",
+            );
+        }
+
+        return $source_paths["abspath"] . "/" . $wp_path;
+    }
+
+    /**
+     * Map a source absolute path to its absolute local target via the remap
+     * rules (most specific source wins), or null when no rule applies.
+     *
+     * Any rules that match the same path are nested (each is a path-prefix of
+     * it, and prefixes of one string are ordered by length), so the longest
+     * matching source is the deepest — i.e. the most specific — match. Ranking
+     * by source, not target: a rule applies based purely on its source side.
+     */
+    private function remap_source_path_to_target(string $source_path): ?string
+    {
+        $best = null;
+        $best_source_len = -1;
+
+        foreach ($this->remap_rules as $rule) {
+            $rest = self::path_remainder_under($source_path, $rule["source"]);
+            if ($rest !== null && strlen($rule["source"]) > $best_source_len) {
+                $best = $rule["target"] . $rest;
+                $best_source_len = strlen($rule["source"]);
+            }
+        }
+
+        return $best;
+    }
 
     /**
      * Resolve a remote absolute path into a local path under the fs root.
@@ -8277,12 +8442,41 @@ class ImportClient
      * local path under the import fs root. Performs symlink traversal security
      * checks to prevent directory traversal attacks that could write files
      * outside the import root.
+     *
+     * With --remap active, an in-scope source path is first routed to its
+     * target (e.g. "/var/www/html/wp-content/x" -> "<docroot>/wp-content/x");
+     * paths under no remap rule fall through to the legacy nested mapping,
+     * exactly as a plain pull.
      */
     private function remote_path_to_local_path_within_import_root(
         string $path
     ): string {
         assert_valid_path($path, "remote path");
+        if (!empty($this->remap_rules)) {
+            $target = $this->remap_source_path_to_target($path);
+            if ($target !== null) {
+                return $target;
+            }
+        }
         return $this->get_filesystem_root_path() . $path;
+    }
+
+    /**
+     * Returns the remainder of $path underneath $prefix,
+     * empty string if $path === $prefix,
+     * or null if $path is not under $prefix.
+     */
+    private static function path_remainder_under(string $path, string $prefix): ?string
+    {
+        if ($path === $prefix) {
+            return "";
+        }
+
+        if (str_starts_with($path, $prefix . "/")) {
+            return substr($path, strlen($prefix));
+        }
+
+        return null;
     }
 
     /**
@@ -9101,6 +9295,13 @@ class ImportClient
 
         if ($this->extra_directory !== null && $this->extra_directory !== "") {
             $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
+        }
+
+        // Ensure every --remap source is enumerated — including a detached
+        // component (relocated uploads/plugins dir) that lives outside the
+        // WordPress roots and so wouldn't be discovered by traversal alone.
+        foreach ($this->remap_rules as $i => $rule) {
+            $extra_paths["remap_src_{$i}"] = $rule["source"];
         }
 
         // auto_prepend_file / auto_append_file may point to directories
@@ -11241,6 +11442,14 @@ if (
             'placeholder' => 'URL',
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
             'commands' => ['pull', 'db-apply'],
+        ],
+        [
+            'name' => 'remap',
+            'type' => 'pair',
+            'target' => 'remap',
+            'pair_args' => 'SRC TGT',
+            'help' => 'Place SRC (e.g. wp-content) at TGT, relative to --docroot (repeatable)',
+            'commands' => ['files-pull'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
