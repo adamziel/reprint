@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/external-merge-sort.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/class-external-merge-sort.php';
 
 final class ExternalMergeSortTest extends TestCase
 {

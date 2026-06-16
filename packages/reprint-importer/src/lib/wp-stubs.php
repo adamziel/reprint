@@ -88,12 +88,15 @@ if (!function_exists('esc_attr')) {
     }
 }
 
-if(!class_exists('WP_Error')) {
-    class WP_Error {
+if (!class_exists('WP_Error', false)) {
+    class WP_Error
+    {
         public $code;
         public $message;
         public $data;
-        public function __construct($code, $message, $data = []) {
+
+        public function __construct($code, $message, $data = [])
+        {
             $this->code = $code;
             $this->message = $message;
             $this->data = $data;
