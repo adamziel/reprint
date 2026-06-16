@@ -10,24 +10,24 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-if (!defined('SITE_EXPORT_VERSION')) {
-    define('SITE_EXPORT_VERSION', '0.8.2-dev');
+if (!defined('REPRINT_EXPORTER_VERSION')) {
+    define('REPRINT_EXPORTER_VERSION', '0.8.2-dev');
 }
-if (!defined('SITE_EXPORT_PLUGIN_DIR')) {
-    define('SITE_EXPORT_PLUGIN_DIR', plugin_dir_path(__FILE__));
+if (!defined('REPRINT_EXPORTER_PLUGIN_DIR')) {
+    define('REPRINT_EXPORTER_PLUGIN_DIR', plugin_dir_path(__FILE__));
 }
-if (!defined('SITE_EXPORT_SECRET_FILE')) {
-    define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
+if (!defined('REPRINT_EXPORTER_SECRET_FILE')) {
+    define('REPRINT_EXPORTER_SECRET_FILE', REPRINT_EXPORTER_PLUGIN_DIR . 'secret.php');
 }
-if (!defined('SITE_EXPORT_SECRET_OPTION')) {
-    define('SITE_EXPORT_SECRET_OPTION', 'site_export_secret');
+if (!defined('REPRINT_EXPORTER_SECRET_OPTION')) {
+    define('REPRINT_EXPORTER_SECRET_OPTION', 'site_export_secret');
 }
 
 /**
  * Maximum age of a request timestamp in seconds.
  * Requests older than this are rejected to prevent replay attacks.
  */
-define('SITE_EXPORT_TIMESTAMP_TOLERANCE', 300);
+define('REPRINT_EXPORTER_TIMESTAMP_TOLERANCE', 300);
 
 /** Sends a JSON error response and terminates. */
 function _site_export_error(int $code, string $message): void {
@@ -46,11 +46,11 @@ function _site_export_error(int $code, string $message): void {
  * @return string|null Absolute path to export.php, or null when the runtime is missing.
  */
 function _site_export_load_exporter_runtime(): ?string {
-    $repo_root = dirname(SITE_EXPORT_PLUGIN_DIR);
+    $repo_root = dirname(REPRINT_EXPORTER_PLUGIN_DIR);
     $candidates = [
         [
-            'autoload' => SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php',
-            'export' => SITE_EXPORT_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-exporter/src/export.php',
+            'autoload' => REPRINT_EXPORTER_PLUGIN_DIR . 'vendor/autoload.php',
+            'export' => REPRINT_EXPORTER_PLUGIN_DIR . 'vendor/wp-php-toolkit/reprint-exporter/src/export.php',
         ],
         [
             'autoload' => $repo_root . '/vendor/autoload.php',
@@ -72,7 +72,7 @@ function _site_export_load_exporter_runtime(): ?string {
 
 /** Returns whether the legacy secret.php override exists. */
 function _site_export_has_secret_file(): bool {
-    return file_exists(SITE_EXPORT_SECRET_FILE);
+    return file_exists(REPRINT_EXPORTER_SECRET_FILE);
 }
 
 /**
@@ -85,7 +85,7 @@ function _site_export_get_file_secret(): ?string {
         return null;
     }
 
-    $secret = require SITE_EXPORT_SECRET_FILE;
+    $secret = require REPRINT_EXPORTER_SECRET_FILE;
     return is_string($secret) ? $secret : null;
 }
 
@@ -95,7 +95,7 @@ function _site_export_get_option_secret(): string {
         return '';
     }
 
-    $secret = get_option(SITE_EXPORT_SECRET_OPTION, '');
+    $secret = get_option(REPRINT_EXPORTER_SECRET_OPTION, '');
     return is_string($secret) ? $secret : '';
 }
 
@@ -122,7 +122,7 @@ function _site_export_update_shared_secret(string $secret): bool {
         return false;
     }
 
-    return (bool) update_option(SITE_EXPORT_SECRET_OPTION, $secret, false);
+    return (bool) update_option(REPRINT_EXPORTER_SECRET_OPTION, $secret, false);
 }
 
 /**
@@ -148,7 +148,7 @@ function _site_export_verify_hmac(string $secret): ?string {
         return 'Reprint Exporter runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.';
     }
 
-    $server = new \Reprint\Exporter\Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+    $server = new \Reprint\Exporter\Site_Export_HMAC_Server($secret, REPRINT_EXPORTER_TIMESTAMP_TOLERANCE);
     return $server->verify_globals();
 }
 

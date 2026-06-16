@@ -9,11 +9,11 @@ if (!defined('ABSPATH')) {
 }
 
 $site_export_test_plugin_dir = sys_get_temp_dir() . '/site-export-secret-test-' . getmypid() . '/';
-if (!defined('SITE_EXPORT_PLUGIN_DIR')) {
-    define('SITE_EXPORT_PLUGIN_DIR', $site_export_test_plugin_dir);
+if (!defined('REPRINT_EXPORTER_PLUGIN_DIR')) {
+    define('REPRINT_EXPORTER_PLUGIN_DIR', $site_export_test_plugin_dir);
 }
-if (!defined('SITE_EXPORT_SECRET_FILE')) {
-    define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
+if (!defined('REPRINT_EXPORTER_SECRET_FILE')) {
+    define('REPRINT_EXPORTER_SECRET_FILE', REPRINT_EXPORTER_PLUGIN_DIR . 'secret.php');
 }
 
 $GLOBALS['site_export_test_options'] = [];
@@ -21,7 +21,7 @@ $GLOBALS['site_export_registered_settings'] = [];
 
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(string $file): string {
-        return SITE_EXPORT_PLUGIN_DIR;
+        return REPRINT_EXPORTER_PLUGIN_DIR;
     }
 }
 
@@ -112,8 +112,8 @@ final class SiteExportSecretTest extends TestCase
     {
         parent::setUp();
 
-        if (!is_dir(SITE_EXPORT_PLUGIN_DIR)) {
-            mkdir(SITE_EXPORT_PLUGIN_DIR, 0755, true);
+        if (!is_dir(REPRINT_EXPORTER_PLUGIN_DIR)) {
+            mkdir(REPRINT_EXPORTER_PLUGIN_DIR, 0755, true);
         }
 
         $this->original_server = $_SERVER;
@@ -124,19 +124,19 @@ final class SiteExportSecretTest extends TestCase
         $_SERVER = [];
         $_FILES = [];
 
-        if (file_exists(SITE_EXPORT_SECRET_FILE)) {
-            unlink(SITE_EXPORT_SECRET_FILE);
+        if (file_exists(REPRINT_EXPORTER_SECRET_FILE)) {
+            unlink(REPRINT_EXPORTER_SECRET_FILE);
         }
     }
 
     protected function tearDown(): void
     {
-        if (file_exists(SITE_EXPORT_SECRET_FILE)) {
-            unlink(SITE_EXPORT_SECRET_FILE);
+        if (file_exists(REPRINT_EXPORTER_SECRET_FILE)) {
+            unlink(REPRINT_EXPORTER_SECRET_FILE);
         }
 
-        if (is_dir(SITE_EXPORT_PLUGIN_DIR)) {
-            rmdir(SITE_EXPORT_PLUGIN_DIR);
+        if (is_dir(REPRINT_EXPORTER_PLUGIN_DIR)) {
+            rmdir(REPRINT_EXPORTER_PLUGIN_DIR);
         }
 
         $_SERVER = $this->original_server;
@@ -147,15 +147,15 @@ final class SiteExportSecretTest extends TestCase
 
     public function testSharedSecretFallsBackToOptionWhenSecretFileMissing(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-secret';
+        $GLOBALS['site_export_test_options'][REPRINT_EXPORTER_SECRET_OPTION] = 'option-secret';
 
         $this->assertSame('option-secret', _site_export_get_shared_secret());
     }
 
     public function testSecretFileOverridesSiteOptionWhenPresent(): void
     {
-        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-secret';
-        file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'file-secret';\n");
+        $GLOBALS['site_export_test_options'][REPRINT_EXPORTER_SECRET_OPTION] = 'option-secret';
+        file_put_contents(REPRINT_EXPORTER_SECRET_FILE, "<?php return 'file-secret';\n");
 
         $this->assertSame('file-secret', _site_export_get_shared_secret());
     }
@@ -163,15 +163,15 @@ final class SiteExportSecretTest extends TestCase
     public function testUpdatingSharedSecretOnlyTouchesTheSiteOption(): void
     {
         $this->assertTrue(_site_export_update_shared_secret('new-secret'));
-        $this->assertSame('new-secret', $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION]);
-        $this->assertFileDoesNotExist(SITE_EXPORT_SECRET_FILE);
+        $this->assertSame('new-secret', $GLOBALS['site_export_test_options'][REPRINT_EXPORTER_SECRET_OPTION]);
+        $this->assertFileDoesNotExist(REPRINT_EXPORTER_SECRET_FILE);
     }
 
     public function testPluginRegistersSecretOptionForCoreSettingsRestEndpoint(): void
     {
         Site_Export_Plugin::get_instance()->register_settings();
 
-        $setting = $GLOBALS['site_export_registered_settings'][SITE_EXPORT_SECRET_OPTION] ?? null;
+        $setting = $GLOBALS['site_export_registered_settings'][REPRINT_EXPORTER_SECRET_OPTION] ?? null;
         $this->assertNotNull($setting);
         $this->assertSame('general', $setting['group']);
         $this->assertTrue($setting['args']['show_in_rest']);

@@ -29,34 +29,34 @@ if (!ob_get_level()) {
  * independently.  These two constants let them detect incompatibility at
  * preflight time instead of producing silent corruption.
  *
- * EXPORT_PROTOCOL_VERSION is sent to the importer in the preflight JSON
+ * REPRINT_EXPORTER_PROTOCOL_VERSION is sent to the importer in the preflight JSON
  * response as `protocol_version`.  Bump it whenever a change to the wire
  * protocol (cursor encoding, multipart structure, header names, endpoint
  * parameters, response format) would break an older importer.
  */
-define('EXPORT_PROTOCOL_VERSION', 1);
+define('REPRINT_EXPORTER_PROTOCOL_VERSION', 1);
 
 /**
  * The oldest *importer* protocol version this export plugin can talk to.
  *
  * Sent to the importer in the preflight response as `protocol_min_version`.
- * The importer checks that its own IMPORT_PROTOCOL_VERSION is >= this value;
+ * The importer checks that its own REPRINT_IMPORTER_PROTOCOL_VERSION is >= this value;
  * if not, it tells the user to update the importer.
  *
  * Raise this when you drop backward-compatibility with old importers.
- * Keep it equal to EXPORT_PROTOCOL_VERSION if no backward compat is needed.
+ * Keep it equal to REPRINT_EXPORTER_PROTOCOL_VERSION if no backward compat is needed.
  */
-define('EXPORT_MIN_IMPORT_VERSION', 1);
+define('REPRINT_EXPORTER_MIN_IMPORT_VERSION', 1);
 
 // File type mask + file type values (top bits of st_mode)
-define('STAT_TYPE_MASK',   0170000);
-define('STAT_TYPE_SOCKET', 0140000);
-define('STAT_TYPE_LINK',   0120000);
-define('STAT_TYPE_FILE',   0100000);
-define('STAT_TYPE_BLOCK',  0060000);
-define('STAT_TYPE_DIR',    0040000);
-define('STAT_TYPE_CHAR',   0020000);
-define('STAT_TYPE_FIFO',   0010000);
+define('REPRINT_EXPORTER_STAT_TYPE_MASK',   0170000);
+define('REPRINT_EXPORTER_STAT_TYPE_SOCKET', 0140000);
+define('REPRINT_EXPORTER_STAT_TYPE_LINK',   0120000);
+define('REPRINT_EXPORTER_STAT_TYPE_FILE',   0100000);
+define('REPRINT_EXPORTER_STAT_TYPE_BLOCK',  0060000);
+define('REPRINT_EXPORTER_STAT_TYPE_DIR',    0040000);
+define('REPRINT_EXPORTER_STAT_TYPE_CHAR',   0020000);
+define('REPRINT_EXPORTER_STAT_TYPE_FIFO',   0010000);
 
 /**
  * Tracks time and memory limits for a single API request.
@@ -1911,8 +1911,8 @@ function endpoint_preflight(array $config): array
         "ok" => $ok,
         "error" => $preflight_error,
         "timestamp" => time(),
-        "protocol_version" => EXPORT_PROTOCOL_VERSION,
-        "protocol_min_version" => EXPORT_MIN_IMPORT_VERSION,
+        "protocol_version" => REPRINT_EXPORTER_PROTOCOL_VERSION,
+        "protocol_min_version" => REPRINT_EXPORTER_MIN_IMPORT_VERSION,
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),
             "searched" => $wp_detect["searched"],
@@ -2914,19 +2914,19 @@ function endpoint_file_index(
                     continue;
                 }
 
-                $mode = $stat["mode"] & STAT_TYPE_MASK;
+                $mode = $stat["mode"] & REPRINT_EXPORTER_STAT_TYPE_MASK;
                 $type = "file";
                 $link_target = null;
-                if ($mode === STAT_TYPE_LINK) {
+                if ($mode === REPRINT_EXPORTER_STAT_TYPE_LINK) {
                     $type = "link";
                     $resolved = resolve_symlink_target($path);
                     $link_target = $resolved['target'];
                     if ($follow_symlinks && !empty($resolved['intermediates'])) {
                         $batch_items = array_merge($batch_items, $resolved['intermediates']);
                     }
-                } elseif ($mode === STAT_TYPE_DIR) {
+                } elseif ($mode === REPRINT_EXPORTER_STAT_TYPE_DIR) {
                     $type = "dir";
-                } elseif ($mode !== STAT_TYPE_FILE) {
+                } elseif ($mode !== REPRINT_EXPORTER_STAT_TYPE_FILE) {
                     $type = "other";
                 }
 

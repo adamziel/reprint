@@ -1445,15 +1445,15 @@ class ImportClient
         if ($remote_ver === null) {
             $proto_ok = false;
             $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
-        } elseif ($remote_ver < IMPORT_MIN_EXPORT_VERSION) {
+        } elseif ($remote_ver < REPRINT_IMPORTER_MIN_EXPORT_VERSION) {
             $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} is too old (client requires >= v" . IMPORT_MIN_EXPORT_VERSION . "). Update the export plugin.";
-        } elseif (IMPORT_PROTOCOL_VERSION < $remote_min) {
+            $proto_detail = "Remote protocol v{$remote_ver} is too old (client requires >= v" . REPRINT_IMPORTER_MIN_EXPORT_VERSION . "). Update the export plugin.";
+        } elseif (REPRINT_IMPORTER_PROTOCOL_VERSION < $remote_min) {
             $proto_ok = false;
-            $proto_detail = "Client protocol v" . IMPORT_PROTOCOL_VERSION . " is too old (remote requires >= v{$remote_min}). Update the importer.";
+            $proto_detail = "Client protocol v" . REPRINT_IMPORTER_PROTOCOL_VERSION . " is too old (remote requires >= v{$remote_min}). Update the importer.";
         } else {
             $proto_ok = true;
-            $proto_detail = "remote v{$remote_ver}, client v" . IMPORT_PROTOCOL_VERSION;
+            $proto_detail = "remote v{$remote_ver}, client v" . REPRINT_IMPORTER_PROTOCOL_VERSION;
         }
         $checks[] = [
             "label" => "Protocol compatible",

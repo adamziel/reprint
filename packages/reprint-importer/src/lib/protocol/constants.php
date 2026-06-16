@@ -11,8 +11,8 @@
  * multipart structure, header names, endpoint parameters, response format)
  * would break an older export plugin.
  */
-if (!defined('IMPORT_PROTOCOL_VERSION')) {
-    define('IMPORT_PROTOCOL_VERSION', 1);
+if (!defined('REPRINT_IMPORTER_PROTOCOL_VERSION')) {
+    define('REPRINT_IMPORTER_PROTOCOL_VERSION', 1);
 }
 
 /**
@@ -23,8 +23,8 @@ if (!defined('IMPORT_PROTOCOL_VERSION')) {
  * update the export plugin.
  *
  * Raise this when you drop backward-compatibility with old export plugins.
- * Keep it equal to IMPORT_PROTOCOL_VERSION if no backward compat is needed.
+ * Keep it equal to REPRINT_IMPORTER_PROTOCOL_VERSION if no backward compat is needed.
  */
-if (!defined('IMPORT_MIN_EXPORT_VERSION')) {
-    define('IMPORT_MIN_EXPORT_VERSION', 1);
+if (!defined('REPRINT_IMPORTER_MIN_EXPORT_VERSION')) {
+    define('REPRINT_IMPORTER_MIN_EXPORT_VERSION', 1);
 }

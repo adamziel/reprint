@@ -27,7 +27,7 @@ class Site_Export_Plugin {
         add_action('init', [$this, 'register_settings']);
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'handle_settings_save']);
-        add_filter('plugin_action_links_' . plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'), [$this, 'add_settings_link']);
+        add_filter('plugin_action_links_' . plugin_basename(REPRINT_EXPORTER_PLUGIN_DIR . 'index.php'), [$this, 'add_settings_link']);
         add_action('admin_bar_menu', [$this, 'add_admin_bar_node'], 100);
     }
 
@@ -35,7 +35,7 @@ class Site_Export_Plugin {
     public function register_settings() {
         register_setting(
             'general',
-            SITE_EXPORT_SECRET_OPTION,
+            REPRINT_EXPORTER_SECRET_OPTION,
             [
                 'type' => 'string',
                 'sanitize_callback' => 'sanitize_text_field',
@@ -341,13 +341,13 @@ add_action('plugins_loaded', function() {
 });
 
 // On activation: set a transient so we can redirect on the next admin page load.
-register_activation_hook(SITE_EXPORT_PLUGIN_DIR . 'index.php', function() {
+register_activation_hook(REPRINT_EXPORTER_PLUGIN_DIR . 'index.php', function() {
     // Only redirect when activated through the admin UI (not via WP-CLI or bulk).
     if (!wp_doing_ajax() && is_admin()) {
         set_transient('site_export_activated', 1, 30);
     }
 
-    $gitignore = SITE_EXPORT_PLUGIN_DIR . '.gitignore';
+    $gitignore = REPRINT_EXPORTER_PLUGIN_DIR . '.gitignore';
     if (!file_exists($gitignore)) {
         file_put_contents($gitignore, "secret.php\n");
     }

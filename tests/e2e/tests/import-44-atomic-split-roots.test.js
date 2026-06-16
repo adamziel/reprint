@@ -61,12 +61,12 @@ describe('Import: Atomic-style split roots (__wp__ + document root)', () => {
                 // WordPress plugin, just without WP bootstrapped.
                 writeFileSync(join(siteDir, 'index.php'), `<?php
 define('ABSPATH', __DIR__ . '/__wp__/');
-define('SITE_EXPORT_PLUGIN_DIR', __DIR__ . '/wp-content/plugins/site-export/');
-define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
+define('REPRINT_EXPORTER_PLUGIN_DIR', __DIR__ . '/wp-content/plugins/site-export/');
+define('REPRINT_EXPORTER_SECRET_FILE', REPRINT_EXPORTER_PLUGIN_DIR . 'secret.php');
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(\$file) { return rtrim(dirname(\$file), '/') . '/'; }
 }
-require_once SITE_EXPORT_PLUGIN_DIR . 'lib.php';
+require_once REPRINT_EXPORTER_PLUGIN_DIR . 'lib.php';
 _site_export_handle_api_request();
 `);
 

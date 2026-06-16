@@ -51,8 +51,8 @@ if ($myRouter->matches('/export')) {
 
 `lib.php` defines these constants (using WordPress's `plugin_dir_path`):
 
-- `SITE_EXPORT_VERSION` — plugin version string
-- `SITE_EXPORT_PLUGIN_DIR` — absolute path to the plugin directory
-- `SITE_EXPORT_SECRET_FILE` — optional path to a PHP file that overrides the stored HMAC shared secret
-- `SITE_EXPORT_SECRET_OPTION` — WordPress site option name used for the stored HMAC shared secret
-- `SITE_EXPORT_TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)
+- `REPRINT_EXPORTER_VERSION` — plugin version string
+- `REPRINT_EXPORTER_PLUGIN_DIR` — absolute path to the plugin directory
+- `REPRINT_EXPORTER_SECRET_FILE` — optional path to a PHP file that overrides the stored HMAC shared secret
+- `REPRINT_EXPORTER_SECRET_OPTION` — WordPress site option name used for the stored HMAC shared secret
+- `REPRINT_EXPORTER_TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)
