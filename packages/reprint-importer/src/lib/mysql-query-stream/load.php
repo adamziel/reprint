@@ -12,15 +12,13 @@
  *   git submodule update --init
  */
 
+require_once __DIR__ . '/../sqlite/functions.php';
+
 $sdi_loader = null;
-foreach ([
-    dirname(__DIR__, 5) . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php',
-    dirname(__DIR__, 6) . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php',
-] as $candidate) {
-    if (file_exists($candidate)) {
-        $sdi_loader = $candidate;
-        break;
-    }
+try {
+    $sdi_loader = resolve_sqlite_integration_path('/wp-pdo-mysql-on-sqlite.php');
+} catch (RuntimeException $e) {
+    $sdi_loader = null;
 }
 
 if ($sdi_loader === null) {

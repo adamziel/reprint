@@ -1,5 +1,46 @@
 <?php
 
+if (!function_exists('reprint_sqlite_integration_roots')) {
+    /**
+     * Return possible sqlite-database-integration roots for supported runtime
+     * layouts. This intentionally does not walk arbitrary parent directories:
+     * import/export output directories such as ./exports are data, not runtime
+     * dependencies.
+     */
+    function reprint_sqlite_integration_roots(): array
+    {
+        $roots = [];
+
+        $explicit = getenv('REPRINT_SQLITE_INTEGRATION_ROOT');
+        if (is_string($explicit) && $explicit !== '') {
+            $roots[] = rtrim($explicit, '/\\');
+        }
+
+        $package_root = dirname(__DIR__, 3);
+        $package_parent = dirname($package_root);
+
+        // Monorepo and PHAR layout:
+        //   <root>/packages/reprint-importer/src/lib/sqlite/functions.php
+        //   phar://reprint.phar/packages/reprint-importer/src/lib/sqlite/functions.php
+        if (basename($package_parent) === 'packages') {
+            $roots[] = dirname($package_parent) . '/lib/sqlite-database-integration';
+        }
+
+        // Composer install layout:
+        //   <project>/vendor/wp-php-toolkit/reprint-importer/src/lib/sqlite/functions.php
+        $vendor_root = dirname($package_root, 2);
+        if (
+            basename($package_root) === 'reprint-importer' &&
+            basename(dirname($package_root)) === 'wp-php-toolkit' &&
+            basename($vendor_root) === 'vendor'
+        ) {
+            $roots[] = dirname($vendor_root) . '/lib/sqlite-database-integration';
+        }
+
+        return array_values(array_unique($roots));
+    }
+}
+
 if (!function_exists('resolve_sqlite_integration_path')) {
     function resolve_sqlite_integration_path(string $suffix = ''): string
     {
@@ -12,9 +53,9 @@ if (!function_exists('resolve_sqlite_integration_path')) {
             $suffixes[] = $moved_paths[$suffix];
         }
 
-        foreach ([dirname(__DIR__, 5), dirname(__DIR__, 6)] as $project_root) {
+        foreach (reprint_sqlite_integration_roots() as $root) {
             foreach ($suffixes as $candidate_suffix) {
-                $candidate = $project_root . '/lib/sqlite-database-integration' . $candidate_suffix;
+                $candidate = $root . $candidate_suffix;
                 if (file_exists($candidate)) {
                     return $candidate;
                 }
@@ -30,8 +71,7 @@ if (!function_exists('resolve_sqlite_integration_path')) {
 if (!function_exists('resolve_sqlite_integration_plugin_path')) {
     function resolve_sqlite_integration_plugin_path(): string
     {
-        foreach ([dirname(__DIR__, 5), dirname(__DIR__, 6)] as $project_root) {
-            $root = $project_root . '/lib/sqlite-database-integration';
+        foreach (reprint_sqlite_integration_roots() as $root) {
             $package = $root . '/packages/plugin-sqlite-database-integration';
             if (is_dir($package)) {
                 return $package;
