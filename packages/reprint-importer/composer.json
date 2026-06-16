@@ -15,13 +15,6 @@
         "classmap": [
             "src/import.php",
             "src/lib"
-        ],
-        "files": [
-            "src/lib/wp-stubs.php",
-            "src/lib/protocol/constants.php",
-            "src/lib/transport/curl-options.php",
-            "src/lib/sqlite/functions.php",
-            "src/lib/version.php"
         ]
     },
     "bin": [

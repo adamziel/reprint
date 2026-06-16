@@ -13,23 +13,22 @@
  * fake source HTTP server without spinning up Playground.
  */
 
-if (!function_exists('reprint_playground_uploads_proxy_code')) {
-    /**
-     * Returns the full mu-plugin source. The wizard writes this string
-     * verbatim to /wordpress/wp-content/mu-plugins/0-reprint-playground-glue.php.
-     */
-    function reprint_playground_uploads_proxy_code(string $source_origin): string {
-        $handler_source = file_get_contents(__DIR__ . '/playground-uploads-proxy-handler.php');
-        if ($handler_source === false) {
-            $handler_source = '';
-        }
-        // Strip the opening <?php so we can inline the file contents
-        // into the heredoc without nesting two opening tags.
-        $handler_source = preg_replace('/^<\?php\s*/', '', $handler_source, 1);
+/**
+ * Returns the full mu-plugin source. The wizard writes this string
+ * verbatim to /wordpress/wp-content/mu-plugins/0-reprint-playground-glue.php.
+ */
+function reprint_playground_uploads_proxy_code(string $source_origin): string {
+    $handler_source = file_get_contents(__DIR__ . '/playground-uploads-proxy-handler.php');
+    if ($handler_source === false) {
+        $handler_source = '';
+    }
+    // Strip the opening <?php so we can inline the file contents
+    // into the heredoc without nesting two opening tags.
+    $handler_source = preg_replace('/^<\?php\s*/', '', $handler_source, 1);
 
-        $source_origin_php = var_export($source_origin, true);
+    $source_origin_php = var_export($source_origin, true);
 
-        return <<<PHP
+    return <<<PHP
 <?php
 // Reprint Playground glue — installed by /reprint.php?action=blueprint.
 //
@@ -76,5 +75,4 @@ if (\$reprint_source_origin !== '') {
     }, 0);
 }
 PHP;
-    }
 }
