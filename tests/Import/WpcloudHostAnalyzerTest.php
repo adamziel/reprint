@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Host\Analyzers\WpcloudHostAnalyzer;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/class-runtime-manifest.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/interface-host-analyzer.php';
@@ -50,7 +51,7 @@ class WpcloudHostAnalyzerTest extends TestCase
 
     public function testAnalyzePopulatesPathsToRemove(): void
     {
-        $analyzer = new \WpcloudHostAnalyzer();
+        $analyzer = new WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($this->wpcloudPreflight());
 
         $this->assertContains('wp-content/object-cache.php', $manifest->paths_to_remove);
@@ -69,7 +70,7 @@ class WpcloudHostAnalyzerTest extends TestCase
             ],
         ]);
 
-        $analyzer = new \WpcloudHostAnalyzer();
+        $analyzer = new WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($preflight);
 
         $this->assertContains('/scripts', $manifest->extra_directories);
@@ -85,7 +86,7 @@ class WpcloudHostAnalyzerTest extends TestCase
             ],
         ]);
 
-        $analyzer = new \WpcloudHostAnalyzer();
+        $analyzer = new WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($preflight);
 
         $this->assertContains('/logging', $manifest->extra_directories);
@@ -102,7 +103,7 @@ class WpcloudHostAnalyzerTest extends TestCase
             ],
         ]);
 
-        $analyzer = new \WpcloudHostAnalyzer();
+        $analyzer = new WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($preflight);
 
         // Both point to /scripts — should appear only once.
@@ -121,7 +122,7 @@ class WpcloudHostAnalyzerTest extends TestCase
             ],
         ]);
 
-        $analyzer = new \WpcloudHostAnalyzer();
+        $analyzer = new WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($preflight);
 
         $this->assertEmpty($manifest->extra_directories);
@@ -137,7 +138,7 @@ class WpcloudHostAnalyzerTest extends TestCase
             ],
         ]);
 
-        $analyzer = new \WpcloudHostAnalyzer();
+        $analyzer = new WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($preflight);
 
         $this->assertEmpty($manifest->extra_directories);
@@ -153,7 +154,7 @@ class WpcloudHostAnalyzerTest extends TestCase
             ],
         ]);
 
-        $analyzer = new \WpcloudHostAnalyzer();
+        $analyzer = new WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($preflight);
 
         // dirname('/env.php') is '/' — should be ignored.
@@ -162,7 +163,7 @@ class WpcloudHostAnalyzerTest extends TestCase
 
     public function testAnalyzeDeclaresThumbnailerRoute(): void
     {
-        $analyzer = new \WpcloudHostAnalyzer();
+        $analyzer = new WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($this->wpcloudPreflight());
 
         $handlers = array_column($manifest->routes, 'handler');
@@ -171,7 +172,7 @@ class WpcloudHostAnalyzerTest extends TestCase
 
     public function testAnalyzeSetsWpDirServerVar(): void
     {
-        $analyzer = new \WpcloudHostAnalyzer();
+        $analyzer = new WpcloudHostAnalyzer();
         $manifest = $analyzer->analyze($this->wpcloudPreflight());
 
         $this->assertArrayHasKey('WP_DIR', $manifest->server_vars);
@@ -181,7 +182,7 @@ class WpcloudHostAnalyzerTest extends TestCase
     public function testScoreIdentifiesWpcloudSite(): void
     {
         $preflight = $this->wpcloudPreflight();
-        $score = \WpcloudHostAnalyzer::score($preflight);
+        $score = WpcloudHostAnalyzer::score($preflight);
 
         // __wp__ dir (0.5) + WP root at __wp__ (0.4) + PRIVACY_MODEL (0.5) = 1.0 (capped)
         $this->assertGreaterThanOrEqual(0.5, $score);
@@ -205,7 +206,7 @@ class WpcloudHostAnalyzerTest extends TestCase
             ],
         ];
 
-        $score = \WpcloudHostAnalyzer::score($preflight);
+        $score = WpcloudHostAnalyzer::score($preflight);
         $this->assertLessThan(0.5, $score);
     }
 }

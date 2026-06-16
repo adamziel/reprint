@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Exporter;
+
 /**
  * HMAC Client for the Site Export API.
  *

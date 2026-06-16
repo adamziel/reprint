@@ -3,6 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
+use Reprint\Importer\Protocol\StreamingContext;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -61,7 +63,7 @@ class TypeSwapTest extends TestCase
      */
     public function testEnsureDirectoryPathRemovesBlockingSymlink()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('ensure_directory_path');
@@ -90,7 +92,7 @@ class TypeSwapTest extends TestCase
      */
     public function testFileChunkReplacesSymlinkToDirectory()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -105,7 +107,7 @@ class TypeSwapTest extends TestCase
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_file_chunk');
 
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $chunk = [
             'headers' => [
                 'x-file-path' => base64_encode('/swapped-path'),
@@ -134,7 +136,7 @@ class TypeSwapTest extends TestCase
      */
     public function testDirectoryChunkReplacesSymlinkToFile()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -170,7 +172,7 @@ class TypeSwapTest extends TestCase
      */
     public function testFileChunkUnderFormerSymlink()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -196,7 +198,7 @@ class TypeSwapTest extends TestCase
 
         // Step 2: file chunk writes a nested file
         $fileMethod = $reflection->getMethod('handle_file_chunk');
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $fileMethod->invoke($client, [
             'headers' => [
                 'x-file-path' => base64_encode('/parent/sub/file.txt'),
@@ -223,7 +225,7 @@ class TypeSwapTest extends TestCase
      */
     public function testNestedFileUnderExistingSymlinkViaEnsureDirectory()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         // Resolve the fs-root path so it matches the realpath() check
         // inside ensure_directory_path (on macOS, /var -> /private/var).

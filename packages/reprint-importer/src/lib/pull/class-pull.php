@@ -1,4 +1,12 @@
 <?php
+
+namespace Reprint\Importer\Pull;
+
+use InvalidArgumentException;
+use RuntimeException;
+use Reprint\Importer\ImportClient;
+use Reprint\Importer\TerminalProgress\TerminalProgress;
+
 /**
  * The `pull` command — orchestrates the lower-level commands into a
  * single resumable site clone pipeline.

@@ -3,7 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use MultipartStreamParser;
+use Reprint\Importer\Protocol\MultipartStreamParser;
 
 require_once __DIR__ . '/../../importer/import.php';
 

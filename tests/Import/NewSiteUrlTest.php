@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -50,7 +51,7 @@ class NewSiteUrlTest extends TestCase
         rmdir($dir);
     }
 
-    private function callResolve(\ImportClient $client, array $options): array
+    private function callResolve(ImportClient $client, array $options): array
     {
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('resolve_new_site_url_option');
@@ -60,7 +61,7 @@ class NewSiteUrlTest extends TestCase
 
     public function testDerivesHttpAndHttpsFromHttpsUrl(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'https://old-site.example.com/wp-json/export',
             $this->tempDir,
             $this->tempDir . '/fs-root'
@@ -83,7 +84,7 @@ class NewSiteUrlTest extends TestCase
 
     public function testDerivesHttpAndHttpsFromHttpUrl(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'http://old-site.local/export?key=abc',
             $this->tempDir,
             $this->tempDir . '/fs-root'
@@ -105,7 +106,7 @@ class NewSiteUrlTest extends TestCase
 
     public function testPreservesPort(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'https://old-site.example.com:8443/export',
             $this->tempDir,
             $this->tempDir . '/fs-root'
@@ -127,7 +128,7 @@ class NewSiteUrlTest extends TestCase
 
     public function testAppendsToExistingRewriteUrlEntries(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'https://old-site.example.com/export',
             $this->tempDir,
             $this->tempDir . '/fs-root'
@@ -158,7 +159,7 @@ class NewSiteUrlTest extends TestCase
 
     public function testNoOpWhenNewSiteUrlNotSet(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'https://old-site.example.com/export',
             $this->tempDir,
             $this->tempDir . '/fs-root'
@@ -172,7 +173,7 @@ class NewSiteUrlTest extends TestCase
 
     public function testThrowsOnUnparseableExportUrl(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             '://not-a-url',
             $this->tempDir,
             $this->tempDir . '/fs-root'
@@ -187,7 +188,7 @@ class NewSiteUrlTest extends TestCase
 
     public function testNewUrlUsedVerbatim(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'https://old-site.example.com/export',
             $this->tempDir,
             $this->tempDir . '/fs-root'

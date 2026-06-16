@@ -20,7 +20,7 @@
  * but documented here so a reader can grep for it.
  */
 
-if (!class_exists('PDO', false)) {
+if (!class_exists(PDO::class, false)) {
     eval(<<<'PHP'
 class PDO
 {
@@ -35,7 +35,7 @@ PHP
     );
 }
 
-if (!class_exists('PDOStatement', false)) {
+if (!class_exists(PDOStatement::class, false)) {
     eval(<<<'PHP'
 class PDOStatement
 {
@@ -44,7 +44,7 @@ PHP
     );
 }
 
-if (!class_exists('PDOException', false)) {
+if (!class_exists(PDOException::class, false)) {
     // Real PDOException extends \Exception (not \RuntimeException). Match
     // upstream so `catch (\RuntimeException $e)` does not accidentally catch
     // the polyfilled exception while missing the real one.

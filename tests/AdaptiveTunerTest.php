@@ -1,6 +1,7 @@
 <?php
 
 declare(strict_types=1);
+use Reprint\Importer\Tuning\AdaptiveTuner;
 
 require_once __DIR__ . '/../importer/import.php';
 

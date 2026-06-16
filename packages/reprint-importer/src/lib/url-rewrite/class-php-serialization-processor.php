@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Importer\UrlRewrite;
+
 /**
  * Parses PHP serialized data at the byte level, exposing string values
  * through a cursor-based API inspired by WordPress's WP_HTML_Tag_Processor.

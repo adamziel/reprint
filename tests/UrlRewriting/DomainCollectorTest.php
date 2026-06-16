@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\UrlRewrite\DomainCollector;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/load.php';

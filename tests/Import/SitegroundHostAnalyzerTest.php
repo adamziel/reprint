@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Host\Analyzers\SitegroundHostAnalyzer;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/class-runtime-manifest.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/interface-host-analyzer.php';
@@ -60,7 +61,7 @@ class SitegroundHostAnalyzerTest extends TestCase
 
     public function testScoreIdentifiesSitegroundSite(): void
     {
-        $score = \SitegroundHostAnalyzer::score($this->sitegroundPreflight());
+        $score = SitegroundHostAnalyzer::score($this->sitegroundPreflight());
 
         // Two sg-* plugins → 0.9
         $this->assertGreaterThanOrEqual(0.5, $score);
@@ -74,7 +75,7 @@ class SitegroundHostAnalyzerTest extends TestCase
             ['name' => 'sg-security', 'type' => 'dir'],
         ];
 
-        $score = \SitegroundHostAnalyzer::score($preflight);
+        $score = SitegroundHostAnalyzer::score($preflight);
         $this->assertLessThan(0.5, $score);
     }
 
@@ -86,13 +87,13 @@ class SitegroundHostAnalyzerTest extends TestCase
             ['name' => 'jetpack', 'type' => 'dir'],
         ];
 
-        $score = \SitegroundHostAnalyzer::score($preflight);
+        $score = SitegroundHostAnalyzer::score($preflight);
         $this->assertSame(0.0, $score);
     }
 
     public function testAnalyzePopulatesPathsToRemove(): void
     {
-        $analyzer = new \SitegroundHostAnalyzer();
+        $analyzer = new SitegroundHostAnalyzer();
         $manifest = $analyzer->analyze($this->sitegroundPreflight());
 
         $this->assertContains('wp-content/plugins/sg-cachepress', $manifest->paths_to_remove);
@@ -101,7 +102,7 @@ class SitegroundHostAnalyzerTest extends TestCase
 
     public function testAnalyzeSetsSourceToSiteground(): void
     {
-        $analyzer = new \SitegroundHostAnalyzer();
+        $analyzer = new SitegroundHostAnalyzer();
         $manifest = $analyzer->analyze($this->sitegroundPreflight());
 
         $this->assertSame('siteground', $manifest->source);

@@ -1,5 +1,9 @@
 <?php
 
+namespace Reprint\Importer\UrlRewrite;
+
+use WP_MySQL_Lexer;
+
 /**
  * Combines Base64ValueScanner and StructuredDataUrlRewriter to rewrite URLs
  * in an entire SQL statement.

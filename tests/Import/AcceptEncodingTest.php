@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
+use Reprint\Importer\ImportClient;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -60,7 +61,7 @@ class AcceptEncodingTest extends TestCase
      */
     public function testAcceptEncodingExcludesBrotli(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'http://fake.url',
             $this->tempDir . '/state',
             $this->tempDir . '/fs-root'

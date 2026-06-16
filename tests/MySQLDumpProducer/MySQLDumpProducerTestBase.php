@@ -1,7 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
-use WordPress\DataLiberation\MySQLDumpProducer;
+use Reprint\Exporter\MySQLDumpProducer;
 
 /**
  * Base test class for MySQLDumpProducer tests.
@@ -51,13 +51,13 @@ abstract class MySQLDumpProducerTestBase extends TestCase
      */
     protected function createProducer(array $options = []): MySQLDumpProducer
     {
-        return new MySQLDumpProducer($this->pdo, $options);
+        return new \Reprint\Exporter\MySQLDumpProducer($this->pdo, $options);
     }
 
     /**
      * Collects all SQL fragments from a producer.
      */
-    protected function collectAllFragments(MySQLDumpProducer $producer): array
+    protected function collectAllFragments(\Reprint\Exporter\MySQLDumpProducer $producer): array
     {
         $fragments = [];
         while ($producer->next_sql_fragment()) {

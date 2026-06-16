@@ -1,4 +1,9 @@
 <?php
+
+namespace Reprint\Exporter;
+
+use PDO;
+
 /**
  * wpdb-backed PDO adapter for MySQL exports on PDO-less hosts.
  *

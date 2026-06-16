@@ -1,5 +1,9 @@
 <?php
 
+namespace Reprint\Importer\Protocol;
+
+use RuntimeException;
+
 /**
  * Thrown when a cURL request times out (CURLE_OPERATION_TIMEDOUT).
  * Callers catch this to save state and exit with "partial" status instead

@@ -1,5 +1,9 @@
 <?php
 
+namespace Reprint\Importer\QueryStream;
+
+use WP_MySQL_Lexer;
+
 /**
  * Naively splits an SQL string into a sequence of queries. It
  * streams the data so you can process very large chunks of SQL

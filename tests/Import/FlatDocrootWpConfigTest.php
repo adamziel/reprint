@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -145,12 +146,12 @@ class FlatDocrootWpConfigTest extends TestCase
         );
     }
 
-    private function makeClient(): \ImportClient
+    private function makeClient(): ImportClient
     {
-        return new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
+        return new ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
     }
 
-    private function loadClientState(\ImportClient $client): void
+    private function loadClientState(ImportClient $client): void
     {
         $state = $this->callPrivate($client, 'load_state');
         $reflection = new \ReflectionClass($client);
@@ -158,7 +159,7 @@ class FlatDocrootWpConfigTest extends TestCase
         $property->setValue($client, $state);
     }
 
-    private function callPrivate(\ImportClient $client, string $method, array $args = [])
+    private function callPrivate(ImportClient $client, string $method, array $args = [])
     {
         $reflection = new \ReflectionClass($client);
         $m = $reflection->getMethod($method);

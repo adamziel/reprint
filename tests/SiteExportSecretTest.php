@@ -183,7 +183,7 @@ final class SiteExportSecretTest extends TestCase
     {
         $secret = 'delegated-secret';
         $nonce = '0123456789abcdef0123456789abcdef';
-        $client = new Site_Export_HMAC_Client($secret);
+        $client = new \Reprint\Exporter\Site_Export_HMAC_Client($secret);
         $timestamp = $client->get_timestamp();
         $content_hash = hash('sha256', '');
 

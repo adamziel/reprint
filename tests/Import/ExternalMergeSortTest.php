@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ExternalMergeSort;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/class-external-merge-sort.php';
 

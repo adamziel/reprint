@@ -1,6 +1,6 @@
 <?php
 
-namespace WordPress\DataLiberation;
+namespace Reprint\Exporter;
 
 use PDO;
 use PDOStatement;

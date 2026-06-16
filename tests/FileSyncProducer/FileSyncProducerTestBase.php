@@ -181,7 +181,7 @@ abstract class FileSyncProducerTestBase extends TestCase
     /**
      * Process all chunks from sync producer
      */
-    protected function processAllChunks(\FileTreeProducer $sync): array
+    protected function processAllChunks(\Reprint\Exporter\FileTreeProducer $sync): array
     {
         $chunks = [];
 

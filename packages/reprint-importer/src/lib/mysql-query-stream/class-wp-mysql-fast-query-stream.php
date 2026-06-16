@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Importer\QueryStream;
+
 /**
  * Drop-in replacement for WP_MySQL_Naive_Query_Stream with a much
  * cheaper boundary scanner. Same public contract: append_sql() bytes,

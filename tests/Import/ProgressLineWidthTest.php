@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\TerminalProgress\TerminalProgress;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -18,10 +19,10 @@ class ProgressLineWidthTest extends TestCase
     /**
      * Create a TerminalProgress with a forced terminal width.
      */
-    private function createProgress(int $terminal_width = 80): \TerminalProgress
+    private function createProgress(int $terminal_width = 80): TerminalProgress
     {
         // Anonymous subclass to override the width detection.
-        return new class(true, STDOUT, false, $terminal_width) extends \TerminalProgress {
+        return new class(true, STDOUT, false, $terminal_width) extends TerminalProgress {
             private int $forced_width;
 
             public function __construct(bool $is_tty, $progress_fd, bool $verbose_mode, int $width)

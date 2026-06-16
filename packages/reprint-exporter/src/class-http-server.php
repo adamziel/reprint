@@ -1,6 +1,8 @@
 <?php
 
-use function WordPress\Reprint\Exporter\parse_size;
+namespace Reprint\Exporter;
+
+use InvalidArgumentException;
 
 /**
  * HTTP dispatcher for the Site Export API.

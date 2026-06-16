@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -61,9 +62,9 @@ class RuntimeFilesTest extends TestCase
         rmdir($dir);
     }
 
-    private function makeClient(): \ImportClient
+    private function makeClient(): ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
+        return new ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
     }
 
     private function writeState(array $state): void
@@ -87,21 +88,21 @@ class RuntimeFilesTest extends TestCase
         );
     }
 
-    private function callPrivate(\ImportClient $client, string $method, array $args = [])
+    private function callPrivate(ImportClient $client, string $method, array $args = [])
     {
         $reflection = new \ReflectionClass($client);
         $m = $reflection->getMethod($method);
         return $m->invoke($client, ...$args);
     }
 
-    private function setPrivate(\ImportClient $client, string $property, $value): void
+    private function setPrivate(ImportClient $client, string $property, $value): void
     {
         $reflection = new \ReflectionClass($client);
         $p = $reflection->getProperty($property);
         $p->setValue($client, $value);
     }
 
-    private function loadClientState(\ImportClient $client): void
+    private function loadClientState(ImportClient $client): void
     {
         $state = $this->callPrivate($client, 'load_state');
         $this->setPrivate($client, 'state', $state);

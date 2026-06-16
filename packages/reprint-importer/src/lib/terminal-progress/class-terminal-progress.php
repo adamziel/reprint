@@ -1,4 +1,7 @@
 <?php
+
+namespace Reprint\Importer\TerminalProgress;
+
 /**
  * Renders progress and lifecycle output to the terminal.
  *

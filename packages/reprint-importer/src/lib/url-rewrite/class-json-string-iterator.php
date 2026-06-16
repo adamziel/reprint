@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Importer\UrlRewrite;
+
 /**
  * Cursor-based iterator over string leaf values in a JSON value.
  *

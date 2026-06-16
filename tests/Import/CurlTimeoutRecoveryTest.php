@@ -3,6 +3,9 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
+use Reprint\Importer\Protocol\CurlTimeoutException;
+use Reprint\Importer\Protocol\StreamingContext;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -127,7 +130,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             $this->stateDir,
             $this->fs_root,
         );
-        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection = new \ReflectionClass(ImportClient::class);
 
         $stateProperty = $reflection->getProperty('state');
         $loadState = $reflection->getMethod('load_state');
@@ -406,7 +409,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     public function testCurlTimeoutExceptionExtendsRuntimeException()
     {
-        $e = new \CurlTimeoutException("Operation timed out");
+        $e = new CurlTimeoutException("Operation timed out");
         $this->assertInstanceOf(\RuntimeException::class, $e);
     }
 
@@ -583,16 +586,16 @@ class CurlTimeoutRecoveryTest extends TestCase
  * simulating a cURL timeout without making real HTTP requests.
  * The cursor is NOT advanced — simulates a complete stall.
  */
-class TimeoutTestClient extends \ImportClient
+class TimeoutTestClient extends ImportClient
 {
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        throw new \CurlTimeoutException(
+        throw new CurlTimeoutException(
             "cURL error: Operation timed out after 300001 milliseconds with 0 bytes received"
         );
     }
@@ -603,12 +606,12 @@ class TimeoutTestClient extends \ImportClient
  * file part-complete checkpoint. This is a hard crash, so download_file_fetch()
  * must not get a chance to do its normal final save.
  */
-class InterruptedAfterStreamedPartCloseClient extends \ImportClient
+class InterruptedAfterStreamedPartCloseClient extends ImportClient
 {
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
@@ -645,12 +648,12 @@ class InterruptedAfterStreamedPartCloseClient extends \ImportClient
  * Test double that completes successfully without throwing,
  * simulating a normal request that finishes.
  */
-class SuccessTestClient extends \ImportClient
+class SuccessTestClient extends ImportClient
 {
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {

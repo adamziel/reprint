@@ -1,5 +1,9 @@
 <?php
 
+namespace Reprint\Importer\Protocol;
+
+use RuntimeException;
+
 /**
  * Streaming multipart parser.
  * Parses multipart/mixed responses incrementally without buffering entire response.

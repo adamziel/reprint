@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Importer\Protocol;
+
 /**
  * Context object passed to streaming callbacks.
  */

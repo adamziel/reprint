@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Importer\Tuning;
+
 /**
  * AdaptiveTuner
  *

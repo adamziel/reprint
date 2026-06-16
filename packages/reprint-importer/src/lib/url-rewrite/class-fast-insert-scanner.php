@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Importer\UrlRewrite;
+
 /**
  * Tokenization-free scanner for the INSERT shape that MySQLDumpProducer emits.
  *

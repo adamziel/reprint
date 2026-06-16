@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Importer\UrlRewrite;
+
 use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 

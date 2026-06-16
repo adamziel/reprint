@@ -16,7 +16,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
             'growing.txt' => $initialContent
         ]);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new \Reprint\Exporter\FileTreeProducer($dir, [
             'chunk_size' => 2048,
             'paths' => $this->enumerateFiles($dir),
         ]);
@@ -51,7 +51,7 @@ class FileUpdateTest extends FileSyncProducerTestBase
             'file3.txt' => str_repeat('B', 5000)
         ]);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new \Reprint\Exporter\FileTreeProducer($dir, [
             'chunk_size' => 2048,
             'paths' => $this->enumerateFiles($dir),
         ]);

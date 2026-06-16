@@ -14,7 +14,7 @@ final class HmacServerTest extends TestCase
         $timestamp = '1700000000.123456';
         $nonce = '0123456789abcdef0123456789abcdef';
         $content_hash = hash('sha256', $body);
-        $client = new Site_Export_HMAC_Client(self::SECRET);
+        $client = new \Reprint\Exporter\Site_Export_HMAC_Client(self::SECRET);
 
         $headers = [
             'X-Auth-Signature' => $client->compute_signature($nonce, $timestamp, $content_hash),
@@ -23,14 +23,14 @@ final class HmacServerTest extends TestCase
             'X-Auth-Content-Hash' => $content_hash,
         ];
 
-        $server = new Site_Export_HMAC_Server(self::SECRET);
+        $server = new \Reprint\Exporter\Site_Export_HMAC_Server(self::SECRET);
 
         $this->assertNull($server->verify($headers, $body, [], 1700000001.0));
     }
 
     public function testMissingHeaderIsRejected(): void
     {
-        $server = new Site_Export_HMAC_Server(self::SECRET);
+        $server = new \Reprint\Exporter\Site_Export_HMAC_Server(self::SECRET);
 
         $this->assertSame(
             'Missing X-Auth-Signature header',
@@ -41,7 +41,7 @@ final class HmacServerTest extends TestCase
     public function testInvalidTimestampFormatIsRejected(): void
     {
         $headers = $this->buildHeadersForBody('', 'not-a-number');
-        $server = new Site_Export_HMAC_Server(self::SECRET);
+        $server = new \Reprint\Exporter\Site_Export_HMAC_Server(self::SECRET);
 
         $this->assertSame(
             'Invalid timestamp format',
@@ -52,7 +52,7 @@ final class HmacServerTest extends TestCase
     public function testExpiredTimestampIsRejected(): void
     {
         $headers = $this->buildHeadersForBody('', '1700000000.000000');
-        $server = new Site_Export_HMAC_Server(self::SECRET, 300);
+        $server = new \Reprint\Exporter\Site_Export_HMAC_Server(self::SECRET, 300);
 
         $this->assertStringContainsString(
             'Request timestamp expired',
@@ -63,7 +63,7 @@ final class HmacServerTest extends TestCase
     public function testShortNonceIsRejected(): void
     {
         $headers = $this->buildHeadersForBody('', '1700000000.000000', 'shortnonce');
-        $server = new Site_Export_HMAC_Server(self::SECRET);
+        $server = new \Reprint\Exporter\Site_Export_HMAC_Server(self::SECRET);
 
         $this->assertSame(
             'Nonce must be at least 16 characters',
@@ -75,7 +75,7 @@ final class HmacServerTest extends TestCase
     {
         $headers = $this->buildHeadersForBody('');
         $headers['X-Auth-Signature'] = str_repeat('0', 64);
-        $server = new Site_Export_HMAC_Server(self::SECRET);
+        $server = new \Reprint\Exporter\Site_Export_HMAC_Server(self::SECRET);
 
         $this->assertSame(
             'HMAC signature verification failed',
@@ -86,7 +86,7 @@ final class HmacServerTest extends TestCase
     public function testContentHashMismatchIsRejected(): void
     {
         $headers = $this->buildHeadersForBody('signed-body');
-        $server = new Site_Export_HMAC_Server(self::SECRET);
+        $server = new \Reprint\Exporter\Site_Export_HMAC_Server(self::SECRET);
 
         $this->assertSame(
             'Content hash mismatch: body was modified in transit',
@@ -104,7 +104,7 @@ final class HmacServerTest extends TestCase
             $server_headers['HTTP_' . strtoupper(str_replace('-', '_', $name))] = $value;
         }
 
-        $server = new Site_Export_HMAC_Server(self::SECRET);
+        $server = new \Reprint\Exporter\Site_Export_HMAC_Server(self::SECRET);
 
         $this->assertNull($server->verify($server_headers, $body, [], 1700000001.0));
     }
@@ -120,7 +120,7 @@ final class HmacServerTest extends TestCase
             $content_hash = hash('sha256', 'first-filesecond-file');
             $nonce = 'fedcba9876543210fedcba9876543210';
             $timestamp = '1700000000.000000';
-            $client = new Site_Export_HMAC_Client(self::SECRET);
+            $client = new \Reprint\Exporter\Site_Export_HMAC_Client(self::SECRET);
 
             $headers = [
                 'X-Auth-Signature' => $client->compute_signature($nonce, $timestamp, $content_hash),
@@ -134,7 +134,7 @@ final class HmacServerTest extends TestCase
                 'a_file' => ['tmp_name' => $tmp_a],
             ];
 
-            $server = new Site_Export_HMAC_Server(self::SECRET);
+            $server = new \Reprint\Exporter\Site_Export_HMAC_Server(self::SECRET);
 
             $this->assertNull($server->verify($headers, 'ignored-body', $files, 1700000001.0));
         } finally {
@@ -149,7 +149,7 @@ final class HmacServerTest extends TestCase
         string $nonce = '0123456789abcdef0123456789abcdef'
     ): array {
         $content_hash = hash('sha256', $body);
-        $client = new Site_Export_HMAC_Client(self::SECRET);
+        $client = new \Reprint\Exporter\Site_Export_HMAC_Client(self::SECRET);
 
         return [
             'X-Auth-Signature' => $client->compute_signature($nonce, $timestamp, $content_hash),

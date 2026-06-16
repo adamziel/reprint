@@ -1,4 +1,9 @@
 <?php
+
+namespace Reprint\Importer\TargetRuntime;
+
+use Reprint\Importer\Host\RuntimeManifest;
+
 /**
  * Runtime applier for PHP's built-in development server.
  *

@@ -2,6 +2,11 @@
 
 declare(strict_types=1);
 
+namespace Reprint\Importer;
+
+use InvalidArgumentException;
+use RuntimeException;
+
 /**
  * Sorts a text file line-by-line using an external merge sort when the file
  * is too large to fit in memory.  Works in pure PHP — no exec() or external

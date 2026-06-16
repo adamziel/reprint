@@ -3,6 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
+use Reprint\Importer\Protocol\StreamingContext;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -57,9 +59,9 @@ class FilesSyncStateTest extends TestCase
         rmdir($dir);
     }
 
-    private function makeClient(): \ImportClient
+    private function makeClient(): ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
+        return new ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
     }
 
     /**
@@ -344,7 +346,7 @@ class FilesSyncStateTest extends TestCase
 
         // Send a file chunk with new content
         $method = $reflection->getMethod('handle_file_chunk');
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $chunk = [
             'headers' => [
                 'x-file-path' => base64_encode('/wp-content/themes/flavor/style.css'),

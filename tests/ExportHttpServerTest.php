@@ -8,7 +8,7 @@ final class ExportHttpServerTest extends TestCase
 {
     public function testParsesJsonBodyAndCastsKnownTypes(): void
     {
-        $server = new Site_Export_HTTP_Server();
+        $server = new \Reprint\Exporter\Site_Export_HTTP_Server();
         $config = $server->parse_http_config(
             ['endpoint' => 'file_index'],
             [],
@@ -30,7 +30,7 @@ final class ExportHttpServerTest extends TestCase
 
     public function testNormalizeConfigAppliesDefaultDirectoryAndDecodesCursorHeader(): void
     {
-        $server = new Site_Export_HTTP_Server([
+        $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
             'default_directory' => '/srv/site',
         ]);
         $cursor = base64_encode(json_encode(['offset' => 10]) ?: '');
@@ -46,7 +46,7 @@ final class ExportHttpServerTest extends TestCase
 
     public function testNormalizeConfigAppliesDefaultDirectoryEvenWhenListDirPresent(): void
     {
-        $server = new Site_Export_HTTP_Server([
+        $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
             'default_directory' => '/srv/site',
         ]);
 
@@ -61,7 +61,7 @@ final class ExportHttpServerTest extends TestCase
 
     public function testNormalizeConfigRejectsInvalidCursor(): void
     {
-        $server = new Site_Export_HTTP_Server();
+        $server = new \Reprint\Exporter\Site_Export_HTTP_Server();
 
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Cursor must be base64-encoded');
@@ -75,7 +75,7 @@ final class ExportHttpServerTest extends TestCase
     public function testDispatchRoutesPreflightWithoutBudget(): void
     {
         $calls = [];
-        $server = new Site_Export_HTTP_Server([
+        $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
             'handlers' => [
                 'preflight' => function (array $config) use (&$calls): void {
                     $calls[] = ['preflight', $config];
@@ -93,7 +93,7 @@ final class ExportHttpServerTest extends TestCase
     public function testDispatchRoutesStreamingEndpointsWithCreatedBudget(): void
     {
         $calls = [];
-        $server = new Site_Export_HTTP_Server([
+        $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
             'handlers' => [
                 'file_index' => function (array $config, $budget) use (&$calls): void {
                     $calls[] = [$config, $budget];
@@ -113,7 +113,7 @@ final class ExportHttpServerTest extends TestCase
 
     public function testDispatchRejectsUnknownEndpoints(): void
     {
-        $server = new Site_Export_HTTP_Server([
+        $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
             'handlers' => [
                 'preflight' => static function (): void {},
             ],
@@ -128,7 +128,7 @@ final class ExportHttpServerTest extends TestCase
     public function testHandleRequestUsesParsedConfigAndDispatches(): void
     {
         $calls = [];
-        $server = new Site_Export_HTTP_Server([
+        $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
             'handlers' => [
                 'preflight' => function (array $config) use (&$calls): void {
                     $calls[] = $config;

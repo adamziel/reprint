@@ -1,4 +1,7 @@
 <?php
+
+namespace Reprint\Importer\Host;
+
 /**
  * Runtime manifest — the intermediate representation between host analyzers
  * and runtime appliers.

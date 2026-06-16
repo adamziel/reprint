@@ -1,4 +1,11 @@
 <?php
+
+use Reprint\Importer\Host\RuntimeManifest;
+use Reprint\Importer\TargetRuntime\NginxFpmApplier;
+use Reprint\Importer\TargetRuntime\PhpBuiltinApplier;
+use Reprint\Importer\TargetRuntime\PlaygroundCliApplier;
+use Reprint\Importer\TargetRuntime\RuntimeApplier;
+
 /**
  * Target runtime functions.
  *

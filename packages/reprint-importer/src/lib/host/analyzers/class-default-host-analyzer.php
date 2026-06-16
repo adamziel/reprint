@@ -1,4 +1,10 @@
 <?php
+
+namespace Reprint\Importer\Host\Analyzers;
+
+use Reprint\Importer\Host\HostAnalyzer;
+use Reprint\Importer\Host\RuntimeManifest;
+
 /**
  * Default host analyzer for unrecognized hosting providers.
  *

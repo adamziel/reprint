@@ -88,7 +88,7 @@ if (!function_exists('esc_attr')) {
     }
 }
 
-if (!class_exists('WP_Error', false)) {
+if (!class_exists(WP_Error::class, false)) {
     class WP_Error
     {
         public $code;

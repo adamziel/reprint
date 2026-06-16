@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -56,7 +57,7 @@ class ImportSymlinkTest extends TestCase
 
     public function testSymlinkIsCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -83,7 +84,7 @@ class ImportSymlinkTest extends TestCase
      */
     public function testRelativeSymlinkEscapingRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -109,7 +110,7 @@ class ImportSymlinkTest extends TestCase
      */
     public function testChainedSymlinksEscapingRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -151,7 +152,7 @@ class ImportSymlinkTest extends TestCase
      */
     public function testAbsoluteSymlinkOutsideRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -176,7 +177,7 @@ class ImportSymlinkTest extends TestCase
      */
     public function testRelativeSymlinkWithinRootCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -202,7 +203,7 @@ class ImportSymlinkTest extends TestCase
      */
     public function testAbsoluteSymlinkWithinRootCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
         $root = realpath($this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
@@ -225,7 +226,7 @@ class ImportSymlinkTest extends TestCase
 
     public function testSymlinkWithMissingDataSkipped()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_symlink_chunk');
@@ -263,7 +264,7 @@ class ImportSymlinkTest extends TestCase
 
     public function testSymlinkReplacesExistingFile()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         // Create a regular file
         $filePath = $this->tempDir . '/fs-root/test/link';

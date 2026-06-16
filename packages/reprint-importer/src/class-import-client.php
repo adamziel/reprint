@@ -1,9 +1,34 @@
 <?php
 
-use function WordPress\Reprint\Exporter\assert_valid_path;
-use function WordPress\Reprint\Exporter\normalize_path;
-use function WordPress\Reprint\Exporter\parse_size;
-use function WordPress\Reprint\Exporter\path_is_within_root;
+namespace Reprint\Importer;
+
+use CURLFile;
+use Exception;
+use InvalidArgumentException;
+use PDO;
+use PDOException;
+use PDOStatement;
+use RuntimeException;
+use Reprint\Importer\Host\RuntimeManifest;
+use Reprint\Importer\Protocol\CurlTimeoutException;
+use Reprint\Importer\Protocol\MultipartStreamParser;
+use Reprint\Importer\Protocol\PreserveLocalSkipException;
+use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Pull\Pull;
+use Reprint\Importer\QueryStream\WP_MySQL_FastQueryStream;
+use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
+use Reprint\Importer\TerminalProgress\TerminalProgress;
+use Reprint\Importer\Tuning\AdaptiveTuner;
+use Reprint\Importer\UrlRewrite\Base64ValueScanner;
+use Reprint\Importer\UrlRewrite\DomainCollector;
+use Reprint\Importer\UrlRewrite\PhpSerializationProcessor;
+use Reprint\Importer\UrlRewrite\SQLitePreparedInsertBuilder;
+use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
+use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
+use function Reprint\Exporter\assert_valid_path;
+use function Reprint\Exporter\normalize_path;
+use function Reprint\Exporter\parse_size;
+use function Reprint\Exporter\path_is_within_root;
 
 class ImportClient
 {
@@ -185,7 +210,7 @@ class ImportClient
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
-    /** @var Site_Export_HMAC_Client|null Signs requests when HMAC auth is configured. */
+    /** @var \Reprint\Exporter\Site_Export_HMAC_Client|null Signs requests when HMAC auth is configured. */
     private $hmac_client = null;
 
     /**
@@ -761,12 +786,12 @@ class ImportClient
         // X-Auth-Nonce, and X-Auth-Timestamp headers so the export API can verify
         // the caller without a SECRET_KEY in the URL.
         if (!empty($options["secret"])) {
-            if (!class_exists('Site_Export_HMAC_Client')) {
+            if (!class_exists(\Reprint\Exporter\Site_Export_HMAC_Client::class)) {
                 throw new RuntimeException(
                     'Streaming exporter runtime not found. Run composer install before using --secret.'
                 );
             }
-            $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
+            $this->hmac_client = new \Reprint\Exporter\Site_Export_HMAC_Client($options["secret"]);
         }
 
         // pull orchestrates the full pipeline (preflight → files → db → apply)
@@ -1238,7 +1263,7 @@ class ImportClient
             file_put_contents($tmp, json_encode($dir_files, JSON_UNESCAPED_SLASHES));
 
             $post_data = [
-                "file_list" => new \CURLFile($tmp, "application/json", "file_list"),
+                "file_list" => new CURLFile($tmp, "application/json", "file_list"),
             ];
             $url = $this->build_url("file_fetch", null, ["directory" => [$directory]]);
 
@@ -2678,8 +2703,8 @@ class ImportClient
             }
         } elseif (file_exists($sql_file)) {
             // Scan db.sql for domains using the same pipeline as db-pull
-            $query_stream = new \WP_MySQL_Naive_Query_Stream();
-            $domain_collector = new \DomainCollector();
+            $query_stream = new WP_MySQL_Naive_Query_Stream();
+            $domain_collector = new DomainCollector();
 
             $sql_handle = fopen($sql_file, "r");
             if (!$sql_handle) {
@@ -3892,8 +3917,8 @@ class ImportClient
         // public class names, so the existing instance is fine.
         $driver_loader = resolve_sqlite_integration_path("/wp-pdo-mysql-on-sqlite.php");
         if (
-            class_exists("WP_PDO_MySQL_On_SQLite", false) &&
-            class_exists("WP_Parser_Grammar", false)
+            class_exists(\WP_PDO_MySQL_On_SQLite::class, false) &&
+            class_exists(\WP_Parser_Grammar::class, false)
         ) {
             $driver_loader = null;
         }
@@ -3918,7 +3943,7 @@ class ImportClient
         );
 
         try {
-            $pdo = new WP_PDO_MySQL_On_SQLite($dsn, null, null, [
+            $pdo = new \WP_PDO_MySQL_On_SQLite($dsn, null, null, [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             ]);
@@ -4199,7 +4224,7 @@ class ImportClient
         // (buffer overflow without a top-level semicolon, or input drained
         // mid-string/comment), so the slow path is still available for
         // any input the fast scanner doesn't handle.
-        $query_stream = new \WP_MySQL_FastQueryStream();
+        $query_stream = new WP_MySQL_FastQueryStream();
         $query_stream->set_error_logger(function (array $err) use (&$stmt_count) {
             $this->audit_log(
                 sprintf(
@@ -4638,7 +4663,7 @@ class ImportClient
         // Use PhpSerializationProcessor to iterate string values safely —
         // no unserialize(), no risk of arbitrary object instantiation.
         $serialized = $row['option_value'];
-        $processor = new \PhpSerializationProcessor($serialized);
+        $processor = new PhpSerializationProcessor($serialized);
         if ($processor->is_malformed()) {
             return [];
         }
@@ -6296,11 +6321,11 @@ class ImportClient
         }
 
         // Domain discovery and statement counting: scan SQL for URLs during download
-        $query_stream = class_exists('WP_MySQL_Naive_Query_Stream')
-            ? new \WP_MySQL_Naive_Query_Stream()
+        $query_stream = class_exists(WP_MySQL_Naive_Query_Stream::class)
+            ? new WP_MySQL_Naive_Query_Stream()
             : null;
-        $domain_collector = class_exists('DomainCollector')
-            ? new \DomainCollector()
+        $domain_collector = class_exists(DomainCollector::class)
+            ? new DomainCollector()
             : null;
         $domains_file = $this->state_dir . "/.import-domains.json";
         $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
@@ -6744,8 +6769,8 @@ class ImportClient
      * base64-decoded values for URL domains.
      */
     private function drain_query_stream_for_domains(
-        \WP_MySQL_Naive_Query_Stream $query_stream,
-        \DomainCollector $domain_collector,
+        WP_MySQL_Naive_Query_Stream $query_stream,
+        DomainCollector $domain_collector,
         ?int &$statements_counted = null
     ) {
         while ($query_stream->next_query()) {
@@ -6765,7 +6790,7 @@ class ImportClient
             $table = self::extract_insert_table($query);
             $is_options_table = substr($table, -8) === '_options';
 
-            $scanner = new \Base64ValueScanner($query);
+            $scanner = new Base64ValueScanner($query);
             while ($scanner->next_value()) {
                 // For _options tables, extract the option_name (second column)
                 // and skip transients — they contain ephemeral cached data

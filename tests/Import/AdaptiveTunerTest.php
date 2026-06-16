@@ -2,8 +2,8 @@
 
 namespace ImportTests;
 
-use AdaptiveTuner;
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Tuning\AdaptiveTuner;
 
 require_once __DIR__ . '/../../importer/import.php';
 

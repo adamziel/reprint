@@ -1,5 +1,9 @@
 <?php
 
+namespace Reprint\Importer\UrlRewrite;
+
+use WP_MySQL_Lexer;
+
 /**
  * Cursor-based processor that iterates over FROM_BASE64('...') values in a SQL
  * statement, letting the caller read and replace each decoded value.

@@ -1,4 +1,7 @@
 <?php
+
+namespace Reprint\Importer\Host;
+
 /**
  * Interface for host analyzers.
  *

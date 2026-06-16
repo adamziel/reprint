@@ -31,7 +31,7 @@ namespace {
     }
 }
 
-namespace WordPress\Reprint\Exporter {
+namespace Reprint\Exporter {
 
 use InvalidArgumentException;
 use RuntimeException;

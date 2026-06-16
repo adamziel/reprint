@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -55,9 +56,9 @@ class DownloadListProgressTest extends TestCase
         rmdir($dir);
     }
 
-    private function makeClient(): \ImportClient
+    private function makeClient(): ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
+        return new ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
     }
 
     /**
@@ -115,7 +116,7 @@ class DownloadListProgressTest extends TestCase
         return [$client, $reflection];
     }
 
-    private function readCounters(\ImportClient $client, \ReflectionClass $reflection): array
+    private function readCounters(ImportClient $client, \ReflectionClass $reflection): array
     {
         return [
             'total' => $reflection->getProperty('download_list_total')->getValue($client),

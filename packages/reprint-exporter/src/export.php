@@ -3,10 +3,17 @@
  * Unified export API for SQL and file operations.
  */
 
-use function WordPress\Reprint\Exporter\assert_valid_path;
-use function WordPress\Reprint\Exporter\build_pdo_dsn;
-use function WordPress\Reprint\Exporter\json_encode_or_throw;
-use function WordPress\Reprint\Exporter\parse_size;
+use Reprint\Exporter\FileTreeProducer;
+use Reprint\Exporter\GzipOutputStream;
+use Reprint\Exporter\MySQLDumpProducer;
+use Reprint\Exporter\ResourceBudget;
+use Reprint\Exporter\Site_Export_HTTP_Server;
+use Reprint\Exporter\SqliteDriverPDO;
+use Reprint\Exporter\WpdbDriverPDO;
+use function Reprint\Exporter\assert_valid_path;
+use function Reprint\Exporter\build_pdo_dsn;
+use function Reprint\Exporter\json_encode_or_throw;
+use function Reprint\Exporter\parse_size;
 
 // Capture any accidental output before headers are set so we can discard it
 // when switching to streaming mode later.
@@ -60,45 +67,6 @@ define('STAT_TYPE_FIFO',   0010000);
  * should_continue() call, this class bundles them into a single
  * object with a simple has_remaining() check.
  */
-class ResourceBudget
-{
-    /** @var float */
-    public $start_time;
-    /** @var int */
-    public $max_time;
-    /** @var int */
-    public $max_memory;
-    /** @var float */
-    public $memory_threshold;
-
-    public function __construct(
-        float $start_time,
-        int $max_time,
-        int $max_memory,
-        float $memory_threshold
-    ) {
-        $this->start_time = $start_time;
-        $this->max_time = $max_time;
-        $this->max_memory = $max_memory;
-        $this->memory_threshold = $memory_threshold;
-    }
-
-    /** Returns false when the request should yield due to time or memory pressure. */
-    public function has_remaining(): bool
-    {
-        if (microtime(true) - $this->start_time >= $this->max_time) {
-            return false;
-        }
-
-        $memory_used = memory_get_usage(true);
-        if ($memory_used >= $this->max_memory * $this->memory_threshold) {
-            return false;
-        }
-
-        return true;
-    }
-}
-
 /**
  * Global streaming context. When set, the error handlers emit error chunks
  * into the active gzip multipart stream instead of sending plain JSON
@@ -358,10 +326,10 @@ function create_wpdb_pdo_adapter()
 // require_once does not resolve symlinks, so the same physical file can
 // be loaded twice through different paths, causing "Cannot redeclare"
 // fatal errors.
-if (!function_exists('WordPress\\Reprint\\Exporter\\build_pdo_dsn')) {
+if (!function_exists('Reprint\\Exporter\\build_pdo_dsn')) {
     require_once __DIR__ . "/utils.php";
 }
-if (!class_exists('Site_Export_HTTP_Server', false)) {
+if (!class_exists(Site_Export_HTTP_Server::class, false)) {
     require_once __DIR__ . "/class-http-server.php";
 }
 
@@ -562,6 +530,8 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
 
 require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/class-file-tree-producer.php";
+require_once __DIR__ . "/class-gzip-output-stream.php";
+require_once __DIR__ . "/class-resource-budget.php";
 
 /**
  * Prepares the PHP environment for streaming by disabling output buffering,
@@ -590,110 +560,6 @@ function prepare_streaming_response(): void
     @ini_set("implicit_flush", "1");
 
     @ob_implicit_flush(true);
-}
-
-/**
- * Incremental gzip compressor that emits data as it arrives rather than
- * buffering the entire response.
- */
-class GzipOutputStream
-{
-    private $deflate_ctx;
-    private bool $enabled = true;
-
-    public function __construct(bool $enabled = true)
-    {
-        $this->enabled = $enabled;
-        if ($this->enabled) {
-            $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
-            if ($this->deflate_ctx === false) {
-                throw new \RuntimeException(
-                    "deflate_init() failed — zlib may be misconfigured",
-                );
-            }
-            if (!headers_sent()) {
-                @header("Content-Encoding: gzip");
-            }
-        }
-    }
-
-    /**
-     * Writes data without forcing a sync point.
-     *
-     * Uses ZLIB_NO_FLUSH so the compressor can build back-references across
-     * multiple write() calls, producing significantly better compression
-     * ratios than ZLIB_SYNC_FLUSH on every call.  Data still flows out
-     * whenever zlib's internal buffer fills — the decompressor on the other
-     * end will decompress incrementally.
-     *
-     * Call sync() after each complete multipart part to guarantee the client
-     * can decompress everything emitted so far.
-     */
-    public function write(string $data): void
-    {
-        if (!$this->enabled) {
-            echo $data;
-            return;
-        }
-        $compressed = deflate_add(
-            $this->deflate_ctx,
-            $data,
-            ZLIB_NO_FLUSH,
-        );
-        if ($compressed === false) {
-            throw new \RuntimeException("deflate_add() failed during gzip write");
-        }
-        if ($compressed !== "") {
-            echo $compressed;
-        }
-    }
-
-    /**
-     * Forces a sync flush so the client can decompress all data written so far.
-     */
-    public function sync(): void
-    {
-        if (!$this->enabled) {
-            flush();
-            return;
-        }
-        $compressed = deflate_add(
-            $this->deflate_ctx,
-            "",
-            ZLIB_SYNC_FLUSH,
-        );
-        if ($compressed === false) {
-            throw new \RuntimeException("deflate_add() failed during gzip sync");
-        }
-        if ($compressed !== "") {
-            echo $compressed;
-        }
-        flush();
-    }
-
-    public function flush(): void
-    {
-        $this->sync();
-    }
-
-    /**
-     * Finalizes the gzip stream with ZLIB_FINISH.
-     */
-    public function finish(): void
-    {
-        if (!$this->enabled) {
-            flush();
-            return;
-        }
-        $final = deflate_add($this->deflate_ctx, "", ZLIB_FINISH);
-        if ($final === false) {
-            throw new \RuntimeException("deflate_add() failed during gzip finish");
-        }
-        if ($final !== "") {
-            echo $final;
-        }
-        flush();
-    }
 }
 
 /**
@@ -842,7 +708,7 @@ function endpoint_sql_chunk(
         $producer_options["cursor"] = $config["cursor"];
     }
 
-    $reader = new WordPress\DataLiberation\MySQLDumpProducer(
+    $reader = new MySQLDumpProducer(
         $mysql,
         $producer_options,
     );

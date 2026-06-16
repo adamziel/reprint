@@ -3,6 +3,9 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
+use Reprint\Importer\Pull\Pull;
+use Reprint\Importer\TerminalProgress\TerminalProgress;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -49,10 +52,10 @@ class PullStartModeTest extends TestCase
         rmdir($dir);
     }
 
-    private function makePull(): \Pull
+    private function makePull(): Pull
     {
-        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
-        return new \Pull($client, new \TerminalProgress(false, STDOUT));
+        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        return new Pull($client, new TerminalProgress(false, STDOUT));
     }
 
     /**
@@ -121,7 +124,7 @@ class PullStartModeTest extends TestCase
             'Invalid --start-runtime value: later. Valid runtimes: nginx-fpm, php-builtin, playground-cli, none'
         );
 
-        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
         $client->run([
             'command' => 'pull',
             'start_runtime' => 'later',
@@ -135,7 +138,7 @@ class PullStartModeTest extends TestCase
             'Starting runtime nginx-fpm is not supported yet. Supported start runtimes: php-builtin, playground-cli, none'
         );
 
-        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
         $client->run([
             'command' => 'pull',
             'runtime' => 'nginx-fpm',
@@ -150,7 +153,7 @@ class PullStartModeTest extends TestCase
             '--start-runtime=playground-cli requires matching --runtime=playground-cli, or omit --runtime to use playground-cli for both.'
         );
 
-        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
         $client->run([
             'command' => 'pull',
             'runtime' => 'php-builtin',

@@ -3,6 +3,9 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Host\Analyzers\DefaultHostAnalyzer;
+use Reprint\Importer\Host\Analyzers\WpcloudHostAnalyzer;
+use Reprint\Importer\ImportClient;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -119,32 +122,32 @@ class ProductionDropInRemovalTest extends TestCase
         );
     }
 
-    private function makeClient(): \ImportClient
+    private function makeClient(): ImportClient
     {
-        return new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
+        return new ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
     }
 
-    private function callPrivate(\ImportClient $client, string $method, array $args = [])
+    private function callPrivate(ImportClient $client, string $method, array $args = [])
     {
         $reflection = new \ReflectionClass($client);
         $method_reflection = $reflection->getMethod($method);
         return $method_reflection->invoke($client, ...$args);
     }
 
-    private function setPrivate(\ImportClient $client, string $property, $value): void
+    private function setPrivate(ImportClient $client, string $property, $value): void
     {
         $reflection = new \ReflectionClass($client);
         $property_reflection = $reflection->getProperty($property);
         $property_reflection->setValue($client, $value);
     }
 
-    private function loadClientState(\ImportClient $client): void
+    private function loadClientState(ImportClient $client): void
     {
         $state = $this->callPrivate($client, 'load_state');
         $this->setPrivate($client, 'state', $state);
     }
 
-    private function runApplyRuntime(\ImportClient $client): void
+    private function runApplyRuntime(ImportClient $client): void
     {
         ob_start();
         try {

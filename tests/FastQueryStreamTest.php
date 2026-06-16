@@ -1,6 +1,8 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\QueryStream\WP_MySQL_FastQueryStream;
+use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
 
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/../packages/reprint-importer/src/lib/mysql-query-stream/load.php';

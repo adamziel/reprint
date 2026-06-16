@@ -140,15 +140,15 @@ function _site_export_update_shared_secret(string $secret): bool {
  * matches AND that the HMAC is valid.
  */
 function _site_export_verify_hmac(string $secret): ?string {
-    if (!class_exists('Site_Export_HMAC_Server')) {
+    if (!class_exists(\Reprint\Exporter\Site_Export_HMAC_Server::class)) {
         _site_export_load_exporter_runtime();
     }
 
-    if (!class_exists('Site_Export_HMAC_Server')) {
+    if (!class_exists(\Reprint\Exporter\Site_Export_HMAC_Server::class)) {
         return 'Reprint Exporter runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.';
     }
 
-    $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+    $server = new \Reprint\Exporter\Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
     return $server->verify_globals();
 }
 
@@ -206,10 +206,10 @@ function _site_export_handle_api_request(array $options = []): void {
     // credentials, so we must not require auth before CORS passes.
     // The class is loaded by the Composer autoloader on demand, but
     // load it eagerly in case the autoloader hasn't been required yet.
-    if (!class_exists('Site_Export_HTTP_Server')) {
+    if (!class_exists(\Reprint\Exporter\Site_Export_HTTP_Server::class)) {
         _site_export_load_exporter_runtime();
     }
-    Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options('*');
+    \Reprint\Exporter\Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options('*');
 
     // Buffer output so stray warnings don't corrupt the JSON response.
     ob_start();
@@ -265,7 +265,7 @@ function _site_export_handle_api_request(array $options = []): void {
 
     // -- Dispatch --
     try {
-        Site_Export_HTTP_Server::serve([
+        \Reprint\Exporter\Site_Export_HTTP_Server::serve([
             'default_directory' => ABSPATH,
         ]);
     } catch (Exception $e) {

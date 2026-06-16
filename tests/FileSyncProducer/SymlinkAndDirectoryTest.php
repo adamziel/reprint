@@ -19,7 +19,7 @@ class SymlinkAndDirectoryTest extends FileSyncProducerTestBase
         $linkPath = $dir . '/link.txt';
         symlink($dir . '/real.txt', $linkPath);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new \Reprint\Exporter\FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -48,7 +48,7 @@ class SymlinkAndDirectoryTest extends FileSyncProducerTestBase
         mkdir($fullDir);
         file_put_contents($fullDir . '/file.txt', 'Content');
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new \Reprint\Exporter\FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -88,7 +88,7 @@ class SymlinkAndDirectoryTest extends FileSyncProducerTestBase
         mkdir($level2);
         mkdir($level3);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new \Reprint\Exporter\FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);
@@ -115,7 +115,7 @@ class SymlinkAndDirectoryTest extends FileSyncProducerTestBase
         $emptyDir = $dir . '/test_empty';
         mkdir($emptyDir);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new \Reprint\Exporter\FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);

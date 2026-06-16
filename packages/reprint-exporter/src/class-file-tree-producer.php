@@ -1,4 +1,9 @@
 <?php
+
+namespace Reprint\Exporter;
+
+use InvalidArgumentException;
+
 /**
  * Streams a provided list of filesystem paths in sorted order with
  * cursor-based resumption. The caller must pass the same paths array

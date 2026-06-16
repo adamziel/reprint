@@ -1,5 +1,9 @@
 <?php
 
+namespace Reprint\Importer\UrlRewrite;
+
+use PDO;
+
 /**
  * Builds SQLite prepared INSERT statements for MySQLDumpProducer-shaped SQL.
  *

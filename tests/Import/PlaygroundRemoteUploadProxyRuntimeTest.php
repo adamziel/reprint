@@ -3,6 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Host\RuntimeManifest;
+use Reprint\Importer\TargetRuntime\PlaygroundCliApplier;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/class-runtime-manifest.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/target-runtime/load.php';
@@ -67,7 +69,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 
     public function testPlaygroundMountsProxyStateFilesIntoVfs(): void
     {
-        $manifest = new \RuntimeManifest('other');
+        $manifest = new RuntimeManifest('other');
         $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL'] =
             'https://source.example/wp-content/uploads';
         $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE'] =
@@ -81,7 +83,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
             'description' => 'Proxy missing uploads',
         ];
 
-        $applier = new \PlaygroundCliApplier();
+        $applier = new PlaygroundCliApplier();
         $applier->apply($manifest, $this->fsRoot, $this->outputDir, [
             'port' => 9400,
             'wordpress_index' => $this->fsRoot . '/index.php',

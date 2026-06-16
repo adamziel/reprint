@@ -1,4 +1,9 @@
 <?php
+
+namespace Reprint\Importer\TargetRuntime;
+
+use Reprint\Importer\Host\RuntimeManifest;
+
 /**
  * Runtime applier for WordPress Playground CLI (@wp-playground/cli).
  *

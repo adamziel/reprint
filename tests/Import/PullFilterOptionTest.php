@@ -3,10 +3,11 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
 
 require_once __DIR__ . '/../../importer/import.php';
 
-class PullFilterFakeClient extends \ImportClient
+class PullFilterFakeClient extends ImportClient
 {
     private bool $create_skipped_list;
 

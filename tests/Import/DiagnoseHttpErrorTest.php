@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -14,13 +15,13 @@ class DiagnoseHttpErrorTest extends TestCase
 {
     private function diagnose(int $http_code, ?string $body = null, ?string $redirect_url = null, bool $has_secret = true): array
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'http://example.com',
             sys_get_temp_dir(),
             sys_get_temp_dir(),
         );
 
-        $ref = new \ReflectionClass(\ImportClient::class);
+        $ref = new \ReflectionClass(ImportClient::class);
 
         if ($has_secret) {
             $hmac = $ref->getProperty('hmac_client');
@@ -248,13 +249,13 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testFormatDiagnosedErrorStoresCodeOnInstance()
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'http://example.com',
             sys_get_temp_dir(),
             sys_get_temp_dir(),
         );
 
-        $ref = new \ReflectionClass(\ImportClient::class);
+        $ref = new \ReflectionClass(ImportClient::class);
         $diagnose = $ref->getMethod('diagnose_http_error');
         $format = $ref->getMethod('format_diagnosed_error');
 

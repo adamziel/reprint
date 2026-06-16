@@ -1,4 +1,10 @@
 <?php
+
+namespace Reprint\Exporter;
+
+use PDO;
+use WP_SQLite_Driver;
+
 /**
  * PDO-compatible adapter for WP_SQLite_Driver.
  *

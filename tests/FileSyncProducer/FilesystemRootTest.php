@@ -17,7 +17,7 @@ class FilesystemRootTest extends FileSyncProducerTestBase
             'file2.txt' => 'Content 2'
         ]);
 
-        $sync = new \FileTreeProducer($dir, [
+        $sync = new \Reprint\Exporter\FileTreeProducer($dir, [
             'paths' => $this->enumerateFiles($dir),
         ]);
         $chunks = $this->processAllChunks($sync);

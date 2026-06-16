@@ -3,6 +3,9 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\ImportClient;
+use Reprint\Importer\Protocol\MultipartStreamParser;
+use Reprint\Importer\Protocol\StreamingContext;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -27,7 +30,7 @@ class FileBodyStreamingTest extends TestCase
 
     public function testFilePartBodiesAreWrittenIncrementally(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'http://fake.url',
             $this->tempDir . '/state',
             $this->tempDir . '/fs-root',
@@ -37,7 +40,7 @@ class FileBodyStreamingTest extends TestCase
         $reflection->getProperty('state')->setValue($client, []);
 
         $handleFileChunk = $reflection->getMethod('handle_file_chunk');
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $bodyLengths = [];
         $context->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context, &$bodyLengths): void {
             if (($chunk['headers']['x-chunk-type'] ?? '') === 'file') {
@@ -49,7 +52,7 @@ class FileBodyStreamingTest extends TestCase
         $currentChunk = null;
         $makeHandler = $reflection->getMethod('make_chunk_handler');
         $handler = $makeHandler->invokeArgs($client, [$context, &$currentChunk]);
-        $parser = new \MultipartStreamParser('BOUNDARY', $handler);
+        $parser = new MultipartStreamParser('BOUNDARY', $handler);
 
         $body = str_repeat('0123456789abcdef', 64 * 1024);
         $multipart = $this->buildMultipart('BOUNDARY', [
@@ -99,7 +102,7 @@ class FileBodyStreamingTest extends TestCase
      */
     public function testMidFileResumeAppendsRemainingBytesWithoutDuplication(): void
     {
-        $client = new \ImportClient(
+        $client = new ImportClient(
             'http://fake.url',
             $this->tempDir . '/state',
             $this->tempDir . '/fs-root',
@@ -118,7 +121,7 @@ class FileBodyStreamingTest extends TestCase
         // sending it — so on resume we re-receive the whole part body. To
         // mimic the *intended* behaviour (server cooperates and skips the
         // already-written prefix), pass 2 sends only the missing tail.
-        $context1 = new \StreamingContext();
+        $context1 = new StreamingContext();
         $handleFileChunk = $reflection->getMethod('handle_file_chunk');
         $context1->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context1): void {
             $handleFileChunk->invoke($client, $chunk, $context1);
@@ -126,7 +129,7 @@ class FileBodyStreamingTest extends TestCase
         $currentChunk1 = null;
         $makeHandler = $reflection->getMethod('make_chunk_handler');
         $handler1 = $makeHandler->invokeArgs($client, [$context1, &$currentChunk1]);
-        $parser1 = new \MultipartStreamParser('BOUNDARY', $handler1);
+        $parser1 = new MultipartStreamParser('BOUNDARY', $handler1);
 
         $multipart1 = $this->buildMultipart('BOUNDARY', [
             [
@@ -167,7 +170,7 @@ class FileBodyStreamingTest extends TestCase
         }
         $trackedBytes = $context1->file_bytes_written;
 
-        $context2 = new \StreamingContext();
+        $context2 = new StreamingContext();
         $context2->file_handle = fopen($target, 'ab');
         $context2->file_path = $target;
         $context2->file_ctime = 1234567890;
@@ -177,7 +180,7 @@ class FileBodyStreamingTest extends TestCase
         };
         $currentChunk2 = null;
         $handler2 = $makeHandler->invokeArgs($client, [$context2, &$currentChunk2]);
-        $parser2 = new \MultipartStreamParser('BOUNDARY', $handler2);
+        $parser2 = new MultipartStreamParser('BOUNDARY', $handler2);
 
         // Pass 2: continuation part for the same file. x-first-chunk=0 is the
         // signal that this is a resume, not a fresh open — handle_file_chunk

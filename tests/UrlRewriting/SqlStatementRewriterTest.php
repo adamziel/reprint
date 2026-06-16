@@ -1,6 +1,9 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\UrlRewrite\Base64ValueScanner;
+use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
+use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/load.php';
