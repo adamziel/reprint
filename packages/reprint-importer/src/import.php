@@ -10264,13 +10264,6 @@ class ImportClient
     }
 
     /**
-     * Return the default compact state structure.
-     */
-    /**
-     * Reset state to defaults while preserving cross-command data like
-     * preflight results, version, and follow_symlinks.
-     */
-    /**
      * Empty the skipped-files download list by truncating it in place
      * rather than deleting it.
      *
@@ -10332,6 +10325,10 @@ class ImportClient
         }
     }
 
+    /**
+     * Reset state to defaults while preserving cross-command data like
+     * preflight results, version, and follow_symlinks.
+     */
     private function reset_state(): void
     {
         $preflight = $this->state["preflight"] ?? null;
@@ -10353,6 +10350,9 @@ class ImportClient
         }
     }
 
+    /**
+     * Return the default compact state structure.
+     */
     public function default_state(): array
     {
         return [
