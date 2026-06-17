@@ -1888,10 +1888,7 @@ class ImportClient
                     @unlink($this->download_list_file);
                     $this->audit_log("FILE DELETE | {$this->download_list_file}");
                 }
-                if (file_exists($this->skipped_download_list_file)) {
-                    @unlink($this->skipped_download_list_file);
-                    $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
-                }
+                $this->clear_skipped_download_list("abort files-pull");
                 if (file_exists($this->volatile_files_file)) {
                     @unlink($this->volatile_files_file);
                     $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
@@ -2828,12 +2825,7 @@ class ImportClient
                     "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
                 );
             }
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | clearing before diff stage",
-                );
-            }
+            $this->clear_skipped_download_list("clearing before diff stage");
             $this->save_state($this->state);
             $stage = "diff";
         }
@@ -2887,11 +2879,8 @@ class ImportClient
                     "FILE DELETE | {$this->download_list_file} | no files to fetch",
                 );
             }
-            if (!$has_skipped && file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | no skipped files to fetch",
-                );
+            if (!$has_skipped) {
+                $this->clear_skipped_download_list("no skipped files to fetch");
             }
         }
 
@@ -2960,12 +2949,7 @@ class ImportClient
             $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
             $this->save_state($this->state);
 
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | skipped files fetch complete",
-                );
-            }
+            $this->clear_skipped_download_list("skipped files fetch complete");
         }
 
         // Recreate intermediate path symlinks so the full symlink chain
@@ -10189,6 +10173,29 @@ class ImportClient
     /**
      * Return the default compact state structure.
      */
+    /**
+     * Empty the skipped-files download list by truncating it in place
+     * rather than deleting it.
+     *
+     * apply-runtime mounts this file into the generated runtime (the
+     * temporary remote-uploads proxy reads it to decide which paths are
+     * still remote-only). A running server re-resolves its mounts on every
+     * PHP runtime rotation, and on restart from a persisted config, so
+     * deleting the file breaks the mount with ENOENT. An empty file means
+     * "no remote-only files left", which is what every caller wants, since
+     * all has-skipped checks test for size > 0.
+     */
+    public function clear_skipped_download_list(string $reason): void
+    {
+        if (!file_exists($this->skipped_download_list_file)) {
+            return;
+        }
+        file_put_contents($this->skipped_download_list_file, "");
+        $this->audit_log(
+            "FILE TRUNCATE | {$this->skipped_download_list_file} | {$reason}",
+        );
+    }
+
     /**
      * Reset state to defaults while preserving cross-command data like
      * preflight results, version, and follow_symlinks.

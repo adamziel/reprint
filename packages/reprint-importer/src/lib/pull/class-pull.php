@@ -424,12 +424,14 @@ class Pull
             $state_dir . "/.import-domains.json",
             $state_dir . "/.import-remote-index.jsonl",
             $state_dir . "/.import-download-list.jsonl",
-            $state_dir . "/.import-download-list-skipped.jsonl",
         ] as $path) {
             if (file_exists($path)) {
                 @unlink($path);
             }
         }
+        // Truncated, not deleted: the generated runtime may hold a mount
+        // of this file for the remote-uploads proxy.
+        $this->client->clear_skipped_download_list("prepared for delta re-pull");
 
         $this->client->audit_log("PULL | prepared for delta re-pull", true);
     }

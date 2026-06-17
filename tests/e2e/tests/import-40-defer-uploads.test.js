@@ -11,7 +11,7 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
@@ -133,9 +133,17 @@ describe('Import: --filter', () => {
             }
         });
 
-        it('skipped download list was cleaned up', () => {
-            assert.ok(!existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
-                'Expected skipped download list to be cleaned up');
+        it('skipped download list was emptied', () => {
+            // The list is truncated to empty rather than deleted: apply-runtime
+            // mounts this path into the generated runtime, and deleting it would
+            // crash the runtime (ENOENT) on its next rotation. An empty file
+            // means "no remote-only files left" (all has-skipped checks test
+            // for size > 0).
+            const skippedList = join(tempDir, '.import-download-list-skipped.jsonl');
+            assert.ok(existsSync(skippedList),
+                'Expected skipped download list to remain on disk (truncated, not deleted)');
+            assert.equal(statSync(skippedList).size, 0,
+                'Expected skipped download list to be emptied after skipped-earlier');
         });
 
         it('all files match source', () => {
