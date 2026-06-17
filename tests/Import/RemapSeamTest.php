@@ -69,7 +69,7 @@ class RemapSeamTest extends TestCase
     public function testInScopePathMapsToDest(): void
     {
         $c = $this->clientWithRules(array(
-            array('source' => '/var/www/html/wp-content', 'target' => $this->root . '/wp-content'),
+            '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
         $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
             '/var/www/html/wp-content/plugins/woo/woo.php',
@@ -83,8 +83,8 @@ class RemapSeamTest extends TestCase
         // target. It must still win — specificity is ranked by source, not by
         // target length.
         $c = $this->clientWithRules(array(
-            array('source' => '/srv/wp-content', 'target' => $this->root . '/archive-of-everything'),
-            array('source' => '/srv/wp-content/plugins', 'target' => $this->root . '/p'),
+            '/srv/wp-content' => $this->root . '/archive-of-everything',
+            '/srv/wp-content/plugins' => $this->root . '/p',
         ));
         $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
             '/srv/wp-content/plugins/woo/woo.php',
@@ -97,7 +97,7 @@ class RemapSeamTest extends TestCase
         // A target that is the docroot itself: files land directly at the root,
         // no double slash.
         $c = $this->clientWithRules(array(
-            array('source' => '/var/www/html/wp-content', 'target' => $this->root),
+            '/var/www/html/wp-content' => $this->root,
         ));
         $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
             '/var/www/html/wp-content/plugins/woo/woo.php',
@@ -108,7 +108,7 @@ class RemapSeamTest extends TestCase
     public function testOutOfScopePathFallsBackToNestedIdentity(): void
     {
         $c = $this->clientWithRules(array(
-            array('source' => '/var/www/html/wp-content', 'target' => $this->root . '/wp-content'),
+            '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
         $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
             '/var/www/html/wp-admin/index.php',

@@ -78,8 +78,10 @@ class RemapResolveTest extends TestCase
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
         $rules = $this->call($c, 'resolve_remap', array(array(array('wp-content', 'wp-content'))));
         $this->assertCount(1, $rules);
-        $this->assertSame('/var/www/html/wp-content', $rules[0]['source']);
-        $this->assertSame($this->root . '/wp-content', $rules[0]['target']);
+        $this->assertSame(
+            $this->root . '/wp-content',
+            $rules['/var/www/html/wp-content']
+        );
     }
 
     public function testAbsoluteTargetContainingDocrootIsTreatedAsRelative(): void
@@ -90,7 +92,10 @@ class RemapResolveTest extends TestCase
         $rules = $this->call($c, 'resolve_remap', array(array(
             array('wp-content', $this->root . '/some/where'),
         )));
-        $this->assertSame($this->root . '/some/where', $rules[0]['target']);
+        $this->assertSame(
+            $this->root . '/some/where',
+            $rules['/var/www/html/wp-content']
+        );
     }
 
     public function testSurroundingSlashesOnSourceAndTargetAreIgnored(): void
@@ -100,8 +105,10 @@ class RemapResolveTest extends TestCase
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
         $rules = $this->call($c, 'resolve_remap', array(array(array('/wp-content/plugins/', '/wp-content/plugins/'))));
         $this->assertCount(1, $rules);
-        $this->assertSame('/var/www/html/wp-content/plugins', $rules[0]['source']);
-        $this->assertSame($this->root . '/wp-content/plugins', $rules[0]['target']);
+        $this->assertSame(
+            $this->root . '/wp-content/plugins',
+            $rules['/var/www/html/wp-content/plugins']
+        );
     }
 
     public function testDetachedComponentsExpandUnderTarget(): void
@@ -115,10 +122,7 @@ class RemapResolveTest extends TestCase
             'uploads' => array('basedir' => '/mnt/blogs/uploads'),
         ));
         $rules = $this->call($c, 'resolve_remap', array(array(array('wp-content', 'wp-content'))));
-        $byTarget = array();
-        foreach ($rules as $r) {
-            $byTarget[$r['target']] = $r['source'];
-        }
+        $byTarget = array_flip($rules);
         $this->assertCount(3, $rules);
         $this->assertSame('/var/www/html/wp-content', $byTarget[$this->root . '/wp-content']);
         $this->assertSame('/mnt/blogs/uploads', $byTarget[$this->root . '/wp-content/uploads']);
@@ -137,7 +141,7 @@ class RemapResolveTest extends TestCase
             array('wp-content/plugins/woocommerce', 'wp-content/plugins/woocommerce'),
         )));
         $this->assertCount(1, $rules);
-        $this->assertSame('/custom/plugins/woocommerce', $rules[0]['source']);
+        $this->assertArrayHasKey('/custom/plugins/woocommerce', $rules);
     }
 
     public function testManualComponentRemapOverridesWholeTreeExpansion(): void
@@ -153,11 +157,10 @@ class RemapResolveTest extends TestCase
             array('wp-content/plugins', 'special-plugins'),
             array('wp-content', 'wp-content'),
         )));
-        $pluginRules = array_values(array_filter($rules, function ($r) {
-            return $r['source'] === '/detached/plugins';
-        }));
-        $this->assertCount(1, $pluginRules, 'exactly one rule for the detached plugins source');
-        $this->assertSame($this->root . '/special-plugins', $pluginRules[0]['target']);
+        // The detached plugins source maps once — to the manual target, not the
+        // whole-tree expansion (a single key per source guarantees no double-route).
+        $this->assertArrayHasKey('/detached/plugins', $rules);
+        $this->assertSame($this->root . '/special-plugins', $rules['/detached/plugins']);
     }
 
     public function testNonWpContentSrcResolvesRelativeToAbspath(): void
@@ -170,8 +173,10 @@ class RemapResolveTest extends TestCase
         ));
         $rules = $this->call($c, 'resolve_remap', array(array(array('wp-admin', 'wp-admin'))));
         $this->assertCount(1, $rules);
-        $this->assertSame('/var/www/html/wp-admin', $rules[0]['source']);
-        $this->assertSame($this->root . '/wp-admin', $rules[0]['target']);
+        $this->assertSame(
+            $this->root . '/wp-admin',
+            $rules['/var/www/html/wp-admin']
+        );
     }
 
     public function testDocrootTargetPlacesAtDocrootRoot(): void
@@ -181,9 +186,9 @@ class RemapResolveTest extends TestCase
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
 
         $rules = $this->call($c, 'resolve_remap', array(array(array('wp-content', $this->root))));
-        $this->assertSame($this->root, $rules[0]['target']);
+        $this->assertSame($this->root, $rules['/var/www/html/wp-content']);
 
         $rules = $this->call($c, 'resolve_remap', array(array(array('wp-content', ''))));
-        $this->assertSame($this->root, $rules[0]['target']);
+        $this->assertSame($this->root, $rules['/var/www/html/wp-content']);
     }
 }

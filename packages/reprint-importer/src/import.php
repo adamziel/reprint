@@ -10,6 +10,7 @@
  * - Three-phase import: files, SQL, then file deltas
  */
 
+use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
@@ -1132,9 +1133,9 @@ class ImportClient
     private $extra_directory = null;
 
     /**
-     * @var array<int,array{source:string,target:string}> Resolved remap rules:
-     * a full source path → its full local target path (both absolute). Empty =
-     * no remapping (files land nested based on their source).
+     * @var array<string,string> Resolved remap rules: full source path => its
+     * full local target path (both absolute). Empty = no remapping (files land
+     * nested based on their source).
      */
     private $remap_rules = [];
 
@@ -8289,7 +8290,7 @@ class ImportClient
      * here.
      *
      * @param array<int,array{0:string,1:string}> $remap_raw Raw (SRC, TGT) pairs.
-     * @return array<int,array{source:string,target:string}>
+     * @return array<string,string> Source path => target path (both absolute).
      */
     private function resolve_remap(array $remap_raw): array
     {
@@ -8297,31 +8298,23 @@ class ImportClient
         $docroot = rtrim($this->get_filesystem_root_path(), "/");
 
         $rules = [];
-        $explicit_sources = [];
         $wp_content_target = null;
-        foreach ($remap_raw as $pair) {
-            [$src, $tgt] = $pair;
-
-            $wp_path = trim(trim($src), "/");
+        foreach ($remap_raw as [$source, $target]) {
+            $wp_path = trim(trim($source), "/");
             if ($wp_path === "") {
                 throw new InvalidArgumentException("--remap source cannot be empty");
             }
 
             // Accept a target given as a full absolute path that includes the
             // docroot — strip the docroot prefix so it's treated as relative.
-            $tgt = trim($tgt);
-            $under_docroot = self::path_remainder_under(rtrim($tgt, "/"), $docroot);
-            if ($under_docroot !== null) {
-                $tgt = $under_docroot;
-            }
-
-            $tgt_rel = trim($tgt, "/");
+            $target = trim($target);
+            $target_relative = self::path_remainder_under(rtrim($target, "/"), $docroot) ?? $target;
+            $target_relative = trim($target_relative, "/");
 
             $source = $this->resolve_source_path($wp_path, $source_paths);
-            $target = $tgt_rel === "" ? $docroot : $docroot . "/" . $tgt_rel;
-            $rules[] = ["source" => $source, "target" => $target];
+            $target = wp_join_unix_paths($docroot, $target_relative);
+            $rules[$source] = $target;
 
-            $explicit_sources[$source] = true;
             if ($wp_path === "wp-content") {
                 $wp_content_target = $target;
             }
@@ -8331,9 +8324,9 @@ class ImportClient
         if ($wp_content_target !== null) {
             foreach (["plugins", "mu-plugins", "uploads"] as $name) {
                 $source = $source_paths[$name];
-                $detached = self::path_remainder_under($source, $source_paths["content"]) === null;
-                if ($detached && !isset($explicit_sources[$source])) {
-                    $rules[] = ["source" => $source, "target" => $wp_content_target . "/" . $name];
+                $is_outside_content_dir = self::path_remainder_under($source, $source_paths["content"]) === null;
+                if ($is_outside_content_dir && !isset($rules[$source])) {
+                    $rules[$source] = wp_join_unix_paths($wp_content_target, $name);
                 }
             }
         }
@@ -8345,8 +8338,9 @@ class ImportClient
      * The source site's real component locations from preflight data, as
      * name => absolute path (abspath, content, plugins, mu-plugins, uploads).
      * Each wp-content component falls back to its conventional spot under
-     * content_dir; one resolving outside content_dir is "detached". abspath
-     * anchors any path outside wp-content and may be null if undetermined.
+     * content_dir; one resolving outside content_dir is relocated and routed
+     * separately. abspath anchors any path outside wp-content and may be null
+     * if undetermined.
      */
     private function wp_component_source_paths(): array
     {
@@ -8396,7 +8390,7 @@ class ImportClient
         foreach ($bases as $prefix => $base) {
             $rest = self::path_remainder_under($wp_path, $prefix);
             if ($rest !== null) {
-                return $base . $rest;
+                return wp_join_unix_paths($base, $rest);
             }
         }
         // Anything outside wp-content (wp-admin, core, a root file, ...) is
@@ -8407,7 +8401,7 @@ class ImportClient
             );
         }
 
-        return $source_paths["abspath"] . "/" . $wp_path;
+        return wp_join_unix_paths($source_paths["abspath"], $wp_path);
     }
 
     /**
@@ -8422,13 +8416,13 @@ class ImportClient
     private function remap_source_path_to_target(string $source_path): ?string
     {
         $best = null;
-        $best_source_len = -1;
+        $best_source_length = -1;
 
-        foreach ($this->remap_rules as $rule) {
-            $rest = self::path_remainder_under($source_path, $rule["source"]);
-            if ($rest !== null && strlen($rule["source"]) > $best_source_len) {
-                $best = $rule["target"] . $rest;
-                $best_source_len = strlen($rule["source"]);
+        foreach ($this->remap_rules as $source => $target) {
+            $rest = self::path_remainder_under($source_path, $source);
+            if ($rest !== null && strlen($source) > $best_source_length) {
+                $best = wp_join_unix_paths($target, $rest);
+                $best_source_length = strlen($source);
             }
         }
 
@@ -9300,8 +9294,10 @@ class ImportClient
         // Ensure every --remap source is enumerated — including a detached
         // component (relocated uploads/plugins dir) that lives outside the
         // WordPress roots and so wouldn't be discovered by traversal alone.
-        foreach ($this->remap_rules as $i => $rule) {
-            $extra_paths["remap_src_{$i}"] = $rule["source"];
+        $remap_index = 0;
+        foreach (array_keys($this->remap_rules) as $source) {
+            $extra_paths["remap_source_{$remap_index}"] = $source;
+            $remap_index++;
         }
 
         // auto_prepend_file / auto_append_file may point to directories
