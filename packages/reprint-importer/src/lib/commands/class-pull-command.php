@@ -16,8 +16,9 @@ final class PullCommand extends ImportCommand
         $client->abort_pull();
     }
 
-    public function execute(ImportClient $client, array $options): void
+    public function execute(ImportClient $client, array $options): ?ImportCommandResult
     {
         $client->run_pull($options);
+        return null;
     }
 }

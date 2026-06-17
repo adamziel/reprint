@@ -16,8 +16,9 @@ final class DbApplyCommand extends ImportCommand
         return true;
     }
 
-    public function execute(ImportClient $client, array $options): void
+    public function execute(ImportClient $client, array $options): ?ImportCommandResult
     {
         $client->run_db_apply($options);
+        return null;
     }
 }

@@ -1,6 +1,7 @@
 <?php
 
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Cli\CliCommandResultRenderer;
 use Reprint\Importer\Command\ImportCommands;
 
 // ============================================================================
@@ -1162,7 +1163,8 @@ if (
     try {
         $client = new ImportClient($remote_url, $state_dir, $fs_root);
         $client->audit_log_argv($command, $argv);
-        $client->run($options ?? []);
+        $result = $client->run($options ?? []);
+        (new CliCommandResultRenderer())->render($client, $result);
         // EXIT_AFTER_IMPORT controls whether we hand control back to
         // the caller after pull returns. Default true: standard CLI
         // invocations (reprint pull, the phar bin, e2e tests) get the

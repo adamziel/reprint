@@ -3,12 +3,121 @@
 namespace Reprint\Importer\Command;
 
 use Reprint\Importer\ImportClient;
+use function Reprint\Importer\Host\detect_host;
 
 final class PreflightCommand extends ImportCommand
 {
-    public function execute(ImportClient $client, array $options): void
+    public function execute(ImportClient $client, array $options): ?ImportCommandResult
     {
-        $client->run_preflight();
-        $client->run_preflight_report();
+        return new PreflightReportResult($this->fetch($client));
+    }
+
+    /**
+     * Run the remote preflight request and persist the result in importer state.
+     *
+     * @return array<string, mixed>
+     */
+    public function fetch(ImportClient $client): array
+    {
+        $url = $client->build_url("preflight", null, []);
+        $client->audit_log("PREFLIGHT REQUEST | {$url}", false);
+
+        // Try each User-Agent until one gets a JSON response. Some WAFs block
+        // certain UAs, so we cycle through candidates and remember the winner.
+        $result = null;
+        $payload = null;
+        foreach (ImportClient::USER_AGENTS as $ua) {
+            $client->state["user_agent"] = $ua;
+            $result = $client->fetch_json($url);
+            $payload = $result["json"] ?? null;
+            if ($payload !== null) {
+                $client->audit_log("USER-AGENT OK | {$ua}", false);
+                break;
+            }
+            $client->audit_log("USER-AGENT BLOCKED | {$ua}", false);
+        }
+
+        $entry = [
+            "timestamp" => time(),
+            "url" => $url,
+            "http_code" => (int) ($result["http_code"] ?? 0),
+            "elapsed" => (float) ($result["elapsed"] ?? 0),
+            "ok" => is_array($payload) ? ($payload["ok"] ?? null) : null,
+            "data" => $payload,
+            "error" => $result["error"] ?? null,
+            "response_body_preview" => $payload === null && isset($result["body"])
+                ? substr((string) $result["body"], 0, 200)
+                : null,
+        ];
+
+        $client->state["preflight"] = $entry;
+
+        $wp_version = $payload["database"]["wp"]["wp_version"] ?? null;
+        if (is_string($wp_version) && $wp_version !== "") {
+            $client->state["version"] = $wp_version;
+        }
+
+        if (isset($payload["protocol_version"])) {
+            $client->state["remote_protocol_version"] = (int) $payload["protocol_version"];
+        }
+        if (isset($payload["protocol_min_version"])) {
+            $client->state["remote_protocol_min_version"] = (int) $payload["protocol_min_version"];
+        }
+
+        $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
+        if ($detected_webhost === 'other' && is_link($client->fs_root . '/__wp__')) {
+            $detected_webhost = 'wpcloud';
+        }
+        $client->state["webhost"] = $detected_webhost;
+        $client->audit_log("WEBHOST DETECTED | {$detected_webhost}", true);
+
+        $client->save_state($client->state);
+
+        $client->audit_log(
+            "PREFLIGHT RESULT | " . json_encode($entry),
+            false,
+        );
+
+        $paths = $payload["database"]["wp"]["paths_urls"] ?? null;
+        if (is_array($paths)) {
+            $this->log_non_standard_layout($client, $paths);
+        }
+
+        $client->download_runtime_files();
+
+        return $entry;
+    }
+
+    /**
+     * @param array<string, mixed> $paths
+     */
+    private function log_non_standard_layout(ImportClient $client, array $paths): void
+    {
+        $abspath = rtrim($paths["abspath"] ?? "", "/");
+        $content_dir = rtrim($paths["content_dir"] ?? "", "/");
+        $uploads_basedir = rtrim(
+            $paths["uploads"]["basedir"] ?? "",
+            "/",
+        );
+        if (
+            $abspath !== "" &&
+            $content_dir !== "" &&
+            $content_dir !== $abspath . "/wp-content"
+        ) {
+            $client->audit_log(
+                "NON-STANDARD LAYOUT | wp-content is at {$content_dir} " .
+                    "(expected {$abspath}/wp-content)",
+            );
+        }
+        if (
+            $content_dir !== "" &&
+            $uploads_basedir !== "" &&
+            strpos($uploads_basedir, $content_dir) !== 0
+        ) {
+            $client->audit_log(
+                "NON-STANDARD LAYOUT | uploads at {$uploads_basedir} " .
+                    "is outside wp-content ({$content_dir})",
+            );
+        }
     }
 }

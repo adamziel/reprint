@@ -21,8 +21,9 @@ final class DbPullCommand extends ImportCommand
         return true;
     }
 
-    public function execute(ImportClient $client, array $options): void
+    public function execute(ImportClient $client, array $options): ?ImportCommandResult
     {
         $client->run_db_sync();
+        return null;
     }
 }

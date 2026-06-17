@@ -89,4 +89,5 @@ require_once __DIR__ . '/class-import-client.php';
 if (!defined('REPRINT_IMPORTER_SOURCE_ENTRY')) {
     define('REPRINT_IMPORTER_SOURCE_ENTRY', __FILE__);
 }
+require_once __DIR__ . '/lib/cli/class-cli-command-result-renderer.php';
 require_once __DIR__ . '/lib/cli/entrypoint.php';

@@ -10,6 +10,8 @@ use PDOException;
 use PDOStatement;
 use RuntimeException;
 use Reprint\Importer\Command\ImportCommands;
+use Reprint\Importer\Command\ImportCommandResult;
+use Reprint\Importer\Command\PreflightCommand;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\MultipartStreamParser;
@@ -445,6 +447,21 @@ class ImportClient
             filesize($this->skipped_download_list_file) > 0;
     }
 
+    public function remote_index_file(): string
+    {
+        return $this->remote_index_file;
+    }
+
+    public function download_list_file(): string
+    {
+        return $this->download_list_file;
+    }
+
+    public function skipped_download_list_file(): string
+    {
+        return $this->skipped_download_list_file;
+    }
+
     /**
      * Log the executed command and full argv to the audit log.
      * Called from the CLI entry point before run() so the invocation
@@ -581,8 +598,10 @@ class ImportClient
      *   - command: Required. One of the commands registered in ImportCommands.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
+     *
+     * @return ImportCommandResult|null Structured command result for the caller to format.
      */
-    public function run(array $options = []): void
+    public function run(array $options = []): ?ImportCommandResult
     {
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
@@ -775,7 +794,7 @@ class ImportClient
                 throw new InvalidArgumentException("Command {$command} does not support --abort");
             }
             $command_runner->abort($this, $command);
-            return;
+            return null;
         }
 
         if ($command_runner->requires_preflight()) {
@@ -783,10 +802,11 @@ class ImportClient
         }
 
         try {
-            $command_runner->execute($this, $options);
+            $result = $command_runner->execute($this, $options);
             if ($command_runner->emits_final_status()) {
                 $this->finish_command_status($command);
             }
+            return $result;
         } catch (Exception $e) {
             $this->report_command_exception($e);
             throw $e;
@@ -998,104 +1018,7 @@ class ImportClient
      */
     public function run_preflight(): void
     {
-        $url = $this->build_url("preflight", null, []);
-        $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
-
-        // Try each User-Agent until one gets a JSON response.
-        // Some WAFs block certain UAs (e.g. browser UAs with custom auth
-        // headers), so we cycle through candidates and remember the winner.
-        $result = null;
-        $payload = null;
-        foreach (self::USER_AGENTS as $ua) {
-            $this->state["user_agent"] = $ua;
-            $result = $this->fetch_json($url);
-            $payload = $result["json"] ?? null;
-            if ($payload !== null) {
-                $this->audit_log("USER-AGENT OK | {$ua}", false);
-                break;
-            }
-            $this->audit_log("USER-AGENT BLOCKED | {$ua}", false);
-        }
-
-        $entry = [
-            "timestamp" => time(),
-            "url" => $url,
-            "http_code" => (int) ($result["http_code"] ?? 0),
-            "elapsed" => (float) ($result["elapsed"] ?? 0),
-            "ok" => is_array($payload) ? ($payload["ok"] ?? null) : null,
-            "data" => $payload,
-            "error" => $result["error"] ?? null,
-            "response_body_preview" => $payload === null && isset($result["body"])
-                ? substr((string) $result["body"], 0, 200)
-                : null,
-        ];
-
-        $this->state["preflight"] = $entry;
-
-        // Store WordPress version at the top level for easy access
-        $wp_version = $payload["database"]["wp"]["wp_version"] ?? null;
-        if (is_string($wp_version) && $wp_version !== "") {
-            $this->state["version"] = $wp_version;
-        }
-
-        // Store remote protocol version for compatibility checks
-        if (isset($payload["protocol_version"])) {
-            $this->state["remote_protocol_version"] = (int) $payload["protocol_version"];
-        }
-        if (isset($payload["protocol_min_version"])) {
-            $this->state["remote_protocol_min_version"] = (int) $payload["protocol_min_version"];
-        }
-
-        // Detect webhost environment from preflight data.
-        // The host analyzers score based on preflight signals. We also
-        // check the local fs root for a __wp__ symlink as a fallback
-        // when the remote preflight didn't report enough filesystem data.
-        $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
-        if ($detected_webhost === 'other' && is_link($this->fs_root . '/__wp__')) {
-            $detected_webhost = 'wpcloud';
-        }
-        $this->state["webhost"] = $detected_webhost;
-        $this->audit_log("WEBHOST DETECTED | {$detected_webhost}", true);
-
-        $this->save_state($this->state);
-
-        $this->audit_log(
-            "PREFLIGHT RESULT | " . json_encode($entry),
-            false,
-        );
-
-        // Log non-standard WordPress directory layouts for awareness
-        $paths = $payload["database"]["wp"]["paths_urls"] ?? null;
-        if (is_array($paths)) {
-            $abspath = rtrim($paths["abspath"] ?? "", "/");
-            $content_dir = rtrim($paths["content_dir"] ?? "", "/");
-            $uploads_basedir = rtrim(
-                $paths["uploads"]["basedir"] ?? "",
-                "/",
-            );
-            if (
-                $abspath !== "" &&
-                $content_dir !== "" &&
-                $content_dir !== $abspath . "/wp-content"
-            ) {
-                $this->audit_log(
-                    "NON-STANDARD LAYOUT | wp-content is at {$content_dir} " .
-                        "(expected {$abspath}/wp-content)",
-                );
-            }
-            if (
-                $content_dir !== "" &&
-                $uploads_basedir !== "" &&
-                strpos($uploads_basedir, $content_dir) !== 0
-            ) {
-                $this->audit_log(
-                    "NON-STANDARD LAYOUT | uploads at {$uploads_basedir} " .
-                        "is outside wp-content ({$content_dir})",
-                );
-            }
-        }
-
-        $this->download_runtime_files();
+        (new PreflightCommand())->fetch($this);
     }
 
     /**
@@ -1107,7 +1030,7 @@ class ImportClient
      * failures are tolerated since the scripts may live on paths not
      * accessible to the web server process.
      */
-    private function download_runtime_files(): void
+    public function download_runtime_files(): void
     {
         $runtime_dir = $this->state_dir . "/runtime_files";
 
@@ -1285,141 +1208,6 @@ class ImportClient
             throw new RuntimeException(
                 "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
             );
-        }
-    }
-
-    /**
-     * Command: preflight
-     *
-     * Prints the full preflight response as pretty-printed JSON to stdout.
-     * The preflight itself already ran in run_preflight() — this just
-     * outputs the stored result.
-     */
-    public function run_preflight_report(): void
-    {
-        $entry = $this->state["preflight"] ?? null;
-        if ($entry === null) {
-            echo "No preflight data available.\n";
-            exit(1);
-        }
-        // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
-        echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
-        $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
-        $this->write_status_file($ok ? null : "Preflight failed");
-        exit($ok ? 0 : 1);
-    }
-
-    /**
-     * Command: preflight-assert
-     *
-     * Inspects the preflight response (already fetched by run_preflight())
-     * and exits with code 0 if migration looks feasible, code 1 if not.
-     * Prints a human-readable pass/fail summary to stdout.
-     */
-    public function run_preflight_assert(): void
-    {
-        $entry = $this->state["preflight"] ?? null;
-        $data = $entry["data"] ?? null;
-        $checks = [];
-        $all_pass = true;
-
-        // 1. Server responded OK
-        $http_ok = ($entry["http_code"] ?? 0) === 200;
-        $checks[] = [
-            "label" => "Server responded",
-            "pass" => $http_ok,
-            "detail" => $http_ok
-                ? "HTTP 200"
-                : "HTTP " . ($entry["http_code"] ?? "no response"),
-        ];
-        if (!$http_ok) {
-            $all_pass = false;
-        }
-
-        // 2. Top-level ok flag
-        $top_ok = is_array($data) && !empty($data["ok"]);
-        $checks[] = [
-            "label" => "Preflight OK",
-            "pass" => $top_ok,
-            "detail" => $top_ok
-                ? "passed"
-                : ($data["error"] ?? "preflight not ok"),
-        ];
-        if (!$top_ok) {
-            $all_pass = false;
-        }
-
-        // 3. Protocol version compatibility
-        $remote_ver = $this->state["remote_protocol_version"] ?? null;
-        $remote_min = $this->state["remote_protocol_min_version"] ?? null;
-        if ($remote_ver === null) {
-            $proto_ok = false;
-            $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
-        } elseif ($remote_ver < REPRINT_IMPORTER_MIN_EXPORT_VERSION) {
-            $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} is too old (client requires >= v" . REPRINT_IMPORTER_MIN_EXPORT_VERSION . "). Update the export plugin.";
-        } elseif (REPRINT_IMPORTER_PROTOCOL_VERSION < $remote_min) {
-            $proto_ok = false;
-            $proto_detail = "Client protocol v" . REPRINT_IMPORTER_PROTOCOL_VERSION . " is too old (remote requires >= v{$remote_min}). Update the importer.";
-        } else {
-            $proto_ok = true;
-            $proto_detail = "remote v{$remote_ver}, client v" . REPRINT_IMPORTER_PROTOCOL_VERSION;
-        }
-        $checks[] = [
-            "label" => "Protocol compatible",
-            "pass" => $proto_ok,
-            "detail" => $proto_detail,
-        ];
-        if (!$proto_ok) {
-            $all_pass = false;
-        }
-
-        // 4. Filesystem accessible
-        $fs = $data["filesystem"] ?? null;
-        $fs_ok = is_array($fs) && !empty($fs["ok"]);
-        $checks[] = [
-            "label" => "Filesystem accessible",
-            "pass" => $fs_ok,
-            "detail" => $fs_ok
-                ? "directories readable"
-                : ($fs["error"] ?? "filesystem check failed"),
-        ];
-        if (!$fs_ok) {
-            $all_pass = false;
-        }
-
-        // 5. Database accessible
-        $db = $data["database"] ?? null;
-        $db_ok = is_array($db) && !empty($db["connected"]);
-        $checks[] = [
-            "label" => "Database accessible",
-            "pass" => $db_ok,
-            "detail" => $db_ok
-                ? ($db["version"] ?? "connected")
-                : ($db["error"] ?? "database check failed"),
-        ];
-        if (!$db_ok) {
-            $all_pass = false;
-        }
-
-        // We do not check for any encoding issues here. We'll move over
-        // the entire database as it is.
-
-        // Print summary
-        foreach ($checks as $check) {
-            $icon = $check["pass"] ? "PASS" : "FAIL";
-            echo "[{$icon}] {$check["label"]}: {$check["detail"]}\n";
-        }
-
-        echo "\n";
-        if ($all_pass) {
-            echo "Migration looks feasible.\n";
-            $this->write_status_file();
-            exit(0);
-        } else {
-            echo "Migration may not be feasible. Review the failures above.\n";
-            $this->write_status_file("Preflight assertions failed");
-            exit(1);
         }
     }
 
@@ -1970,7 +1758,7 @@ class ImportClient
      * - If already completed: require --abort flag
      * - If abort flag: clear remote index file and index cursor
      */
-    private function run_files_index(): void
+    public function run_files_index(): void
     {
         $state_command = $this->state["command"] ?? null;
         $current_status =
@@ -2586,208 +2374,6 @@ class ImportClient
         }
         $this->output_progress($db_sync_complete, true);
     }
-
-    // =========================================================================
-    // db-apply: Apply SQL dump to a target MySQL database with URL rewriting
-    // =========================================================================
-
-    /**
-     * Command: db-apply
-     *
-     * Reads db.sql, optionally rewrites URLs, and executes statements against
-     * a target MySQL database. Supports resumption via statement count tracking.
-     *
-     */
-    public function run_db_domains(): void
-    {
-        $domains_file = $this->state_dir . "/.import-domains.json";
-        $sql_file = $this->state_dir . "/db.sql";
-
-        if (file_exists($domains_file)) {
-            // Fast path: domains were already discovered during db-pull
-            $domains = json_decode(file_get_contents($domains_file), true);
-            if (!is_array($domains)) {
-                throw new RuntimeException(
-                    "Failed to parse {$domains_file}",
-                );
-            }
-        } elseif (file_exists($sql_file)) {
-            // Scan db.sql for domains using the same pipeline as db-pull
-            $query_stream = new WP_MySQL_Naive_Query_Stream();
-            $domain_collector = new DomainCollector();
-
-            $sql_handle = fopen($sql_file, "r");
-            if (!$sql_handle) {
-                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
-            }
-
-            try {
-                $chunk_size = 64 * 1024;
-                while (!feof($sql_handle)) {
-                    $data = fread($sql_handle, $chunk_size);
-                    if ($data === false || $data === '') {
-                        break;
-                    }
-                    $query_stream->append_sql($data);
-                    $this->drain_query_stream_for_domains(
-                        $query_stream,
-                        $domain_collector,
-                    );
-                }
-
-                $query_stream->mark_input_complete();
-                $this->drain_query_stream_for_domains(
-                    $query_stream,
-                    $domain_collector,
-                );
-            } finally {
-                fclose($sql_handle);
-            }
-
-            $domains = $domain_collector->get_domains();
-
-            // Save for future calls
-            file_put_contents(
-                $domains_file,
-                json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-            );
-        } else {
-            throw new RuntimeException(
-                "No domain data found. Run db-pull first, or place a db.sql file in {$this->state_dir}.",
-            );
-        }
-
-        // Print one domain per line to stdout
-        foreach ($domains as $domain) {
-            echo $domain . "\n";
-        }
-    }
-
-    /**
-     * Print file index statistics: total indexed files and their size,
-     * plus pending downloads and their size.
-     *
-     * Reads .import-remote-index.jsonl for all indexed files and
-     * .import-download-list.jsonl for files not yet downloaded.
-     */
-    public function run_files_stats(): void
-    {
-        $remote_index = $this->remote_index_file;
-        $download_list = $this->download_list_file;
-
-        // Single pass over the remote index to build a path→size map.
-        // Duplicates (from overlapping symlink targets) are collapsed
-        // automatically because later entries overwrite earlier ones in
-        // the map, so the counts we derive are always deduplicated.
-        $size_by_path = [];
-
-        if (is_file($remote_index)) {
-            $handle = fopen($remote_index, "r");
-            if ($handle) {
-                while (($line = fgets($handle)) !== false) {
-                    $entry = $this->parse_index_line($line);
-                    if ($entry === null) {
-                        continue;
-                    }
-                    $size_by_path[$entry["path"]] = $entry["size"];
-                }
-                fclose($handle);
-            }
-        }
-
-        $indexed_count = count($size_by_path);
-        $indexed_bytes = array_sum($size_by_path);
-
-        // Walk the download list(s) to count pending files. The download
-        // list only stores paths, so look up sizes from the map above.
-        // Files before the fetch byte offset have already been downloaded.
-        $pending_count = 0;
-        $pending_bytes = 0;
-        $skipped_pending_count = 0;
-        $skipped_pending_bytes = 0;
-
-        // Count pending in the main download list
-        $fetch_offset = $this->state["fetch"]["offset"] ?? 0;
-        if (is_file($download_list)) {
-            $handle = fopen($download_list, "r");
-            if ($handle) {
-                // Seek past already-downloaded entries. The fetch offset
-                // is the byte position where the next batch starts, so
-                // everything before it has been fetched.
-                if ($fetch_offset > 0) {
-                    fseek($handle, $fetch_offset);
-                }
-                while (($line = fgets($handle)) !== false) {
-                    $line = trim($line);
-                    if ($line === "") {
-                        continue;
-                    }
-                    $data = json_decode($line, true);
-                    if (!is_array($data)) {
-                        continue;
-                    }
-                    $path_encoded = $data["path"] ?? "";
-                    $path = base64_decode($path_encoded, true);
-                    if ($path === false || $path === "") {
-                        continue;
-                    }
-                    $pending_count++;
-                    $pending_bytes += $size_by_path[$path] ?? 0;
-                }
-                fclose($handle);
-            }
-        }
-
-        // Count pending in the skipped download list (uploads filtered out by --filter=essential-files)
-        $skipped_offset = $this->state["fetch_skipped"]["offset"] ?? 0;
-        $skipped_list = $this->skipped_download_list_file;
-        if (is_file($skipped_list)) {
-            $handle = fopen($skipped_list, "r");
-            if ($handle) {
-                if ($skipped_offset > 0) {
-                    fseek($handle, $skipped_offset);
-                }
-                while (($line = fgets($handle)) !== false) {
-                    $line = trim($line);
-                    if ($line === "") {
-                        continue;
-                    }
-                    $data = json_decode($line, true);
-                    if (!is_array($data)) {
-                        continue;
-                    }
-                    $path_encoded = $data["path"] ?? "";
-                    $path = base64_decode($path_encoded, true);
-                    if ($path === false || $path === "") {
-                        continue;
-                    }
-                    $skipped_pending_count++;
-                    $skipped_pending_bytes += $size_by_path[$path] ?? 0;
-                }
-                fclose($handle);
-            }
-        }
-
-        $result = [
-            "indexed" => [
-                "files" => $indexed_count,
-                "bytes" => $indexed_bytes,
-            ],
-            "pending" => [
-                "files" => $pending_count,
-                "bytes" => $pending_bytes,
-            ],
-        ];
-        if ($skipped_pending_count > 0 || is_file($skipped_list)) {
-            $result["pending_skipped"] = [
-                "files" => $skipped_pending_count,
-                "bytes" => $skipped_pending_bytes,
-            ];
-        }
-
-        echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
-    }
-
 
     /**
      * Format a byte count into a human-readable string.
@@ -3974,6 +3560,10 @@ class ImportClient
             ),
         ];
     }
+
+    // =========================================================================
+    // db-apply: Apply SQL dump to a target MySQL database with URL rewriting
+    // =========================================================================
 
     public function run_db_apply(array $options): void
     {
@@ -5748,7 +5338,7 @@ class ImportClient
     /**
      * Parse one JSON index line into an array.
      */
-    private function parse_index_line(string $line): ?array
+    public function parse_index_line(string $line): ?array
     {
         $line = trim($line);
         if ($line === "") {
@@ -6678,11 +6268,11 @@ class ImportClient
      * Drain complete SQL statements from a query stream and scan their
      * base64-decoded values for URL domains.
      */
-    private function drain_query_stream_for_domains(
+    public function drain_query_stream_for_domains(
         WP_MySQL_Naive_Query_Stream $query_stream,
         DomainCollector $domain_collector,
         ?int &$statements_counted = null
-    ) {
+    ): void {
         while ($query_stream->next_query()) {
             $query = $query_stream->get_query();
             if ($statements_counted !== null) {
@@ -8015,7 +7605,7 @@ class ImportClient
     /**
      * Build request URL with endpoint and cursor.
      */
-    private function build_url(
+    public function build_url(
         string $endpoint,
         ?string $cursor,
         array $params = []
@@ -8351,7 +7941,7 @@ class ImportClient
      * start with an honest non-browser identity and fall back to common
      * browser strings.
      */
-    private const USER_AGENTS = [
+    public const USER_AGENTS = [
         "Reprint/1.0",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
@@ -8717,7 +8307,7 @@ class ImportClient
     /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
-    private function fetch_json(string $url): array
+    public function fetch_json(string $url): array
     {
         $this->reset_curl_state();
 
@@ -9624,7 +9214,7 @@ class ImportClient
      * Uses atomic write (temp file + rename) to prevent corruption if
      * the process is killed mid-write.
      */
-    private function save_state(array $state): void
+    public function save_state(array $state): void
     {
         // Keep the spinner alive between curl requests. save_state is
         // called frequently during streaming operations, so this fills

@@ -21,10 +21,14 @@ abstract class MySQLDumpProducerTestBase extends TestCase
 
         // Connect without database selection
         $dsn = "mysql:host={$host};charset=utf8mb4";
-        $this->pdo = new PDO($dsn, $user, $pass, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        ]);
+        try {
+            $this->pdo = new PDO($dsn, $user, $pass, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            ]);
+        } catch (PDOException $e) {
+            $this->markTestSkipped("MySQL not reachable: " . $e->getMessage());
+        }
 
         // Create test database
         $this->pdo->exec("DROP DATABASE IF EXISTS `{$this->dbName}`");

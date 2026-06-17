@@ -26,5 +26,5 @@ abstract class ImportCommand
         $client->abort_command($command);
     }
 
-    abstract public function execute(ImportClient $client, array $options): void;
+    abstract public function execute(ImportClient $client, array $options): ?ImportCommandResult;
 }
