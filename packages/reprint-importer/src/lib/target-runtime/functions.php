@@ -224,7 +224,74 @@ function copy_sqlite_plugin(string $source_dir, string $output_dir): string
         copy_directory_recursive($source_dir, $target_dir);
     }
 
+    ensure_sqlite_plugin_database_driver($source_dir, $target_dir);
+
     return $target_dir;
+}
+
+/**
+ * Ensure the copied SQLite plugin is self-contained.
+ *
+ * In the sqlite-database-integration source tree, wp-includes/database is a
+ * symlink to packages/mysql-on-sqlite/src. RecursiveDirectoryIterator does not
+ * copy that linked tree by default, so runtime output can end up missing files
+ * required by wp-includes/sqlite/db.php. Mirror the release ZIP layout by
+ * replacing the runtime copy with a real database driver directory.
+ */
+function ensure_sqlite_plugin_database_driver(string $source_dir, string $target_dir): void
+{
+    $target_database_dir = $target_dir . '/wp-includes/database';
+    if (is_file($target_database_dir . '/version.php') && !is_link($target_database_dir)) {
+        return;
+    }
+
+    $source_database_dir = sqlite_plugin_database_driver_source($source_dir);
+    remove_sqlite_runtime_path_recursive($target_database_dir);
+    copy_directory_recursive($source_database_dir, $target_database_dir);
+}
+
+function sqlite_plugin_database_driver_source(string $source_dir): string
+{
+    $candidates = [
+        $source_dir . '/wp-includes/database',
+        dirname($source_dir) . '/mysql-on-sqlite/src',
+    ];
+
+    foreach ($candidates as $candidate) {
+        if (is_file($candidate . '/version.php')) {
+            return realpath($candidate) ?: $candidate;
+        }
+    }
+
+    throw new RuntimeException(
+        "sqlite-database-integration database driver not found for {$source_dir}. " .
+        "Run 'git submodule update --init' to fetch it.",
+    );
+}
+
+function remove_sqlite_runtime_path_recursive(string $path): void
+{
+    if (!file_exists($path) && !is_link($path)) {
+        return;
+    }
+
+    if (is_link($path) || is_file($path)) {
+        unlink($path);
+        return;
+    }
+
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST,
+    );
+    foreach ($iterator as $item) {
+        if ($item->isLink() || $item->isFile()) {
+            unlink($item->getPathname());
+        } else {
+            rmdir($item->getPathname());
+        }
+    }
+    rmdir($path);
 }
 
 /**
