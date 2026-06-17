@@ -2615,6 +2615,35 @@ class ImportClient
                 $this->state["stage"] = "fetch-skipped";
                 $this->save_state($this->state);
                 $this->run_files_sync_pipeline();
+
+                // The skipped-files fetch can span several invocations: each
+                // files-sync run yields when it hits its execution budget
+                // (--max-exec) or a server timeout, saving its cursor and
+                // returning status "partial" (exit code 2) so the caller
+                // re-invokes it to continue. On a partial return the fetch
+                // isn't finished, so return without marking it complete and
+                // let the next run resume.
+                $pipeline_status = $this->state["status"] ?? null;
+                if ($pipeline_status === "partial") {
+                    return;
+                }
+
+                // Mark the run complete. Without this, the state stays
+                // "in_progress" forever after a successful skipped-files
+                // fetch, and later runs take the resume path instead of
+                // the complete path.
+                $this->state["status"] = "complete";
+                $this->save_state($this->state);
+
+                $this->audit_log("files-pull (skipped files) complete", true);
+                $this->progress->show_lifecycle_line("files-pull (skipped files) complete\n");
+                $this->output_progress([
+                    "type" => "lifecycle",
+                    "event" => "complete",
+                    "command" => "files-pull",
+                    "stage" => "fetch-skipped",
+                    "message" => "files-pull (skipped files) complete",
+                ], true);
                 return;
             }
 

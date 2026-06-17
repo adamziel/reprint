@@ -125,6 +125,12 @@ describe('Import: --filter', () => {
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
+        it('state is marked complete after skipped-earlier', () => {
+            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            assert.equal(state.status, 'complete',
+                'Expected the skipped-earlier run to be marked complete (not left in_progress)');
+        });
+
         it('upload files now exist in the fs-root', () => {
             const importedRoot = join(fsRootDir(tempDir), siteDir);
             for (const f of UPLOAD_FILES) {
