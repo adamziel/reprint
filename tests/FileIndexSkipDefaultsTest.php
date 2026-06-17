@@ -5,7 +5,7 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 
 /**
- * Coverage for the default deny-list applied by endpoint_file_index().
+ * Coverage for the default deny-list applied by FileIndexCommand.
  *
  * Two layers of testing:
  *
@@ -15,9 +15,9 @@ use PHPUnit\Framework\TestCase;
  *      looks superficially similar but should be preserved
  *      (.htaccess, .well-known, cache-control.css, etc.).
  *
- *   2. endpoint_file_index() integration tests via subprocess: build a
+ *   2. FileIndexCommand integration tests via subprocess: build a
  *      fixture tree that mixes real-WP-shaped junk and real content,
- *      run the endpoint, decode the multipart response, and assert
+ *      run the core API, decode the multipart response, and assert
  *      which entries appear and which were filtered. A separate run
  *      with include_caches=1 confirms the override turns the filter
  *      off cleanly.
@@ -155,7 +155,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
     }
 
     // ------------------------------------------------------------------
-    // Integration tests — endpoint_file_index() over the fixture
+    // Integration tests — FileIndexCommand over the fixture
     // ------------------------------------------------------------------
 
     public function testFileIndexFiltersDefaultJunk(): void
@@ -212,9 +212,8 @@ final class FileIndexSkipDefaultsTest extends TestCase
         // (modulo cursor batch boundaries). Run the fixture with a very
         // small batch_size so multiple batches are emitted, then verify the
         // joined output matches the single-batch run.
-        // batch_size has a server-side floor of 100 (see require_int_range
-        // in endpoint_file_index), so the "small" run picks the minimum
-        // that still forces multiple batches given our fixture size.
+        // batch_size has a server-side floor of 100, so the "small" run picks
+        // the minimum that still forces multiple batches given our fixture size.
         $siteDir = $this->buildFixtureSite();
         $small = $this->runFileIndexEntries($siteDir, false, /* batch_size */ 100);
         $large = $this->runFileIndexEntries($siteDir, false, /* batch_size */ 5000);
@@ -367,7 +366,7 @@ declare(strict_types=1);
 require_once %s;
 $config = json_decode(file_get_contents(%s), true, 512, JSON_THROW_ON_ERROR);
 $budget = new \Reprint\Exporter\ResourceBudget(microtime(true), 10, 128 * 1024 * 1024, 0.9);
-endpoint_file_index($config, $budget);
+(new \Reprint\Exporter\Command\FileIndexCommand())->execute($config, $budget);
 PHP,
                 var_export(dirname(__DIR__) . '/packages/reprint-exporter/src/export.php', true),
                 var_export($configPath, true),

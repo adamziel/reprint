@@ -1,6 +1,7 @@
 <?php
 
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Command\ImportCommands;
 
 // ============================================================================
 // CLI Entry Point
@@ -1095,16 +1096,7 @@ if (
 
     $command = $argv[1];
 
-    // Legacy command names that still work on the CLI.
-    $command_aliases = [
-        "files-sync" => "files-pull",
-        "db-sync" => "db-pull",
-        "flat-document-root" => "flat-docroot",
-        "flatten-docroot" => "flat-docroot",
-    ];
-    if (isset($command_aliases[$command])) {
-        $command = $command_aliases[$command];
-    }
+    $command = ImportCommands::normalize_name($command) ?? $command;
 
     // install-exporter is a standalone guide — no URL, state-dir, or fs-root needed.
     // Handle it before per-command --help so it always shows the full guide.

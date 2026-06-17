@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/../packages/reprint-exporter/src/class-resource-budget.php';
+require_once __DIR__ . '/../packages/reprint-exporter/src/commands/load.php';
+require_once __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
+
 final class ExportHttpServerTest extends TestCase
 {
     public function testParsesJsonBodyAndCastsKnownTypes(): void
@@ -72,22 +76,30 @@ final class ExportHttpServerTest extends TestCase
         );
     }
 
-    public function testDispatchRoutesPreflightWithoutBudget(): void
+    public function testDispatchRoutesPreflightCommandWithoutBudget(): void
     {
-        $calls = [];
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+
         $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
             'handlers' => [
-                'preflight' => function (array $config) use (&$calls): void {
-                    $calls[] = ['preflight', $config];
-                },
+                'preflight' => new \Reprint\Exporter\Command\PreflightCommand(),
             ],
+            'budget_factory' => static function (): \Reprint\Exporter\ResourceBudget {
+                throw new RuntimeException('Preflight should not create a resource budget.');
+            },
         ]);
 
-        $server->dispatch(['endpoint' => 'preflight']);
+        ob_start();
+        try {
+            $server->dispatch([
+                'endpoint' => 'preflight',
+                'directory' => sys_get_temp_dir(),
+            ]);
+        } finally {
+            ob_end_clean();
+        }
 
-        $this->assertCount(1, $calls);
-        $this->assertSame('preflight', $calls[0][0]);
-        $this->assertSame(['endpoint' => 'preflight'], $calls[0][1]);
+        $this->addToAssertionCount(1);
     }
 
     public function testDispatchRoutesStreamingEndpointsWithCreatedBudget(): void
@@ -111,6 +123,38 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame(['from' => 'file_index'], $calls[0][1]);
     }
 
+    public function testDispatchCreatesBudgetForCommandHandlers(): void
+    {
+        $budget = new \Reprint\Exporter\ResourceBudget(0.0, 1, PHP_INT_MAX, 0.8);
+        $command = new class extends \Reprint\Exporter\Command\BudgetedExportCommand {
+            /** @var array<int, array{0: array<string, mixed>, 1: \Reprint\Exporter\ResourceBudget}> */
+            public $calls = [];
+
+            public function execute(array $config, \Reprint\Exporter\ResourceBudget $budget): array
+            {
+                $this->calls[] = [$config, $budget];
+                return ['ok' => true];
+            }
+        };
+
+        $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
+            'handlers' => [
+                'file_index' => $command,
+            ],
+            'budget_factory' => static function (array $config) use ($budget): \Reprint\Exporter\ResourceBudget {
+                return $config['endpoint'] === 'file_index'
+                    ? $budget
+                    : new \Reprint\Exporter\ResourceBudget(0.0, 1, 1, 0.8);
+            },
+        ]);
+
+        $server->dispatch(['endpoint' => 'file_index']);
+
+        $this->assertCount(1, $command->calls);
+        $this->assertSame(['endpoint' => 'file_index'], $command->calls[0][0]);
+        $this->assertSame($budget, $command->calls[0][1]);
+    }
+
     public function testDispatchRejectsUnknownEndpoints(): void
     {
         $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
@@ -127,22 +171,33 @@ final class ExportHttpServerTest extends TestCase
 
     public function testHandleRequestUsesParsedConfigAndDispatches(): void
     {
-        $calls = [];
+        $budget = new \Reprint\Exporter\ResourceBudget(0.0, 1, PHP_INT_MAX, 0.8);
+        $command = new class extends \Reprint\Exporter\Command\BudgetedExportCommand {
+            /** @var array<int, array{0: array<string, mixed>, 1: \Reprint\Exporter\ResourceBudget}> */
+            public $calls = [];
+
+            public function execute(array $config, \Reprint\Exporter\ResourceBudget $budget): array
+            {
+                $this->calls[] = [$config, $budget];
+                return ['ok' => true];
+            }
+        };
         $server = new \Reprint\Exporter\Site_Export_HTTP_Server([
             'handlers' => [
-                'preflight' => function (array $config) use (&$calls): void {
-                    $calls[] = $config;
-                },
+                'file_index' => $command,
             ],
+            'budget_factory' => static function () use ($budget): \Reprint\Exporter\ResourceBudget {
+                return $budget;
+            },
         ]);
 
         $server->handle_request([
-            'get' => ['endpoint' => 'preflight'],
+            'get' => ['endpoint' => 'file_index'],
             'post' => [],
             'server' => ['REQUEST_METHOD' => 'GET'],
             'body' => '',
         ]);
 
-        $this->assertSame([['endpoint' => 'preflight']], $calls);
+        $this->assertSame([['endpoint' => 'file_index'], $budget], $command->calls[0]);
     }
 }

@@ -25,17 +25,17 @@ final class HttpServerServeTest extends TestCase
 
         require '{$this->classPath()}';
 
-        // endpoint_preflight is defined by export.php; it must not
-        // exist before serve() is called.
-        if (function_exists('endpoint_preflight')) {
-            echo "FAIL: endpoint_preflight defined before serve()";
+        // REPRINT_EXPORTER_PROTOCOL_VERSION is defined by export.php; it must
+        // not exist before serve() is called.
+        if (defined('REPRINT_EXPORTER_PROTOCOL_VERSION')) {
+            echo "FAIL: export runtime loaded before serve()";
             exit;
         }
 
         \Reprint\Exporter\Site_Export_HTTP_Server::serve();
 
-        // serve() should have required export.php, which defines endpoint_preflight.
-        echo function_exists('endpoint_preflight') ? "OK" : "FAIL: endpoint_preflight not defined";
+        // serve() should have required export.php, which defines the protocol constant.
+        echo defined('REPRINT_EXPORTER_PROTOCOL_VERSION') ? "OK" : "FAIL: export runtime not loaded";
         PHP;
 
         $output = $this->runScript($script);
@@ -53,8 +53,8 @@ final class HttpServerServeTest extends TestCase
         require '{$this->classPath()}';
         require '{$this->exportPath()}';
 
-        // Track require side-effect: if export.php was re-required, endpoint_preflight
-        // would be re-declared which would be a fatal error.
+        // Track require side-effect: if export.php was re-required, unguarded
+        // top-level definitions would fail.
         \Reprint\Exporter\Site_Export_HTTP_Server::serve();
         echo "OK";
         PHP;
@@ -66,15 +66,14 @@ final class HttpServerServeTest extends TestCase
     public function testServeForwardsOptionsToConstructor(): void
     {
         $script = <<<PHP
-        \$_GET['endpoint'] = 'preflight';
+        \$_GET['endpoint'] = 'custom';
 
         require '{$this->classPath()}';
 
-        // Override the default handler for 'preflight' to verify the
-        // options were passed through to the constructor.
+        // Override handlers to verify the options were passed through to the constructor.
         \Reprint\Exporter\Site_Export_HTTP_Server::serve([
             'handlers' => [
-                'preflight' => function (\$config) {
+                'custom' => function (array \$config, \$budget): void {
                     echo "handler-called:" . \$config['endpoint'];
                 },
             ],
@@ -82,7 +81,7 @@ final class HttpServerServeTest extends TestCase
         PHP;
 
         $output = $this->runScript($script);
-        $this->assertStringContainsString('handler-called:preflight', $output);
+        $this->assertStringContainsString('handler-called:custom', $output);
     }
 
     private function classPath(): string

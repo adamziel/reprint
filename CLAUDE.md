@@ -111,7 +111,7 @@ Symlinks ARE automatically recreated during import. This is safe because all pat
 
 ### Server-Side Directory Dedup
 
-The file indexer (`endpoint_file_index` in `export.php`) prevents duplicate traversal of directories that overlap with configured roots. The `should_skip_index_root()` function checks each directory's `realpath()` against the scheduled root list — if a directory is a duplicate or parent of an already-scheduled root, traversal skips it. This is critical for WP.com Atomic sites where symlinks create overlapping paths (e.g. `/srv/htdocs/srv` → `/srv` creating infinite cycles, or `/wordpress/` and `/srv/htdocs/wordpress/` resolving to the same location).
+The file indexer (`FileIndexCommand`) prevents duplicate traversal of directories that overlap with configured roots. The `should_skip_index_root()` function checks each directory's `realpath()` against the scheduled root list — if a directory is a duplicate or parent of an already-scheduled root, traversal skips it. This is critical for WP.com Atomic sites where symlinks create overlapping paths (e.g. `/srv/htdocs/srv` → `/srv` creating infinite cycles, or `/wordpress/` and `/srv/htdocs/wordpress/` resolving to the same location).
 
 ### Non-Empty fs-root Handling (`--on-fs-root-nonempty`)
 

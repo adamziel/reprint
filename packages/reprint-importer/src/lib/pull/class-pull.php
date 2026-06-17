@@ -5,6 +5,7 @@ namespace Reprint\Importer\Pull;
 use InvalidArgumentException;
 use RuntimeException;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Pull\Command\PullStageCommands;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 
 /**
@@ -31,6 +32,11 @@ class Pull
     {
         $this->client = $client;
         $this->progress = $progress;
+    }
+
+    public function client(): ImportClient
+    {
+        return $this->client;
     }
 
     /**
@@ -74,16 +80,8 @@ class Pull
     /** Human-readable label for a pipeline stage. */
     public function stage_label(string $stage): string
     {
-        switch ($stage) {
-            case 'preflight':     return 'Connecting';
-            case 'files-pull':    return 'Pulling files';
-            case 'db-pull':       return 'Pulling database';
-            case 'db-apply':      return 'Importing database';
-            case 'flat-docroot':  return 'Flattening layout';
-            case 'apply-runtime': return 'Preparing runtime';
-            case 'start':         return 'Starting server';
-            default:              return $stage;
-        }
+        $command = PullStageCommands::get($stage);
+        return $command ? $command->label() : $stage;
     }
 
     /**
@@ -140,12 +138,11 @@ class Pull
 
         for ($i = $start_index; $i < $total; $i++) {
             $stage = $stages[$i];
-            $step = $i + 1;
 
             $this->print_stage_header($stage);
 
             try {
-                $this->run_stage($stage, $options, $step, $total);
+                $this->run_stage($stage, $options);
             } catch (\Exception $e) {
                 $this->report_failure($stage, $stages, $i, $e);
                 throw $e;
@@ -186,68 +183,14 @@ class Pull
         ], true);
     }
 
-    private function run_stage(string $stage, array $options, int $step, int $total): void
+    private function run_stage(string $stage, array $options): void
     {
-        switch ($stage) {
-            case 'preflight':
-                $this->client->run_preflight();
-                if ($this->check_plugin_installed()) {
-                    $this->client->exit_code = 1;
-                    return;
-                }
-                $this->print_done($stage, $this->preflight_summary());
-                break;
-
-            case 'files-pull':
-                $this->run_until_complete(function () {
-                    $this->client->run_files_sync();
-                });
-                $skipped_pending =
-                    $options['filter'] === 'essential-files' &&
-                    $this->client->has_skipped_files_pending();
-                $this->client->set_pull_files_state($options['filter'], $skipped_pending);
-                $count = $this->client->index_count();
-                $summary = $count > 0 ? number_format($count) . " files" : null;
-                if ($skipped_pending) {
-                    $summary = $summary !== null
-                        ? $summary . ", deferred files pending"
-                        : "deferred files pending";
-                }
-                $this->print_done($stage, $summary);
-                break;
-
-            case 'db-pull':
-                $this->run_until_complete(function () {
-                    $this->client->run_db_sync();
-                });
-                $sql_file = $this->client->state_dir . "/db.sql";
-                $size = file_exists($sql_file) ? $this->format_bytes(filesize($sql_file)) : null;
-                $this->print_done($stage, $size);
-                break;
-
-            case 'db-apply':
-                $this->run_until_complete(function () use ($options) {
-                    $this->client->run_db_apply($options);
-                });
-                $state = $this->client->state;
-                $stmts = (int) ($state["apply"]["statements_executed"] ?? 0);
-                $this->print_done($stage, $stmts > 0 ? number_format($stmts) . " statements" : null);
-                break;
-
-            case 'flat-docroot':
-                $this->client->run_flat_document_root($options);
-                $this->print_done($stage);
-                break;
-
-            case 'apply-runtime':
-                $this->client->run_apply_runtime($options);
-                $this->print_done($stage);
-                break;
-
-            case 'start':
-                $this->start_server($options);
-                break;
+        $command = PullStageCommands::get($stage);
+        if ($command === null) {
+            throw new InvalidArgumentException("Invalid pull stage: {$stage}");
         }
+
+        $command->execute($this, $options);
     }
 
     /**
@@ -448,7 +391,7 @@ class Pull
      * resetting the status to "in_progress" so the handler enters its
      * resume path (it specifically checks for that value).
      */
-    private function run_until_complete(callable $handler): void
+    public function run_until_complete(callable $handler): void
     {
         for ($attempt = 0; $attempt < 1000; $attempt++) {
             $handler();
@@ -469,7 +412,7 @@ class Pull
      * Check whether preflight detected that the exporter plugin is not
      * installed. Returns true if so (caller should abort the pipeline).
      */
-    private function check_plugin_installed(): bool
+    public function check_plugin_installed(): bool
     {
         $state = $this->client->state;
         $preflight = $state["preflight"] ?? null;
@@ -520,7 +463,7 @@ class Pull
     /**
      * Build a one-line summary of preflight results for the checkmark.
      */
-    private function preflight_summary(): ?string
+    public function preflight_summary(): ?string
     {
         $state = $this->client->state;
         $data = $state["preflight"]["data"] ?? null;
@@ -543,7 +486,7 @@ class Pull
      * Start the local server. For php-builtin / playground-cli this
      * runs start.sh via passthru and blocks until the user hits Ctrl-C.
      */
-    private function start_server(array $options): void
+    public function start_server(array $options): void
     {
         $output_dir = $options['output_dir'] ?? $this->client->state_dir . '/runtime';
         $start_sh = $output_dir . '/start.sh';
@@ -601,7 +544,7 @@ class Pull
         $this->progress->print_line("\n\r\033[K  {$cyan}⠋{$r} {$label}");
     }
 
-    private function print_done(string $stage, ?string $summary = null): void
+    public function print_done(string $stage, ?string $summary = null): void
     {
         $this->progress->clear_progress_line();
         $green = "\033[32m";
@@ -660,7 +603,7 @@ class Pull
         $this->progress->print_line("  Re-run the same command to resume.\n");
     }
 
-    private function format_bytes(int $bytes): string
+    public function format_bytes(int $bytes): string
     {
         if ($bytes >= 1073741824) {
             return sprintf("%.1f GB", $bytes / 1073741824);

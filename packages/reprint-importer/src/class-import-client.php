@@ -9,6 +9,7 @@ use PDO;
 use PDOException;
 use PDOStatement;
 use RuntimeException;
+use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\MultipartStreamParser;
@@ -577,7 +578,7 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: files-pull, files-index, db-pull, db-index, preflight, preflight-assert
+     *   - command: Required. One of the commands registered in ImportCommands.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      */
@@ -597,18 +598,7 @@ class ImportClient
                 );
             }
         }
-        $command = $options["command"] ?? null;
-
-        // Apply legacy command aliases so callers using old names still work.
-        static $command_aliases = [
-            "files-sync" => "files-pull",
-            "db-sync" => "db-pull",
-            "flat-document-root" => "flat-docroot",
-            "flatten-docroot" => "flat-docroot",
-        ];
-        if ($command && isset($command_aliases[$command])) {
-            $command = $command_aliases[$command];
-        }
+        $command = ImportCommands::normalize_name($options["command"] ?? null);
 
         $abort = $options["abort"] ?? false;
         $this->pipeline_step = $options["pipeline_step"] ?? null;
@@ -616,28 +606,14 @@ class ImportClient
 
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Command is required. Valid commands: " . ImportCommands::valid_names_message(),
             );
         }
 
-        if (
-            !in_array($command, [
-                "pull",
-                "files-pull",
-                "files-index",
-                "db-pull",
-                "db-index",
-                "db-domains",
-                "db-apply",
-                "files-stats",
-                "preflight",
-                "preflight-assert",
-                "flat-docroot",
-                "apply-runtime",
-            ])
-        ) {
+        $command_runner = ImportCommands::get($command);
+        if ($command_runner === null) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Invalid command: {$command}. Valid commands: " . ImportCommands::valid_names_message(),
             );
         }
 
@@ -794,131 +770,65 @@ class ImportClient
             $this->hmac_client = new \Reprint\Exporter\Site_Export_HMAC_Client($options["secret"]);
         }
 
-        // pull orchestrates the full pipeline (preflight → files → db → apply)
-        // internally, so it must run before the normal command dispatch.
-        if ($command === "pull") {
-            if ($abort) {
-                $this->pull->abort();
-                return;
-            }
-            try {
-                $this->pull->run($options);
-            } catch (\Exception $e) {
-                $this->output_progress([
-                    "status" => "error",
-                    "error" => $e->getMessage(),
-                    "message" => "Error: " . $e->getMessage(),
-                ]);
-                $this->write_status_file($e->getMessage());
-                throw $e;
-            }
-            return;
-        }
-
-        // preflight and preflight-assert run the preflight themselves and
-        // exit directly — they do not go through the normal command dispatch.
-        if ($command === "preflight") {
-            $this->run_preflight();
-            $this->run_preflight_report();
-            return;
-        }
-
-        // db-domains and db-apply are local-only commands that don't need a remote server.
-        if ($command === "db-domains") {
-            $this->run_db_domains();
-            return;
-        }
-        if ($command === "files-stats") {
-            $this->run_files_stats();
-            return;
-        }
-        if ($command === "flat-docroot") {
-            $this->run_flat_document_root($options);
-            return;
-        }
-        if ($command === "apply-runtime") {
-            $this->run_apply_runtime($options);
-            return;
-        }
-        if ($command === "db-apply") {
-            if ($abort) {
-                $this->handle_abort($command);
-                return;
-            }
-            try {
-                $this->run_db_apply($options);
-                $final_status = $this->state["status"] ?? "complete";
-                $this->output_progress(["status" => $final_status, "message" => "db-apply {$final_status}"]);
-                if ($final_status === "partial") {
-                    $this->exit_code = 2;
-                }
-            } catch (Exception $e) {
-                $this->output_progress([
-                    "status" => "error",
-                    "error" => $e->getMessage(),
-                    "error_code" => $this->last_error_code,
-                    "message" => "Error: " . $e->getMessage(),
-                ]);
-                $this->write_status_file($e->getMessage());
-                throw $e;
-            }
-            return;
-        }
-
-        // All other commands require a prior preflight run.
-        $this->require_preflight();
-
-        // Handle --abort: clear state for the command and exit immediately.
-        // To abort a sync, run `<command> --abort` (clears state), then
-        // run `<command>` again (starts fresh).
         if ($abort) {
-            // @TODO: Co-locate abort for each command with the run_*() method
-            //        for that command.
-            $this->handle_abort($command);
+            if (!$command_runner->supports_abort()) {
+                throw new InvalidArgumentException("Command {$command} does not support --abort");
+            }
+            $command_runner->abort($this, $command);
             return;
         }
 
-        // Dispatch to appropriate command handler
+        if ($command_runner->requires_preflight()) {
+            $this->require_preflight();
+        }
+
         try {
-            switch ($command) {
-                case "preflight-assert":
-                    $this->run_preflight_assert();
-                    return;
-
-                case "files-pull":
-                    $this->run_files_sync();
-                    break;
-
-                case "files-index":
-                    $this->run_files_index();
-                    break;
-
-                case "db-pull":
-                    $this->run_db_sync();
-                    break;
-                case "db-index":
-                    $this->run_db_index();
-                    break;
-            }
-
-            $final_status = $this->state["status"] ?? "complete";
-            $this->output_progress(["status" => $final_status, "message" => "{$command} {$final_status}"]);
-
-            // Exit code 2 signals "partial progress, call me again" so
-            // runner scripts can loop on $? without reading the state file.
-            if ($final_status === "partial") {
-                $this->exit_code = 2;
+            $command_runner->execute($this, $options);
+            if ($command_runner->emits_final_status()) {
+                $this->finish_command_status($command);
             }
         } catch (Exception $e) {
-            $this->output_progress([
-                "status" => "error",
-                "error" => $e->getMessage(),
-                "error_code" => $this->last_error_code,
-                "message" => "Error: " . $e->getMessage(),
-            ]);
-            $this->write_status_file($e->getMessage());
+            $this->report_command_exception($e);
             throw $e;
         }
+    }
+
+    public function run_pull(array $options): void
+    {
+        $this->pull->run($options);
+    }
+
+    public function abort_pull(): void
+    {
+        $this->pull->abort();
+    }
+
+    public function abort_command(string $command): void
+    {
+        $this->handle_abort($command);
+    }
+
+    public function finish_command_status(string $command): void
+    {
+        $final_status = $this->state["status"] ?? "complete";
+        $this->output_progress(["status" => $final_status, "message" => "{$command} {$final_status}"]);
+
+        // Exit code 2 signals "partial progress, call me again" so
+        // runner scripts can loop on $? without reading the state file.
+        if ($final_status === "partial") {
+            $this->exit_code = 2;
+        }
+    }
+
+    public function report_command_exception(Exception $e): void
+    {
+        $this->output_progress([
+            "status" => "error",
+            "error" => $e->getMessage(),
+            "error_code" => $this->last_error_code,
+            "message" => "Error: " . $e->getMessage(),
+        ]);
+        $this->write_status_file($e->getMessage());
     }
 
     /**
@@ -1368,7 +1278,7 @@ class ImportClient
      * Assert that a preflight has already been run and stored in state.
      * All commands except preflight/preflight-assert call this before starting work.
      */
-    private function require_preflight(): void
+    public function require_preflight(): void
     {
         $entry = $this->state["preflight"] ?? null;
         if (!is_array($entry) || empty($entry["data"])) {
@@ -1385,7 +1295,7 @@ class ImportClient
      * The preflight itself already ran in run_preflight() — this just
      * outputs the stored result.
      */
-    private function run_preflight_report(): void
+    public function run_preflight_report(): void
     {
         $entry = $this->state["preflight"] ?? null;
         if ($entry === null) {
@@ -1406,7 +1316,7 @@ class ImportClient
      * and exits with code 0 if migration looks feasible, code 1 if not.
      * Prints a human-readable pass/fail summary to stdout.
      */
-    private function run_preflight_assert(): void
+    public function run_preflight_assert(): void
     {
         $entry = $this->state["preflight"] ?? null;
         $data = $entry["data"] ?? null;
@@ -2688,7 +2598,7 @@ class ImportClient
      * a target MySQL database. Supports resumption via statement count tracking.
      *
      */
-    private function run_db_domains(): void
+    public function run_db_domains(): void
     {
         $domains_file = $this->state_dir . "/.import-domains.json";
         $sql_file = $this->state_dir . "/db.sql";
@@ -2760,7 +2670,7 @@ class ImportClient
      * Reads .import-remote-index.jsonl for all indexed files and
      * .import-download-list.jsonl for files not yet downloaded.
      */
-    private function run_files_stats(): void
+    public function run_files_stats(): void
     {
         $remote_index = $this->remote_index_file;
         $download_list = $this->download_list_file;
@@ -4716,7 +4626,7 @@ class ImportClient
      *
      * Streams table metadata (name/rows/size) for planning and diagnostics.
      */
-    private function run_db_index(): void
+    public function run_db_index(): void
     {
         $state_command = $this->state["command"] ?? null;
         $tables_file = $this->state_dir . "/db-tables.jsonl";
@@ -9700,15 +9610,9 @@ class ImportClient
         $state = $this->normalize_state($state);
         $state = $this->decode_state_paths($state);
 
-        // Migrate legacy command names from older state files.
-        static $legacy_commands = [
-            "files-sync" => "files-pull",
-            "db-sync" => "db-pull",
-            "flat-document-root" => "flat-docroot",
-        ];
         $state_cmd = $state["command"] ?? null;
-        if ($state_cmd && isset($legacy_commands[$state_cmd])) {
-            $state["command"] = $legacy_commands[$state_cmd];
+        if (is_string($state_cmd)) {
+            $state["command"] = ImportCommands::normalize_name($state_cmd);
         }
 
         return $state;

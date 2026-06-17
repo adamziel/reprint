@@ -3,13 +3,17 @@
 namespace Reprint\Exporter;
 
 use InvalidArgumentException;
+use Reprint\Exporter\Command\BudgetedExportCommand;
+use Reprint\Exporter\Command\ExportCommand;
+use Reprint\Exporter\Command\ExportCommands;
+use Reprint\Exporter\Command\PreflightCommand;
 
 /**
  * HTTP dispatcher for the Site Export API.
  */
 final class Site_Export_HTTP_Server {
 
-    /** @var array<string, callable> */
+    /** @var array<string, callable|ExportCommand> */
     private $handlers;
 
     /** @var callable */
@@ -125,11 +129,11 @@ final class Site_Export_HTTP_Server {
      * @param array<string, mixed> $options Forwarded to the constructor.
      */
     public static function serve(array $options = []): void {
-        // endpoint_preflight is defined by export.php — use it as a
-        // cheap sentinel to detect whether the runtime is already
-        // loaded. require_once would be safe either way, but this
-        // avoids re-running the stat() on hot paths.
-        if (!function_exists('endpoint_preflight')) {
+        // REPRINT_EXPORTER_PROTOCOL_VERSION is defined by export.php — use it
+        // as a cheap sentinel to detect whether the runtime is already loaded.
+        // require_once would be safe either way, but this avoids re-running the
+        // stat() on hot paths.
+        if (!defined('REPRINT_EXPORTER_PROTOCOL_VERSION')) {
             require_once __DIR__ . '/export.php';
         }
 
@@ -247,9 +251,8 @@ final class Site_Export_HTTP_Server {
 
     /**
      * @param array<string, mixed> $config
-     * @param mixed $budget
      */
-    public function dispatch(array $config, $budget = null): void {
+    public function dispatch(array $config): void {
         $endpoint = $config['endpoint'] ?? null;
         if (!is_string($endpoint) || $endpoint === '') {
             throw new InvalidArgumentException(
@@ -264,29 +267,37 @@ final class Site_Export_HTTP_Server {
         }
 
         $handler = $this->handlers[$endpoint];
-        if ($endpoint === 'preflight') {
-            call_user_func($handler, $config);
+        if ($handler instanceof PreflightCommand) {
+            $handler->execute($config);
             return;
         }
 
-        if ($budget === null) {
+        if ($handler instanceof BudgetedExportCommand) {
             $budget = $this->create_resource_budget($config);
+            if (!$budget instanceof ResourceBudget) {
+                throw new InvalidArgumentException('Export budget factory must return a ResourceBudget.');
+            }
+
+            $handler->execute($config, $budget);
+            return;
         }
 
-        call_user_func($handler, $config, $budget);
+        if ($handler instanceof ExportCommand) {
+            throw new InvalidArgumentException('Unsupported export command: ' . get_class($handler));
+        }
+
+        call_user_func($handler, $config, $this->create_resource_budget($config));
     }
 
     /**
-     * @return array<string, callable>
+     * @return array<string, ExportCommand>
      */
     private function default_handlers(): array {
-        return [
-            'file_index' => 'endpoint_file_index',
-            'file_fetch' => 'endpoint_file_fetch',
-            'sql_chunk' => 'endpoint_sql_chunk',
-            'db_index' => 'endpoint_db_index',
-            'preflight' => 'endpoint_preflight',
-        ];
+        if (!class_exists(ExportCommands::class)) {
+            require_once __DIR__ . '/commands/load.php';
+        }
+
+        return ExportCommands::all();
     }
 
     /**

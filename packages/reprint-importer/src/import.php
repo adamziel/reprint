@@ -47,6 +47,10 @@ require_once __DIR__ . '/lib/class-external-merge-sort.php';
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
+// Stateless command objects used by the importer CLI and pull pipeline.
+require_once __DIR__ . '/lib/commands/load.php';
+require_once __DIR__ . '/lib/pull/commands/load.php';
+
 // Pull command — orchestrates the lower-level commands into a pipeline
 require_once __DIR__ . '/lib/pull/class-pull.php';
 

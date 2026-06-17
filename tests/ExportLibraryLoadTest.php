@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Verifies that requiring export.php does not authenticate requests
- * or terminate the process — it only registers functions and classes.
+ * or terminate the process — it only registers the export runtime.
  *
  * Tests run in subprocesses because export.php registers shutdown and
  * error handlers at module level.
@@ -24,14 +24,14 @@ final class ExportLibraryLoadTest extends TestCase
         $result = $this->runExportWith($script);
 
         $this->assertStringNotContainsString('Invalid secret key', $result['output']);
-        $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
+        $this->assertStringContainsString('export-runtime-loaded', $result['output']);
     }
 
-    public function testRequiringExportPhpDefinesEndpointHandlers(): void
+    public function testRequiringExportPhpLoadsExportRuntime(): void
     {
         $result = $this->runExportWith('');
 
-        $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
+        $this->assertStringContainsString('export-runtime-loaded', $result['output']);
     }
 
     /**
@@ -47,8 +47,10 @@ final class ExportLibraryLoadTest extends TestCase
         {$setup_script}
         require '{$export_path}';
         // If we got here, require() completed without die()ing.
-        // Print a marker indicating endpoint functions are defined.
-        echo function_exists('endpoint_preflight') ? 'endpoint-handlers-loaded' : 'handlers-missing';
+        // Print a marker indicating the core export runtime is available.
+        echo class_exists(\Reprint\Exporter\Command\ExportCommands::class)
+            ? 'export-runtime-loaded'
+            : 'runtime-missing';
         PHP;
 
         $tmp_dir = sys_get_temp_dir() . '/export-library-test-' . uniqid();
