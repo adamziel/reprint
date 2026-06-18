@@ -3,8 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use ReflectionMethod;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Transport\HttpRequestBuilder;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -18,59 +17,13 @@ require_once __DIR__ . '/../../importer/import.php';
  */
 class AcceptEncodingTest extends TestCase
 {
-    private $tempDir;
-
-    protected function setUp(): void
-    {
-        parent::setUp();
-        $this->tempDir = sys_get_temp_dir() . '/import-encoding-test-' . uniqid();
-        mkdir($this->tempDir . '/state', 0755, true);
-        mkdir($this->tempDir . '/fs-root', 0755, true);
-    }
-
-    protected function tearDown(): void
-    {
-        $this->recursiveDelete($this->tempDir);
-        parent::tearDown();
-    }
-
-    private function recursiveDelete(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-        foreach (scandir($dir) as $item) {
-            if ($item === '.' || $item === '..') {
-                continue;
-            }
-            $path = $dir . '/' . $item;
-            if (is_link($path)) {
-                unlink($path);
-            } elseif (is_dir($path)) {
-                $this->recursiveDelete($path);
-            } else {
-                unlink($path);
-            }
-        }
-        rmdir($dir);
-    }
-
     /**
      * The Accept-Encoding header must not include "br" (brotli),
      * because curl may not have brotli support compiled in.
      */
     public function testAcceptEncodingExcludesBrotli(): void
     {
-        $client = new ImportClient(
-            'http://fake.url',
-            $this->tempDir . '/state',
-            $this->tempDir . '/fs-root'
-        );
-
-        $method = new ReflectionMethod($client, 'get_base_headers');
-        $method->setAccessible(true);
-
-        $headers = $method->invoke($client, 'application/json');
+        $headers = HttpRequestBuilder::base_headers('application/json');
 
         $encoding_header = null;
         foreach ($headers as $header) {

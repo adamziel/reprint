@@ -43,6 +43,7 @@ use Reprint\Importer\Sql\SqlStatementInspector;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 use Reprint\Importer\Transport\HttpErrorDiagnoser;
+use Reprint\Importer\Transport\HttpRequestBuilder;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 use Reprint\Importer\UrlRewrite\Base64ValueScanner;
 use Reprint\Importer\UrlRewrite\DomainCollector;
@@ -5967,17 +5968,7 @@ class ImportClient
         ?string $cursor,
         array $params = []
     ): string {
-        $url = $this->remote_url;
-        $separator = strpos($url, "?") === false ? "?" : "&";
-
-        $params["endpoint"] = $endpoint;
-        if ($cursor) {
-            // Also include cursor in query params as a fallback when headers are stripped.
-            $params["cursor"] = $cursor;
-        }
-        $params["_cache_bust"] = time() . "-" . rand(0, 999999);
-
-        return $url . $separator . http_build_query($params);
+        return HttpRequestBuilder::url($this->remote_url, $endpoint, $cursor, $params);
     }
 
     /**
@@ -6057,24 +6048,14 @@ class ImportClient
      * start with an honest non-browser identity and fall back to common
      * browser strings.
      */
-    public const USER_AGENTS = [
-        "Reprint/1.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-    ];
+    public const USER_AGENTS = HttpRequestBuilder::USER_AGENTS;
 
     private function get_base_headers(string $accept): array
     {
-        $ua = $this->state["user_agent"] ?? self::USER_AGENTS[0];
-        return [
-            "User-Agent: {$ua}",
-            "Accept: {$accept}",
-            "Accept-Language: en-US,en;q=0.9",
-            "Accept-Encoding: gzip, deflate",
-            "Cache-Control: no-cache",
-            "Pragma: no-cache",
-            "Connection: keep-alive",
-        ];
+        return HttpRequestBuilder::base_headers(
+            $accept,
+            $this->state["user_agent"] ?? null,
+        );
     }
 
     /**
