@@ -35,6 +35,7 @@ use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
+use Reprint\Importer\Sql\DbIndexResponseHandler;
 use Reprint\Importer\Sql\SqlStatementInspector;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
@@ -5524,93 +5525,31 @@ class ImportClient
                 $url = $this->build_url("db_index", $cursor, $params);
 
                 $context = new StreamingContext();
-                $context->on_chunk = function ($chunk) use (
-                    &$cursor,
-                    &$complete,
-                    &$tables_written,
-                    &$rows_estimated,
-                    &$bytes_written,
+                $response_handler = new DbIndexResponseHandler(
                     $handle,
-                    $context
-                ) {
-                    if ($this->shutdown_requested) {
-                        throw new RuntimeException("Shutdown requested");
-                    }
-                    if (function_exists("pcntl_signal_dispatch")) {
-                        pcntl_signal_dispatch();
-                    }
-
-                    $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
-
-                    $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-                    if ($chunk_type === "table_stats") {
-                        $data = json_decode($chunk["body"], true);
-                        if (is_array($data)) {
-                            foreach ($data as $row) {
-                                $line = json_encode($row) . "\n";
-                                $bytes = fwrite($handle, $line);
-                                if ($bytes === false || $bytes !== strlen($line)) {
-                                    throw new RuntimeException(
-                                        "Table stats write failed: wrote " . ($bytes === false ? "0" : $bytes) .
-                                        "/" . strlen($line) . " bytes (disk full?)"
-                                    );
-                                }
-                                $bytes_written += $bytes;
-                                $tables_written++;
-                                if (
-                                    isset($row["rows"]) &&
-                                    is_numeric($row["rows"])
-                                ) {
-                                    $rows_estimated += (int) $row["rows"];
-                                }
-                            }
-                        }
-                    } elseif ($chunk_type === "progress") {
-                        $this->handle_progress($chunk, "db-index");
-                    } elseif ($chunk_type === "completion") {
-                        $complete =
-                            ($chunk["headers"]["x-status"] ?? "") ===
-                            "complete";
-                        $context->saw_completion = true;
-                        $context->response_stats = [
-                            "status" => $chunk["headers"]["x-status"] ?? null,
-                            "tables_processed" =>
-                                isset($chunk["headers"]["x-tables-processed"])
-                                    ? (int) $chunk["headers"]["x-tables-processed"]
-                                    : null,
-                            "rows_estimated" =>
-                                isset($chunk["headers"]["x-rows-estimated"])
-                                    ? (int) $chunk["headers"]["x-rows-estimated"]
-                                    : null,
-                            "server_time" =>
-                                isset($chunk["headers"]["x-time-elapsed"])
-                                    ? (float) $chunk["headers"]["x-time-elapsed"]
-                                    : null,
-                            "memory_used" =>
-                                isset($chunk["headers"]["x-memory-used"])
-                                    ? (int) $chunk["headers"]["x-memory-used"]
-                                    : null,
-                            "memory_limit" =>
-                                isset($chunk["headers"]["x-memory-limit"])
-                                    ? (int) $chunk["headers"]["x-memory-limit"]
-                                    : null,
-                        ];
-                        $this->output_progress(
-                            [
-                                "phase" => "db-index",
-                                "status" =>
-                                    $chunk["headers"]["x-status"] ?? "unknown",
-                                "tables_processed" =>
-                                    (int) ($chunk["headers"][
-                                        "x-tables-processed"
-                                    ] ?? 0),
-                            ],
-                            true,
-                        );
-                    } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "sql", $context);
-                    }
-                };
+                    $cursor,
+                    $context,
+                    $tables_written,
+                    $rows_estimated,
+                    $bytes_written,
+                    function (): bool {
+                        return $this->shutdown_requested;
+                    },
+                    function (array $chunk, string $phase): void {
+                        $this->handle_progress($chunk, $phase);
+                    },
+                    function (
+                        array $chunk,
+                        string $phase,
+                        StreamingContext $context
+                    ): void {
+                        $this->handle_error_chunk($chunk, $phase, $context);
+                    },
+                    function (array $progress): void {
+                        $this->output_progress($progress, true);
+                    },
+                );
+                $context->on_chunk = [$response_handler, "handle"];
 
                 $cursor_before = $cursor;
                 $request_start = microtime(true);
@@ -5623,6 +5562,12 @@ class ImportClient
                         "db_index",
                     );
                 } catch (CurlTimeoutException $e) {
+                    $cursor = $response_handler->cursor();
+                    $complete = $response_handler->complete();
+                    $tables_written = $response_handler->tables_written();
+                    $rows_estimated = $response_handler->rows_estimated();
+                    $bytes_written = $response_handler->bytes_written();
+
                     // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
                     // with no progress, so we don't retry forever.
                     $this->assert_can_retry_consecutive_timeout("db_index", $cursor_before, $cursor);
@@ -5639,6 +5584,12 @@ class ImportClient
                     $this->save_state($this->state);
                     return;
                 }
+                $cursor = $response_handler->cursor();
+                $complete = $response_handler->complete();
+                $tables_written = $response_handler->tables_written();
+                $rows_estimated = $response_handler->rows_estimated();
+                $bytes_written = $response_handler->bytes_written();
+
                 $this->state["consecutive_timeouts"] = 0;
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
