@@ -36,6 +36,7 @@ use Reprint\Importer\Session\ExportDirectoryResolver;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
+use Reprint\Importer\Session\VolatileFileTracker;
 use Reprint\Importer\Sql\DbIndexResponseHandler;
 use Reprint\Importer\Sql\SqlResponseHandler;
 use Reprint\Importer\Sql\SqlStatementInspector;
@@ -471,41 +472,14 @@ class ImportClient
         $this->audit_log("COMMAND | {$command} | argv=" . implode(' ', $masked), false);
     }
 
-    /**
-     * Load the volatile files tracker from disk.
-     *
-     * @return array<string, int> Map of path => change count
-     */
-    private function load_volatile_files(): array
+    private function volatile_file_tracker(): VolatileFileTracker
     {
-        if (!file_exists($this->volatile_files_file)) {
-            return [];
-        }
-        $json = file_get_contents($this->volatile_files_file);
-        if ($json === false) {
-            return [];
-        }
-        $data = json_decode($json, true);
-        return is_array($data) ? $data : [];
-    }
-
-    /**
-     * Save the volatile files tracker to disk.
-     * Deletes the file if the array is empty.
-     */
-    private function save_volatile_files(array $files): void
-    {
-        if (empty($files)) {
-            if (file_exists($this->volatile_files_file)) {
-                @unlink($this->volatile_files_file);
-            }
-            return;
-        }
-        $json = json_encode($files, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-        if ($json === false) {
-            return; // Don't corrupt the file
-        }
-        file_put_contents($this->volatile_files_file, $json . "\n");
+        return new VolatileFileTracker(
+            $this->volatile_files_file,
+            function (string $message): void {
+                $this->audit_log($message);
+            },
+        );
     }
 
     /**
@@ -514,11 +488,7 @@ class ImportClient
      */
     private function record_volatile_file(string $path): void
     {
-        $files = $this->load_volatile_files();
-        $count = ($files[$path] ?? 0) + 1;
-        $files[$path] = $count;
-        $this->save_volatile_files($files);
-        $this->audit_log("VOLATILE | path={$path} | count={$count}");
+        $this->volatile_file_tracker()->record($path);
     }
 
     /**
@@ -526,13 +496,7 @@ class ImportClient
      */
     private function clear_volatile_file(string $path): void
     {
-        $files = $this->load_volatile_files();
-        if (!isset($files[$path])) {
-            return;
-        }
-        unset($files[$path]);
-        $this->save_volatile_files($files);
-        $this->audit_log("VOLATILE CLEARED | path={$path}");
+        $this->volatile_file_tracker()->clear($path);
     }
 
     /**
@@ -540,7 +504,7 @@ class ImportClient
      */
     private function report_volatile_files(): void
     {
-        $files = $this->load_volatile_files();
+        $files = $this->volatile_file_tracker()->load();
         if (empty($files)) {
             return;
         }
