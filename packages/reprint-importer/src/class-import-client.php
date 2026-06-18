@@ -12,7 +12,9 @@ use RuntimeException;
 use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightCommand;
+use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Host\RuntimeManifest;
+use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\MultipartStreamParser;
 use Reprint\Importer\Protocol\PreserveLocalSkipException;
@@ -23,6 +25,8 @@ use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
+use Reprint\Importer\Sql\SqlStatementInspector;
+use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 use Reprint\Importer\UrlRewrite\Base64ValueScanner;
@@ -2388,16 +2392,7 @@ class ImportClient
      */
     private function format_bytes(int $bytes): string
     {
-        if ($bytes >= 1073741824) {
-            return sprintf("%.1f GB", $bytes / 1073741824);
-        }
-        if ($bytes >= 1048576) {
-            return sprintf("%.1f MB", $bytes / 1048576);
-        }
-        if ($bytes >= 1024) {
-            return sprintf("%.1f KB", $bytes / 1024);
-        }
-        return "{$bytes} B";
+        return ByteFormatter::format($bytes);
     }
 
     /**
@@ -3164,10 +3159,7 @@ class ImportClient
      */
     private function flatten_clean_path($value): ?string
     {
-        if (!is_string($value) || trim($value) === "") {
-            return null;
-        }
-        return rtrim($value, "/");
+        return PathUtils::clean_path_value($value);
     }
 
     /**
@@ -3182,22 +3174,7 @@ class ImportClient
         string $from,
         string $to
     ): string {
-        $from_parts = explode("/", trim($from, "/"));
-        $to_parts = explode("/", trim($to, "/"));
-
-        // Find common prefix length
-        $common = 0;
-        $max = min(count($from_parts), count($to_parts));
-        while ($common < $max && $from_parts[$common] === $to_parts[$common]) {
-            $common++;
-        }
-
-        // Go up from $from to the common ancestor, then down to $to
-        $up = count($from_parts) - $common;
-        $down = array_slice($to_parts, $common);
-
-        $parts = array_merge(array_fill(0, $up, ".."), $down);
-        return implode("/", $parts) ?: ".";
+        return PathUtils::relative_path($from, $to);
     }
 
     /**
@@ -5348,29 +5325,7 @@ class ImportClient
      */
     public function parse_index_line(string $line): ?array
     {
-        $line = trim($line);
-        if ($line === "") {
-            return null;
-        }
-        $data = json_decode($line, true);
-        if (!is_array($data)) {
-            throw new RuntimeException("Invalid index line format");
-        }
-        $path_encoded = $data["path"] ?? "";
-        if (!is_string($path_encoded) || $path_encoded === "") {
-            throw new RuntimeException("Invalid index path");
-        }
-        $path = base64_decode($path_encoded, true);
-        if ($path === "" || $path === false) {
-            throw new RuntimeException("Invalid index path (base64 decode failed)");
-        }
-        assert_valid_path($path, "index path");
-        return [
-            "path" => $path,
-            "ctime" => (int) ($data["ctime"] ?? 0),
-            "size" => (int) ($data["size"] ?? 0),
-            "type" => (string) ($data["type"] ?? "file"),
-        ];
+        return IndexLineParser::parse($line);
     }
 
     /**
@@ -6346,10 +6301,7 @@ class ImportClient
      */
     private static function extract_insert_table(string $query): string
     {
-        if (preg_match('/INSERT\s+INTO\s+`([^`]+)`/i', $query, $m)) {
-            return $m[1];
-        }
-        return '?';
+        return SqlStatementInspector::extract_insert_table($query);
     }
 
     /**
@@ -6361,43 +6313,7 @@ class ImportClient
      */
     private static function extract_row_identifier(string $query, int $offset): string
     {
-        // Walk backwards from the match to find the row-opening '('.
-        // Track parenthesis depth so we skip inner '(' from FROM_BASE64()
-        // and CONVERT() wrappers.
-        $depth = 0;
-        $row_start = -1;
-        for ($i = $offset - 1; $i >= 0; $i--) {
-            $ch = $query[$i];
-            if ($ch === ')') {
-                $depth++;
-            } elseif ($ch === '(') {
-                if ($depth === 0) {
-                    $row_start = $i + 1;
-                    break;
-                }
-                $depth--;
-            }
-        }
-
-        if ($row_start < 0) {
-            return 'offset=?';
-        }
-
-        // Read the first value after the row-opening '('.
-        // Numeric PKs: (123, ...  or (-5, ...
-        $after = substr($query, $row_start, 40);
-        if (preg_match('/^(-?\d+)/', $after, $m)) {
-            return 'pk=' . $m[1];
-        }
-        // String PKs: ('some-uuid', ...
-        if (preg_match("/^'([^']{0,30})'/", $after, $m)) {
-            return "pk=" . $m[1];
-        }
-        if (preg_match('/^NULL/i', $after)) {
-            return 'pk=NULL';
-        }
-
-        return 'offset=?';
+        return SqlStatementInspector::extract_row_identifier($query, $offset);
     }
 
     /**
@@ -6409,89 +6325,16 @@ class ImportClient
      */
     private static function extract_option_name(string $query, int $offset): ?string
     {
-        // Find the row-opening '(' by walking backwards, same as extract_row_identifier.
-        $depth = 0;
-        $row_start = -1;
-        for ($i = $offset - 1; $i >= 0; $i--) {
-            $ch = $query[$i];
-            if ($ch === ')') {
-                $depth++;
-            } elseif ($ch === '(') {
-                if ($depth === 0) {
-                    $row_start = $i + 1;
-                    break;
-                }
-                $depth--;
-            }
-        }
-
-        if ($row_start < 0) {
-            return null;
-        }
-
-        // Skip the first column value (option_id) and the comma separator,
-        // then read the second column value (option_name) which is a quoted string.
-        $after = substr($query, $row_start, 200);
-        // First column is typically a number: "123," or could be FROM_BASE64(...)
-        // Skip to the first comma that's outside parentheses.
-        $len = strlen($after);
-        $d = 0;
-        $comma_pos = -1;
-        for ($j = 0; $j < $len; $j++) {
-            $c = $after[$j];
-            if ($c === '(') { $d++; }
-            elseif ($c === ')') { $d--; }
-            elseif ($c === ',' && $d === 0) {
-                $comma_pos = $j;
-                break;
-            }
-        }
-
-        if ($comma_pos < 0) {
-            return null;
-        }
-
-        // After the comma, skip whitespace and read a quoted string or FROM_BASE64(...)
-        $rest = ltrim(substr($after, $comma_pos + 1));
-        // Simple quoted string: 'option_name'
-        if (isset($rest[0]) && $rest[0] === "'") {
-            if (preg_match("/^'([^']{0,80})'/", $rest, $m)) {
-                return $m[1];
-            }
-        }
-        // FROM_BASE64('...') wrapped value — decode it
-        if (strpos($rest, 'FROM_BASE64(') === 0) {
-            if (preg_match("/^FROM_BASE64\\('([A-Za-z0-9+\\/=]+)'\\)/", $rest, $m)) {
-                $decoded = base64_decode($m[1], true);
-                if ($decoded !== false) {
-                    return substr($decoded, 0, 80);
-                }
-            }
-        }
-
-        return null;
+        return SqlStatementInspector::extract_option_name($query, $offset);
     }
 
     /**
      * Check whether a SQL statement's first keyword token matches a given token ID.
-     * Skips leading whitespace and comments, so "/* ... *​/ INSERT INTO ..." is handled.
+     * Skips leading whitespace and comments before the first SQL keyword.
      */
     private static function sql_starts_with_token(string $sql, int $expected_token_id): bool
     {
-        $lexer = new \WP_MySQL_Lexer($sql);
-        while ($lexer->next_token()) {
-            $token = $lexer->get_token();
-            if (
-                $token->id === \WP_MySQL_Lexer::WHITESPACE
-                || $token->id === \WP_MySQL_Lexer::COMMENT
-                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_START
-                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_END
-            ) {
-                continue;
-            }
-            return $token->id === $expected_token_id;
-        }
-        return false;
+        return SqlStatementInspector::starts_with_token($sql, $expected_token_id);
     }
 
     /**

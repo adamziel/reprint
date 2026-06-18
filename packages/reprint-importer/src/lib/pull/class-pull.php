@@ -6,6 +6,7 @@ use InvalidArgumentException;
 use RuntimeException;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Pull\Command\PullStageCommands;
+use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 
 /**
@@ -605,15 +606,6 @@ class Pull
 
     public function format_bytes(int $bytes): string
     {
-        if ($bytes >= 1073741824) {
-            return sprintf("%.1f GB", $bytes / 1073741824);
-        }
-        if ($bytes >= 1048576) {
-            return sprintf("%.1f MB", $bytes / 1048576);
-        }
-        if ($bytes >= 1024) {
-            return sprintf("%.1f KB", $bytes / 1024);
-        }
-        return "{$bytes} B";
+        return ByteFormatter::format($bytes);
     }
 }
