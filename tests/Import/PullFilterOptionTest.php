@@ -98,6 +98,25 @@ class PullFilterFakeClient extends \ImportClient
 }
 
 /**
+ * Fake client that records the options the pull pipeline hands to
+ * apply-runtime, so we can assert the flatten_to -> flat_document_root
+ * bridge. flat-docroot is stubbed to a no-op.
+ */
+class PullBridgeFakeClient extends PullFilterFakeClient
+{
+    public ?array $apply_runtime_options = null;
+
+    public function run_flat_document_root(array $options): void
+    {
+    }
+
+    public function run_apply_runtime(array $options): void
+    {
+        $this->apply_runtime_options = $options;
+    }
+}
+
+/**
  * Tests for pull-level file filtering.
  */
 class PullFilterOptionTest extends TestCase
@@ -217,5 +236,66 @@ class PullFilterOptionTest extends TestCase
         $this->assertFalse($state["pull"]["skipped_pending"]);
         $this->assertSame('none', $state["filter"]);
         $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
+    }
+
+    public function testPullDerivesFlatDocumentRootFromFlattenTo(): void
+    {
+        $client = new PullBridgeFakeClient($this->stateDir, $this->fs_root, false);
+        $flatten_to = $this->tempDir . '/flattened-site';
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "filter" => "essential-files",
+            "flatten_to" => $flatten_to,
+            "runtime" => "playground-cli",
+            "start_runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        // The pull pipeline must hand apply-runtime a flat_document_root
+        // derived from --flatten-to, so the generated runtime targets the
+        // flattened layout instead of the raw download tree.
+        $this->assertIsArray($client->apply_runtime_options);
+        $this->assertSame($flatten_to, $client->apply_runtime_options["flat_document_root"]);
+    }
+
+    public function testRepullBypassesTheMidFlightFilterGuard(): void
+    {
+        // The state a completed pull leaves once its deferred "skipped-earlier"
+        // tail has run: pull.stage=complete, but the sub-command state still
+        // reads filter=skipped-earlier / status=in_progress. A delta re-pull
+        // (filter=essential-files) must not be blocked by the mid-flight filter
+        // guard — Pull::run() calls prepare_repull() to clear that stale state.
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "command" => "files-pull",
+                "status" => "in_progress",
+                "stage" => null,
+                "filter" => "skipped-earlier",
+                "pull" => [
+                    "stage" => "complete",
+                    "files_filter" => "essential-files",
+                    "skipped_pending" => true,
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "filter" => "essential-files",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        // The re-pull ran to completion instead of throwing the filter guard.
+        $state = $this->readState();
+        $this->assertSame('complete', $state["pull"]["stage"]);
+        $this->assertSame('essential-files', $state["filter"]);
     }
 }

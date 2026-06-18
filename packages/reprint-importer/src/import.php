@@ -1608,7 +1608,17 @@ class ImportClient
             }
             $prev = $this->state["filter"] ?? null;
             $status = $this->state["status"] ?? null;
-            $is_mid_flight = $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
+            // A pull whose previous run already completed is about to delta
+            // re-pull: Pull::run() calls prepare_repull(), which clears the
+            // leftover sub-command state — including the skipped-earlier
+            // tail's lingering "in_progress" status. That stale state must
+            // not block switching the filter back to the pull's own value.
+            $is_repull =
+                $command === "pull" &&
+                (($this->state["pull"]["stage"] ?? null) === "complete");
+            $is_mid_flight =
+                !$is_repull &&
+                $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
             if ($is_mid_flight) {
                 throw new RuntimeException(
                     "Cannot change --filter from '{$prev}' to '{$next}' while a sync is in progress. " .
