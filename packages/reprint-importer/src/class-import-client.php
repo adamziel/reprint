@@ -36,6 +36,7 @@ use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Sql\DbIndexResponseHandler;
+use Reprint\Importer\Sql\SqlResponseHandler;
 use Reprint\Importer\Sql\SqlStatementInspector;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
@@ -4974,6 +4975,23 @@ class ImportClient
         $caught_exception = null;
         $buffer_not_flushed = "";
         $chunks_since_save = 0;
+        $sync_sql_response_state = function (
+            SqlResponseHandler $response_handler
+        ) use (
+            &$cursor,
+            &$complete,
+            &$sql_bytes_written,
+            &$sql_buffer,
+            &$sql_statements_counted,
+            &$chunks_since_save
+        ): void {
+            $cursor = $response_handler->cursor();
+            $complete = $response_handler->complete();
+            $sql_bytes_written = $response_handler->sql_bytes_written();
+            $sql_buffer = $response_handler->sql_buffer();
+            $sql_statements_counted = $response_handler->sql_statements_counted();
+            $chunks_since_save = $response_handler->chunks_since_save();
+        };
         try {
             while (!$complete) {
                 $params = $this->get_tuned_params("sql_chunk");
@@ -4981,140 +4999,52 @@ class ImportClient
 
                 $context = new StreamingContext();
                 $context->chunk_fingerprints = [];
-                $context->on_chunk = function ($chunk) use (
+                $response_handler = new SqlResponseHandler(
                     $mode,
-                    &$cursor,
-                    &$complete,
-                    &$sql_handle,
-                    $mysql_conn,
-                    &$buffer_handle,
-                    &$sql_buffer,
-                    &$sql_bytes_written,
+                    $cursor,
                     $context,
+                    $sql_handle,
+                    $mysql_conn,
+                    $buffer_handle,
+                    $sql_buffer,
+                    $sql_bytes_written,
                     $query_stream,
                     $domain_collector,
-                    $domains_file,
-                    &$sql_statements_counted,
-                    &$chunks_since_save
-                ) {
-                    // Check if shutdown was requested
-                    if ($this->shutdown_requested) {
-                        throw new RuntimeException("Shutdown requested");
-                    }
-
-                    // Allow signal handlers to run
-                    if (function_exists("pcntl_signal_dispatch")) {
-                        pcntl_signal_dispatch();
-                    }
-
-                    $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
-
-                    // Save cursor periodically (every 50 chunks).
-                    // Skip saving when there's buffered SQL waiting for a
-                    // complete statement — crash recovery would replay the
-                    // cursor but miss the buffered bytes.
-                    $chunks_since_save++;
-                    if (
-                        $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
-                        && $sql_buffer === ""
-                    ) {
-                        if ($sql_handle) {
-                            fflush($sql_handle);
-                        }
+                    $sql_statements_counted,
+                    $chunks_since_save,
+                    self::SAVE_STATE_EVERY_N_CHUNKS,
+                    function (): bool {
+                        return $this->shutdown_requested;
+                    },
+                    function (
+                        ?string $cursor,
+                        int $sql_bytes_written,
+                        int $sql_statements_counted
+                    ): void {
                         $this->state["cursor"] = $cursor;
                         $this->state["sql_bytes"] = $sql_bytes_written;
                         $this->state["sql_statements_counted"] = $sql_statements_counted;
                         $this->save_state($this->state);
-                        $chunks_since_save = 0;
-
-                        // Also persist discovered domains so they survive crashes.
-                        // On resume, the SQL download picks up from the cursor,
-                        // skipping already-downloaded data — so domains from that
-                        // earlier data would be lost without periodic saves.
-                        if ($domain_collector) {
-                            $domains = $domain_collector->get_domains();
-                            if (!empty($domains)) {
-                                file_put_contents(
-                                    $domains_file,
-                                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                                );
-                            }
-                        }
-                    }
-
-                    $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
-                    if ($chunk_type === "sql") {
-                        $query_complete = ($chunk["headers"]["x-query-complete"] ?? "1") === "1";
-                        $data = $chunk["body"];
-
-                        switch ($mode) {
-                            case "file":
-                                $bytes = fwrite($sql_handle, $data);
-                                if ($bytes === false || $bytes !== strlen($data)) {
-                                    throw new RuntimeException(
-                                        "SQL write failed: wrote " . ($bytes === false ? "0" : $bytes) .
-                                        "/" . strlen($data) . " bytes (disk full?)"
-                                    );
-                                }
-                                $sql_bytes_written += $bytes;
-                                break;
-
-                            case "stdout":
-                                $bytes = @fwrite(STDOUT, $data);
-                                if ($bytes === false) {
-                                    // Broken pipe — save state and exit cleanly so the
-                                    // pipe reader (e.g. `mysql`) can finish on its own.
-                                    $this->save_state($this->state);
-                                    exit(0);
-                                }
-                                $sql_bytes_written += $bytes;
-                                break;
-
-                            case "mysql":
-                                // Append to disk immediately so the buffer survives
-                                // even if the process is killed mid-chunk.
-                                if ($buffer_handle) {
-                                    fwrite($buffer_handle, $data);
-                                    fflush($buffer_handle);
-                                }
-
-                                $sql_buffer .= $data;
-                                $sql_bytes_written += strlen($data);
-
-                                if ($query_complete) {
-                                    if (!$mysql_conn->multi_query($sql_buffer)) {
-                                        throw new RuntimeException("MySQL execution failed: " . $mysql_conn->error);
-                                    }
-                                    // Drain all result sets from multi_query before sending the
-                                    // next chunk — mysqli requires this.
-                                    do {
-                                        $result = $mysql_conn->store_result();
-                                        if ($result) { $result->free(); }
-                                        if ($mysql_conn->errno) {
-                                            throw new RuntimeException("MySQL statement error: " . $mysql_conn->error);
-                                        }
-                                    } while ($mysql_conn->more_results() && $mysql_conn->next_result());
-
-                                    // Query executed — truncate the buffer file and reset.
-                                    if ($buffer_handle) {
-                                        ftruncate($buffer_handle, 0);
-                                        rewind($buffer_handle);
-                                    }
-                                    $sql_buffer = "";
-                                }
-                                break;
-                        }
-
-                        // Feed data to query stream for domain discovery and statement counting
-                        if ($query_stream && $domain_collector) {
-                            $query_stream->append_sql($data);
-                            $this->drain_query_stream_for_domains(
-                                $query_stream,
-                                $domain_collector,
-                                $sql_statements_counted,
-                            );
-                        }
+                    },
+                    function (array $domains) use ($domains_file): void {
+                        file_put_contents(
+                            $domains_file,
+                            json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
+                        );
+                    },
+                    function (
+                        WP_MySQL_Naive_Query_Stream $query_stream,
+                        DomainCollector $domain_collector,
+                        int $sql_statements_counted
+                    ): int {
+                        $this->drain_query_stream_for_domains(
+                            $query_stream,
+                            $domain_collector,
+                            $sql_statements_counted,
+                        );
+                        return $sql_statements_counted;
+                    },
+                    function (int $sql_bytes_written): void {
                         // Show download progress on the TTY progress line.
                         // The bytes accumulate across chunks and requests.
                         // Include estimated total from db-index when available,
@@ -5131,55 +5061,36 @@ class ImportClient
                             $sql_progress .= " / " . $this->format_bytes($db_bytes_est);
                         }
                         $this->progress->show_progress_line($sql_progress, $sql_fraction);
-
-                    } elseif ($chunk_type === "progress") {
-                        $this->handle_progress($chunk, "sql");
-                    } elseif ($chunk_type === "completion") {
-                        $complete =
-                            ($chunk["headers"]["x-status"] ?? "") ===
-                            "complete";
-                        $context->saw_completion = true;
-                        $context->response_stats = [
-                            "status" => $chunk["headers"]["x-status"] ?? null,
-                            "sql_bytes" =>
-                                isset($chunk["headers"]["x-sql-bytes"])
-                                    ? (int) $chunk["headers"]["x-sql-bytes"]
-                                    : null,
-                            "server_time" =>
-                                isset($chunk["headers"]["x-time-elapsed"])
-                                    ? (float) $chunk["headers"]["x-time-elapsed"]
-                                    : null,
-                            "memory_used" =>
-                                isset($chunk["headers"]["x-memory-used"])
-                                    ? (int) $chunk["headers"]["x-memory-used"]
-                                    : null,
-                            "memory_limit" =>
-                                isset($chunk["headers"]["x-memory-limit"])
-                                    ? (int) $chunk["headers"]["x-memory-limit"]
-                                    : null,
-                        ];
-                        $this->output_progress(
-                            [
-                                "phase" => "sql",
-                                "status" =>
-                                    $chunk["headers"]["x-status"] ?? "unknown",
-                                "batches_processed" =>
-                                    (int) ($chunk["headers"][
-                                        "x-batches-processed"
-                                    ] ?? 0),
-                            ],
-                            true,
-                        );
-                    } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "db-index", $context);
-                    }
-                };
+                    },
+                    function (array $chunk, string $phase): void {
+                        $this->handle_progress($chunk, $phase);
+                    },
+                    function (
+                        array $chunk,
+                        string $phase,
+                        StreamingContext $context
+                    ): void {
+                        $this->handle_error_chunk($chunk, $phase, $context);
+                    },
+                    function (array $progress): void {
+                        $this->output_progress($progress, true);
+                    },
+                    function (): void {
+                        // Broken pipe — save state and exit cleanly so the
+                        // pipe reader (e.g. `mysql`) can finish on its own.
+                        $this->save_state($this->state);
+                        exit(0);
+                    },
+                );
+                $context->on_chunk = [$response_handler, "handle"];
 
                 $cursor_before = $cursor;
                 $request_start = microtime(true);
                 try {
                     $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
                 } catch (CurlTimeoutException $e) {
+                    $sync_sql_response_state($response_handler);
+
                     // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
                     // with no progress, so we don't retry forever.
                     $this->assert_can_retry_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
@@ -5201,6 +5112,8 @@ class ImportClient
                     $curl_timed_out = true;
                     break;
                 } catch (RuntimeException $e) {
+                    $sync_sql_response_state($response_handler);
+
                     // The server may crash mid-response (max_execution_time,
                     // OOM, fatal error). This surfaces as either:
                     //  - "missing completion chunk" (response ended without it)
@@ -5249,6 +5162,8 @@ class ImportClient
                     }
                     throw $e;
                 }
+                $sync_sql_response_state($response_handler);
+
                 $this->state["consecutive_timeouts"] = 0;
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
