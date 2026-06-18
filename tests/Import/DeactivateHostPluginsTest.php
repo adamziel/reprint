@@ -5,21 +5,18 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use PDO;
 use PDOException;
-use Reprint\Importer\Host\Analyzers\WpcloudHostAnalyzer;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Sql\ActivePluginDeactivator;
 
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Verify deactivate_host_plugins() rewrites active_plugins identically on
+ * Verify ActivePluginDeactivator rewrites active_plugins identically on
  * MySQL and SQLite targets. Regression: prepare() used to throw "object
  * is uninitialized" against the WP_PDO_MySQL_On_SQLite wrapper.
  */
 class DeactivateHostPluginsTest extends TestCase
 {
     private string $tempDir;
-    private string $stateDir;
-    private string $fsRoot;
     private ?PDO $cleanupPdo = null;
     private ?string $mysqlDbName = null;
 
@@ -27,10 +24,7 @@ class DeactivateHostPluginsTest extends TestCase
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/deactivate-host-plugins-' . uniqid();
-        $this->stateDir = $this->tempDir . '/state';
-        $this->fsRoot = $this->tempDir . '/fs-root';
-        mkdir($this->stateDir, 0755, true);
-        mkdir($this->fsRoot, 0755, true);
+        mkdir($this->tempDir, 0755, true);
     }
 
     protected function tearDown(): void
@@ -70,18 +64,13 @@ class DeactivateHostPluginsTest extends TestCase
             'akismet/akismet.php',
         ]));
 
-        $this->writeState([
-            'webhost' => 'siteground',
-            'preflight' => [
-                'data' => [
-                    'database' => ['wp' => ['table_prefix' => 'wp_']],
-                ],
+        $result = ActivePluginDeactivator::deactivate_for_removed_paths(
+            $pdo,
+            [
+                'wp-content/plugins/sg-cachepress',
+                'wp-content/plugins/sg-security',
             ],
-        ]);
-        $client = $this->makeClient();
-        $this->loadClientState($client);
-
-        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$pdo]);
+        );
 
         sort($result);
         $this->assertSame(
@@ -116,18 +105,11 @@ class DeactivateHostPluginsTest extends TestCase
             'akismet/akismet.php',
         ]), 'custom_');
 
-        $this->writeState([
-            'webhost' => 'siteground',
-            'preflight' => [
-                'data' => [
-                    'database' => ['wp' => ['table_prefix' => 'custom_']],
-                ],
-            ],
-        ]);
-        $client = $this->makeClient();
-        $this->loadClientState($client);
-
-        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$pdo]);
+        $result = ActivePluginDeactivator::deactivate_for_removed_paths(
+            $pdo,
+            ['wp-content/plugins/sg-cachepress'],
+            'custom_',
+        );
         $this->assertSame(['sg-cachepress/sg-cachepress.php'], $result);
 
         $remaining = unserialize($this->fetchOption($pdo, 'active_plugins', 'custom_'));
@@ -147,20 +129,13 @@ class DeactivateHostPluginsTest extends TestCase
         $serialized = serialize(['akismet/akismet.php']);
         $this->insertOption($pdo, 'active_plugins', $serialized);
 
-        $this->writeState([
-            'webhost' => 'wpcloud',
-            'preflight' => [
-                'data' => [
-                    // Minimal data WpcloudHostAnalyzer::analyze() reads.
-                    'runtime' => ['ini_get_all' => []],
-                    'database' => ['wp' => ['table_prefix' => 'wp_']],
-                ],
+        $result = ActivePluginDeactivator::deactivate_for_removed_paths(
+            $pdo,
+            [
+                'wp-content/object-cache.php',
+                'wp-content/mu-plugins/wpcomsh',
             ],
-        ]);
-        $client = $this->makeClient();
-        $this->loadClientState($client);
-
-        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$pdo]);
+        );
         $this->assertSame([], $result);
         $this->assertSame($serialized, $this->fetchOption($pdo, 'active_plugins'));
     }
@@ -174,19 +149,52 @@ class DeactivateHostPluginsTest extends TestCase
         $this->createWpOptionsTable($pdo);
         // Intentionally no active_plugins row.
 
-        $this->writeState([
-            'webhost' => 'siteground',
-            'preflight' => [
-                'data' => [
-                    'database' => ['wp' => ['table_prefix' => 'wp_']],
-                ],
-            ],
-        ]);
-        $client = $this->makeClient();
-        $this->loadClientState($client);
-
-        $result = $this->callPrivate($client, 'deactivate_host_plugins', [$pdo]);
+        $result = ActivePluginDeactivator::deactivate_for_removed_paths(
+            $pdo,
+            ['wp-content/plugins/sg-cachepress'],
+        );
         $this->assertSame([], $result);
+    }
+
+    /**
+     * @dataProvider targetProvider
+     */
+    public function testPathIncompatiblePluginsOnlyDeactivateForSubpathUrls(string $engine): void
+    {
+        $pdo = $this->createPdo($engine);
+        $this->createWpOptionsTable($pdo);
+        $this->insertOption($pdo, 'active_plugins', serialize([
+            'page-optimize/page-optimize.php',
+            'akismet/akismet.php',
+        ]));
+
+        $result = ActivePluginDeactivator::deactivate_path_incompatible(
+            $pdo,
+            'https://playground.test/scope:abc',
+        );
+
+        $this->assertSame(['page-optimize/page-optimize.php'], $result);
+        $remaining = unserialize($this->fetchOption($pdo, 'active_plugins'));
+        $this->assertSame(['akismet/akismet.php'], array_values($remaining));
+    }
+
+    /**
+     * @dataProvider targetProvider
+     */
+    public function testPathIncompatiblePluginsNoopForRootUrls(string $engine): void
+    {
+        $pdo = $this->createPdo($engine);
+        $this->createWpOptionsTable($pdo);
+        $serialized = serialize(['page-optimize/page-optimize.php']);
+        $this->insertOption($pdo, 'active_plugins', $serialized);
+
+        $result = ActivePluginDeactivator::deactivate_path_incompatible(
+            $pdo,
+            'https://example.test/',
+        );
+
+        $this->assertSame([], $result);
+        $this->assertSame($serialized, $this->fetchOption($pdo, 'active_plugins'));
     }
 
     // ---- helpers ----
@@ -305,34 +313,6 @@ class DeactivateHostPluginsTest extends TestCase
     private function ansiQuote(string $value): string
     {
         return "'" . str_replace("'", "''", $value) . "'";
-    }
-
-    private function writeState(array $state): void
-    {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode($state, JSON_PRETTY_PRINT),
-        );
-    }
-
-    private function makeClient(): ImportClient
-    {
-        return new ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
-    }
-
-    private function loadClientState(ImportClient $client): void
-    {
-        $state = $this->callPrivate($client, 'load_state');
-        $reflection = new \ReflectionClass($client);
-        $property = $reflection->getProperty('state');
-        $property->setValue($client, $state);
-    }
-
-    private function callPrivate(ImportClient $client, string $method, array $args = [])
-    {
-        $reflection = new \ReflectionClass($client);
-        $m = $reflection->getMethod($method);
-        return $m->invoke($client, ...$args);
     }
 
     private function recursiveDelete(string $dir): void
