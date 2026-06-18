@@ -20,6 +20,9 @@ use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Pull\Pull;
 use Reprint\Importer\QueryStream\WP_MySQL_FastQueryStream;
 use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
+use Reprint\Importer\Session\ImportPaths;
+use Reprint\Importer\Session\ImportStateSchema;
+use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 use Reprint\Importer\UrlRewrite\Base64ValueScanner;
@@ -37,7 +40,6 @@ class ImportClient
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
-    private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
 
     /**
@@ -55,6 +57,12 @@ class ImportClient
 
     /** @var string Directory where downloaded site files are written (no filesystem-root/ wrapper). */
     public $fs_root;
+
+    /** @var ImportPaths Derived filesystem paths for this import session. */
+    private ImportPaths $paths;
+
+    /** @var StatePathCodec Encodes byte-sensitive state paths for JSON persistence. */
+    private StatePathCodec $state_path_codec;
 
     /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
@@ -289,19 +297,19 @@ class ImportClient
         $this->remote_url = rtrim($remote_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->fs_root = rtrim($fs_root, "/");
-        $this->state_file = $this->state_dir . "/.import-state.json";
-        $this->index_file = $this->state_dir . "/.import-index.jsonl";
-        $this->index_updates_file =
-            $this->state_dir . "/.import-index-updates.jsonl";
-        $this->remote_index_file =
-            $this->state_dir . "/.import-remote-index.jsonl";
-        $this->download_list_file =
-            $this->state_dir . "/.import-download-list.jsonl";
-        $this->skipped_download_list_file =
-            $this->state_dir . "/.import-download-list-skipped.jsonl";
-        $this->audit_log = $this->state_dir . "/.import-audit.log";
-        $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
-        $this->status_file = $this->state_dir . "/.import-status.json";
+        $this->paths = new ImportPaths($this->state_dir);
+        $this->state_path_codec = new StatePathCodec(function (string $message): void {
+            $this->audit_log($message, true);
+        });
+        $this->state_file = $this->paths->state_file();
+        $this->index_file = $this->paths->index_file();
+        $this->index_updates_file = $this->paths->index_updates_file();
+        $this->remote_index_file = $this->paths->remote_index_file();
+        $this->download_list_file = $this->paths->download_list_file();
+        $this->skipped_download_list_file = $this->paths->skipped_download_list_file();
+        $this->audit_log = $this->paths->audit_log();
+        $this->volatile_files_file = $this->paths->volatile_files_file();
+        $this->status_file = $this->paths->status_file();
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
         // against STDERR in run() once we know the output mode.
@@ -8787,94 +8795,7 @@ class ImportClient
 
     public function default_state(): array
     {
-        return [
-            "command" => null,
-            "status" => null,
-            "cursor" => null,
-            "stage" => null,
-            "preflight" => null,
-            "remote_protocol_version" => null,
-            "remote_protocol_min_version" => null,
-            "version" => null,
-            "webhost" => null,
-            "follow_symlinks" => true,
-            "fs_root_nonempty_behavior" => "error",
-            "filter" => "none",
-            "max_allowed_packet" => null,
-            "db_index" => [
-                "file" => null,
-                "tables" => 0,
-                "rows_estimated" => 0,
-                "bytes" => 0,
-                "updated_at" => null,
-            ],
-            "diff" => [
-                "remote_offset" => 0,
-                "local_after" => null,
-            ],
-            "index" => [
-                "cursor" => null,
-            ],
-            "fetch" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-            ],
-            "fetch_skipped" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-            ],
-            // Crash recovery: track in-progress file downloads
-            // If we crash mid-write, we can truncate to the expected size on resume
-            "current_file" => null,        // Path to file being written
-            "current_file_bytes" => null,  // Expected bytes written so far
-            // Crash recovery: track SQL file size
-            "sql_bytes" => null,           // Expected SQL file size
-            // db-apply state
-            "apply" => [
-                "statements_executed" => 0,
-                "bytes_read" => 0,
-                "rewrite_url" => null,
-                // Target database configuration — persisted by db-apply
-                // so that apply-runtime can generate DB_* constants.
-                "target_engine" => null,
-                "target_db" => null,
-                "target_host" => null,
-                "target_port" => null,
-                "target_user" => null,
-                "target_pass" => null,
-                "target_sqlite_path" => null,
-                "remote_paths_removed_from_local_site" => [],
-            ],
-            // SQL output mode (file, stdout, mysql) — persisted for resume
-            "sql_output" => null,
-            // MySQL connection parameters — persisted for resume (password excluded)
-            "mysql_host" => null,
-            "mysql_port" => null,
-            "mysql_user" => null,
-            "mysql_database" => null,
-            // Consecutive cURL timeout counter — tracks how many times in a
-            // row a timeout fired without the cursor advancing. After
-            // MAX_CONSECUTIVE_TIMEOUTS with no progress, the importer gives
-            // up instead of retrying forever.
-            "consecutive_timeouts" => 0,
-            // Adaptive tuning state/config
-            "tuning" => [
-                "config" => [],
-                "state" => [],
-            ],
-            // Pull pipeline state — tracks progress through the composite
-            // preflight → files-pull → db-pull → db-apply → ... pipeline.
-            // "stage" is the last completed stage name, or "complete".
-            "pull" => [
-                "stage" => null,
-                "files_filter" => null,
-                "skipped_pending" => false,
-            ],
-        ];
+        return ImportStateSchema::default_state();
     }
 
     /**
@@ -8882,60 +8803,7 @@ class ImportClient
      */
     private function normalize_state(array $state): array
     {
-        $defaults = $this->default_state();
-        $state = array_intersect_key($state, $defaults);
-        $state = array_merge($defaults, $state);
-        $diff = $state["diff"];
-        if (!is_array($diff)) {
-            $diff = [];
-        }
-        $diff = array_intersect_key($diff, $defaults["diff"]);
-        $state["diff"] = array_merge($defaults["diff"], $diff);
-        $index = $state["index"] ?? [];
-        if (!is_array($index)) {
-            $index = [];
-        }
-        $index = array_intersect_key($index, $defaults["index"]);
-        $state["index"] = array_merge($defaults["index"], $index);
-        $fetch = $state["fetch"] ?? [];
-        if (!is_array($fetch)) {
-            $fetch = [];
-        }
-        $fetch = array_intersect_key($fetch, $defaults["fetch"]);
-        $state["fetch"] = array_merge($defaults["fetch"], $fetch);
-        $tuning = $state["tuning"] ?? [];
-        if (!is_array($tuning)) {
-            $tuning = [];
-        }
-        $tuning = array_intersect_key($tuning, $defaults["tuning"]);
-        $tuning = array_merge($defaults["tuning"], $tuning);
-        $state["tuning"] = $tuning;
-        $index_db = $state["db_index"] ?? [];
-        if (!is_array($index_db)) {
-            $index_db = [];
-        }
-        $index_db = array_intersect_key(
-            $index_db,
-            $defaults["db_index"],
-        );
-        $index_db = array_merge(
-            $defaults["db_index"],
-            $index_db,
-        );
-        $state["db_index"] = $index_db;
-        $apply = $state["apply"] ?? [];
-        if (!is_array($apply)) {
-            $apply = [];
-        }
-        $apply = array_intersect_key($apply, $defaults["apply"]);
-        $state["apply"] = array_merge($defaults["apply"], $apply);
-        $pull = $state["pull"] ?? [];
-        if (!is_array($pull)) {
-            $pull = [];
-        }
-        $pull = array_intersect_key($pull, $defaults["pull"]);
-        $state["pull"] = array_merge($defaults["pull"], $pull);
-        return $state;
+        return ImportStateSchema::normalize($state);
     }
 
     /**
@@ -8943,31 +8811,7 @@ class ImportClient
      */
     private function encode_state_paths(array $state): array
     {
-        $state["diff"]["local_after"] = $this->encode_state_path_value(
-            $state["diff"]["local_after"] ?? null,
-        );
-        $state["fetch"]["batch_file"] = $this->encode_state_path_value(
-            $state["fetch"]["batch_file"] ?? null,
-        );
-        $state["current_file"] = $this->encode_state_path_value(
-            $state["current_file"] ?? null,
-        );
-        $state["db_index"]["file"] = $this->encode_state_path_value(
-            $state["db_index"]["file"] ?? null,
-        );
-
-        if (
-            isset($state["preflight"]) &&
-            is_array($state["preflight"]) &&
-            isset($state["preflight"]["data"]) &&
-            is_array($state["preflight"]["data"])
-        ) {
-            $state["preflight"]["data"] = $this->encode_preflight_data_paths(
-                $state["preflight"]["data"],
-            );
-        }
-
-        return $state;
+        return $this->state_path_codec->encode_state_paths($state);
     }
 
     /**
@@ -8977,31 +8821,7 @@ class ImportClient
      */
     private function decode_state_paths(array $state): array
     {
-        $state["diff"]["local_after"] = $this->decode_state_path_value(
-            $state["diff"]["local_after"] ?? null,
-        );
-        $state["fetch"]["batch_file"] = $this->decode_state_path_value(
-            $state["fetch"]["batch_file"] ?? null,
-        );
-        $state["current_file"] = $this->decode_state_path_value(
-            $state["current_file"] ?? null,
-        );
-        $state["db_index"]["file"] = $this->decode_state_path_value(
-            $state["db_index"]["file"] ?? null,
-        );
-
-        if (
-            isset($state["preflight"]) &&
-            is_array($state["preflight"]) &&
-            isset($state["preflight"]["data"]) &&
-            is_array($state["preflight"]["data"])
-        ) {
-            $state["preflight"]["data"] = $this->decode_preflight_data_paths(
-                $state["preflight"]["data"],
-            );
-        }
-
-        return $state;
+        return $this->state_path_codec->decode_state_paths($state);
     }
 
     /**
@@ -9009,65 +8829,7 @@ class ImportClient
      */
     private function encode_preflight_data_paths(array $data): array
     {
-        if (isset($data["wp_detect"]["searched"]) && is_array($data["wp_detect"]["searched"])) {
-            foreach ($data["wp_detect"]["searched"] as $idx => $path) {
-                $data["wp_detect"]["searched"][$idx] = $this->encode_state_path_value($path);
-            }
-        }
-
-        if (isset($data["wp_detect"]["roots"]) && is_array($data["wp_detect"]["roots"])) {
-            foreach ($data["wp_detect"]["roots"] as $idx => $root) {
-                if (!is_array($root)) {
-                    continue;
-                }
-                foreach (["path", "wp_load_path", "wp_config_path"] as $key) {
-                    if (array_key_exists($key, $root)) {
-                        $data["wp_detect"]["roots"][$idx][$key] = $this->encode_state_path_value($root[$key]);
-                    }
-                }
-            }
-        }
-
-        if (isset($data["runtime"]) && is_array($data["runtime"])) {
-            foreach (["temp_dir", "document_root", "script_filename", "cwd"] as $key) {
-                if (array_key_exists($key, $data["runtime"])) {
-                    $data["runtime"][$key] = $this->encode_state_path_value($data["runtime"][$key]);
-                }
-            }
-        }
-
-        if (isset($data["filesystem"]["directories"]) && is_array($data["filesystem"]["directories"])) {
-            foreach ($data["filesystem"]["directories"] as $idx => $dir_entry) {
-                if (!is_array($dir_entry) || !array_key_exists("path", $dir_entry)) {
-                    continue;
-                }
-                $data["filesystem"]["directories"][$idx]["path"] = $this->encode_state_path_value($dir_entry["path"]);
-            }
-        }
-
-        if (isset($data["htaccess"]["files"]) && is_array($data["htaccess"]["files"])) {
-            foreach ($data["htaccess"]["files"] as $idx => $file_entry) {
-                if (!is_array($file_entry) || !array_key_exists("path", $file_entry)) {
-                    continue;
-                }
-                $data["htaccess"]["files"][$idx]["path"] = $this->encode_state_path_value($file_entry["path"]);
-            }
-        }
-
-        if (isset($data["wp_content"]["roots"]) && is_array($data["wp_content"]["roots"])) {
-            foreach ($data["wp_content"]["roots"] as $idx => $root_entry) {
-                if (!is_array($root_entry)) {
-                    continue;
-                }
-                foreach (["root", "content_dir"] as $key) {
-                    if (array_key_exists($key, $root_entry)) {
-                        $data["wp_content"]["roots"][$idx][$key] = $this->encode_state_path_value($root_entry[$key]);
-                    }
-                }
-            }
-        }
-
-        return $data;
+        return $this->state_path_codec->encode_preflight_data_paths($data);
     }
 
     /**
@@ -9075,65 +8837,7 @@ class ImportClient
      */
     private function decode_preflight_data_paths(array $data): array
     {
-        if (isset($data["wp_detect"]["searched"]) && is_array($data["wp_detect"]["searched"])) {
-            foreach ($data["wp_detect"]["searched"] as $idx => $path) {
-                $data["wp_detect"]["searched"][$idx] = $this->decode_state_path_value($path);
-            }
-        }
-
-        if (isset($data["wp_detect"]["roots"]) && is_array($data["wp_detect"]["roots"])) {
-            foreach ($data["wp_detect"]["roots"] as $idx => $root) {
-                if (!is_array($root)) {
-                    continue;
-                }
-                foreach (["path", "wp_load_path", "wp_config_path"] as $key) {
-                    if (array_key_exists($key, $root)) {
-                        $data["wp_detect"]["roots"][$idx][$key] = $this->decode_state_path_value($root[$key]);
-                    }
-                }
-            }
-        }
-
-        if (isset($data["runtime"]) && is_array($data["runtime"])) {
-            foreach (["temp_dir", "document_root", "script_filename", "cwd"] as $key) {
-                if (array_key_exists($key, $data["runtime"])) {
-                    $data["runtime"][$key] = $this->decode_state_path_value($data["runtime"][$key]);
-                }
-            }
-        }
-
-        if (isset($data["filesystem"]["directories"]) && is_array($data["filesystem"]["directories"])) {
-            foreach ($data["filesystem"]["directories"] as $idx => $dir_entry) {
-                if (!is_array($dir_entry) || !array_key_exists("path", $dir_entry)) {
-                    continue;
-                }
-                $data["filesystem"]["directories"][$idx]["path"] = $this->decode_state_path_value($dir_entry["path"]);
-            }
-        }
-
-        if (isset($data["htaccess"]["files"]) && is_array($data["htaccess"]["files"])) {
-            foreach ($data["htaccess"]["files"] as $idx => $file_entry) {
-                if (!is_array($file_entry) || !array_key_exists("path", $file_entry)) {
-                    continue;
-                }
-                $data["htaccess"]["files"][$idx]["path"] = $this->decode_state_path_value($file_entry["path"]);
-            }
-        }
-
-        if (isset($data["wp_content"]["roots"]) && is_array($data["wp_content"]["roots"])) {
-            foreach ($data["wp_content"]["roots"] as $idx => $root_entry) {
-                if (!is_array($root_entry)) {
-                    continue;
-                }
-                foreach (["root", "content_dir"] as $key) {
-                    if (array_key_exists($key, $root_entry)) {
-                        $data["wp_content"]["roots"][$idx][$key] = $this->decode_state_path_value($root_entry[$key]);
-                    }
-                }
-            }
-        }
-
-        return $data;
+        return $this->state_path_codec->decode_preflight_data_paths($data);
     }
 
     /**
@@ -9142,10 +8846,7 @@ class ImportClient
      */
     private function encode_state_path_value($value)
     {
-        if (!is_string($value) || $value === "") {
-            return $value;
-        }
-        return self::STATE_PATH_ENCODING_PREFIX . base64_encode($value);
+        return $this->state_path_codec->encode_value($value);
     }
 
     /**
@@ -9154,22 +8855,7 @@ class ImportClient
      */
     private function decode_state_path_value($value)
     {
-        if (!is_string($value) || $value === "") {
-            return $value;
-        }
-        if (!str_starts_with($value, self::STATE_PATH_ENCODING_PREFIX)) {
-            return $value;
-        }
-        $encoded = substr($value, strlen(self::STATE_PATH_ENCODING_PREFIX));
-        $decoded = base64_decode($encoded, true);
-        if ($decoded === false) {
-            $this->audit_log(
-                "Warning: invalid base64-encoded state path; resetting field",
-                true,
-            );
-            return null;
-        }
-        return $decoded;
+        return $this->state_path_codec->decode_value($value);
     }
 
     /**
