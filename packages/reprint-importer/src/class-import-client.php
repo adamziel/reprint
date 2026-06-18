@@ -13,6 +13,7 @@ use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightCommand;
 use Reprint\Importer\FileSync\DownloadList;
+use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Index\IndexFileSorter;
@@ -4711,174 +4712,41 @@ class ImportClient
      */
     private function diff_indexes_and_build_fetch_list(): bool
     {
-        if (!file_exists($this->remote_index_file)) {
-            throw new RuntimeException("Remote index file not found");
-        }
-
-        $diff = $this->state["diff"] ?? [];
-        $remote_offset = (int) ($diff["remote_offset"] ?? 0);
-        $local_after = $diff["local_after"] ?? null;
-        $download_mode = $remote_offset > 0 ? "a" : "w";
-        if ($download_mode === "w") {
-            $this->audit_log(
-                "FILE CREATE | {$this->download_list_file} | building download list",
-            );
-        } else {
-            $this->audit_log(
-                "FILE APPEND | {$this->download_list_file} | resuming download list build",
-            );
-        }
-        $download_handle = fopen($this->download_list_file, $download_mode);
-        if (!$download_handle) {
-            throw new RuntimeException("Failed to open download list file");
-        }
-
-        // When --filter=essential-files is active, uploads go to a separate
-        // "skipped" list so only essential files are fetched in this run.
-        $skipped_handle = null;
-        $uploads_basedir = null;
-        if ($this->filter === "essential-files") {
-            if ($download_mode === "w") {
-                $this->audit_log(
-                    "FILE CREATE | {$this->skipped_download_list_file} | building skipped download list (uploads)",
-                );
-            } else {
-                $this->audit_log(
-                    "FILE APPEND | {$this->skipped_download_list_file} | resuming skipped download list build",
-                );
-            }
-            $skipped_handle = fopen($this->skipped_download_list_file, $download_mode);
-            if (!$skipped_handle) {
-                fclose($download_handle);
-                throw new RuntimeException("Failed to open skipped download list file");
-            }
-            $uploads_basedir = $this->get_uploads_basedir();
-            $this->audit_log(
-                "FILTER | essential-files | uploads_basedir=" . ($uploads_basedir ?? "(fallback: wp-content/uploads/)"),
-            );
-        }
-
-        $remote_handle = fopen($this->remote_index_file, "r");
-        if (!$remote_handle) {
-            fclose($download_handle);
-            throw new RuntimeException("Failed to open remote index file");
-        }
-        if ($remote_offset > 0) {
-            fseek($remote_handle, $remote_offset);
-        }
-
-        $local_handle = file_exists($this->index_file)
-            ? fopen($this->index_file, "r")
-            : null;
-        $local = $this->read_index_line($local_handle);
-        if ($local_after) {
-            while (
-                $local !== null &&
-                strcmp($local["path"], $local_after) <= 0
-            ) {
-                $local = $this->read_index_line($local_handle);
-            }
-        }
-        $this->begin_index_updates();
-        $processed = 0;
-
-        while (($line = fgets($remote_handle)) !== false) {
-            if ($this->shutdown_requested) {
-                break;
-            }
-
-            if (function_exists("pcntl_signal_dispatch")) {
-                pcntl_signal_dispatch();
-            }
-
-            $remote_offset = ftell($remote_handle);
-            $remote = $this->parse_index_line($line);
-            if (!$remote) {
-                continue;
-            }
-
-            while (
-                $local !== null &&
-                strcmp($local["path"], $remote["path"]) < 0
-            ) {
-                $this->delete_local_file_path($local["path"]);
-                $this->delete_index_entry($local["path"]);
-                $local_after = $local["path"];
-                $local = $this->read_index_line($local_handle);
-            }
-
-            if ($local !== null && $local["path"] === $remote["path"]) {
-                if (
-                    $local["ctime"] !== $remote["ctime"] ||
-                    $local["size"] !== $remote["size"] ||
-                    $local["type"] !== $remote["type"]
-                ) {
-                    // File is in both indexes but changed on the remote.
-                    // Always re-download — this file is in our local index,
-                    // meaning we synced it before; preserve-local does not
-                    // protect files we own.
-                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
-                        ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list(
-                        $remote["path"],
-                        $target_handle,
-                    );
-                }
-                $local_after = $local["path"];
-                $local = $this->read_index_line($local_handle);
-            } elseif (
-                $local === null ||
-                strcmp($local["path"], $remote["path"]) > 0
-            ) {
-                $skip_reason = $this->should_skip_for_preserve_local($remote["path"]);
-                if ($skip_reason) {
-                    $this->audit_log($skip_reason, true);
-                    $this->emit_skip_progress($remote["path"]);
-                } else {
-                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
-                        ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list($remote["path"], $target_handle);
-                }
-            }
-
-            $processed++;
-            if ($processed % 200 === 0) {
-                $this->state["diff"] = [
-                    "remote_offset" => $remote_offset,
-                    "local_after" => $local_after,
-                ];
+        $builder = new FetchListBuilder(
+            $this->index_store,
+            function (string $path): void {
+                $this->delete_local_file_path($path);
+            },
+            function (string $path): ?string {
+                return $this->should_skip_for_preserve_local($path);
+            },
+            function (string $path): void {
+                $this->emit_skip_progress($path);
+            },
+            function (array $diff): void {
+                $this->state["diff"] = $diff;
                 $this->save_state($this->state);
+            },
+            function (): bool {
+                return $this->shutdown_requested;
+            },
+            function (): void {
                 $this->progress->tick_spinner();
-            }
-        }
+            },
+            function (string $message, bool $to_console = true): void {
+                $this->audit_log($message, $to_console);
+            },
+        );
 
-        while ($local !== null) {
-            $this->delete_local_file_path($local["path"]);
-            $this->delete_index_entry($local["path"]);
-            $local_after = $local["path"];
-            $local = $this->read_index_line($local_handle);
-        }
-
-        if ($local_handle) {
-            fclose($local_handle);
-        }
-        fclose($remote_handle);
-        fclose($download_handle);
-        if ($skipped_handle !== null) {
-            fclose($skipped_handle);
-        }
-
-        $this->state["diff"] = [
-            "remote_offset" => $remote_offset,
-            "local_after" => $local_after,
-        ];
-        $this->save_state($this->state);
-
-        $this->finalize_index_updates();
-
-        return !$this->shutdown_requested;
+        return $builder->build(
+            $this->remote_index_file,
+            $this->index_file,
+            $this->download_list_file,
+            $this->skipped_download_list_file,
+            $this->state["diff"] ?? [],
+            $this->filter,
+            $this->filter === "essential-files" ? $this->get_uploads_basedir() : null,
+        );
     }
 
     /**
@@ -5053,30 +4921,6 @@ class ImportClient
     }
 
     /**
-     * Check whether a remote path belongs to the uploads directory.
-     *
-     * Uses the preflight-reported uploads basedir when available, otherwise
-     * falls back to matching "wp-content/uploads/" anywhere in the path.
-     */
-    private function is_uploads_path(string $path, ?string $uploads_basedir): bool
-    {
-        if ($uploads_basedir !== null) {
-            return strpos($path, $uploads_basedir) !== false;
-        }
-        // Fallback: match the conventional WordPress uploads path
-        return strpos($path, "wp-content/uploads/") !== false;
-    }
-
-    /**
-     * Append a path to the download list file.
-     */
-    private function append_download_list(string $path, $handle): void
-    {
-        DownloadList::append_path($handle, $path);
-        $this->audit_log("Added to the download list: {$path}", false);
-    }
-
-    /**
      * Delete a local file path safely under the fs root.
      */
     private function delete_local_file_path(string $path): void
@@ -5154,14 +4998,6 @@ class ImportClient
     }
 
     /**
-     * Start collecting index updates into a temp file for streaming merge.
-     */
-    private function begin_index_updates(): void
-    {
-        $this->index_store->begin_updates();
-    }
-
-    /**
      * Merge the collected updates with the existing sorted index without loading it into memory.
      */
     private function finalize_index_updates(): void
@@ -5169,13 +5005,6 @@ class ImportClient
         $this->index_store->finalize_updates();
     }
 
-    /**
-     * Read one JSON record from the on-disk index.
-     */
-    private function read_index_line($handle): ?array
-    {
-        return $this->index_store->read_index_line($handle);
-    }
     /**
      * Download SQL from remote.
      */
