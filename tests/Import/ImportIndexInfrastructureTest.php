@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Index\IndexFileSorter;
 use Reprint\Importer\Index\IndexLineParser;
+use Reprint\Importer\Index\IndexPathPrefixMatcher;
 use Reprint\Importer\Index\IndexStore;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
@@ -86,6 +87,31 @@ final class ImportIndexInfrastructureTest extends TestCase
         $this->assertSame('/a.txt', $entries[0][0]);
         $this->assertSame('/b.txt', $entries[1][0]);
         $this->assertCount(2, $entries);
+    }
+
+    public function testIndexPathPrefixMatcherFindsExactAndDescendantPaths(): void
+    {
+        $index = $this->temp_dir . '/remote-index.jsonl';
+        file_put_contents($index, implode('', [
+            $this->index_line('/srv/site/wp-content/theme/style.css', 1, 10),
+            $this->index_line('/srv/site/wp-config.php', 2, 20),
+            "not-json\n",
+        ]));
+
+        $matcher = new IndexPathPrefixMatcher($index);
+
+        $this->assertTrue($matcher->contains('/srv/site/wp-config.php'));
+        $this->assertTrue($matcher->contains('/srv/site/wp-content'));
+        $this->assertTrue($matcher->contains('/srv/site/../site/wp-content/'));
+        $this->assertFalse($matcher->contains('/srv/site/wp'));
+        $this->assertFalse($matcher->contains('/srv/site/wp-content-other'));
+    }
+
+    public function testIndexPathPrefixMatcherReturnsFalseWhenFileMissing(): void
+    {
+        $matcher = new IndexPathPrefixMatcher($this->temp_dir . '/missing.jsonl');
+
+        $this->assertFalse($matcher->contains('/srv/site'));
     }
 
     private function index_line(

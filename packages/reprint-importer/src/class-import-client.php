@@ -25,6 +25,7 @@ use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Index\IndexFileSorter;
 use Reprint\Importer\Index\IndexLineParser;
+use Reprint\Importer\Index\IndexPathPrefixMatcher;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\MultipartStreamParser;
@@ -241,13 +242,8 @@ class ImportClient
     /** @var int Cumulative count of index entries written (survives retries). */
     private $index_entries_counted = 0;
 
-    /**
-     * Memoized lookups for "does remote index contain this path or any descendant path?"
-     * keyed by normalized absolute path.
-     *
-     * @var array<string,bool>
-     */
-    private $remote_index_prefix_cache = [];
+    /** @var IndexPathPrefixMatcher|null Memoized remote index path-prefix matcher. */
+    private ?IndexPathPrefixMatcher $remote_index_prefix_matcher = null;
 
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
@@ -5468,53 +5464,13 @@ class ImportClient
         return $mapped_relative;
     }
 
-    /**
-     * Checks if the remote index contains $path or any descendant under it.
-     * Runs a memoized O(N) scan of .import-remote-index.jsonl.
-     */
     private function remote_index_contains_path_prefix(string $path): bool
     {
-        $path = rtrim(normalize_path($path), "/");
-        if ($path === "") {
-            return false;
+        if ($this->remote_index_prefix_matcher === null) {
+            $this->remote_index_prefix_matcher = new IndexPathPrefixMatcher($this->remote_index_file);
         }
 
-        if (isset($this->remote_index_prefix_cache[$path])) {
-            return $this->remote_index_prefix_cache[$path];
-        }
-
-        if (!file_exists($this->remote_index_file)) {
-            $this->remote_index_prefix_cache[$path] = false;
-            return false;
-        }
-
-        $h = fopen($this->remote_index_file, "r");
-        if (!$h) {
-            $this->remote_index_prefix_cache[$path] = false;
-            return false;
-        }
-
-        $prefix = $path . "/";
-        $found = false;
-        while (($line = fgets($h)) !== false) {
-            try {
-                $entry = $this->parse_index_line($line);
-            } catch (RuntimeException $e) {
-                continue;
-            }
-            if ($entry === null) {
-                continue;
-            }
-            $entry_path = $entry["path"];
-            if ($entry_path === $path || str_starts_with($entry_path, $prefix)) {
-                $found = true;
-                break;
-            }
-        }
-        fclose($h);
-
-        $this->remote_index_prefix_cache[$path] = $found;
-        return $found;
+        return $this->remote_index_prefix_matcher->contains($path);
     }
 
     /**
