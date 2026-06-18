@@ -75,7 +75,7 @@ final class DbIndexDownloader
         if ($bytes_written > 0 && file_exists($tables_file)) {
             $actual_size = filesize($tables_file);
             if ($actual_size > $bytes_written) {
-                $this->audit(
+                ($this->audit)(
                     sprintf(
                         "CRASH RECOVERY | Truncating db-tables.jsonl from %d to %d bytes",
                         $actual_size,
@@ -101,7 +101,7 @@ final class DbIndexDownloader
                 $params = [
                     "tables_per_batch" => 1000,
                 ];
-                $url = $this->build_url("db_index", $cursor, $params);
+                $url = (string) ($this->build_url)("db_index", $cursor, $params);
 
                 $context = new StreamingContext();
                 $response_handler = new DbIndexResponseHandler(
@@ -111,29 +111,17 @@ final class DbIndexDownloader
                     $tables_written,
                     $rows_estimated,
                     $bytes_written,
-                    function (): bool {
-                        return $this->should_stop();
-                    },
-                    function (array $chunk, string $phase): void {
-                        $this->handle_progress($chunk, $phase);
-                    },
-                    function (
-                        array $chunk,
-                        string $phase,
-                        StreamingContext $context
-                    ): void {
-                        $this->handle_error($chunk, $phase, $context);
-                    },
-                    function (array $progress): void {
-                        $this->handle_completion_progress($progress);
-                    },
+                    $this->should_stop,
+                    $this->handle_progress,
+                    $this->handle_error,
+                    $this->handle_completion_progress,
                 );
                 $context->on_chunk = [$response_handler, "handle"];
 
                 $cursor_before = $cursor;
                 $request_start = microtime(true);
                 try {
-                    $this->fetch_streaming(
+                    ($this->fetch_streaming)(
                         $url,
                         $cursor,
                         $context,
@@ -147,7 +135,7 @@ final class DbIndexDownloader
                     $rows_estimated = $response_handler->rows_estimated();
                     $bytes_written = $response_handler->bytes_written();
 
-                    $this->assert_can_retry_timeout("db_index", $cursor_before, $cursor);
+                    ($this->assert_can_retry_timeout)("db_index", $cursor_before, $cursor);
                     fflush($handle);
                     $state["cursor"] = $cursor;
                     $state["db_index"] = $this->state_entry(
@@ -157,7 +145,7 @@ final class DbIndexDownloader
                         $bytes_written,
                     );
                     $state["status"] = "partial";
-                    $this->save_state($state);
+                    ($this->save_state)($state);
                     return;
                 }
                 $cursor = $response_handler->cursor();
@@ -168,7 +156,7 @@ final class DbIndexDownloader
 
                 $state["consecutive_timeouts"] = 0;
                 $wall_time = microtime(true) - $request_start;
-                $this->finalize_request(
+                ($this->finalize_request)(
                     "db_index",
                     $wall_time,
                     $context->response_stats ?? [],
@@ -182,7 +170,7 @@ final class DbIndexDownloader
                     $rows_estimated,
                     $bytes_written,
                 );
-                $this->save_state($state);
+                ($this->save_state)($state);
             }
         } finally {
             fclose($handle);
@@ -202,66 +190,5 @@ final class DbIndexDownloader
             "bytes" => $bytes_written,
             "updated_at" => time(),
         ];
-    }
-
-    private function build_url(string $endpoint, ?string $cursor, array $params): string
-    {
-        return (string) ($this->build_url)($endpoint, $cursor, $params);
-    }
-
-    private function fetch_streaming(
-        string $url,
-        ?string $cursor,
-        StreamingContext $context,
-        ?array $post_data,
-        string $phase
-    ): void {
-        ($this->fetch_streaming)($url, $cursor, $context, $post_data, $phase);
-    }
-
-    private function should_stop(): bool
-    {
-        return (bool) ($this->should_stop)();
-    }
-
-    private function handle_progress(array $chunk, string $phase): void
-    {
-        ($this->handle_progress)($chunk, $phase);
-    }
-
-    private function handle_error(
-        array $chunk,
-        string $phase,
-        StreamingContext $context
-    ): void {
-        ($this->handle_error)($chunk, $phase, $context);
-    }
-
-    private function handle_completion_progress(array $progress): void
-    {
-        ($this->handle_completion_progress)($progress);
-    }
-
-    private function assert_can_retry_timeout(
-        string $phase,
-        ?string $cursor_before,
-        ?string $cursor_after
-    ): void {
-        ($this->assert_can_retry_timeout)($phase, $cursor_before, $cursor_after);
-    }
-
-    private function finalize_request(string $endpoint, float $wall_time, array $stats): void
-    {
-        ($this->finalize_request)($endpoint, $wall_time, $stats);
-    }
-
-    private function save_state(array $state): void
-    {
-        ($this->save_state)($state);
-    }
-
-    private function audit(string $message, bool $to_console): void
-    {
-        ($this->audit)($message, $to_console);
     }
 }

@@ -107,16 +107,16 @@ final class RemoteIndexDownloader
         $remote_index_file = $config["remote_index_file"];
         $mode = file_exists($remote_index_file) ? "a" : "w";
         if ($mode === "a" && $entries_counted === 0) {
-            $entries_counted = $this->count_lines($remote_index_file);
+            $entries_counted = (int) ($this->count_lines)($remote_index_file);
         }
 
         if ($mode === "w") {
-            $this->audit(
+            ($this->audit)(
                 "FILE CREATE | {$remote_index_file} | downloading fresh remote index",
                 true,
             );
         } else {
-            $this->audit(
+            ($this->audit)(
                 "FILE APPEND | {$remote_index_file} | resuming remote index download",
                 true,
             );
@@ -128,7 +128,7 @@ final class RemoteIndexDownloader
         }
 
         try {
-            $params = $this->get_tuned_params("file_index");
+            $params = (array) ($this->get_tuned_params)("file_index");
             if ($cursor === null) {
                 $params["list_dir"] = $config["list_dir_override"] ?? $roots[0];
             }
@@ -143,7 +143,7 @@ final class RemoteIndexDownloader
                 $params["directory"] = $export_dirs;
             }
 
-            $url = $this->build_url("file_index", $cursor, $params);
+            $url = (string) ($this->build_url)("file_index", $cursor, $params);
             $context = new StreamingContext();
 
             $response_handler = new IndexResponseHandler(
@@ -152,45 +152,35 @@ final class RemoteIndexDownloader
                 $context,
                 $entries_counted,
                 $config["save_every"],
-                function (): bool {
-                    return $this->should_stop();
-                },
+                $this->should_stop,
                 function (?string $cursor) use (&$state): void {
                     $state["index"] = [
                         "cursor" => $cursor,
                     ];
-                    $this->save_state($state);
+                    ($this->save_state)($state);
                 },
-                function (array $chunk, StreamingContext $context): void {
-                    $this->handle_metadata($chunk, $context);
-                },
-                function (array $chunk, string $phase, StreamingContext $context): void {
-                    $this->handle_error($chunk, $phase, $context);
-                },
-                function (array $chunk, string $phase): void {
-                    $this->handle_progress($chunk, $phase);
-                },
-                function (int $entries_counted): void {
-                    $this->show_progress($entries_counted);
-                },
+                $this->handle_metadata,
+                $this->handle_error,
+                $this->handle_progress,
+                $this->show_progress,
             );
             $context->on_chunk = [$response_handler, 'handle'];
 
             $cursor_before = $cursor;
             $request_start = microtime(true);
             try {
-                $this->fetch_streaming($url, $cursor, $context, null, "file_index");
+                ($this->fetch_streaming)($url, $cursor, $context, null, "file_index");
             } catch (CurlTimeoutException $e) {
                 $cursor = $response_handler->cursor();
                 $entries_counted = $response_handler->entries_counted();
-                $this->assert_can_retry_timeout("file_index", $cursor_before, $cursor);
+                ($this->assert_can_retry_timeout)("file_index", $cursor_before, $cursor);
 
                 fclose($handle);
                 $handle = null;
 
                 $state["index"] = ["cursor" => $cursor];
                 $state["status"] = "partial";
-                $this->save_state($state);
+                ($this->save_state)($state);
                 return false;
             }
 
@@ -199,7 +189,7 @@ final class RemoteIndexDownloader
             $entries_counted = $response_handler->entries_counted();
             $state["consecutive_timeouts"] = 0;
             $wall_time = microtime(true) - $request_start;
-            $this->finalize_request(
+            ($this->finalize_request)(
                 "file_index",
                 $wall_time,
                 $context->response_stats ?? [],
@@ -211,7 +201,7 @@ final class RemoteIndexDownloader
             $state["index"] = [
                 "cursor" => $complete ? null : $cursor,
             ];
-            $this->save_state($state);
+            ($this->save_state)($state);
 
             return $complete;
         } finally {
@@ -219,81 +209,5 @@ final class RemoteIndexDownloader
                 fclose($handle);
             }
         }
-    }
-
-    private function build_url(string $endpoint, ?string $cursor, array $params): string
-    {
-        return (string) ($this->build_url)($endpoint, $cursor, $params);
-    }
-
-    private function fetch_streaming(
-        string $url,
-        ?string $cursor,
-        StreamingContext $context,
-        ?array $post_data,
-        string $phase
-    ): void {
-        ($this->fetch_streaming)($url, $cursor, $context, $post_data, $phase);
-    }
-
-    private function get_tuned_params(string $endpoint): array
-    {
-        return (array) ($this->get_tuned_params)($endpoint);
-    }
-
-    private function should_stop(): bool
-    {
-        return (bool) ($this->should_stop)();
-    }
-
-    private function save_state(array $state): void
-    {
-        ($this->save_state)($state);
-    }
-
-    private function handle_metadata(array $chunk, StreamingContext $context): void
-    {
-        ($this->handle_metadata)($chunk, $context);
-    }
-
-    private function handle_error(
-        array $chunk,
-        string $phase,
-        StreamingContext $context
-    ): void {
-        ($this->handle_error)($chunk, $phase, $context);
-    }
-
-    private function handle_progress(array $chunk, string $phase): void
-    {
-        ($this->handle_progress)($chunk, $phase);
-    }
-
-    private function show_progress(int $entries_counted): void
-    {
-        ($this->show_progress)($entries_counted);
-    }
-
-    private function assert_can_retry_timeout(
-        string $phase,
-        ?string $cursor_before,
-        ?string $cursor_after
-    ): void {
-        ($this->assert_can_retry_timeout)($phase, $cursor_before, $cursor_after);
-    }
-
-    private function finalize_request(string $endpoint, float $wall_time, array $stats): void
-    {
-        ($this->finalize_request)($endpoint, $wall_time, $stats);
-    }
-
-    private function count_lines(string $path): int
-    {
-        return (int) ($this->count_lines)($path);
-    }
-
-    private function audit(string $message, bool $to_console): void
-    {
-        ($this->audit)($message, $to_console);
     }
 }

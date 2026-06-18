@@ -36,12 +36,12 @@ final class RuntimeFilesDownloader
     {
         if (is_dir($runtime_dir)) {
             $this->remove_directory_recursive($runtime_dir);
-            $this->audit("RUNTIME FILES | deleted {$runtime_dir}");
+            ($this->audit)("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
         $files = $this->files_from_preflight($preflight_data);
         if (empty($files)) {
-            $this->audit("RUNTIME FILES | no prepend/append scripts to download");
+            ($this->audit)("RUNTIME FILES | no prepend/append scripts to download");
             return 0;
         }
 
@@ -49,13 +49,13 @@ final class RuntimeFilesDownloader
             mkdir($runtime_dir, 0755, true);
         }
 
-        $this->audit(
+        ($this->audit)(
             "RUNTIME FILES | downloading " . count($files) . " script(s): " .
                 implode(", ", $files),
         );
 
         $downloaded = $this->fetch_files_into($runtime_dir, $files);
-        $this->audit("RUNTIME FILES | downloaded {$downloaded}/" . count($files) . " script(s)");
+        ($this->audit)("RUNTIME FILES | downloaded {$downloaded}/" . count($files) . " script(s)");
 
         return $downloaded;
     }
@@ -116,15 +116,15 @@ final class RuntimeFilesDownloader
                 $post_data = [
                     "file_list" => new CURLFile($tmp, "application/json", "file_list"),
                 ];
-                $url = $this->build_url("file_fetch", null, ["directory" => [$directory]]);
+                $url = (string) ($this->build_url)("file_fetch", null, ["directory" => [$directory]]);
 
                 $context->on_chunk = function ($chunk) use ($target_dir, $context, &$downloaded): void {
                     $this->handle_chunk($chunk, $target_dir, $context, $downloaded);
                 };
 
-                $this->fetch_streaming($url, null, $context, $post_data, "file_fetch");
+                ($this->fetch_streaming)($url, null, $context, $post_data, "file_fetch");
             } catch (RuntimeException $e) {
-                $this->audit(
+                ($this->audit)(
                     "Fetch failed for directory {$directory} (non-fatal): " .
                         substr($e->getMessage(), 0, 200),
                 );
@@ -154,7 +154,7 @@ final class RuntimeFilesDownloader
         } elseif ($chunk_type === "error") {
             $body = json_decode($chunk["body"] ?? "{}", true);
             $error_path = isset($body["path"]) ? base64_decode($body["path"]) : "unknown";
-            $this->audit("Fetch error for {$error_path}: " . ($body["message"] ?? "unknown"));
+            ($this->audit)("Fetch error for {$error_path}: " . ($body["message"] ?? "unknown"));
         } elseif ($chunk_type === "completion") {
             $context->saw_completion = true;
         }
@@ -197,7 +197,7 @@ final class RuntimeFilesDownloader
             fclose($context->file_handle);
             $context->file_handle = null;
             $downloaded++;
-            $this->audit("Saved {$path} → {$local_path}");
+            ($this->audit)("Saved {$path} → {$local_path}");
         }
     }
 
@@ -226,25 +226,5 @@ final class RuntimeFilesDownloader
         }
 
         @rmdir($dir);
-    }
-
-    private function build_url(string $endpoint, ?string $cursor, array $params): string
-    {
-        return (string) ($this->build_url)($endpoint, $cursor, $params);
-    }
-
-    private function fetch_streaming(
-        string $url,
-        ?string $cursor,
-        StreamingContext $context,
-        ?array $post_data,
-        string $phase
-    ): void {
-        ($this->fetch_streaming)($url, $cursor, $context, $post_data, $phase);
-    }
-
-    private function audit(string $message): void
-    {
-        ($this->audit)($message);
     }
 }

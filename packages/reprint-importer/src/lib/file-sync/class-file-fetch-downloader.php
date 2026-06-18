@@ -114,7 +114,7 @@ final class FileFetchDownloader
         if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
             $actual_size = filesize($tracked_file);
             if ($actual_size > $tracked_bytes) {
-                $this->audit(
+                ($this->audit)(
                     sprintf(
                         "CRASH RECOVERY | Truncating %s from %d to %d bytes",
                         $tracked_file,
@@ -131,16 +131,16 @@ final class FileFetchDownloader
             }
         }
 
-        $params = $this->get_tuned_params("file_fetch");
+        $params = (array) ($this->get_tuned_params)("file_fetch");
         $export_dirs = $config["export_dirs"];
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
         }
 
-        $url = $this->build_url("file_fetch", $cursor, $params);
+        $url = (string) ($this->build_url)("file_fetch", $cursor, $params);
         $post_data = $config["post_data"];
-        $this->audit("Downloading file fetch from {$url}", true);
-        $this->audit("POST data: " . json_encode($post_data), true);
+        ($this->audit)("Downloading file fetch from {$url}", true);
+        ($this->audit)("POST data: " . json_encode($post_data), true);
 
         $context = new StreamingContext();
         $context->file_handle = null;
@@ -152,7 +152,7 @@ final class FileFetchDownloader
             if ($context->file_handle) {
                 $context->file_path = $tracked_file;
                 $context->file_bytes_written = $tracked_bytes;
-                $this->audit(
+                ($this->audit)(
                     sprintf(
                         "RESUME FILE | Re-opened %s at %d bytes for continued download",
                         $tracked_file,
@@ -168,43 +168,27 @@ final class FileFetchDownloader
             $state_key,
             $context,
             $config["save_every"],
-            function (): bool {
-                return $this->should_stop();
-            },
+            $this->should_stop,
             function (string $state_key, ?string $cursor, StreamingContext $context) use (&$state): void {
                 $this->save_file_fetch_checkpoint($state, $state_key, $cursor, $context);
             },
-            function (array $chunk, StreamingContext $context): void {
-                $this->handle_metadata($chunk, $context);
-            },
-            function (array $chunk, StreamingContext $context): void {
-                $this->handle_file($chunk, $context);
-            },
-            function (array $chunk): void {
-                $this->handle_directory($chunk);
-            },
-            function (array $chunk): void {
-                $this->handle_symlink($chunk);
-            },
+            $this->handle_metadata,
+            $this->handle_file,
+            $this->handle_directory,
+            $this->handle_symlink,
             function (string $path): void {
-                $this->audit("Missing on server: {$path}", true);
+                ($this->audit)("Missing on server: {$path}", true);
             },
-            function (array $chunk, string $phase, StreamingContext $context): void {
-                $this->handle_error($chunk, $phase, $context);
-            },
-            function (array $chunk, string $phase): void {
-                $this->handle_progress($chunk, $phase);
-            },
-            function (array $progress): void {
-                $this->handle_completion_progress($progress);
-            },
+            $this->handle_error,
+            $this->handle_progress,
+            $this->handle_completion_progress,
         );
         $context->on_chunk = [$response_handler, 'handle'];
 
         $cursor_before = $cursor;
         $request_start = microtime(true);
         try {
-            $this->fetch_streaming(
+            ($this->fetch_streaming)(
                 $url,
                 $cursor,
                 $context,
@@ -213,12 +197,12 @@ final class FileFetchDownloader
             );
         } catch (CurlTimeoutException $e) {
             $cursor = $response_handler->cursor();
-            $this->assert_can_retry_timeout("file_fetch", $cursor_before, $cursor);
+            ($this->assert_can_retry_timeout)("file_fetch", $cursor_before, $cursor);
             $state[$state_key]["cursor"] = $cursor;
-            $this->finalize_index_updates();
+            ($this->finalize_index_updates)();
             $this->track_current_file_if_active($state, $context);
             $state["status"] = "partial";
-            $this->save_state($state);
+            ($this->save_state)($state);
             return false;
         }
 
@@ -227,15 +211,15 @@ final class FileFetchDownloader
         $state["consecutive_timeouts"] = 0;
         $wall_time = microtime(true) - $request_start;
 
-        $this->finalize_request(
+        ($this->finalize_request)(
             "file_fetch",
             $wall_time,
             $context->response_stats ?? [],
         );
         $state[$state_key]["cursor"] = $cursor;
-        $this->finalize_index_updates();
+        ($this->finalize_index_updates)();
         $this->track_current_file($state, $context);
-        $this->save_state($state);
+        ($this->save_state)($state);
 
         return $complete;
     }
@@ -251,7 +235,7 @@ final class FileFetchDownloader
     ): void {
         $state[$state_key]["cursor"] = $cursor;
         $this->track_current_file($state, $context);
-        $this->save_state($state);
+        ($this->save_state)($state);
     }
 
     /**
@@ -280,96 +264,5 @@ final class FileFetchDownloader
             $state["current_file"] = $context->file_path;
             $state["current_file_bytes"] = $context->file_bytes_written;
         }
-    }
-
-    private function build_url(string $endpoint, ?string $cursor, array $params): string
-    {
-        return (string) ($this->build_url)($endpoint, $cursor, $params);
-    }
-
-    private function fetch_streaming(
-        string $url,
-        ?string $cursor,
-        StreamingContext $context,
-        ?array $post_data,
-        string $phase
-    ): void {
-        ($this->fetch_streaming)($url, $cursor, $context, $post_data, $phase);
-    }
-
-    private function get_tuned_params(string $endpoint): array
-    {
-        return (array) ($this->get_tuned_params)($endpoint);
-    }
-
-    private function should_stop(): bool
-    {
-        return (bool) ($this->should_stop)();
-    }
-
-    private function save_state(array $state): void
-    {
-        ($this->save_state)($state);
-    }
-
-    private function handle_metadata(array $chunk, StreamingContext $context): void
-    {
-        ($this->handle_metadata)($chunk, $context);
-    }
-
-    private function handle_file(array $chunk, StreamingContext $context): void
-    {
-        ($this->handle_file)($chunk, $context);
-    }
-
-    private function handle_directory(array $chunk): void
-    {
-        ($this->handle_directory)($chunk);
-    }
-
-    private function handle_symlink(array $chunk): void
-    {
-        ($this->handle_symlink)($chunk);
-    }
-
-    private function handle_error(
-        array $chunk,
-        string $phase,
-        StreamingContext $context
-    ): void {
-        ($this->handle_error)($chunk, $phase, $context);
-    }
-
-    private function handle_progress(array $chunk, string $phase): void
-    {
-        ($this->handle_progress)($chunk, $phase);
-    }
-
-    private function handle_completion_progress(array $progress): void
-    {
-        ($this->handle_completion_progress)($progress);
-    }
-
-    private function assert_can_retry_timeout(
-        string $phase,
-        ?string $cursor_before,
-        ?string $cursor_after
-    ): void {
-        ($this->assert_can_retry_timeout)($phase, $cursor_before, $cursor_after);
-    }
-
-    private function finalize_request(string $endpoint, float $wall_time, array $stats): void
-    {
-        ($this->finalize_request)($endpoint, $wall_time, $stats);
-    }
-
-    private function finalize_index_updates(): void
-    {
-        ($this->finalize_index_updates)();
-    }
-
-    private function audit(string $message, bool $to_console): void
-    {
-        ($this->audit)($message, $to_console);
     }
 }

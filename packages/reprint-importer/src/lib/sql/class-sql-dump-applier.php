@@ -88,7 +88,7 @@ final class SqlDumpApplier
         $query_stream = new WP_MySQL_FastQueryStream();
         $stmt_count = 0;
         $query_stream->set_error_logger(function (array $err) use (&$stmt_count): void {
-            $this->audit(
+            ($this->audit)(
                 sprintf(
                     "FAST QUERY STREAM fallback | reason=%s | byte_offset=%d | stmt=%d | %s | context=%.200s",
                     $err['reason'] ?? '?',
@@ -99,7 +99,7 @@ final class SqlDumpApplier
                 ),
                 true
             );
-            $this->show_lifecycle_line(
+            ($this->show_lifecycle_line)(
                 "Fast query stream fell back to lexer-based parser at byte offset "
                 . ($err['byte_offset'] ?? 0) . "; see audit log for details\n"
             );
@@ -127,7 +127,7 @@ final class SqlDumpApplier
             $stmts_to_skip = $statements_executed;
         }
 
-        $this->output_progress([
+        ($this->output_progress)([
             "status" => "starting",
             "phase" => "db-apply",
             "statements_total" => $statements_total,
@@ -138,8 +138,8 @@ final class SqlDumpApplier
             $chunk_size = 64 * 1024;
 
             while (!feof($sql_handle)) {
-                if ($this->should_stop()) {
-                    $this->audit("SHUTDOWN REQUESTED | saving state", true);
+                if (($this->should_stop)()) {
+                    ($this->audit)("SHUTDOWN REQUESTED | saving state", true);
                     break;
                 }
                 if (function_exists("pcntl_signal_dispatch")) {
@@ -173,7 +173,7 @@ final class SqlDumpApplier
                     if ($stmts_since_save >= $save_every) {
                         $state["apply"]["statements_executed"] = $statements_executed;
                         $state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                        $this->save_state($state);
+                        ($this->save_state)($state);
                         $stmts_since_save = 0;
 
                         $this->show_apply_progress(
@@ -204,19 +204,19 @@ final class SqlDumpApplier
                 $statements_executed++;
             }
 
-            if ($this->should_stop()) {
+            if (($this->should_stop)()) {
                 $state["apply"]["statements_executed"] = $statements_executed;
                 $state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
                 $state["status"] = "partial";
-                $this->save_state($state);
-                $this->audit(
+                ($this->save_state)($state);
+                ($this->audit)(
                     sprintf(
                         "PARTIAL db-apply | %d statements executed",
                         $statements_executed,
                     ),
                     true,
                 );
-                $this->output_progress([
+                ($this->output_progress)([
                     "status" => "partial",
                     "phase" => "db-apply",
                     "statements_executed" => $statements_executed,
@@ -226,25 +226,25 @@ final class SqlDumpApplier
                 return;
             }
 
-            foreach ($this->deactivate_host_plugins($pdo) as $basename) {
-                $this->audit("DB-APPLY | deactivated plugin {$basename} (host-specific)", true);
+            foreach ((array) ($this->deactivate_host_plugins)($pdo) as $basename) {
+                ($this->audit)("DB-APPLY | deactivated plugin {$basename} (host-specific)", true);
             }
 
             foreach (
-                $this->deactivate_path_incompatible_plugins(
+                (array) ($this->deactivate_path_incompatible_plugins)(
                     $pdo,
                     $config["new_site_url"],
                 ) as $basename
             ) {
-                $this->audit("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)", true);
+                ($this->audit)("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)", true);
             }
 
             $state["apply"]["statements_executed"] = $statements_executed;
             $state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
             $state["status"] = "complete";
-            $this->save_state($state);
+            ($this->save_state)($state);
 
-            $this->audit(
+            ($this->audit)(
                 sprintf(
                     "db-apply complete | %d statements executed",
                     $statements_executed,
@@ -252,7 +252,7 @@ final class SqlDumpApplier
                 true,
             );
 
-            $this->output_progress([
+            ($this->output_progress)([
                 "status" => "complete",
                 "phase" => "db-apply",
                 "statements_executed" => $statements_executed,
@@ -260,10 +260,10 @@ final class SqlDumpApplier
                 "message" => "db-apply complete ({$statements_executed} statements executed)",
             ], false);
 
-            if (!$this->is_quiet_lifecycle()) {
-                $this->clear_progress_line();
+            if (!(bool) ($this->is_quiet_lifecycle)()) {
+                ($this->clear_progress_line)();
             }
-            $this->show_lifecycle_line("db-apply complete ({$statements_executed} statements executed)\n");
+            ($this->show_lifecycle_line)("db-apply complete ({$statements_executed} statements executed)\n");
         } finally {
             fclose($sql_handle);
         }
@@ -293,7 +293,7 @@ final class SqlDumpApplier
         try {
             $executed_query = $query_executor->execute($query);
         } catch (PDOException $e) {
-            $this->audit(
+            ($this->audit)(
                 sprintf(
                     "SQL ERROR | stmt=%d | %s | query=%.200s",
                     $stmt_count,
@@ -327,7 +327,7 @@ final class SqlDumpApplier
                 : number_format($statements_executed) . " / " . number_format($statements_total),
         );
 
-        $this->output_progress([
+        ($this->output_progress)([
             "phase" => "db-apply",
             "statements_executed" => $statements_executed,
             "bytes_read" => $total_bytes_read,
@@ -337,62 +337,6 @@ final class SqlDumpApplier
             "message" => $progress_message,
         ], false);
 
-        $this->show_progress_line($progress_message, $apply_fraction);
-    }
-
-    private function should_stop(): bool
-    {
-        return (bool) ($this->should_stop)();
-    }
-
-    private function save_state(array $state): void
-    {
-        ($this->save_state)($state);
-    }
-
-    private function audit(string $message, bool $to_console): void
-    {
-        ($this->audit)($message, $to_console);
-    }
-
-    private function output_progress(array $progress, bool $force): void
-    {
-        ($this->output_progress)($progress, $force);
-    }
-
-    private function show_progress_line(string $message, ?float $fraction): void
-    {
-        ($this->show_progress_line)($message, $fraction);
-    }
-
-    private function show_lifecycle_line(string $message): void
-    {
-        ($this->show_lifecycle_line)($message);
-    }
-
-    private function clear_progress_line(): void
-    {
-        ($this->clear_progress_line)();
-    }
-
-    private function is_quiet_lifecycle(): bool
-    {
-        return (bool) ($this->is_quiet_lifecycle)();
-    }
-
-    /**
-     * @return string[]
-     */
-    private function deactivate_host_plugins(PDO $pdo): array
-    {
-        return (array) ($this->deactivate_host_plugins)($pdo);
-    }
-
-    /**
-     * @return string[]
-     */
-    private function deactivate_path_incompatible_plugins(PDO $pdo, string $new_site_url): array
-    {
-        return (array) ($this->deactivate_path_incompatible_plugins)($pdo, $new_site_url);
+        ($this->show_progress_line)($progress_message, $apply_fraction);
     }
 }

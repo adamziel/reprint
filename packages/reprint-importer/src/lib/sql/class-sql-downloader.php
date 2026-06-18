@@ -121,7 +121,7 @@ final class SqlDownloader
             if ($tracked_bytes !== null && file_exists($sql_file)) {
                 $actual_size = filesize($sql_file);
                 if ($actual_size > $tracked_bytes) {
-                    $this->audit(
+                    ($this->audit)(
                         sprintf(
                             "CRASH RECOVERY | Truncating db.sql from %d to %d bytes",
                             $actual_size,
@@ -170,7 +170,7 @@ final class SqlDownloader
             }
             $mysql_conn->set_charset("utf8mb4");
 
-            $this->audit(
+            ($this->audit)(
                 "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
                 true,
             );
@@ -178,7 +178,7 @@ final class SqlDownloader
             $buffer_file = $state_dir . "/.sql-buffer";
             if (file_exists($buffer_file)) {
                 $sql_buffer = file_get_contents($buffer_file);
-                $this->audit(
+                ($this->audit)(
                     sprintf("CRASH RECOVERY | Restored %d bytes from .sql-buffer", strlen($sql_buffer)),
                     true,
                 );
@@ -218,7 +218,7 @@ final class SqlDownloader
         }
 
         $has_cursor = $cursor !== null;
-        $this->audit(
+        ($this->audit)(
             sprintf(
                 "START SQL REQUEST | mode=%s | cursor=%s | bytes_written=%s",
                 $mode,
@@ -252,8 +252,8 @@ final class SqlDownloader
 
         try {
             while (!$complete) {
-                $params = $this->get_tuned_params("sql_chunk");
-                $url = $this->build_url("sql_chunk", $cursor, $params);
+                $params = (array) ($this->get_tuned_params)("sql_chunk");
+                $url = (string) ($this->build_url)("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
                 $context->chunk_fingerprints = [];
@@ -271,9 +271,7 @@ final class SqlDownloader
                     $sql_statements_counted,
                     $chunks_since_save,
                     $config["save_every"],
-                    function (): bool {
-                        return $this->should_stop();
-                    },
+                    $this->should_stop,
                     function (
                         ?string $cursor,
                         int $sql_bytes_written,
@@ -282,7 +280,7 @@ final class SqlDownloader
                         $state["cursor"] = $cursor;
                         $state["sql_bytes"] = $sql_bytes_written;
                         $state["sql_statements_counted"] = $sql_statements_counted;
-                        $this->save_state($state);
+                        ($this->save_state)($state);
                     },
                     function (array $domains) use ($domains_file): void {
                         file_put_contents(
@@ -290,47 +288,23 @@ final class SqlDownloader
                             json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
                         );
                     },
-                    function (
-                        WP_MySQL_Naive_Query_Stream $query_stream,
-                        DomainCollector $domain_collector,
-                        int $sql_statements_counted
-                    ): int {
-                        return $this->drain_query_stream(
-                            $query_stream,
-                            $domain_collector,
-                            $sql_statements_counted,
-                        );
-                    },
-                    function (int $sql_bytes_written): void {
-                        $this->show_sql_progress($sql_bytes_written);
-                    },
-                    function (array $chunk, string $phase): void {
-                        $this->handle_progress($chunk, $phase);
-                    },
-                    function (
-                        array $chunk,
-                        string $phase,
-                        StreamingContext $context
-                    ): void {
-                        $this->handle_error($chunk, $phase, $context);
-                    },
-                    function (array $progress): void {
-                        $this->handle_completion_progress($progress);
-                    },
-                    function (): void {
-                        $this->handle_stdout_write_failed();
-                    },
+                    $this->drain_query_stream,
+                    $this->show_sql_progress,
+                    $this->handle_progress,
+                    $this->handle_error,
+                    $this->handle_completion_progress,
+                    $this->handle_stdout_write_failed,
                 );
                 $context->on_chunk = [$response_handler, "handle"];
 
                 $cursor_before = $cursor;
                 $request_start = microtime(true);
                 try {
-                    $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
+                    ($this->fetch_streaming)($url, $cursor, $context, null, "sql_chunk");
                 } catch (CurlTimeoutException $e) {
                     $sync_sql_response_state($response_handler);
 
-                    $this->assert_can_retry_timeout("sql_chunk", $cursor_before, $cursor);
+                    ($this->assert_can_retry_timeout)("sql_chunk", $cursor_before, $cursor);
                     if ($sql_handle) {
                         fflush($sql_handle);
                     }
@@ -338,7 +312,7 @@ final class SqlDownloader
                     $state["sql_bytes"] = $sql_bytes_written;
                     $state["sql_statements_counted"] = $sql_statements_counted;
                     $state["status"] = "partial";
-                    $this->save_state($state);
+                    ($this->save_state)($state);
                     $sql_buffer = "";
                     $curl_timed_out = true;
                     break;
@@ -356,13 +330,13 @@ final class SqlDownloader
                         $is_retryable_curl ||
                         strpos($msg, "missing multipart boundary") !== false;
                     if ($is_retryable) {
-                        $this->audit(
+                        ($this->audit)(
                             "INCOMPLETE RESPONSE | " . $msg .
                             " | buffered_sql=" . strlen($sql_buffer) . " bytes" .
                             " - will save state for retry",
                             true,
                         );
-                        $this->assert_can_retry_timeout("sql_chunk", $cursor_before, $cursor);
+                        ($this->assert_can_retry_timeout)("sql_chunk", $cursor_before, $cursor);
                         if ($sql_handle) {
                             fflush($sql_handle);
                         }
@@ -370,7 +344,7 @@ final class SqlDownloader
                         $state["sql_bytes"] = $sql_bytes_written;
                         $state["sql_statements_counted"] = $sql_statements_counted;
                         $state["status"] = "partial";
-                        $this->save_state($state);
+                        ($this->save_state)($state);
                         $curl_timed_out = true;
                         break;
                     }
@@ -380,7 +354,7 @@ final class SqlDownloader
 
                 $state["consecutive_timeouts"] = 0;
                 $wall_time = microtime(true) - $request_start;
-                $this->finalize_request(
+                ($this->finalize_request)(
                     "sql_chunk",
                     $wall_time,
                     $context->response_stats ?? [],
@@ -392,12 +366,12 @@ final class SqlDownloader
 
                 $state["cursor"] = $cursor;
                 $state["sql_bytes"] = $complete ? null : $sql_bytes_written;
-                $this->save_state($state);
+                ($this->save_state)($state);
             }
 
             if ($query_stream && $domain_collector) {
                 $query_stream->mark_input_complete();
-                $sql_statements_counted = $this->drain_query_stream(
+                $sql_statements_counted = (int) ($this->drain_query_stream)(
                     $query_stream,
                     $domain_collector,
                     $sql_statements_counted,
@@ -409,7 +383,7 @@ final class SqlDownloader
                         $domains_file,
                         json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
                     );
-                    $this->audit(
+                    ($this->audit)(
                         sprintf(
                             "DOMAINS DISCOVERED | %d unique domains saved to .import-domains.json",
                             count($domains),
@@ -423,7 +397,7 @@ final class SqlDownloader
                         $sql_stats_file,
                         json_encode(["statements_total" => $sql_statements_counted]) . "\n",
                     );
-                    $this->audit(
+                    ($this->audit)(
                         sprintf(
                             "SQL STATS | %d statements counted during download",
                             $sql_statements_counted,
@@ -453,14 +427,14 @@ final class SqlDownloader
                 }
                 if ($pending !== "") {
                     if ($caught_exception !== null) {
-                        $this->audit(
+                        ($this->audit)(
                             "BUFFER NOT FLUSHED | " . strlen($pending) .
                             " bytes in SQL buffer during exception unwind" .
                             " (original error: " . $caught_exception->getMessage() . ")",
                             true,
                         );
                     } elseif ($curl_timed_out) {
-                        $this->audit(
+                        ($this->audit)(
                             "BUFFER PRESERVED | " . strlen($pending) .
                             " bytes in SQL buffer saved for crash recovery",
                             true,
@@ -478,93 +452,5 @@ final class SqlDownloader
                 " bytes) - incomplete export?"
             );
         }
-    }
-
-    private function build_url(string $endpoint, ?string $cursor, array $params): string
-    {
-        return (string) ($this->build_url)($endpoint, $cursor, $params);
-    }
-
-    private function fetch_streaming(
-        string $url,
-        ?string $cursor,
-        StreamingContext $context,
-        ?array $post_data,
-        string $phase
-    ): void {
-        ($this->fetch_streaming)($url, $cursor, $context, $post_data, $phase);
-    }
-
-    private function get_tuned_params(string $endpoint): array
-    {
-        return (array) ($this->get_tuned_params)($endpoint);
-    }
-
-    private function should_stop(): bool
-    {
-        return (bool) ($this->should_stop)();
-    }
-
-    private function save_state(array $state): void
-    {
-        ($this->save_state)($state);
-    }
-
-    private function drain_query_stream(
-        WP_MySQL_Naive_Query_Stream $query_stream,
-        DomainCollector $domain_collector,
-        int $sql_statements_counted
-    ): int {
-        return (int) ($this->drain_query_stream)(
-            $query_stream,
-            $domain_collector,
-            $sql_statements_counted,
-        );
-    }
-
-    private function show_sql_progress(int $sql_bytes_written): void
-    {
-        ($this->show_sql_progress)($sql_bytes_written);
-    }
-
-    private function handle_progress(array $chunk, string $phase): void
-    {
-        ($this->handle_progress)($chunk, $phase);
-    }
-
-    private function handle_error(
-        array $chunk,
-        string $phase,
-        StreamingContext $context
-    ): void {
-        ($this->handle_error)($chunk, $phase, $context);
-    }
-
-    private function handle_completion_progress(array $progress): void
-    {
-        ($this->handle_completion_progress)($progress);
-    }
-
-    private function handle_stdout_write_failed(): void
-    {
-        ($this->handle_stdout_write_failed)();
-    }
-
-    private function assert_can_retry_timeout(
-        string $phase,
-        ?string $cursor_before,
-        ?string $cursor_after
-    ): void {
-        ($this->assert_can_retry_timeout)($phase, $cursor_before, $cursor_after);
-    }
-
-    private function finalize_request(string $endpoint, float $wall_time, array $stats): void
-    {
-        ($this->finalize_request)($endpoint, $wall_time, $stats);
-    }
-
-    private function audit(string $message, bool $to_console): void
-    {
-        ($this->audit)($message, $to_console);
     }
 }
