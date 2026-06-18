@@ -18,6 +18,7 @@ use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileChunkApplier;
 use Reprint\Importer\FileSync\FileFetchResponseHandler;
 use Reprint\Importer\FileSync\IndexResponseHandler;
+use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\FileSync\SymlinkChunkApplier;
 use Reprint\Importer\Filesystem\FlatDocumentRootBuilder;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
@@ -981,170 +982,27 @@ class ImportClient
      */
     public function download_runtime_files(): void
     {
-        $runtime_dir = $this->state_dir . "/runtime_files";
-
-        // Always wipe and recreate so the directory reflects current state.
-        if (is_dir($runtime_dir)) {
-            self::rmdir_recursive($runtime_dir);
-            $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
-        }
-
-        $ini_all = $this->state["preflight"]["data"]["runtime"]["ini_get_all"] ?? [];
-        $files = [];
-        foreach (["auto_prepend_file", "auto_append_file"] as $key) {
-            $path = $ini_all[$key] ?? "";
-            if (is_string($path) && $path !== "") {
-                $files[] = $path;
-            }
-        }
-        $files = array_values(array_unique($files));
-
-        if (empty($files)) {
-            $this->audit_log("RUNTIME FILES | no prepend/append scripts to download");
-            return;
-        }
-
-        mkdir($runtime_dir, 0755, true);
-
-        $this->audit_log(
-            "RUNTIME FILES | downloading " . count($files) . " script(s): " .
-                implode(", ", $files),
+        (new RuntimeFilesDownloader(
+            function (string $endpoint, ?string $cursor, array $params): string {
+                return $this->build_url($endpoint, $cursor, $params);
+            },
+            function (
+                string $url,
+                ?string $cursor,
+                StreamingContext $context,
+                ?array $post_data,
+                string $phase
+            ): void {
+                $this->fetch_streaming($url, $cursor, $context, $post_data, $phase);
+            },
+            function (string $message): void {
+                $this->audit_log($message);
+            },
+        ))->download(
+            $this->state["preflight"]["data"] ?? [],
+            $this->paths->runtime_files_dir(),
         );
-
-        $downloaded = $this->fetch_files_into($runtime_dir, $files);
-        $this->audit_log("RUNTIME FILES | downloaded {$downloaded}/" . count($files) . " script(s)");
     }
-
-    /**
-     * Download a list of absolute remote paths into $target_dir,
-     * preserving their directory structure.
-     *
-     * Issues one file_fetch request per parent directory so that an
-     * inaccessible directory doesn't block the others.  All errors
-     * are caught and logged as non-fatal.
-     *
-     * @return int Number of files successfully downloaded.
-     */
-    private function fetch_files_into(string $target_dir, array $files): int
-    {
-        $by_dir = [];
-        foreach ($files as $f) {
-            $parent = dirname($f);
-            if ($parent !== "" && $parent !== ".") {
-                $by_dir[rtrim($parent, "/")][] = $f;
-            }
-        }
-
-        $downloaded = 0;
-
-        foreach ($by_dir as $directory => $dir_files) {
-            $tmp = tempnam(sys_get_temp_dir(), "fetch-into-");
-            if ($tmp === false) {
-                continue;
-            }
-            file_put_contents($tmp, json_encode($dir_files, JSON_UNESCAPED_SLASHES));
-
-            $post_data = [
-                "file_list" => new CURLFile($tmp, "application/json", "file_list"),
-            ];
-            $url = $this->build_url("file_fetch", null, ["directory" => [$directory]]);
-
-            $context = new StreamingContext();
-            $context->file_handle = null;
-            $context->file_path = null;
-            $context->file_ctime = null;
-
-            $context->on_chunk = function ($chunk) use ($target_dir, $context, &$downloaded) {
-                $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
-                if ($chunk_type === "file") {
-                    $raw = $chunk["headers"]["x-file-path"] ?? "";
-                    $path = base64_decode($raw, true);
-                    if ($path === false || $path === "") {
-                        return;
-                    }
-
-                    $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
-                    $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
-                    $local_path = $target_dir . $path;
-
-                    if ($is_first) {
-                        if ($context->file_handle) {
-                            fclose($context->file_handle);
-                            $context->file_handle = null;
-                        }
-                        $dir = dirname($local_path);
-                        if (!is_dir($dir)) {
-                            @mkdir($dir, 0755, true);
-                        }
-                        $context->file_handle = @fopen($local_path, "wb");
-                        $context->file_path = $local_path;
-                    }
-
-                    if ($context->file_handle && isset($chunk["body"])) {
-                        fwrite($context->file_handle, $chunk["body"]);
-                    }
-
-                    if ($is_last && $context->file_handle) {
-                        fclose($context->file_handle);
-                        $context->file_handle = null;
-                        $downloaded++;
-                        $this->audit_log("Saved {$path} → {$local_path}");
-                    }
-                } elseif ($chunk_type === "error") {
-                    $body = json_decode($chunk["body"] ?? "{}", true);
-                    $error_path = isset($body["path"]) ? base64_decode($body["path"]) : "unknown";
-                    $this->audit_log("Fetch error for {$error_path}: " . ($body["message"] ?? "unknown"));
-                } elseif ($chunk_type === "completion") {
-                    $context->saw_completion = true;
-                }
-            };
-
-            try {
-                $this->fetch_streaming($url, null, $context, $post_data, "file_fetch");
-            } catch (\RuntimeException $e) {
-                $this->audit_log(
-                    "Fetch failed for directory {$directory} (non-fatal): " .
-                        substr($e->getMessage(), 0, 200),
-                );
-            }
-
-            @unlink($tmp);
-
-            if ($context->file_handle) {
-                fclose($context->file_handle);
-            }
-        }
-
-        return $downloaded;
-    }
-
-    /**
-     * Recursively remove a directory and all its contents.
-     */
-    private static function rmdir_recursive(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-        $entries = scandir($dir);
-        if ($entries === false) {
-            return;
-        }
-        foreach ($entries as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
-            $path = $dir . "/" . $entry;
-            if (is_dir($path) && !is_link($path)) {
-                self::rmdir_recursive($path);
-            } else {
-                @unlink($path);
-            }
-        }
-        @rmdir($dir);
-    }
-
 
     /**
      * Assert that a preflight has already been run and stored in state.

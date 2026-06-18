@@ -3,7 +3,9 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Protocol\StreamingContext;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -197,5 +199,80 @@ class RuntimeFilesTest extends TestCase
 
         // The directory should exist even though no files were downloaded.
         $this->assertDirectoryExists($this->stateDir . '/runtime_files');
+    }
+
+    public function testDownloaderSavesFetchedRuntimeFile(): void
+    {
+        $runtimeDir = $this->stateDir . '/runtime_files';
+        $audit = [];
+        $urls = [];
+
+        $downloader = new RuntimeFilesDownloader(
+            function (string $endpoint, ?string $cursor, array $params) use (&$urls): string {
+                $this->assertSame('file_fetch', $endpoint);
+                $this->assertNull($cursor);
+                $this->assertSame(['/scripts'], $params['directory']);
+
+                $url = 'http://fake.url/export.php?endpoint=' . $endpoint;
+                $urls[] = $url;
+
+                return $url;
+            },
+            function (
+                string $url,
+                ?string $cursor,
+                StreamingContext $context,
+                ?array $post_data,
+                string $phase
+            ): void {
+                $this->assertSame('http://fake.url/export.php?endpoint=file_fetch', $url);
+                $this->assertNull($cursor);
+                $this->assertSame('file_fetch', $phase);
+                $this->assertIsArray($post_data);
+                $this->assertArrayHasKey('file_list', $post_data);
+
+                ($context->on_chunk)([
+                    'headers' => [
+                        'x-chunk-type' => 'file',
+                        'x-file-path' => base64_encode('/scripts/env.php'),
+                        'x-first-chunk' => '1',
+                        'x-last-chunk' => '1',
+                    ],
+                    'body' => "<?php\nreturn ['loaded' => true];\n",
+                ]);
+                ($context->on_chunk)([
+                    'headers' => [
+                        'x-chunk-type' => 'completion',
+                    ],
+                ]);
+            },
+            function (string $message) use (&$audit): void {
+                $audit[] = $message;
+            },
+        );
+
+        $downloaded = $downloader->download(
+            [
+                'runtime' => [
+                    'ini_get_all' => [
+                        'auto_prepend_file' => '/scripts/env.php',
+                        'auto_append_file' => '/scripts/env.php',
+                    ],
+                ],
+            ],
+            $runtimeDir,
+        );
+
+        $this->assertSame(1, $downloaded);
+        $this->assertCount(1, $urls);
+        $this->assertSame(
+            "<?php\nreturn ['loaded' => true];\n",
+            file_get_contents($runtimeDir . '/scripts/env.php'),
+        );
+        $this->assertContains('RUNTIME FILES | downloaded 1/1 script(s)', $audit);
+        $this->assertStringContainsString(
+            'Saved /scripts/env.php',
+            implode("\n", $audit),
+        );
     }
 }
