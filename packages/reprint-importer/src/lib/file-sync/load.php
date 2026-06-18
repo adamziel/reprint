@@ -5,4 +5,6 @@ require_once __DIR__ . '/class-download-list.php';
 require_once __DIR__ . '/class-file-chunk-applier.php';
 require_once __DIR__ . '/class-fetch-list-builder.php';
 require_once __DIR__ . '/class-fetch-list-executor.php';
+require_once __DIR__ . '/class-file-fetch-response-handler.php';
+require_once __DIR__ . '/class-index-response-handler.php';
 require_once __DIR__ . '/class-symlink-chunk-applier.php';

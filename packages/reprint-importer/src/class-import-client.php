@@ -17,6 +17,8 @@ use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileChunkApplier;
+use Reprint\Importer\FileSync\FileFetchResponseHandler;
+use Reprint\Importer\FileSync\IndexResponseHandler;
 use Reprint\Importer\FileSync\SymlinkChunkApplier;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Filesystem\PathUtils;
@@ -43,7 +45,6 @@ use Reprint\Importer\UrlRewrite\PhpSerializationProcessor;
 use Reprint\Importer\UrlRewrite\SQLitePreparedInsertBuilder;
 use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
 use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
-use function Reprint\Exporter\assert_valid_path;
 use function Reprint\Exporter\normalize_path;
 use function Reprint\Exporter\path_is_within_root;
 
@@ -4270,8 +4271,6 @@ class ImportClient
         string $state_key = "fetch"
     ): bool {
         $cursor = $cursor ?? ($this->state[$state_key]["cursor"] ?? null);
-        $complete = false;
-        $chunks_since_save = 0;
 
         // Crash recovery: if we have a tracked file that's larger than expected,
         // truncate it. This happens if we crashed after writing but before saving
@@ -4333,108 +4332,43 @@ class ImportClient
             }
         }
 
-        $context->on_chunk = function ($chunk) use (
-            &$cursor,
-            &$complete,
-            &$chunks_since_save,
+        $response_handler = new FileFetchResponseHandler(
+            $cursor,
+            $state_key,
             $context,
-            $state_key
-        ) {
-            if ($this->shutdown_requested) {
-                throw new RuntimeException("Shutdown requested");
-            }
-
-            if (function_exists("pcntl_signal_dispatch")) {
-                pcntl_signal_dispatch();
-            }
-
-            // Streamed file bodies can arrive in multiple parser callbacks
-            // for one exporter file part. Save only at the part boundary:
-            // mid-body, the cursor already points to the end of the part
-            // while file_bytes_written may still lag; at is_streaming_close
-            // the bytes are on disk and we force a per-part checkpoint.
-            $is_streaming_body = !empty($chunk["is_streaming_body"]);
-            $is_streaming_close = !empty($chunk["is_streaming_close"]);
-            if (!$is_streaming_body) {
-                $chunks_since_save++;
-                $force_save = $is_streaming_close;
-                if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                    $this->state[$state_key]["cursor"] = $cursor;
-                    // Track current file for crash recovery
-                    if ($context->file_handle && $context->file_path) {
-                        // Flush to ensure bytes are on disk before saving state
-                        fflush($context->file_handle);
-                        $this->state["current_file"] = $context->file_path;
-                        $this->state["current_file_bytes"] = $context->file_bytes_written;
-                    } else {
-                        $this->state["current_file"] = null;
-                        $this->state["current_file_bytes"] = null;
-                    }
-                    $this->save_state($this->state);
-                    $chunks_since_save = 0;
-                }
-            }
-
-            if (isset($chunk["headers"]["x-cursor"])) {
-                $cursor = $chunk["headers"]["x-cursor"];
-            }
-
-            $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
-            if ($chunk_type === "metadata") {
+            self::SAVE_STATE_EVERY_N_CHUNKS,
+            function (): bool {
+                return $this->shutdown_requested;
+            },
+            function (string $state_key, ?string $cursor, StreamingContext $context): void {
+                $this->save_file_fetch_checkpoint($state_key, $cursor, $context);
+            },
+            function (array $chunk, StreamingContext $context): void {
                 $this->handle_metadata_chunk($chunk, $context);
-            } elseif ($chunk_type === "file") {
+            },
+            function (array $chunk, StreamingContext $context): void {
                 $this->handle_file_chunk($chunk, $context);
-            } elseif ($chunk_type === "directory") {
+            },
+            function (array $chunk): void {
                 $this->handle_directory_chunk($chunk);
-            } elseif ($chunk_type === "symlink") {
+            },
+            function (array $chunk): void {
                 $this->handle_symlink_chunk($chunk);
-            } elseif ($chunk_type === "missing") {
-                $path = base64_decode($chunk["headers"]["x-file-path"] ?? "");
-                if ($path) {
-                    $this->audit_log("Missing on server: {$path}", true);
-                }
-                // @TODO: Cleanup the local file that we may have started downloading.
-            } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "files", $context);
-            } elseif ($chunk_type === "progress") {
-                $this->handle_progress($chunk, "files");
-            } elseif ($chunk_type === "completion") {
-                $complete =
-                    ($chunk["headers"]["x-status"] ?? "") === "complete";
-                $context->saw_completion = true;
-                $context->response_stats = [
-                    "status" => $chunk["headers"]["x-status"] ?? null,
-                    "bytes_processed" =>
-                        isset($chunk["headers"]["x-bytes-processed"])
-                            ? (int) $chunk["headers"]["x-bytes-processed"]
-                            : null,
-                    "server_time" =>
-                        isset($chunk["headers"]["x-time-elapsed"])
-                            ? (float) $chunk["headers"]["x-time-elapsed"]
-                            : null,
-                    "memory_used" =>
-                        isset($chunk["headers"]["x-memory-used"])
-                            ? (int) $chunk["headers"]["x-memory-used"]
-                            : null,
-                    "memory_limit" =>
-                        isset($chunk["headers"]["x-memory-limit"])
-                            ? (int) $chunk["headers"]["x-memory-limit"]
-                            : null,
-                ];
-                $this->output_progress(
-                    [
-                        "phase" => "files",
-                        "status" => $chunk["headers"]["x-status"] ?? "unknown",
-                        "files_completed" =>
-                            (int) ($chunk["headers"]["x-files-completed"] ?? 0),
-                        "bytes_processed" =>
-                            (int) ($chunk["headers"]["x-bytes-processed"] ?? 0),
-                    ],
-                    true,
-                );
-            }
-        };
+            },
+            function (string $path): void {
+                $this->audit_log("Missing on server: {$path}", true);
+            },
+            function (array $chunk, string $phase, StreamingContext $context): void {
+                $this->handle_error_chunk($chunk, $phase, $context);
+            },
+            function (array $chunk, string $phase): void {
+                $this->handle_progress($chunk, $phase);
+            },
+            function (array $progress): void {
+                $this->output_progress($progress, true);
+            },
+        );
+        $context->on_chunk = [$response_handler, 'handle'];
 
         $cursor_before = $cursor;
         $request_start = microtime(true);
@@ -4447,6 +4381,7 @@ class ImportClient
                 "file_fetch",
             );
         } catch (CurlTimeoutException $e) {
+            $cursor = $response_handler->cursor();
             // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
             // with no progress, so we don't retry forever.
             $this->assert_can_retry_consecutive_timeout("file_fetch", $cursor_before, $cursor);
@@ -4463,6 +4398,8 @@ class ImportClient
             $this->save_state($this->state);
             return false;
         }
+        $cursor = $response_handler->cursor();
+        $complete = $response_handler->complete();
         $this->state["consecutive_timeouts"] = 0;
         $wall_time = microtime(true) - $request_start;
 
@@ -4485,6 +4422,23 @@ class ImportClient
         $this->save_state($this->state);
 
         return $complete;
+    }
+
+    private function save_file_fetch_checkpoint(
+        string $state_key,
+        ?string $cursor,
+        StreamingContext $context
+    ): void {
+        $this->state[$state_key]["cursor"] = $cursor;
+        if ($context->file_handle && $context->file_path) {
+            fflush($context->file_handle);
+            $this->state["current_file"] = $context->file_path;
+            $this->state["current_file_bytes"] = $context->file_bytes_written;
+        } else {
+            $this->state["current_file"] = null;
+            $this->state["current_file_bytes"] = null;
+        }
+        $this->save_state($this->state);
     }
 
     /**
@@ -4523,8 +4477,6 @@ class ImportClient
             throw new RuntimeException("Failed to open remote index file");
         }
 
-        $complete = false;
-        $chunks_since_save = 0;
         $params = $this->get_tuned_params("file_index");
         if ($cursor === null) {
             $params["list_dir"] = $list_dir_override ?? $roots[0];
@@ -4550,141 +4502,43 @@ class ImportClient
         $url = $this->build_url("file_index", $cursor, $params);
         $context = new StreamingContext();
 
-        $context->on_chunk = function ($chunk) use (
-            &$cursor,
-            &$complete,
-            &$chunks_since_save,
+        $response_handler = new IndexResponseHandler(
             $handle,
-            $context
-        ) {
-            if ($this->shutdown_requested) {
-                throw new RuntimeException("Shutdown requested");
-            }
-
-            if (function_exists("pcntl_signal_dispatch")) {
-                pcntl_signal_dispatch();
-            }
-
-            $chunks_since_save++;
-            if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+            $cursor,
+            $context,
+            $this->index_entries_counted,
+            self::SAVE_STATE_EVERY_N_CHUNKS,
+            function (): bool {
+                return $this->shutdown_requested;
+            },
+            function (?string $cursor): void {
                 $this->state["index"] = [
                     "cursor" => $cursor,
                 ];
                 $this->save_state($this->state);
-                $chunks_since_save = 0;
-            }
-
-            if (isset($chunk["headers"]["x-cursor"])) {
-                $cursor = $chunk["headers"]["x-cursor"];
-            }
-
-            $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
-            if ($chunk_type === "index_batch") {
-                $body = $chunk["body"] ?? "";
-                if ($body === "") {
-                    return;
-                }
-                $items = json_decode($body, true);
-                if (!is_array($items)) {
-                    throw new RuntimeException(
-                        "Invalid index batch JSON received from server",
-                    );
-                }
-                foreach ($items as $item) {
-                    if (!is_array($item)) {
-                        continue;
-                    }
-                    $path_encoded = $item["path"] ?? "";
-                    if (!is_string($path_encoded) || $path_encoded === "") {
-                        throw new RuntimeException(
-                            "Invalid index batch item: missing path",
-                        );
-                    }
-                    $path = base64_decode($path_encoded, true);
-                    if ($path === "" || $path === false) {
-                        throw new RuntimeException(
-                            "Invalid index batch item: path base64 decode failed",
-                        );
-                    }
-                    assert_valid_path(
-                        $path,
-                        "index batch path",
-                    );
-                    $ctime = (int) ($item["ctime"] ?? 0);
-                    $size = (int) ($item["size"] ?? 0);
-                    $type = (string) ($item["type"] ?? "file");
-
-                    $entry = [
-                        "path" => base64_encode($path),
-                        "ctime" => $ctime,
-                        "size" => $size,
-                        "type" => $type,
-                    ];
-                    if (isset($item["target"]) && is_string($item["target"]) && $item["target"] !== "") {
-                        $entry["target"] = $item["target"]; // already base64-encoded
-                    }
-                    if (!empty($item["intermediate"])) {
-                        $entry["intermediate"] = true;
-                    }
-                    $line = json_encode(
-                        $entry,
-                        JSON_UNESCAPED_SLASHES,
-                    );
-                    if ($line === false) {
-                        continue;
-                    }
-                    $bytes = fwrite($handle, $line . "\n");
-                    if ($bytes === false) {
-                        throw new RuntimeException("Failed to write to remote index file (disk full?)");
-                    }
-                    $this->index_entries_counted++;
-                }
-                if ($this->index_entries_counted > 0) {
-                    $this->progress->show_progress_line(
-                        "Scanning remote files — " .
-                        number_format($this->index_entries_counted) . " scanned"
-                    );
-                } else {
-                    $this->progress->show_progress_line("Scanning remote files");
-                }
-            } elseif ($chunk_type === "progress") {
-                $this->handle_progress($chunk, "index");
-            } elseif ($chunk_type === "metadata") {
+            },
+            function (array $chunk, StreamingContext $context): void {
                 $this->handle_metadata_chunk($chunk, $context);
-            } elseif ($chunk_type === "completion") {
-                $complete =
-                    ($chunk["headers"]["x-status"] ?? "") === "complete";
-                $context->saw_completion = true;
-                $context->response_stats = [
-                    "status" => $chunk["headers"]["x-status"] ?? null,
-                    "entries_processed" =>
-                        isset($chunk["headers"]["x-total-entries"])
-                            ? (int) $chunk["headers"]["x-total-entries"]
-                            : null,
-                    "server_time" =>
-                        isset($chunk["headers"]["x-time-elapsed"])
-                            ? (float) $chunk["headers"]["x-time-elapsed"]
-                            : null,
-                    "memory_used" =>
-                        isset($chunk["headers"]["x-memory-used"])
-                            ? (int) $chunk["headers"]["x-memory-used"]
-                            : null,
-                    "memory_limit" =>
-                        isset($chunk["headers"]["x-memory-limit"])
-                            ? (int) $chunk["headers"]["x-memory-limit"]
-                            : null,
-                ];
-            } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "index", $context);
-            }
-        };
+            },
+            function (array $chunk, string $phase, StreamingContext $context): void {
+                $this->handle_error_chunk($chunk, $phase, $context);
+            },
+            function (array $chunk, string $phase): void {
+                $this->handle_progress($chunk, $phase);
+            },
+            function (int $entries_counted): void {
+                $this->show_remote_index_progress($entries_counted);
+            },
+        );
+        $context->on_chunk = [$response_handler, 'handle'];
 
         $cursor_before = $cursor;
         $request_start = microtime(true);
         try {
             $this->fetch_streaming($url, $cursor, $context, null, "file_index");
         } catch (CurlTimeoutException $e) {
+            $cursor = $response_handler->cursor();
+            $this->index_entries_counted = $response_handler->entries_counted();
             // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
             // with no progress, so we don't retry forever.
             $this->assert_can_retry_consecutive_timeout("file_index", $cursor_before, $cursor);
@@ -4694,6 +4548,9 @@ class ImportClient
             $this->save_state($this->state);
             return false;
         }
+        $cursor = $response_handler->cursor();
+        $complete = $response_handler->complete();
+        $this->index_entries_counted = $response_handler->entries_counted();
         $this->state["consecutive_timeouts"] = 0;
         $wall_time = microtime(true) - $request_start;
         $this->finalize_tuned_request(
@@ -4709,6 +4566,19 @@ class ImportClient
         $this->save_state($this->state);
 
         return $complete;
+    }
+
+    private function show_remote_index_progress(int $entries_counted): void
+    {
+        if ($entries_counted > 0) {
+            $this->progress->show_progress_line(
+                "Scanning remote files — " .
+                number_format($entries_counted) . " scanned"
+            );
+            return;
+        }
+
+        $this->progress->show_progress_line("Scanning remote files");
     }
 
     /**
