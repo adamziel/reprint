@@ -7,7 +7,6 @@ use Exception;
 use InvalidArgumentException;
 use PDO;
 use PDOException;
-use PDOStatement;
 use RuntimeException;
 use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
@@ -40,6 +39,7 @@ use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Session\VolatileFileTracker;
 use Reprint\Importer\Sql\ActivePluginDeactivator;
+use Reprint\Importer\Sql\DbApplyQueryExecutor;
 use Reprint\Importer\Sql\DbIndexResponseHandler;
 use Reprint\Importer\Sql\SqlResponseHandler;
 use Reprint\Importer\Sql\SqlStatementInspector;
@@ -53,7 +53,6 @@ use Reprint\Importer\Tuning\AdaptiveTuner;
 use Reprint\Importer\UrlRewrite\Base64ValueScanner;
 use Reprint\Importer\UrlRewrite\DomainCollector;
 use Reprint\Importer\UrlRewrite\NewSiteUrlResolver;
-use Reprint\Importer\UrlRewrite\SQLitePreparedInsertBuilder;
 use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
 use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
 use function Reprint\Exporter\normalize_path;
@@ -63,7 +62,6 @@ class ImportClient
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
-    private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
 
     /**
      * Maximum number of consecutive cURL timeouts with no cursor progress
@@ -2976,8 +2974,6 @@ class ImportClient
 
         [$pdo, $connection_label] = $this->create_target_db_apply_connection($options);
         $sqlite_prepared_pdo = null;
-        $sqlite_prepared_statement_cache = [];
-        $sqlite_prepared_statement_cache_order = [];
         if (
             strtolower((string) ($options["target_engine"] ?? "mysql")) === "sqlite"
             && method_exists($pdo, 'get_connection')
@@ -2992,6 +2988,7 @@ class ImportClient
                 false,
             );
         }
+        $query_executor = new DbApplyQueryExecutor($pdo, $stmt_rewriter, $sqlite_prepared_pdo);
 
         $this->audit_log(
             "CONNECTED | {$connection_label}",
@@ -3099,15 +3096,7 @@ class ImportClient
                     // Execute against target database
                     $executed_query = $query;
                     try {
-                        $this->execute_db_apply_query(
-                            $pdo,
-                            $query,
-                            $stmt_rewriter,
-                            $sqlite_prepared_pdo,
-                            $sqlite_prepared_statement_cache,
-                            $sqlite_prepared_statement_cache_order,
-                            $executed_query,
-                        );
+                        $executed_query = $query_executor->execute($query);
                     } catch (PDOException $e) {
                         $this->audit_log(
                             sprintf(
@@ -3179,15 +3168,7 @@ class ImportClient
 
                 $executed_query = $query;
                 try {
-                    $this->execute_db_apply_query(
-                        $pdo,
-                        $query,
-                        $stmt_rewriter,
-                        $sqlite_prepared_pdo,
-                        $sqlite_prepared_statement_cache,
-                        $sqlite_prepared_statement_cache_order,
-                        $executed_query,
-                    );
+                    $executed_query = $query_executor->execute($query);
                 } catch (PDOException $e) {
                     $this->audit_log(
                         sprintf(
@@ -3284,65 +3265,6 @@ class ImportClient
         } finally {
             fclose($sql_handle);
         }
-    }
-
-    private function execute_db_apply_query(
-        PDO $pdo,
-        string $query,
-        ?SqlStatementRewriter $stmt_rewriter,
-        ?PDO $sqlite_prepared_pdo,
-        array &$sqlite_prepared_statement_cache,
-        array &$sqlite_prepared_statement_cache_order,
-        string &$executed_query
-    ): void {
-        $executed_query = $query;
-
-        if ($sqlite_prepared_pdo !== null) {
-            $prepared_insert = $stmt_rewriter !== null
-                ? $stmt_rewriter->build_sqlite_prepared_insert($query)
-                : SQLitePreparedInsertBuilder::build($query);
-
-            if ($prepared_insert !== null) {
-                $executed_query = $prepared_insert['sql'];
-                $statement = $sqlite_prepared_statement_cache[$prepared_insert['sql']] ?? null;
-                if (!$statement instanceof PDOStatement) {
-                    $statement = $sqlite_prepared_pdo->prepare($prepared_insert['sql']);
-                    if ($statement === false) {
-                        throw new PDOException('Failed to prepare SQLite INSERT statement.');
-                    }
-
-                    $sqlite_prepared_statement_cache[$prepared_insert['sql']] = $statement;
-                    $sqlite_prepared_statement_cache_order[] = $prepared_insert['sql'];
-                    if (count($sqlite_prepared_statement_cache_order) > self::SQLITE_PREPARED_INSERT_CACHE_MAX) {
-                        $oldest_sql = array_shift($sqlite_prepared_statement_cache_order);
-                        if (is_string($oldest_sql)) {
-                            unset($sqlite_prepared_statement_cache[$oldest_sql]);
-                        }
-                    }
-                } else {
-                    $statement->closeCursor();
-                }
-
-                foreach ($prepared_insert['params'] as $index => $value) {
-                    $statement->bindValue(
-                        $index + 1,
-                        $value,
-                        $prepared_insert['param_types'][$index] ?? PDO::PARAM_STR
-                    );
-                }
-
-                if ($statement->execute() === false) {
-                    throw new PDOException('Failed to execute SQLite INSERT statement.');
-                }
-                return;
-            }
-        }
-
-        if ($stmt_rewriter !== null) {
-            $executed_query = $stmt_rewriter->rewrite($query);
-        }
-
-        $pdo->exec($executed_query);
     }
 
     /**
