@@ -6,7 +6,6 @@ use CURLFile;
 use Exception;
 use InvalidArgumentException;
 use PDO;
-use PDOException;
 use RuntimeException;
 use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
@@ -16,8 +15,8 @@ use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileChunkApplier;
-use Reprint\Importer\FileSync\FileFetchResponseHandler;
-use Reprint\Importer\FileSync\IndexResponseHandler;
+use Reprint\Importer\FileSync\FileFetchDownloader;
+use Reprint\Importer\FileSync\RemoteIndexDownloader;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\FileSync\SymlinkChunkApplier;
 use Reprint\Importer\Filesystem\FlatDocumentRootBuilder;
@@ -31,7 +30,6 @@ use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\MultipartStreamParser;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Pull\Pull;
-use Reprint\Importer\QueryStream\WP_MySQL_FastQueryStream;
 use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
 use Reprint\Importer\Session\ExportDirectoryResolver;
 use Reprint\Importer\Session\ImportPaths;
@@ -41,7 +39,8 @@ use Reprint\Importer\Session\VolatileFileTracker;
 use Reprint\Importer\Sql\ActivePluginDeactivator;
 use Reprint\Importer\Sql\DbApplyQueryExecutor;
 use Reprint\Importer\Sql\DbIndexDownloader;
-use Reprint\Importer\Sql\SqlResponseHandler;
+use Reprint\Importer\Sql\SqlDumpApplier;
+use Reprint\Importer\Sql\SqlDownloader;
 use Reprint\Importer\Sql\SqlStatementInspector;
 use Reprint\Importer\Sql\TargetDatabaseConnectionFactory;
 use Reprint\Importer\Support\ByteFormatter;
@@ -2590,276 +2589,49 @@ class ImportClient
             false,
         );
 
-        // Stream db.sql through the query stream and execute. Use the
-        // fast strcspn-based parser by default; it self-falls-back to
-        // WP_MySQL_Naive_Query_Stream if it ever fails to make progress
-        // (buffer overflow without a top-level semicolon, or input drained
-        // mid-string/comment), so the slow path is still available for
-        // any input the fast scanner doesn't handle.
-        $query_stream = new WP_MySQL_FastQueryStream();
-        $query_stream->set_error_logger(function (array $err) use (&$stmt_count) {
-            $this->audit_log(
-                sprintf(
-                    "FAST QUERY STREAM fallback | reason=%s | byte_offset=%d | stmt=%d | %s | context=%.200s",
-                    $err['reason'] ?? '?',
-                    $err['byte_offset'] ?? 0,
-                    $stmt_count,
-                    $err['message'] ?? '',
-                    $err['context'] ?? ''
-                ),
-                true
-            );
-            $this->progress->show_lifecycle_line(
-                "Fast query stream fell back to lexer-based parser at byte offset "
-                . ($err['byte_offset'] ?? 0) . "; see audit log for details\n"
-            );
-        });
-        $sql_handle = fopen($sql_file, "r");
-        if (!$sql_handle) {
-            throw new RuntimeException("Cannot open SQL file: {$sql_file}");
-        }
-
-        $sql_file_size = filesize($sql_file);
-        $total_bytes_read = 0;
-        $stmt_count = 0;
-        $skipped = 0;
-        $save_every = 100;
-        $stmts_since_save = 0;
-
-        // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
-        $statements_total = null;
-        if (file_exists($sql_stats_file)) {
-            $stats = json_decode(file_get_contents($sql_stats_file), true);
-            if (is_array($stats) && isset($stats["statements_total"])) {
-                $statements_total = (int) $stats["statements_total"];
-            }
-        }
-
-        // If resuming, seek to saved position. bytes_read is the byte offset
-        // right after the last successfully executed query (tracked via
-        // query_stream->get_bytes_consumed()), so no statement skipping is
-        // needed after seeking — we're exactly at the next un-executed query.
-        $seek_offset = 0;
-        $stmts_to_skip = 0;
-        if ($bytes_read > 0 && $bytes_read < $sql_file_size) {
-            fseek($sql_handle, $bytes_read);
-            $total_bytes_read = $bytes_read;
-            $seek_offset = $bytes_read;
-        } elseif ($statements_executed > 0) {
-            // Can't seek — need to scan from beginning and skip statements
-            $stmts_to_skip = $statements_executed;
-        }
-
-        $this->output_progress([
-            "status" => "starting",
-            "phase" => "db-apply",
-            "statements_total" => $statements_total,
-            "message" => "Applying SQL" . ($statements_total !== null ? " ({$statements_total} statements)" : ""),
-        ]);
-
-        try {
-            $chunk_size = 64 * 1024; // 64KB read chunks
-
-            while (!feof($sql_handle)) {
-                // Check shutdown
-                if ($this->shutdown_requested) {
-                    $this->audit_log("SHUTDOWN REQUESTED | saving state", true);
-                    break;
-                }
-                if (function_exists("pcntl_signal_dispatch")) {
-                    pcntl_signal_dispatch();
-                }
-
-                $data = fread($sql_handle, $chunk_size);
-                if ($data === false || $data === '') {
-                    break;
-                }
-                $total_bytes_read += strlen($data);
-                $query_stream->append_sql($data);
-
-                while ($query_stream->next_query()) {
-                    $query = $query_stream->get_query();
-                    $stmt_count++;
-
-                    // Skip already-executed statements on resume
-                    if ($stmts_to_skip > 0) {
-                        $stmts_to_skip--;
-                        continue;
-                    }
-
-                    // Execute against target database
-                    $executed_query = $query;
-                    try {
-                        $executed_query = $query_executor->execute($query);
-                    } catch (PDOException $e) {
-                        $this->audit_log(
-                            sprintf(
-                                "SQL ERROR | stmt=%d | %s | query=%.200s",
-                                $stmt_count,
-                                $e->getMessage(),
-                                $executed_query,
-                            ),
-                            true,
-                        );
-                        throw new RuntimeException(
-                            "SQL execution error at statement {$stmt_count}: " .
-                            $e->getMessage(),
-                        );
-                    }
-
-                    $statements_executed++;
-                    $stmts_since_save++;
-
-                    // Save state periodically. bytes_read is the file offset
-                    // right after the last extracted query — NOT total_bytes_read,
-                    // which includes bytes buffered in the query stream that haven't
-                    // formed a complete query yet. This ensures resumption starts at
-                    // the exact boundary between executed and un-executed queries.
-                    if ($stmts_since_save >= $save_every) {
-                        $this->state["apply"]["statements_executed"] = $statements_executed;
-                        $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                        $this->save_state($this->state);
-                        $stmts_since_save = 0;
-
-                        // Progress output
-                        $apply_fraction = $sql_file_size > 0
-                            ? $total_bytes_read / $sql_file_size
-                            : null;
-                        $pct = $apply_fraction !== null ? round($apply_fraction * 100, 1) : 0;
-
-                        $progress_message = sprintf(
-                            "%s statements",
-                            $statements_total === null
-                                ? number_format($statements_executed)
-                                : number_format($statements_executed) . " / " . number_format($statements_total),
-                        );
-
-                        $this->output_progress([
-                            "phase" => "db-apply",
-                            "statements_executed" => $statements_executed,
-                            "bytes_read" => $total_bytes_read,
-                            "bytes_total" => $sql_file_size,
-                            "pct" => $pct,
-                            "statements_total" => $statements_total,
-                            "message" => $progress_message,
-                        ]);
-
-                        $this->progress->show_progress_line($progress_message, $apply_fraction);
-                    }
-                }
-            }
-
-            // Drain any remaining buffered query
-            $query_stream->mark_input_complete();
-            while ($query_stream->next_query()) {
-                $query = $query_stream->get_query();
-                $stmt_count++;
-
-                if ($stmts_to_skip > 0) {
-                    $stmts_to_skip--;
-                    continue;
-                }
-
-                $executed_query = $query;
-                try {
-                    $executed_query = $query_executor->execute($query);
-                } catch (PDOException $e) {
-                    $this->audit_log(
-                        sprintf(
-                            "SQL ERROR | stmt=%d | %s | query=%.200s",
-                            $stmt_count,
-                            $e->getMessage(),
-                            $executed_query,
-                        ),
-                        true,
-                    );
-                    throw new RuntimeException(
-                        "SQL execution error at statement {$stmt_count}: " .
-                        $e->getMessage(),
-                    );
-                }
-
-                $statements_executed++;
-            }
-
-            if ($this->shutdown_requested) {
-                // Save partial progress
-                $this->state["apply"]["statements_executed"] = $statements_executed;
-                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                $this->state["status"] = "partial";
-                $this->save_state($this->state);
-                $this->audit_log(
-                    sprintf(
-                        "PARTIAL db-apply | %d statements executed",
-                        $statements_executed,
-                    ),
-                    true,
-                );
-                $this->output_progress([
-                    "status" => "partial",
-                    "phase" => "db-apply",
-                    "statements_executed" => $statements_executed,
-                    "statements_total" => $statements_total,
-                    "message" => "db-apply partial: {$statements_executed} statements executed",
-                ], true);
-            } else {
-                // Deactivate host-specific plugins before marking complete.
-                // The host analyzer declares paths_to_remove; any entry under
-                // wp-content/plugins/ means that plugin will be deleted from
-                // disk during apply-runtime. We remove it from active_plugins
-                // now, while the database connection is still open, so
-                // WordPress won't complain about missing plugin files.
-                // We skip deactivate_plugins() because the plugin files will
-                // be gone by the time WordPress boots — firing deactivation
-                // hooks into absent code is pointless.
-                $deactivated = $this->deactivate_host_plugins($pdo);
-                foreach ($deactivated as $basename) {
-                    $this->audit_log("DB-APPLY | deactivated plugin {$basename} (host-specific)");
-                }
-
-                // Drop plugins whose URL builders break when the site
-                // URL has a non-/ path segment (e.g. WordPress Playground's
-                // /scope:<slug>/ iframe scope).
-                $deactivated = $this->deactivate_path_incompatible_plugins(
-                    $pdo,
-                    (string) ($options["new_site_url"] ?? ""),
-                );
-                foreach ($deactivated as $basename) {
-                    $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
-                }
-
-                // Mark complete
-                $this->state["apply"]["statements_executed"] = $statements_executed;
-                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                $this->state["status"] = "complete";
-                $this->save_state($this->state);
-
-                $this->audit_log(
-                    sprintf(
-                        "db-apply complete | %d statements executed",
-                        $statements_executed,
-                    ),
-                    true,
-                );
-
-                $this->output_progress([
-                    "status" => "complete",
-                    "phase" => "db-apply",
-                    "statements_executed" => $statements_executed,
-                    "statements_total" => $statements_total,
-                    "message" => "db-apply complete ({$statements_executed} statements executed)",
-                ]);
-
-                if (!$this->progress->is_quiet_lifecycle()) {
-                    // Clear the progress line before printing the final message
-                    $this->progress->clear_progress_line();
-                }
-                $this->progress->show_lifecycle_line("db-apply complete ({$statements_executed} statements executed)\n");
-            }
-        } finally {
-            fclose($sql_handle);
-        }
+        (new SqlDumpApplier(
+            function (): bool {
+                return $this->shutdown_requested;
+            },
+            function (array $state): void {
+                $this->save_state($state);
+            },
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (array $progress, bool $force): void {
+                $this->output_progress($progress, $force);
+            },
+            function (string $message, ?float $fraction): void {
+                $this->progress->show_progress_line($message, $fraction);
+            },
+            function (string $message): void {
+                $this->progress->show_lifecycle_line($message);
+            },
+            function (): void {
+                $this->progress->clear_progress_line();
+            },
+            function (): bool {
+                return $this->progress->is_quiet_lifecycle();
+            },
+            function (PDO $pdo): array {
+                return $this->deactivate_host_plugins($pdo);
+            },
+            function (PDO $pdo, string $new_site_url): array {
+                return $this->deactivate_path_incompatible_plugins($pdo, $new_site_url);
+            },
+        ))->apply(
+            $this->state,
+            [
+                "sql_file" => $sql_file,
+                "state_dir" => $this->state_dir,
+                "statements_executed" => $statements_executed,
+                "bytes_read" => $bytes_read,
+                "new_site_url" => (string) ($options["new_site_url"] ?? ""),
+            ],
+            $query_executor,
+            $pdo,
+        );
     }
 
     /**
@@ -3029,78 +2801,27 @@ class ImportClient
         ?string $cursor,
         string $state_key = "fetch"
     ): bool {
-        $cursor = $cursor ?? ($this->state[$state_key]["cursor"] ?? null);
-
-        // Crash recovery: if we have a tracked file that's larger than expected,
-        // truncate it. This happens if we crashed after writing but before saving
-        // the new cursor, so we'll re-fetch the same data.
-        $tracked_file = $this->state["current_file"] ?? null;
-        $tracked_bytes = $this->state["current_file_bytes"] ?? null;
-        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
-            $actual_size = filesize($tracked_file);
-            if ($actual_size > $tracked_bytes) {
-                $this->audit_log(
-                    sprintf(
-                        "CRASH RECOVERY | Truncating %s from %d to %d bytes",
-                        $tracked_file,
-                        $actual_size,
-                        $tracked_bytes,
-                    ),
-                    true,
-                );
-                $handle = fopen($tracked_file, "r+");
-                if ($handle) {
-                    ftruncate($handle, $tracked_bytes);
-                    fclose($handle);
-                }
-            }
-        }
-
-        $params = $this->get_tuned_params("file_fetch");
-        // Always send directory[] – see comment in download_remote_index().
-        $export_dirs = $this->get_export_directories();
-        if (!empty($export_dirs)) {
-            $params["directory"] = $export_dirs;
-        }
-        $url = $this->build_url("file_fetch", $cursor, $params);
-        $this->audit_log("Downloading file fetch from {$url}");
-        $this->audit_log("POST data: " . json_encode($post_data));
-
-        $context = new StreamingContext();
-        $context->file_handle = null;
-        $context->file_path = null;
-        $context->file_ctime = null;
-
-        // Resume recovery: if a file was partially downloaded in a previous
-        // request, re-open it in append mode so continuation chunks (where
-        // is_first=false) can still be written.  Without this, the context
-        // starts with file_handle=null and non-first chunks are silently dropped.
-        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
-            $context->file_handle = fopen($tracked_file, "ab");
-            if ($context->file_handle) {
-                $context->file_path = $tracked_file;
-                $context->file_bytes_written = $tracked_bytes;
-                $this->audit_log(
-                    sprintf(
-                        "RESUME FILE | Re-opened %s at %d bytes for continued download",
-                        $tracked_file,
-                        $tracked_bytes,
-                    ),
-                    true,
-                );
-            }
-        }
-
-        $response_handler = new FileFetchResponseHandler(
-            $cursor,
-            $state_key,
-            $context,
-            self::SAVE_STATE_EVERY_N_CHUNKS,
+        return (new FileFetchDownloader(
+            function (string $endpoint, ?string $cursor, array $params): string {
+                return $this->build_url($endpoint, $cursor, $params);
+            },
+            function (
+                string $url,
+                ?string $cursor,
+                StreamingContext $context,
+                ?array $post_data,
+                string $phase
+            ): void {
+                $this->fetch_streaming($url, $cursor, $context, $post_data, $phase);
+            },
+            function (string $endpoint): array {
+                return $this->get_tuned_params($endpoint);
+            },
             function (): bool {
                 return $this->shutdown_requested;
             },
-            function (string $state_key, ?string $cursor, StreamingContext $context): void {
-                $this->save_file_fetch_checkpoint($state_key, $cursor, $context);
+            function (array $state): void {
+                $this->save_state($state);
             },
             function (array $chunk, StreamingContext $context): void {
                 $this->handle_metadata_chunk($chunk, $context);
@@ -3114,10 +2835,11 @@ class ImportClient
             function (array $chunk): void {
                 $this->handle_symlink_chunk($chunk);
             },
-            function (string $path): void {
-                $this->audit_log("Missing on server: {$path}", true);
-            },
-            function (array $chunk, string $phase, StreamingContext $context): void {
+            function (
+                array $chunk,
+                string $phase,
+                StreamingContext $context
+            ): void {
                 $this->handle_error_chunk($chunk, $phase, $context);
             },
             function (array $chunk, string $phase): void {
@@ -3126,78 +2848,36 @@ class ImportClient
             function (array $progress): void {
                 $this->output_progress($progress, true);
             },
+            function (
+                string $phase,
+                ?string $cursor_before,
+                ?string $cursor_after
+            ): void {
+                $this->assert_can_retry_consecutive_timeout(
+                    $phase,
+                    $cursor_before,
+                    $cursor_after,
+                );
+            },
+            function (string $endpoint, float $wall_time, array $stats): void {
+                $this->finalize_tuned_request($endpoint, $wall_time, $stats);
+            },
+            function (): void {
+                $this->finalize_index_updates();
+            },
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+        ))->download(
+            $this->state,
+            [
+                "post_data" => $post_data,
+                "cursor" => $cursor,
+                "state_key" => $state_key,
+                "export_dirs" => $this->get_export_directories(),
+                "save_every" => self::SAVE_STATE_EVERY_N_CHUNKS,
+            ],
         );
-        $context->on_chunk = [$response_handler, 'handle'];
-
-        $cursor_before = $cursor;
-        $request_start = microtime(true);
-        try {
-            $this->fetch_streaming(
-                $url,
-                $cursor,
-                $context,
-                $post_data,
-                "file_fetch",
-            );
-        } catch (CurlTimeoutException $e) {
-            $cursor = $response_handler->cursor();
-            // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
-            // with no progress, so we don't retry forever.
-            $this->assert_can_retry_consecutive_timeout("file_fetch", $cursor_before, $cursor);
-            // Save state so the next invocation resumes from the
-            // last cursor instead of crashing with exit code 1.
-            $this->state[$state_key]["cursor"] = $cursor;
-            $this->finalize_index_updates();
-            if ($context->file_handle && $context->file_path) {
-                fflush($context->file_handle);
-                $this->state["current_file"] = $context->file_path;
-                $this->state["current_file_bytes"] = $context->file_bytes_written;
-            }
-            $this->state["status"] = "partial";
-            $this->save_state($this->state);
-            return false;
-        }
-        $cursor = $response_handler->cursor();
-        $complete = $response_handler->complete();
-        $this->state["consecutive_timeouts"] = 0;
-        $wall_time = microtime(true) - $request_start;
-
-        $this->finalize_tuned_request(
-            "file_fetch",
-            $wall_time,
-            $context->response_stats ?? [],
-        );
-        $this->state[$state_key]["cursor"] = $cursor;
-        $this->finalize_index_updates();
-        // Update file tracking: track in-progress file, or clear if complete/no active file
-        if ($context->file_handle && $context->file_path) {
-            fflush($context->file_handle);
-            $this->state["current_file"] = $context->file_path;
-            $this->state["current_file_bytes"] = $context->file_bytes_written;
-        } else {
-            $this->state["current_file"] = null;
-            $this->state["current_file_bytes"] = null;
-        }
-        $this->save_state($this->state);
-
-        return $complete;
-    }
-
-    private function save_file_fetch_checkpoint(
-        string $state_key,
-        ?string $cursor,
-        StreamingContext $context
-    ): void {
-        $this->state[$state_key]["cursor"] = $cursor;
-        if ($context->file_handle && $context->file_path) {
-            fflush($context->file_handle);
-            $this->state["current_file"] = $context->file_path;
-            $this->state["current_file_bytes"] = $context->file_bytes_written;
-        } else {
-            $this->state["current_file"] = null;
-            $this->state["current_file_bytes"] = null;
-        }
-        $this->save_state($this->state);
     }
 
     /**
@@ -3205,81 +2885,36 @@ class ImportClient
      */
     private function download_remote_index(?string $list_dir_override = null): bool
     {
-        $index_state = $this->state["index"] ?? $this->default_state()["index"];
-        $cursor = $index_state["cursor"] ?? null;
-
-        $roots = $this->get_root_directories_from_preflight();
-        if (empty($roots)) {
-            throw new RuntimeException(
-                "No root directories found. Either add directory[]=... to the " .
-                    "export URL, or run preflight first so directories can be auto-detected.",
-            );
-        }
-
-        $mode = file_exists($this->remote_index_file) ? "a" : "w";
-        // Initialize the index counter from the existing file so resume
-        // shows a monotonically increasing count.
-        if ($mode === "a" && $this->index_entries_counted === 0) {
-            $this->index_entries_counted = $this->count_newlines($this->remote_index_file);
-        }
-        if ($mode === "w") {
-            $this->audit_log(
-                "FILE CREATE | {$this->remote_index_file} | downloading fresh remote index",
-            );
-        } else {
-            $this->audit_log(
-                "FILE APPEND | {$this->remote_index_file} | resuming remote index download",
-            );
-        }
-        $handle = fopen($this->remote_index_file, $mode);
-        if (!$handle) {
-            throw new RuntimeException("Failed to open remote index file");
-        }
-
-        $params = $this->get_tuned_params("file_index");
-        if ($cursor === null) {
-            $params["list_dir"] = $list_dir_override ?? $roots[0];
-        }
-        if ($this->follow_symlinks) {
-            $params["follow_symlinks"] = "1";
-        }
-        if ($this->include_caches) {
-            // Server defaults to skipping caches/VCS metadata/OS junk.
-            // Opt in to include them when the consumer explicitly asks.
-            $params["include_caches"] = "1";
-        }
-        // Always send directory[] to the server when we have export dirs.
-        // Without this parameter, the server falls back to ABSPATH as the
-        // scan root. On managed hosts like wp.com Atomic, ABSPATH points to
-        // a shared WordPress core directory (e.g. /wordpress/core/6.9.4/)
-        // rather than the site's document root, so the scan would miss
-        // wp-content entirely (no plugins, themes, or uploads).
-        $export_dirs = $this->get_export_directories();
-        if (!empty($export_dirs)) {
-            $params["directory"] = $export_dirs;
-        }
-        $url = $this->build_url("file_index", $cursor, $params);
-        $context = new StreamingContext();
-
-        $response_handler = new IndexResponseHandler(
-            $handle,
-            $cursor,
-            $context,
-            $this->index_entries_counted,
-            self::SAVE_STATE_EVERY_N_CHUNKS,
+        return (new RemoteIndexDownloader(
+            function (string $endpoint, ?string $cursor, array $params): string {
+                return $this->build_url($endpoint, $cursor, $params);
+            },
+            function (
+                string $url,
+                ?string $cursor,
+                StreamingContext $context,
+                ?array $post_data,
+                string $phase
+            ): void {
+                $this->fetch_streaming($url, $cursor, $context, $post_data, $phase);
+            },
+            function (string $endpoint): array {
+                return $this->get_tuned_params($endpoint);
+            },
             function (): bool {
                 return $this->shutdown_requested;
             },
-            function (?string $cursor): void {
-                $this->state["index"] = [
-                    "cursor" => $cursor,
-                ];
-                $this->save_state($this->state);
+            function (array $state): void {
+                $this->save_state($state);
             },
             function (array $chunk, StreamingContext $context): void {
                 $this->handle_metadata_chunk($chunk, $context);
             },
-            function (array $chunk, string $phase, StreamingContext $context): void {
+            function (
+                array $chunk,
+                string $phase,
+                StreamingContext $context
+            ): void {
                 $this->handle_error_chunk($chunk, $phase, $context);
             },
             function (array $chunk, string $phase): void {
@@ -3288,43 +2923,39 @@ class ImportClient
             function (int $entries_counted): void {
                 $this->show_remote_index_progress($entries_counted);
             },
+            function (
+                string $phase,
+                ?string $cursor_before,
+                ?string $cursor_after
+            ): void {
+                $this->assert_can_retry_consecutive_timeout(
+                    $phase,
+                    $cursor_before,
+                    $cursor_after,
+                );
+            },
+            function (string $endpoint, float $wall_time, array $stats): void {
+                $this->finalize_tuned_request($endpoint, $wall_time, $stats);
+            },
+            function (string $path): int {
+                return $this->count_newlines($path);
+            },
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+        ))->download(
+            $this->state,
+            [
+                "remote_index_file" => $this->remote_index_file,
+                "roots" => $this->get_root_directories_from_preflight(),
+                "export_dirs" => $this->get_export_directories(),
+                "list_dir_override" => $list_dir_override,
+                "follow_symlinks" => $this->follow_symlinks,
+                "include_caches" => $this->include_caches,
+                "save_every" => self::SAVE_STATE_EVERY_N_CHUNKS,
+            ],
+            $this->index_entries_counted,
         );
-        $context->on_chunk = [$response_handler, 'handle'];
-
-        $cursor_before = $cursor;
-        $request_start = microtime(true);
-        try {
-            $this->fetch_streaming($url, $cursor, $context, null, "file_index");
-        } catch (CurlTimeoutException $e) {
-            $cursor = $response_handler->cursor();
-            $this->index_entries_counted = $response_handler->entries_counted();
-            // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
-            // with no progress, so we don't retry forever.
-            $this->assert_can_retry_consecutive_timeout("file_index", $cursor_before, $cursor);
-            fclose($handle);
-            $this->state["index"] = ["cursor" => $cursor];
-            $this->state["status"] = "partial";
-            $this->save_state($this->state);
-            return false;
-        }
-        $cursor = $response_handler->cursor();
-        $complete = $response_handler->complete();
-        $this->index_entries_counted = $response_handler->entries_counted();
-        $this->state["consecutive_timeouts"] = 0;
-        $wall_time = microtime(true) - $request_start;
-        $this->finalize_tuned_request(
-            "file_index",
-            $wall_time,
-            $context->response_stats ?? [],
-        );
-        fclose($handle);
-
-        $this->state["index"] = [
-            "cursor" => $complete ? null : $cursor,
-        ];
-        $this->save_state($this->state);
-
-        return $complete;
     }
 
     private function show_remote_index_progress(int $entries_counted): void
@@ -3582,463 +3213,100 @@ class ImportClient
      */
     private function download_sql(): void
     {
-        $cursor = $this->state["cursor"] ?? null;
-        $complete = false;
-        $mode = $this->sql_output_mode;
-
-        // ── Set up write strategy based on output mode ──────────────
-
-        $sql_handle = null;
-        $mysql_conn = null;
-        $buffer_handle = null;
-        $sql_bytes_written = 0;
-        $sql_buffer = "";
-
-        if ($mode === "file") {
-            $sql_file = $this->state_dir . "/db.sql";
-
-            // Crash recovery: if SQL file is larger than expected, truncate it.
-            // This happens if we crashed after writing but before saving the new cursor.
-            $tracked_bytes = $this->state["sql_bytes"] ?? null;
-            if ($tracked_bytes !== null && file_exists($sql_file)) {
-                $actual_size = filesize($sql_file);
-                if ($actual_size > $tracked_bytes) {
-                    $this->audit_log(
-                        sprintf(
-                            "CRASH RECOVERY | Truncating db.sql from %d to %d bytes",
-                            $actual_size,
-                            $tracked_bytes,
-                        ),
-                        true,
-                    );
-                    $handle = fopen($sql_file, "r+");
-                    if ($handle) {
-                        ftruncate($handle, $tracked_bytes);
-                        fclose($handle);
-                    }
-                }
-            }
-
-            $sql_bytes_written = file_exists($sql_file) ? filesize($sql_file) : 0;
-
-            // Open in write mode if no cursor (starting fresh), append mode if resuming
-            $sql_handle = fopen($sql_file, $cursor ? "a" : "w");
-            if (!$sql_handle) {
-                throw new RuntimeException("Cannot open SQL file: {$sql_file}");
-            }
-
-        } elseif ($mode === "stdout") {
-            $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
-
-        } elseif ($mode === "mysql") {
-            $sql_bytes_written = $this->state["sql_bytes"] ?? 0;
-
-            $host = $this->mysql_host ?? "127.0.0.1";
-            $user = $this->mysql_user ?? "root";
-            $pass = $this->mysql_password ?? "";
-            $name = $this->mysql_database;
-
-            // Parse host for port/socket (same format as WordPress DB_HOST).
-            // An explicit --mysql-port takes precedence over a port embedded
-            // in the host string.
-            $port = $this->mysql_port ?? 3306;
-            $socket = null;
-            if (strpos($host, ":") !== false) {
-                list($host, $port_or_socket) = explode(":", $host, 2);
-                if ($port_or_socket[0] === "/") {
-                    $socket = $port_or_socket;
-                } elseif ($this->mysql_port === null) {
-                    $port = (int) $port_or_socket;
-                }
-            }
-
-            $mysql_conn = new \mysqli($host, $user, $pass, $name, $port, $socket);
-            if ($mysql_conn->connect_error) {
-                throw new RuntimeException("MySQL connection failed: " . $mysql_conn->connect_error);
-            }
-            $mysql_conn->set_charset("utf8mb4");
-
-            $this->audit_log(
-                "SQL OUTPUT mysql | connected via multi_query(): {$user}@{$host}:{$port}/{$name}",
-                true,
-            );
-
-            // Open a persistent buffer file so partial queries survive crashes.
-            // Each SQL chunk is appended to this file as it arrives; when the
-            // query completes and executes, the file is truncated. If the process
-            // dies at any point, the next run reloads whatever was accumulated.
-            $buffer_file = $this->state_dir . "/.sql-buffer";
-            if (file_exists($buffer_file)) {
-                $sql_buffer = file_get_contents($buffer_file);
-                $this->audit_log(
-                    sprintf("CRASH RECOVERY | Restored %d bytes from .sql-buffer", strlen($sql_buffer)),
-                    true,
-                );
-            }
-            // Open in write mode (truncate) if we loaded nothing, append if we
-            // have a partial query to continue accumulating into.
-            $buffer_handle = fopen($buffer_file, $sql_buffer !== "" ? "a" : "w");
-            if (!$buffer_handle) {
-                throw new RuntimeException("Cannot open SQL buffer file: {$buffer_file}");
-            }
-        }
-
-        // Domain discovery and statement counting: scan SQL for URLs during download
-        $query_stream = class_exists(WP_MySQL_Naive_Query_Stream::class)
-            ? new WP_MySQL_Naive_Query_Stream()
-            : null;
-        $domain_collector = class_exists(DomainCollector::class)
-            ? new DomainCollector()
-            : null;
-        $domains_file = $this->state_dir . "/.import-domains.json";
-        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
-        $sql_statements_counted = (int) ($this->state["sql_statements_counted"] ?? 0);
-
-        // Auto-detect the source site domain from the export URL so it
-        // always appears in .import-domains.json even if the SQL dump
-        // hasn't been fully scanned yet.
-        if ($domain_collector) {
-            $parsed_url = parse_url($this->remote_url);
-            if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
-                $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
-                if (!empty($parsed_url['port'])) {
-                    $source_origin .= ':' . $parsed_url['port'];
-                }
-                $domain_collector->merge([$source_origin]);
-            }
-        }
-
-        // Load previously discovered domains (from earlier partial downloads)
-        if ($domain_collector && file_exists($domains_file)) {
-            $prev = json_decode(file_get_contents($domains_file), true);
-            if (is_array($prev)) {
-                $domain_collector->merge($prev);
-            }
-        }
-
-        // Log current progress at start of request
-        $has_cursor = $cursor !== null;
-        $this->audit_log(
-            sprintf(
-                "START SQL REQUEST | mode=%s | cursor=%s | bytes_written=%s",
-                $mode,
-                $has_cursor ? "YES" : "NO",
-                number_format($sql_bytes_written) . " bytes",
-            ),
-            false,
-        );
-
-        $curl_timed_out = false;
-        $caught_exception = null;
-        $buffer_not_flushed = "";
-        $chunks_since_save = 0;
-        $sync_sql_response_state = function (
-            SqlResponseHandler $response_handler
-        ) use (
-            &$cursor,
-            &$complete,
-            &$sql_bytes_written,
-            &$sql_buffer,
-            &$sql_statements_counted,
-            &$chunks_since_save
-        ): void {
-            $cursor = $response_handler->cursor();
-            $complete = $response_handler->complete();
-            $sql_bytes_written = $response_handler->sql_bytes_written();
-            $sql_buffer = $response_handler->sql_buffer();
-            $sql_statements_counted = $response_handler->sql_statements_counted();
-            $chunks_since_save = $response_handler->chunks_since_save();
-        };
-        try {
-            while (!$complete) {
-                $params = $this->get_tuned_params("sql_chunk");
-                $url = $this->build_url("sql_chunk", $cursor, $params);
-
-                $context = new StreamingContext();
-                $context->chunk_fingerprints = [];
-                $response_handler = new SqlResponseHandler(
-                    $mode,
-                    $cursor,
-                    $context,
-                    $sql_handle,
-                    $mysql_conn,
-                    $buffer_handle,
-                    $sql_buffer,
-                    $sql_bytes_written,
-                    $query_stream,
-                    $domain_collector,
-                    $sql_statements_counted,
-                    $chunks_since_save,
-                    self::SAVE_STATE_EVERY_N_CHUNKS,
-                    function (): bool {
-                        return $this->shutdown_requested;
-                    },
-                    function (
-                        ?string $cursor,
-                        int $sql_bytes_written,
-                        int $sql_statements_counted
-                    ): void {
-                        $this->state["cursor"] = $cursor;
-                        $this->state["sql_bytes"] = $sql_bytes_written;
-                        $this->state["sql_statements_counted"] = $sql_statements_counted;
-                        $this->save_state($this->state);
-                    },
-                    function (array $domains) use ($domains_file): void {
-                        file_put_contents(
-                            $domains_file,
-                            json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                        );
-                    },
-                    function (
-                        WP_MySQL_Naive_Query_Stream $query_stream,
-                        DomainCollector $domain_collector,
-                        int $sql_statements_counted
-                    ): int {
-                        $this->drain_query_stream_for_domains(
-                            $query_stream,
-                            $domain_collector,
-                            $sql_statements_counted,
-                        );
-                        return $sql_statements_counted;
-                    },
-                    function (int $sql_bytes_written): void {
-                        // Show download progress on the TTY progress line.
-                        // The bytes accumulate across chunks and requests.
-                        // Include estimated total from db-index when available,
-                        // but only if the estimate is larger than what we've
-                        // already downloaded — INFORMATION_SCHEMA estimates
-                        // can be wildly off (e.g. 7 KB for a 22 MB dump).
-                        $db_bytes_est = (int) ($this->state["db_index"]["bytes"] ?? 0);
-                        $est_is_useful = $db_bytes_est > $sql_bytes_written;
-                        $sql_fraction = $est_is_useful
-                            ? $sql_bytes_written / $db_bytes_est
-                            : null;
-                        $sql_progress = $this->format_bytes($sql_bytes_written);
-                        if ($est_is_useful) {
-                            $sql_progress .= " / " . $this->format_bytes($db_bytes_est);
-                        }
-                        $this->progress->show_progress_line($sql_progress, $sql_fraction);
-                    },
-                    function (array $chunk, string $phase): void {
-                        $this->handle_progress($chunk, $phase);
-                    },
-                    function (
-                        array $chunk,
-                        string $phase,
-                        StreamingContext $context
-                    ): void {
-                        $this->handle_error_chunk($chunk, $phase, $context);
-                    },
-                    function (array $progress): void {
-                        $this->output_progress($progress, true);
-                    },
-                    function (): void {
-                        // Broken pipe — save state and exit cleanly so the
-                        // pipe reader (e.g. `mysql`) can finish on its own.
-                        $this->save_state($this->state);
-                        exit(0);
-                    },
-                );
-                $context->on_chunk = [$response_handler, "handle"];
-
-                $cursor_before = $cursor;
-                $request_start = microtime(true);
-                try {
-                    $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
-                } catch (CurlTimeoutException $e) {
-                    $sync_sql_response_state($response_handler);
-
-                    // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
-                    // with no progress, so we don't retry forever.
-                    $this->assert_can_retry_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
-                    // Save state so the next invocation resumes from the
-                    // last cursor instead of crashing with exit code 1.
-                    if ($sql_handle) {
-                        fflush($sql_handle);
-                    }
-                    $this->state["cursor"] = $cursor;
-                    $this->state["sql_bytes"] = $sql_bytes_written;
-                    $this->state["sql_statements_counted"] = $sql_statements_counted;
-                    $this->state["status"] = "partial";
-                    $this->save_state($this->state);
-                    // Discard any pending SQL buffer — it's incomplete and
-                    // will be re-fetched on the next invocation. Setting
-                    // this to "" also prevents the finally block from
-                    // throwing about un-executed buffered SQL.
-                    $sql_buffer = "";
-                    $curl_timed_out = true;
-                    break;
-                } catch (RuntimeException $e) {
-                    $sync_sql_response_state($response_handler);
-
-                    // The server may crash mid-response (max_execution_time,
-                    // OOM, fatal error). This surfaces as either:
-                    //  - "missing completion chunk" (response ended without it)
-                    //  - cURL error 18/52/56 (partial transfer / recv error)
-                    //  - "missing multipart boundary" (proxy error page)
-                    // Treat these as a retryable partial response: save state
-                    // so the next invocation resumes from the cursor. Unlike
-                    // a timeout (where the buffer is discarded and re-fetched),
-                    // we keep $sql_buffer intact here so the .sql-buffer file
-                    // is preserved — the next run reloads it and continues
-                    // accumulating from where the server left off.
-                    $msg = $e->getMessage();
-                    // Only retry connection-level curl errors that indicate
-                    // the server crashed or the connection was interrupted.
-                    // Do NOT retry content-encoding errors (e.g. gzip
-                    // corruption, CURLE_BAD_CONTENT_ENCODING=61) — those
-                    // will fail identically on every retry.
-                    //   18 = CURLE_PARTIAL_FILE (transfer closed mid-stream)
-                    //   52 = CURLE_GOT_NOTHING (empty response)
-                    //   56 = CURLE_RECV_ERROR (connection reset / recv failure)
-                    $is_retryable_curl = preg_match(
-                        '/cURL error \((\d+)\):/', $msg, $curl_match
-                    ) && in_array((int) $curl_match[1], [18, 52, 56]);
-                    $is_retryable =
-                        strpos($msg, "missing completion chunk") !== false ||
-                        $is_retryable_curl ||
-                        strpos($msg, "missing multipart boundary") !== false;
-                    if ($is_retryable) {
-                        $this->audit_log(
-                            "INCOMPLETE RESPONSE | " . $msg .
-                            " | buffered_sql=" . strlen($sql_buffer) . " bytes" .
-                            " — will save state for retry",
-                            true,
-                        );
-                        $this->assert_can_retry_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
-                        if ($sql_handle) {
-                            fflush($sql_handle);
-                        }
-                        $this->state["cursor"] = $cursor;
-                        $this->state["sql_bytes"] = $sql_bytes_written;
-                        $this->state["sql_statements_counted"] = $sql_statements_counted;
-                        $this->state["status"] = "partial";
-                        $this->save_state($this->state);
-                        $curl_timed_out = true;
-                        break;
-                    }
-                    throw $e;
-                }
-                $sync_sql_response_state($response_handler);
-
-                $this->state["consecutive_timeouts"] = 0;
-                $wall_time = microtime(true) - $request_start;
-                $this->finalize_tuned_request(
-                    "sql_chunk",
-                    $wall_time,
-                    $context->response_stats ?? [],
-                );
-
-                // Save cursor for resumption (keep it even when complete for reference)
-                if ($sql_handle) {
-                    fflush($sql_handle);
-                }
-
-                $this->state["cursor"] = $cursor;
-                // Clear sql_bytes when complete, otherwise save current position
-                $this->state["sql_bytes"] = $complete ? null : $sql_bytes_written;
-                $this->save_state($this->state);
-            }
-
-            // Drain any remaining statements after download completes
-            if ($query_stream && $domain_collector) {
-                $query_stream->mark_input_complete();
+        (new SqlDownloader(
+            function (string $endpoint, ?string $cursor, array $params): string {
+                return $this->build_url($endpoint, $cursor, $params);
+            },
+            function (
+                string $url,
+                ?string $cursor,
+                StreamingContext $context,
+                ?array $post_data,
+                string $phase
+            ): void {
+                $this->fetch_streaming($url, $cursor, $context, $post_data, $phase);
+            },
+            function (string $endpoint): array {
+                return $this->get_tuned_params($endpoint);
+            },
+            function (): bool {
+                return $this->shutdown_requested;
+            },
+            function (array $state): void {
+                $this->save_state($state);
+            },
+            function (
+                WP_MySQL_Naive_Query_Stream $query_stream,
+                DomainCollector $domain_collector,
+                int $sql_statements_counted
+            ): int {
                 $this->drain_query_stream_for_domains(
                     $query_stream,
                     $domain_collector,
                     $sql_statements_counted,
                 );
-
-                // Save discovered domains
-                $domains = $domain_collector->get_domains();
-                if (!empty($domains)) {
-                    file_put_contents(
-                        $domains_file,
-                        json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                    );
-                    $this->audit_log(
-                        sprintf(
-                            "DOMAINS DISCOVERED | %d unique domains saved to .import-domains.json",
-                            count($domains),
-                        ),
-                        false,
-                    );
+                return $sql_statements_counted;
+            },
+            function (int $sql_bytes_written): void {
+                $db_bytes_est = (int) ($this->state["db_index"]["bytes"] ?? 0);
+                $est_is_useful = $db_bytes_est > $sql_bytes_written;
+                $sql_fraction = $est_is_useful
+                    ? $sql_bytes_written / $db_bytes_est
+                    : null;
+                $sql_progress = $this->format_bytes($sql_bytes_written);
+                if ($est_is_useful) {
+                    $sql_progress .= " / " . $this->format_bytes($db_bytes_est);
                 }
-
-                // Save statement count for db-apply progress reporting
-                if ($sql_statements_counted > 0) {
-                    file_put_contents(
-                        $sql_stats_file,
-                        json_encode(["statements_total" => $sql_statements_counted]) . "\n",
-                    );
-                    $this->audit_log(
-                        sprintf(
-                            "SQL STATS | %d statements counted during download",
-                            $sql_statements_counted,
-                        ),
-                        false,
-                    );
-                }
-            }
-        } catch (\Throwable $e) {
-            $caught_exception = $e;
-            throw $e;
-        } finally {
-            if ($sql_handle) {
-                fclose($sql_handle);
-            }
-            if ($buffer_handle) {
-                fclose($buffer_handle);
-                $buffer_handle = null;
-            }
-            if ($mysql_conn) {
-                $pending = $sql_buffer;
-                $mysql_conn->close();
-                $mysql_conn = null;
-                // Clean up buffer file — if we got here with an empty buffer,
-                // all queries were executed successfully.
-                $buffer_file = $this->state_dir . "/.sql-buffer";
-                if ($pending === "" && file_exists($buffer_file)) {
-                    unlink($buffer_file);
-                }
-                if ($pending !== "") {
-                    if ($caught_exception !== null) {
-                        // An exception is already in flight (e.g. curl error,
-                        // MySQL error). Don't mask it by throwing about the
-                        // buffer — the buffer data is safely persisted in
-                        // .sql-buffer and will be recovered on the next run.
-                        $this->audit_log(
-                            "BUFFER NOT FLUSHED | " . strlen($pending) .
-                            " bytes in SQL buffer during exception unwind" .
-                            " (original error: " . $caught_exception->getMessage() . ")",
-                            true,
-                        );
-                    } elseif ($curl_timed_out) {
-                        // Crash recovery — the buffer file is preserved on
-                        // disk so the next invocation reloads it and continues
-                        // accumulating from where the server left off.
-                        $this->audit_log(
-                            "BUFFER PRESERVED | " . strlen($pending) .
-                            " bytes in SQL buffer saved for crash recovery",
-                            true,
-                        );
-                    } else {
-                        $buffer_not_flushed = $pending;
-                    }
-                }
-            }
-        }
-
-        if ($buffer_not_flushed !== "") {
-            throw new RuntimeException(
-                "Buffered SQL was never executed (" . strlen($buffer_not_flushed) .
-                " bytes) — incomplete export?"
-            );
-        }
-
-        if ($curl_timed_out) {
-            return;
-        }
+                $this->progress->show_progress_line($sql_progress, $sql_fraction);
+            },
+            function (array $chunk, string $phase): void {
+                $this->handle_progress($chunk, $phase);
+            },
+            function (
+                array $chunk,
+                string $phase,
+                StreamingContext $context
+            ): void {
+                $this->handle_error_chunk($chunk, $phase, $context);
+            },
+            function (array $progress): void {
+                $this->output_progress($progress, true);
+            },
+            function (): void {
+                $this->save_state($this->state);
+                exit(0);
+            },
+            function (
+                string $phase,
+                ?string $cursor_before,
+                ?string $cursor_after
+            ): void {
+                $this->assert_can_retry_consecutive_timeout(
+                    $phase,
+                    $cursor_before,
+                    $cursor_after,
+                );
+            },
+            function (string $endpoint, float $wall_time, array $stats): void {
+                $this->finalize_tuned_request($endpoint, $wall_time, $stats);
+            },
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+        ))->download(
+            $this->state,
+            [
+                "mode" => $this->sql_output_mode,
+                "state_dir" => $this->state_dir,
+                "remote_url" => $this->remote_url,
+                "mysql_host" => $this->mysql_host,
+                "mysql_port" => $this->mysql_port,
+                "mysql_user" => $this->mysql_user,
+                "mysql_password" => $this->mysql_password,
+                "mysql_database" => $this->mysql_database,
+                "save_every" => self::SAVE_STATE_EVERY_N_CHUNKS,
+            ],
+        );
     }
 
     /**

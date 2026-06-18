@@ -6,6 +6,8 @@ require_once __DIR__ . '/class-active-plugin-deactivator.php';
 require_once __DIR__ . '/class-db-apply-query-executor.php';
 require_once __DIR__ . '/class-db-index-downloader.php';
 require_once __DIR__ . '/class-db-index-response-handler.php';
+require_once __DIR__ . '/class-sql-dump-applier.php';
+require_once __DIR__ . '/class-sql-downloader.php';
 require_once __DIR__ . '/class-sql-response-handler.php';
 require_once __DIR__ . '/class-sql-statement-inspector.php';
 require_once __DIR__ . '/class-target-database-connection-factory.php';
