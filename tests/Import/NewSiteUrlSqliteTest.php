@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Sql\TargetDatabaseConnectionFactory;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -120,21 +121,7 @@ class NewSiteUrlSqliteTest extends TestCase
      */
     private function querySqlite(string $dbPath, string $sql, string $dbName): array
     {
-        $polyfills = resolve_sqlite_integration_path("/php-polyfills.php");
-        $driver = resolve_sqlite_integration_path("/wp-pdo-mysql-on-sqlite.php");
-        require_once $polyfills;
-        require_once $driver;
-
-        $dsn = "mysql-on-sqlite:path={$dbPath};dbname={$dbName}";
-        $pdo = new \WP_PDO_MySQL_On_SQLite($dsn, null, null, [
-            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-        ]);
-
-        $sqlite_pdo = $pdo->get_connection()->get_pdo();
-        \register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
-            return $data === null ? null : base64_decode($data);
-        });
+        $pdo = TargetDatabaseConnectionFactory::sqlite($dbPath, $dbName);
 
         return $pdo->query($sql)->fetchAll();
     }

@@ -6,6 +6,7 @@ use PHPUnit\Framework\TestCase;
 use PDO;
 use PDOException;
 use Reprint\Importer\Sql\ActivePluginDeactivator;
+use Reprint\Importer\Sql\TargetDatabaseConnectionFactory;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -248,24 +249,10 @@ class DeactivateHostPluginsTest extends TestCase
             $this->markTestSkipped('pdo_sqlite extension required');
         }
 
-        $polyfills = resolve_sqlite_integration_path('/php-polyfills.php');
-        $driver = resolve_sqlite_integration_path('/wp-pdo-mysql-on-sqlite.php');
-        require_once $polyfills;
-        require_once $driver;
-
-        $dbPath = $this->tempDir . '/target.sqlite';
-        $dsn = "mysql-on-sqlite:path={$dbPath};dbname=test_db";
-        $pdo = new \WP_PDO_MySQL_On_SQLite($dsn, null, null, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        ]);
-
-        // Mirror create_sqlite_target_pdo() — deactivate_host_plugins()
-        // requires FROM_BASE64 on the SQLite connection.
-        \register_sqlite_function($pdo->get_connection()->get_pdo(), 'FROM_BASE64', function ($data) {
-            return $data === null ? null : base64_decode($data);
-        });
-        return $pdo;
+        return TargetDatabaseConnectionFactory::sqlite(
+            $this->tempDir . '/target.sqlite',
+            'test_db',
+        );
     }
 
     private function createWpOptionsTable(PDO $pdo, string $prefix = 'wp_'): void
