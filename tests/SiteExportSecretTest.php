@@ -2,104 +2,12 @@
 
 declare(strict_types=1);
 
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
-if (!defined('ABSPATH')) {
-    define('ABSPATH', __DIR__ . '/');
-}
-
-$site_export_test_plugin_dir = sys_get_temp_dir() . '/site-export-secret-test-' . getmypid() . '/';
-if (!defined('REPRINT_EXPORTER_PLUGIN_DIR')) {
-    define('REPRINT_EXPORTER_PLUGIN_DIR', $site_export_test_plugin_dir);
-}
-if (!defined('REPRINT_EXPORTER_SECRET_FILE')) {
-    define('REPRINT_EXPORTER_SECRET_FILE', REPRINT_EXPORTER_PLUGIN_DIR . 'secret.php');
-}
-
-$GLOBALS['site_export_test_options'] = [];
-$GLOBALS['site_export_registered_settings'] = [];
-
-if (!function_exists('plugin_dir_path')) {
-    function plugin_dir_path(string $file): string {
-        return REPRINT_EXPORTER_PLUGIN_DIR;
-    }
-}
-
-if (!function_exists('get_option')) {
-    function get_option(string $name, $default = false) {
-        return array_key_exists($name, $GLOBALS['site_export_test_options'])
-            ? $GLOBALS['site_export_test_options'][$name]
-            : $default;
-    }
-}
-
-if (!function_exists('update_option')) {
-    function update_option(string $name, $value, $autoload = null): bool {
-        $GLOBALS['site_export_test_options'][$name] = $value;
-        return true;
-    }
-}
-
-if (!function_exists('register_setting')) {
-    function register_setting(string $group, string $name, array $args = []): void {
-        $GLOBALS['site_export_registered_settings'][$name] = [
-            'group' => $group,
-            'args' => $args,
-        ];
-    }
-}
-
-if (!function_exists('add_action')) {
-    function add_action(...$args): void {}
-}
-
-if (!function_exists('add_filter')) {
-    function add_filter(...$args): void {}
-}
-
-if (!function_exists('plugin_basename')) {
-    function plugin_basename(string $file): string {
-        return basename($file);
-    }
-}
-
-if (!function_exists('register_activation_hook')) {
-    function register_activation_hook(...$args): void {}
-}
-
-if (!function_exists('wp_doing_ajax')) {
-    function wp_doing_ajax(): bool {
-        return false;
-    }
-}
-
-if (!function_exists('is_admin')) {
-    function is_admin(): bool {
-        return true;
-    }
-}
-
-if (!function_exists('set_transient')) {
-    function set_transient(...$args): void {}
-}
-
-if (!function_exists('get_transient')) {
-    function get_transient(...$args): bool {
-        return false;
-    }
-}
-
-if (!function_exists('delete_transient')) {
-    function delete_transient(...$args): void {}
-}
-
-if (!function_exists('wp_safe_redirect')) {
-    function wp_safe_redirect(...$args): void {}
-}
-
-require_once __DIR__ . '/../reprint-exporter-wp/lib.php';
-require_once __DIR__ . '/../reprint-exporter-wp/wordpress/site-export.php';
-
+#[RunTestsInSeparateProcesses]
+#[PreserveGlobalState(false)]
 final class SiteExportSecretTest extends TestCase
 {
     /** @var array<string, mixed> */
@@ -111,6 +19,8 @@ final class SiteExportSecretTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        $this->bootstrapWordPressPlugin();
 
         if (!is_dir(REPRINT_EXPORTER_PLUGIN_DIR)) {
             mkdir(REPRINT_EXPORTER_PLUGIN_DIR, 0755, true);
@@ -143,6 +53,110 @@ final class SiteExportSecretTest extends TestCase
         $_FILES = $this->original_files;
 
         parent::tearDown();
+    }
+
+    private function bootstrapWordPressPlugin(): void
+    {
+        if (!defined('ABSPATH')) {
+            define('ABSPATH', __DIR__ . '/');
+        }
+
+        if (!defined('REPRINT_EXPORTER_PLUGIN_DIR')) {
+            define('REPRINT_EXPORTER_PLUGIN_DIR', sys_get_temp_dir() . '/site-export-secret-test-' . getmypid() . '/');
+        }
+
+        if (!defined('REPRINT_EXPORTER_SECRET_FILE')) {
+            define('REPRINT_EXPORTER_SECRET_FILE', REPRINT_EXPORTER_PLUGIN_DIR . 'secret.php');
+        }
+
+        $GLOBALS['site_export_test_options'] = [];
+        $GLOBALS['site_export_registered_settings'] = [];
+
+        $this->bootstrapWordPressFunctions();
+
+        require_once __DIR__ . '/../reprint-exporter-wp/lib.php';
+        require_once __DIR__ . '/../reprint-exporter-wp/wordpress/site-export.php';
+    }
+
+    private function bootstrapWordPressFunctions(): void
+    {
+        if (!function_exists('plugin_dir_path')) {
+            function plugin_dir_path(string $file): string {
+                return REPRINT_EXPORTER_PLUGIN_DIR;
+            }
+        }
+
+        if (!function_exists('get_option')) {
+            function get_option(string $name, $default = false) {
+                return array_key_exists($name, $GLOBALS['site_export_test_options'])
+                    ? $GLOBALS['site_export_test_options'][$name]
+                    : $default;
+            }
+        }
+
+        if (!function_exists('update_option')) {
+            function update_option(string $name, $value, $autoload = null): bool {
+                $GLOBALS['site_export_test_options'][$name] = $value;
+                return true;
+            }
+        }
+
+        if (!function_exists('register_setting')) {
+            function register_setting(string $group, string $name, array $args = []): void {
+                $GLOBALS['site_export_registered_settings'][$name] = [
+                    'group' => $group,
+                    'args' => $args,
+                ];
+            }
+        }
+
+        if (!function_exists('add_action')) {
+            function add_action(...$args): void {}
+        }
+
+        if (!function_exists('add_filter')) {
+            function add_filter(...$args): void {}
+        }
+
+        if (!function_exists('plugin_basename')) {
+            function plugin_basename(string $file): string {
+                return basename($file);
+            }
+        }
+
+        if (!function_exists('register_activation_hook')) {
+            function register_activation_hook(...$args): void {}
+        }
+
+        if (!function_exists('wp_doing_ajax')) {
+            function wp_doing_ajax(): bool {
+                return false;
+            }
+        }
+
+        if (!function_exists('is_admin')) {
+            function is_admin(): bool {
+                return true;
+            }
+        }
+
+        if (!function_exists('set_transient')) {
+            function set_transient(...$args): void {}
+        }
+
+        if (!function_exists('get_transient')) {
+            function get_transient(...$args): bool {
+                return false;
+            }
+        }
+
+        if (!function_exists('delete_transient')) {
+            function delete_transient(...$args): void {}
+        }
+
+        if (!function_exists('wp_safe_redirect')) {
+            function wp_safe_redirect(...$args): void {}
+        }
     }
 
     public function testSharedSecretFallsBackToOptionWhenSecretFileMissing(): void
