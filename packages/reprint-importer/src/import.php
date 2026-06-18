@@ -8284,10 +8284,12 @@ class ImportClient
     }
 
     /**
-     * Build and return the remap rules from the raw remap pairs + preflight
-     * data. Each rule is a full source path → full local target path (both
-     * absolute); the caller's docroot-relative TGT is rooted under the docroot
-     * here.
+     * Build the remap rules from the raw remap pairs + preflight data.
+     *
+     * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
+     * Source arguments resolve against the remote site's component locations.
+     * Target arguments resolve under --fs-root and must stay within it.
+     * Each rule is a full source path => full local target path (both absolute).
      *
      * @param array<int,array{0:string,1:string}> $remap_raw Raw (SRC, TGT) pairs.
      * @return array<string,string> Source path => target path (both absolute).
@@ -8295,32 +8297,38 @@ class ImportClient
     private function resolve_remap(array $remap_raw): array
     {
         $source_paths = $this->wp_component_source_paths();
-        $docroot = rtrim($this->get_filesystem_root_path(), "/");
+        $fs_root = rtrim($this->get_filesystem_root_path(), "/");
+
+        $source_tokens = [
+            "wp-content" => $source_paths["content"],
+            "wp-plugins" => $source_paths["plugins"],
+            "wp-mu-plugins" => $source_paths["mu-plugins"],
+            "wp-uploads" => $source_paths["uploads"],
+            "abspath" => $source_paths["abspath"],
+        ];
+        $target_tokens = ["fs-root" => $fs_root];
 
         $rules = [];
         $wp_content_target = null;
-        foreach ($remap_raw as [$source, $target]) {
-            $wp_path = trim(trim($source), "/");
-            if ($wp_path === "") {
-                throw new InvalidArgumentException("--remap source cannot be empty");
+        foreach ($remap_raw as [$source_raw, $target_raw]) {
+            $source = $this->resolve_remap_path($source_raw, $source_tokens);
+            $target = $this->resolve_remap_path($target_raw, $target_tokens);
+
+            if (!path_is_within_root($target, $fs_root)) {
+                throw new InvalidArgumentException(
+                    "--remap target \"{$target}\" resolves outside --fs-root ({$fs_root}); " .
+                        "targets must stay within the destination root",
+                );
             }
 
-            // Accept a target given as a full absolute path that includes the
-            // docroot — strip the docroot prefix so it's treated as relative.
-            $target = trim($target);
-            $target_relative = self::path_remainder_under(rtrim($target, "/"), $docroot) ?? $target;
-            $target_relative = trim($target_relative, "/");
-
-            $source = $this->resolve_source_path($wp_path, $source_paths);
-            $target = wp_join_unix_paths($docroot, $target_relative);
             $rules[$source] = $target;
-
-            if ($wp_path === "wp-content") {
+            if ($source === $source_paths["content"]) {
                 $wp_content_target = $target;
             }
         }
 
-        // Pass 2: Do a whole tree remap for wp-content's components if needed.
+        // Whole-tree remap of the wp-content components that can live outside the content_dir,
+        // unless an explicit rule has already placed them somewhere else.
         if ($wp_content_target !== null) {
             foreach (["plugins", "mu-plugins", "uploads"] as $name) {
                 $source = $source_paths[$name];
@@ -8369,39 +8377,39 @@ class ImportClient
     }
 
     /**
-     * Resolve a WordPress-layout path (e.g. "wp-content/plugins/woocommerce",
-     * "wp-admin", "wp-config.php") to the source site's real absolute path.
-     * wp-content and its components resolve via their (possibly relocated) real
-     * dirs; anything else is taken relative to ABSPATH.
+     * Resolve a --remap argument (source or target) into an absolute path.
      *
-     * @param string $wp_path The WordPress-layout path to resolve.
-     * @param array<string,string|null> $source_paths From wp_component_source_paths().
+     * Substitutes every known `:token:` (see the token tables in resolve_remap)
+     * with its value, wherever it appears, then trims trailing slashes. The
+     * result must be a valid absolute path with no `.`/`..` segments; a relative
+     * path or an unknown token (left unsubstituted) fails that check. Referencing
+     * a token whose value is unavailable in preflight is a distinct, clear error.
+     *
+     * @param string $raw The raw remap argument.
+     * @param array<string,string|null> $tokens Token name => value (null = unavailable).
      */
-    private function resolve_source_path(string $wp_path, array $source_paths): string
+    private function resolve_remap_path(string $raw, array $tokens): string
     {
-        // Longest WP-path prefix first, each mapped to its real source location.
-        $bases = [
-            "wp-content/plugins" => $source_paths["plugins"],
-            "wp-content/mu-plugins" => $source_paths["mu-plugins"],
-            "wp-content/uploads" => $source_paths["uploads"],
-            "wp-content" => $source_paths["content"],
-        ];
-
-        foreach ($bases as $prefix => $base) {
-            $rest = self::path_remainder_under($wp_path, $prefix);
-            if ($rest !== null) {
-                return wp_join_unix_paths($base, $rest);
+        $resolved = $raw;
+        foreach ($tokens as $name => $value) {
+            if (strpos($resolved, ":{$name}:") === false) {
+                continue;
             }
-        }
-        // Anything outside wp-content (wp-admin, core, a root file, ...) is
-        // taken relative to ABSPATH.
-        if ($source_paths["abspath"] === null) {
-            throw new InvalidArgumentException(
-                "Cannot resolve --remap {$wp_path}: preflight has no ABSPATH. Run preflight first.",
-            );
+
+            if ($value === null) {
+                throw new InvalidArgumentException(
+                    "Cannot resolve --remap token \":{$name}:\": not available in " .
+                        "preflight data. Run preflight first.",
+                );
+            }
+
+            $resolved = str_replace(":{$name}:", $value, $resolved);
         }
 
-        return wp_join_unix_paths($source_paths["abspath"], $wp_path);
+        $resolved = rtrim($resolved, "/");
+        assert_valid_path($resolved, "--remap path \"{$raw}\"");
+
+        return $resolved;
     }
 
     /**
@@ -11443,8 +11451,9 @@ if (
             'name' => 'remap',
             'type' => 'pair',
             'target' => 'remap',
-            'pair_args' => 'SRC TGT',
-            'help' => 'Place SRC (e.g. wp-content) at TGT, relative to --docroot (repeatable)',
+            'pair_args' => 'SOURCE TARGET',
+            'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
+                '(a :fs-root: path or an absolute path within --fs-root); repeatable',
             'commands' => ['files-pull'],
         ],
 

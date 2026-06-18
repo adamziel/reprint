@@ -7,8 +7,12 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * --remap: resolving SRC TGT pairs into remap rules, with detached-component
- * expansion driven by the source's preflight paths_urls.
+ * --remap: resolving template-string SOURCE TARGET pairs into remap rules.
+ *
+ * Each argument has its known `:token:`s substituted wherever they appear, then
+ * must resolve to an absolute path. Source tokens are remote WP-layout locations
+ * (:wp-uploads:, :abspath:, …); the target token is :fs-root:. Targets must stay
+ * within --fs-root. Anything that doesn't resolve to an absolute path is an error.
  */
 class RemapResolveTest extends TestCase
 {
@@ -59,11 +63,6 @@ class RemapResolveTest extends TestCase
         (new \ReflectionClass($c))->getProperty($p)->setValue($c, $v);
     }
 
-    private function get($c, string $p)
-    {
-        return (new \ReflectionClass($c))->getProperty($p)->getValue($c);
-    }
-
     private function client(array $pathsUrls): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
@@ -73,122 +72,166 @@ class RemapResolveTest extends TestCase
         return $c;
     }
 
-    public function testWpContentRemapsToFullTargetUnderDocroot(): void
+    private function resolve($c, array ...$pairs): array
     {
-        $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
-        $rules = $this->call($c, 'resolve_remap', array(array(array('wp-content', 'wp-content'))));
-        $this->assertCount(1, $rules);
-        $this->assertSame(
-            $this->root . '/wp-content',
-            $rules['/var/www/html/wp-content']
+        return $this->call($c, 'resolve_remap', array($pairs));
+    }
+
+    // --- resolution: SOURCE TARGET → one source => target rule -------------
+
+    /**
+     * Each case resolves a single --remap pair and asserts the resulting rule.
+     * The expected target is given as a suffix appended to the (per-test) fs root.
+     *
+     * @dataProvider provideResolutionCases
+     */
+    public function testResolvesRuleToExpectedSourceAndTarget(
+        array $pathsUrls,
+        string $source,
+        string $target,
+        string $expectedSource,
+        string $expectedTargetSuffix
+    ): void {
+        $rules = $this->resolve($this->client($pathsUrls), array($source, $target));
+        $this->assertSame($this->root . $expectedTargetSuffix, $rules[$expectedSource]);
+    }
+
+    public static function provideResolutionCases(): array
+    {
+        return array(
+            'wp-content token → content dir' => array(
+                array('content_dir' => '/var/www/html/wp-content'),
+                ':wp-content:', ':fs-root:/wp-content',
+                '/var/www/html/wp-content', '/wp-content',
+            ),
+            'component token + subpath resolves via preflight' => array(
+                array('content_dir' => '/srv/wp-content', 'plugins_dir' => '/custom/plugins'),
+                ':wp-plugins:/woocommerce', ':fs-root:/wp-content/plugins/woocommerce',
+                '/custom/plugins/woocommerce', '/wp-content/plugins/woocommerce',
+            ),
+            'abspath token resolves non-content paths' => array(
+                array('abspath' => '/var/www/html', 'content_dir' => '/var/www/html/wp-content'),
+                ':abspath:/wp-admin', ':fs-root:/wp-admin',
+                '/var/www/html/wp-admin', '/wp-admin',
+            ),
+            'raw absolute source used literally' => array(
+                array('content_dir' => '/var/www/html/wp-content'),
+                '/var/log/site', ':fs-root:/logs',
+                '/var/log/site', '/logs',
+            ),
+            'fs-root token + subpath' => array(
+                array('content_dir' => '/var/www/html/wp-content'),
+                ':wp-content:', ':fs-root:/media',
+                '/var/www/html/wp-content', '/media',
+            ),
+            'bare fs-root token is the root itself' => array(
+                array('content_dir' => '/var/www/html/wp-content'),
+                ':wp-content:', ':fs-root:',
+                '/var/www/html/wp-content', '',
+            ),
+            'trailing slashes trimmed (leading kept)' => array(
+                array('content_dir' => '/var/www/html/wp-content'),
+                ':wp-content:/', ':fs-root:/media/',
+                '/var/www/html/wp-content', '/media',
+            ),
+            'substitution is literal — no separator enforced' => array(
+                array('content_dir' => '/var/www/html/wp-content', 'plugins_dir' => '/p'),
+                ':wp-plugins:jetpack', ':fs-root:/x',
+                '/pjetpack', '/x',
+            ),
+            'whitespace in a raw path is preserved' => array(
+                array('content_dir' => '/var/www/html/wp-content'),
+                '/var/data/odd ', ':fs-root:/odd',
+                '/var/data/odd ', '/odd',
+            ),
         );
     }
 
-    public function testAbsoluteTargetContainingDocrootIsTreatedAsRelative(): void
+    public function testRawAbsoluteTargetWithinRootUsedLiterally(): void
     {
-        // A target pasted as a full absolute path under the docroot resolves
-        // the same as the docroot-relative form (no double-nesting).
+        // An absolute target already inside --fs-root is used verbatim (the
+        // :fs-root: token is sugar for exactly this).
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
-        $rules = $this->call($c, 'resolve_remap', array(array(
-            array('wp-content', $this->root . '/some/where'),
-        )));
-        $this->assertSame(
-            $this->root . '/some/where',
-            $rules['/var/www/html/wp-content']
-        );
+        $rules = $this->resolve($c, array(':wp-content:', $this->root . '/wp-content'));
+        $this->assertSame($this->root . '/wp-content', $rules['/var/www/html/wp-content']);
     }
 
-    public function testSurroundingSlashesOnSourceAndTargetAreIgnored(): void
-    {
-        // Leading/trailing slashes on either endpoint are trimmed — no rsync-style
-        // folder-vs-contents distinction; both endpoints are explicitly named.
-        $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
-        $rules = $this->call($c, 'resolve_remap', array(array(array('/wp-content/plugins/', '/wp-content/plugins/'))));
-        $this->assertCount(1, $rules);
-        $this->assertSame(
-            $this->root . '/wp-content/plugins',
-            $rules['/var/www/html/wp-content/plugins']
-        );
-    }
+    // --- detached-component expansion --------------------------------------
 
     public function testDetachedComponentsExpandUnderTarget(): void
     {
-        // Source keeps plugins inside wp-content (nested → no extra rule), but
-        // uploads and mu-plugins outside it (detached → routed under TGT).
+        // Remapping wp-content auto-follows components that live OUTSIDE
+        // content_dir (uploads, mu-plugins here); a nested one (plugins) is
+        // already covered by the wp-content rule and gets no separate rule.
         $c = $this->client(array(
             'content_dir' => '/var/www/html/wp-content',
-            'plugins_dir' => '/var/www/html/wp-content/plugins',
-            'mu_plugins_dir' => '/opt/muplugins',
-            'uploads' => array('basedir' => '/mnt/blogs/uploads'),
+            'plugins_dir' => '/var/www/html/wp-content/plugins', // nested
+            'mu_plugins_dir' => '/opt/muplugins',                // detached
+            'uploads' => array('basedir' => '/mnt/blogs/uploads'), // detached
         ));
-        $rules = $this->call($c, 'resolve_remap', array(array(array('wp-content', 'wp-content'))));
+        $rules = $this->resolve($c, array(':wp-content:', ':fs-root:/wp-content'));
         $byTarget = array_flip($rules);
         $this->assertCount(3, $rules);
         $this->assertSame('/var/www/html/wp-content', $byTarget[$this->root . '/wp-content']);
         $this->assertSame('/mnt/blogs/uploads', $byTarget[$this->root . '/wp-content/uploads']);
         $this->assertSame('/opt/muplugins', $byTarget[$this->root . '/wp-content/mu-plugins']);
-        // plugins is nested under content_dir → covered by the wp-content rule.
         $this->assertArrayNotHasKey($this->root . '/wp-content/plugins', $byTarget);
     }
 
-    public function testComponentSrcResolvesViaPreflight(): void
+    public function testExplicitComponentOverridesExpansion(): void
     {
-        $c = $this->client(array(
-            'content_dir' => '/srv/wp-content',
-            'plugins_dir' => '/custom/plugins',
-        ));
-        $rules = $this->call($c, 'resolve_remap', array(array(
-            array('wp-content/plugins/woocommerce', 'wp-content/plugins/woocommerce'),
-        )));
-        $this->assertCount(1, $rules);
-        $this->assertArrayHasKey('/custom/plugins/woocommerce', $rules);
-    }
-
-    public function testManualComponentRemapOverridesWholeTreeExpansion(): void
-    {
-        // Detached plugins explicitly sent elsewhere; a whole wp-content remap
-        // must NOT also route them under its own target. Manual flag listed
-        // FIRST to prove order independence.
+        // A detached component sent somewhere explicitly wins over the
+        // whole-wp-content expansion. Explicit rule listed FIRST to prove the
+        // override is order-independent.
         $c = $this->client(array(
             'content_dir' => '/var/www/html/wp-content',
-            'plugins_dir' => '/detached/plugins', // detached → would otherwise expand
+            'plugins_dir' => '/detached/plugins',
         ));
-        $rules = $this->call($c, 'resolve_remap', array(array(
-            array('wp-content/plugins', 'special-plugins'),
-            array('wp-content', 'wp-content'),
-        )));
-        // The detached plugins source maps once — to the manual target, not the
-        // whole-tree expansion (a single key per source guarantees no double-route).
-        $this->assertArrayHasKey('/detached/plugins', $rules);
+        $rules = $this->resolve(
+            $c,
+            array(':wp-plugins:', ':fs-root:/special-plugins'),
+            array(':wp-content:', ':fs-root:/wp-content')
+        );
         $this->assertSame($this->root . '/special-plugins', $rules['/detached/plugins']);
     }
 
-    public function testNonWpContentSrcResolvesRelativeToAbspath(): void
+    // --- errors ------------------------------------------------------------
+
+    /**
+     * Every case must resolve to a valid absolute path; these don't, so each is
+     * rejected with InvalidArgumentException.
+     *
+     * @dataProvider provideInvalidArguments
+     */
+    public function testRejectsInvalidArgument(string $source, string $target): void
     {
-        // wp-admin / core / arbitrary paths are not restricted — they resolve
-        // relative to the source's ABSPATH.
-        $c = $this->client(array(
-            'abspath' => '/var/www/html',
-            'content_dir' => '/var/www/html/wp-content',
-        ));
-        $rules = $this->call($c, 'resolve_remap', array(array(array('wp-admin', 'wp-admin'))));
-        $this->assertCount(1, $rules);
-        $this->assertSame(
-            $this->root . '/wp-admin',
-            $rules['/var/www/html/wp-admin']
+        $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
+        $this->expectException(\InvalidArgumentException::class);
+        $this->resolve($c, array($source, $target));
+    }
+
+    public static function provideInvalidArguments(): array
+    {
+        return array(
+            'bare relative source' => array('wp-content/uploads', ':fs-root:/uploads'),
+            'bare relative target' => array(':wp-content:', 'media'),
+            'unclosed token (not substituted)' => array(':wp-plugins', ':fs-root:/p'),
+            'unknown source token' => array(':bogus:', ':fs-root:/x'),
+            'fs-root token invalid as source' => array(':fs-root:/x', ':fs-root:/x'),
+            'remote token invalid as target' => array(':wp-content:', ':wp-content:/x'),
+            'absolute target outside fs-root' => array(':wp-content:', '/media'),
+            'target climbs out via ".."' => array(':wp-content:', ':fs-root:/safe/../../../etc'),
+            'empty source' => array('', ':fs-root:/x'),
         );
     }
 
-    public function testDocrootTargetPlacesAtDocrootRoot(): void
+    public function testAbspathTokenWithoutPreflightThrows(): void
     {
-        // Target == the docroot (whether given absolutely or as an empty
-        // relative) means: place the source at the docroot root itself.
+        // :abspath: present but unavailable (no abspath, no wp_detect roots) gets
+        // a clear message naming preflight, not the generic path error.
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
-
-        $rules = $this->call($c, 'resolve_remap', array(array(array('wp-content', $this->root))));
-        $this->assertSame($this->root, $rules['/var/www/html/wp-content']);
-
-        $rules = $this->call($c, 'resolve_remap', array(array(array('wp-content', ''))));
-        $this->assertSame($this->root, $rules['/var/www/html/wp-content']);
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('preflight');
+        $this->resolve($c, array(':abspath:/wp-admin', ':fs-root:/wp-admin'));
     }
 }
