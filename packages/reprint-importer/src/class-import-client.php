@@ -46,6 +46,7 @@ use Reprint\Importer\Transport\HttpErrorDiagnoser;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 use Reprint\Importer\UrlRewrite\Base64ValueScanner;
 use Reprint\Importer\UrlRewrite\DomainCollector;
+use Reprint\Importer\UrlRewrite\NewSiteUrlResolver;
 use Reprint\Importer\UrlRewrite\PhpSerializationProcessor;
 use Reprint\Importer\UrlRewrite\SQLitePreparedInsertBuilder;
 use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
@@ -3286,32 +3287,7 @@ class ImportClient
      */
     private function resolve_new_site_url_option(array &$options): void
     {
-        if (empty($options["new_site_url"])) {
-            return;
-        }
-
-        $parsed_url = parse_url($this->remote_url);
-        if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
-            throw new InvalidArgumentException(
-                "--new-site-url requires a valid export URL to derive the source site origin.",
-            );
-        }
-
-        $host_with_port = $parsed_url['host'];
-        if (!empty($parsed_url['port'])) {
-            $host_with_port .= ':' . $parsed_url['port'];
-        }
-
-        if (!isset($options["rewrite_url"])) {
-            $options["rewrite_url"] = [];
-        }
-
-        // Rewrite both http:// and https:// variants of the old origin
-        // to the new URL verbatim, so we catch references stored with
-        // either scheme in the database.
-        $new_url = $options["new_site_url"];
-        $options["rewrite_url"][] = ['https://' . $host_with_port, $new_url];
-        $options["rewrite_url"][] = ['http://' . $host_with_port, $new_url];
+        $options = NewSiteUrlResolver::resolve_options($options, $this->remote_url);
     }
 
     private function escape_pdo_dsn_value(string $value): string

@@ -3,7 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\UrlRewrite\NewSiteUrlResolver;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -13,62 +13,15 @@ require_once __DIR__ . '/../../importer/import.php';
  */
 class NewSiteUrlTest extends TestCase
 {
-    private $tempDir;
-
-    protected function setUp(): void
+    private function resolve(array $options, string $export_url): array
     {
-        parent::setUp();
-        $this->tempDir = sys_get_temp_dir() . '/import-new-site-url-test-' . uniqid();
-        mkdir($this->tempDir, 0755, true);
-        mkdir($this->tempDir . '/fs-root', 0755, true);
-    }
-
-    protected function tearDown(): void
-    {
-        $this->recursiveDelete($this->tempDir);
-        parent::tearDown();
-    }
-
-    private function recursiveDelete(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-        $items = scandir($dir);
-        foreach ($items as $item) {
-            if ($item === '.' || $item === '..') {
-                continue;
-            }
-            $path = $dir . '/' . $item;
-            if (is_link($path)) {
-                unlink($path);
-            } elseif (is_dir($path)) {
-                $this->recursiveDelete($path);
-            } else {
-                unlink($path);
-            }
-        }
-        rmdir($dir);
-    }
-
-    private function callResolve(ImportClient $client, array $options): array
-    {
-        $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('resolve_new_site_url_option');
-        $method->invokeArgs($client, [&$options]);
-        return $options;
+        return NewSiteUrlResolver::resolve_options($options, $export_url);
     }
 
     public function testDerivesHttpAndHttpsFromHttpsUrl(): void
     {
-        $client = new ImportClient(
-            'https://old-site.example.com/wp-json/export',
-            $this->tempDir,
-            $this->tempDir . '/fs-root'
-        );
-
         $options = ['new_site_url' => 'https://new-site.example.com'];
-        $options = $this->callResolve($client, $options);
+        $options = $this->resolve($options, 'https://old-site.example.com/wp-json/export');
 
         $this->assertArrayHasKey('rewrite_url', $options);
         $this->assertCount(2, $options['rewrite_url']);
@@ -84,14 +37,8 @@ class NewSiteUrlTest extends TestCase
 
     public function testDerivesHttpAndHttpsFromHttpUrl(): void
     {
-        $client = new ImportClient(
-            'http://old-site.local/export?key=abc',
-            $this->tempDir,
-            $this->tempDir . '/fs-root'
-        );
-
         $options = ['new_site_url' => 'https://new-site.example.com'];
-        $options = $this->callResolve($client, $options);
+        $options = $this->resolve($options, 'http://old-site.local/export?key=abc');
 
         $this->assertCount(2, $options['rewrite_url']);
         $this->assertSame(
@@ -106,14 +53,8 @@ class NewSiteUrlTest extends TestCase
 
     public function testPreservesPort(): void
     {
-        $client = new ImportClient(
-            'https://old-site.example.com:8443/export',
-            $this->tempDir,
-            $this->tempDir . '/fs-root'
-        );
-
         $options = ['new_site_url' => 'https://new-site.example.com'];
-        $options = $this->callResolve($client, $options);
+        $options = $this->resolve($options, 'https://old-site.example.com:8443/export');
 
         $this->assertCount(2, $options['rewrite_url']);
         $this->assertSame(
@@ -128,19 +69,13 @@ class NewSiteUrlTest extends TestCase
 
     public function testAppendsToExistingRewriteUrlEntries(): void
     {
-        $client = new ImportClient(
-            'https://old-site.example.com/export',
-            $this->tempDir,
-            $this->tempDir . '/fs-root'
-        );
-
         $options = [
             'new_site_url' => 'https://new-site.example.com',
             'rewrite_url' => [
                 ['https://cdn.old-site.com', 'https://cdn.new-site.com'],
             ],
         ];
-        $options = $this->callResolve($client, $options);
+        $options = $this->resolve($options, 'https://old-site.example.com/export');
 
         $this->assertCount(3, $options['rewrite_url']);
         $this->assertSame(
@@ -159,44 +94,26 @@ class NewSiteUrlTest extends TestCase
 
     public function testNoOpWhenNewSiteUrlNotSet(): void
     {
-        $client = new ImportClient(
-            'https://old-site.example.com/export',
-            $this->tempDir,
-            $this->tempDir . '/fs-root'
-        );
-
         $options = [];
-        $options = $this->callResolve($client, $options);
+        $options = $this->resolve($options, 'https://old-site.example.com/export');
 
         $this->assertArrayNotHasKey('rewrite_url', $options);
     }
 
     public function testThrowsOnUnparseableExportUrl(): void
     {
-        $client = new ImportClient(
-            '://not-a-url',
-            $this->tempDir,
-            $this->tempDir . '/fs-root'
-        );
-
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('--new-site-url requires a valid export URL');
 
         $options = ['new_site_url' => 'https://new-site.example.com'];
-        $this->callResolve($client, $options);
+        $this->resolve($options, '://not-a-url');
     }
 
     public function testNewUrlUsedVerbatim(): void
     {
-        $client = new ImportClient(
-            'https://old-site.example.com/export',
-            $this->tempDir,
-            $this->tempDir . '/fs-root'
-        );
-
         // The new URL should be used exactly as-is, even with a trailing path
         $options = ['new_site_url' => 'http://localhost:8080/subdir'];
-        $options = $this->callResolve($client, $options);
+        $options = $this->resolve($options, 'https://old-site.example.com/export');
 
         $this->assertCount(2, $options['rewrite_url']);
         // Both variants map to the exact same verbatim new URL
