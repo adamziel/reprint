@@ -22,7 +22,6 @@ use Reprint\Importer\FileSync\SymlinkChunkApplier;
 use Reprint\Importer\Filesystem\FlatDocumentRootBuilder;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Filesystem\PathUtils;
-use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Index\IndexFileSorter;
 use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Index\IndexPathPrefixMatcher;
@@ -46,6 +45,7 @@ use Reprint\Importer\Sql\SqlStatementInspector;
 use Reprint\Importer\Sql\TargetDatabaseConnectionFactory;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\Support\PathDisplayFormatter;
+use Reprint\Importer\TargetRuntime\RuntimeConfigurationApplier;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 use Reprint\Importer\Transport\HttpErrorDiagnoser;
 use Reprint\Importer\Transport\HttpRequestBuilder;
@@ -2351,20 +2351,6 @@ class ImportClient
      */
     public function run_apply_runtime(array $options): void
     {
-        $runtime = $options["runtime"] ?? null;
-        if (empty($runtime)) {
-            throw new InvalidArgumentException(
-                "apply-runtime requires --runtime=RUNTIME."
-            );
-        }
-
-        $output_dir = $options["output_dir"] ?? null;
-        if (empty($output_dir)) {
-            throw new InvalidArgumentException(
-                "apply-runtime requires --output-dir=DIR to write runtime configuration files"
-            );
-        }
-
         // Load state to get preflight data and detected webhost.
         $entry = $this->state["preflight"] ?? null;
         if (!is_array($entry) || empty($entry["data"])) {
@@ -2377,276 +2363,56 @@ class ImportClient
         $preflight_data = $entry["data"];
         $webhost = $this->state["webhost"] ?? "other";
 
-        // Resolve the effective fs root from either --flat-document-root
-        // (used as-is) or --fs-root (prefixed with the remote document_root).
-        // Mutual exclusion is already enforced at the CLI level.
-        $flat_document_root = $options["flat_document_root"] ?? null;
-
-        if (!empty($flat_document_root)) {
-            // --flat-document-root: used directly as the web root.
-            $effective_fs_root = rtrim($flat_document_root, "/");
-        } else {
-            // --fs-root: the raw download directory. The remote site's
-            // document_root tells us where the web root lived on the
-            // source server. Files are downloaded preserving the full
-            // remote path, so the effective fs root is --fs-root +
-            // document_root.
-            $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
-            if (is_string($remote_doc_root)) {
-                $remote_doc_root = rtrim($remote_doc_root, "/");
-            } else {
-                $remote_doc_root = "";
-            }
-
-            if ($remote_doc_root !== "") {
-                $effective_fs_root = $this->fs_root . $remote_doc_root;
-            } else {
-                $effective_fs_root = $this->fs_root;
-            }
-
-            if (!is_dir($effective_fs_root)) {
-                throw new RuntimeException(
-                    "Effective fs root does not exist: {$effective_fs_root}\n" .
-                    "The remote document_root was: {$remote_doc_root}\n" .
-                    "If you used flat-docroot, pass the flattened directory " .
-                    "with --flat-document-root instead of --fs-root."
-                );
-            }
-        }
-
-        // Resolve to absolute paths so generated files work from any cwd.
-        $abs_output_dir = realpath($output_dir) ?: $output_dir;
-        $abs_fs_root = realpath($effective_fs_root) ?: $effective_fs_root;
-
-        if (!is_dir($abs_output_dir)) {
-            if (!mkdir($abs_output_dir, 0755, true)) {
-                throw new RuntimeException(
-                    "Failed to create output directory: {$abs_output_dir}"
-                );
-            }
-            $abs_output_dir = realpath($abs_output_dir);
-        }
-
-        // Step 1: Host analyzer produces a manifest from preflight data.
-        $analyzer = host_analyzer_for($webhost);
-        $manifest = $analyzer->analyze($preflight_data);
-        $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data);
-
-        // Step 1b: Merge target database configuration from db-apply state.
-        // db-apply persists the target engine and connection details so that
-        // apply-runtime can generate the matching DB_* constants and, for
-        // SQLite targets, set up the database integration plugin.
-        $apply_state = $this->state["apply"] ?? [];
-        $target_engine = $apply_state["target_engine"] ?? null;
-        if ($target_engine === "mysql") {
-            $manifest->constants["DB_NAME"] = $apply_state["target_db"] ?? "";
-            $manifest->constants["DB_USER"] = $apply_state["target_user"] ?? "";
-            $manifest->constants["DB_PASSWORD"] = $apply_state["target_pass"] ?? "";
-            $host_value = $apply_state["target_host"] ?? "127.0.0.1";
-            $port_value = (int) ($apply_state["target_port"] ?? 3306);
-            if ($port_value !== 3306) {
-                $host_value .= ":" . $port_value;
-            }
-            $manifest->constants["DB_HOST"] = $host_value;
-            // runtime.php defines DB_* before wp-config.php loads, which
-            // causes "Constant already defined" warnings. Flag this so the
-            // generated runtime.php installs a handler to suppress them.
-            $manifest->has_db_constants = true;
-        } elseif ($target_engine === "sqlite") {
-            $sqlite_path = $apply_state["target_sqlite_path"] ?? null;
-            if ($sqlite_path !== null && $sqlite_path !== '') {
-                $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
-                $db_file = basename($sqlite_path);
-            } else {
-                $db_dir = '{fs-root}/wp-content/database/';
-                $db_file = '.ht.sqlite';
-            }
-            $manifest->sqlite = [
-                'plugin_source' => resolve_sqlite_integration_plugin_path(),
-                'plugin_dir' => '',  // resolved after copy_sqlite_plugin()
-                'db_dir' => $db_dir,
-                'db_file' => $db_file,
-            ];
-        }
-
-        $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
-
-        // Resolve host and port for the target server. If not provided on
-        // the CLI, derive from the first URL rewrite target (saved by
-        // db-apply). This way the dev server listens on the same address
-        // the database was rewritten to.
-        $host = $options["host"] ?? null;
-        $port = $options["port"] ?? null;
-        if ($host === null || $port === null) {
-            $rewrite_map = $this->state["apply"]["rewrite_url"] ?? [];
-            $first_target = !empty($rewrite_map) ? reset($rewrite_map) : null;
-            if (is_string($first_target)) {
-                $parsed = parse_url($first_target);
-                if ($host === null) {
-                    $host = $parsed["host"] ?? null;
-                }
-                if ($port === null && isset($parsed["port"])) {
-                    $port = $parsed["port"];
-                }
-            }
-        }
-
-        // Resolve the path to WordPress's index.php. On standard hosts it
-        // lives in the fs root. On WPCloud the ABSPATH is a different
-        // directory (e.g. /wordpress/core/X.Y.Z) which maps to
-        // download_root + abspath when using --fs-root.
-        $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
-        $abspath = rtrim($paths_urls["abspath"] ?? "", "/");
-        if (!empty($flat_document_root)) {
-            // Flattened layout: index.php is at the top level.
-            $wordpress_index = $abs_fs_root . '/index.php';
-        } elseif ($abspath !== "") {
-            // Raw download: ABSPATH is relative to the download root,
-            // not the effective fs root (which is download_root + document_root).
-            $wordpress_index = realpath($this->fs_root . $abspath . '/index.php') ?: '';
-        } else {
-            $wordpress_index = $abs_fs_root . '/index.php';
-        }
-
-        // Step 2: Runtime applier writes server-specific config files.
-        $applier = runtime_applier_for($runtime);
-        $applier_options = [];
-        if ($wordpress_index !== '') {
-            $applier_options['wordpress_index'] = $wordpress_index;
-        }
-        if ($host !== null) {
-            $applier_options['host'] = $host;
-        }
-        if ($port !== null) {
-            $applier_options['port'] = (int) $port;
-        }
-        // Step 2b: For SQLite targets, copy the integration plugin into the
-        // output directory BEFORE the applier runs, so generate_runtime_php()
-        // can embed the resolved plugin path in the lazy-loader code.
-        if ($manifest->sqlite !== null) {
-            $copied_plugin = copy_sqlite_plugin(
-                $manifest->sqlite['plugin_source'],
-                $abs_output_dir,
-            );
-            // Replace the source path with the copied-to path so the
-            // generated runtime.php points to the output directory.
-            $manifest->sqlite['plugin_dir'] = $copied_plugin;
-            // Resolve {fs-root} in db_dir now that we have the real path.
-            $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
-                $manifest->sqlite['db_dir'],
-                $abs_fs_root,
-            );
-        }
-
-        $summary = $applier->apply($manifest, $abs_fs_root, $abs_output_dir, $applier_options);
-
-        if ($manifest->sqlite !== null) {
-            $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
-        }
-
-        // Remove production drop-ins and mu-plugins that would crash
-        // the local site.  The host analyzer declares these — they
-        // depend on infrastructure (Memcached servers, multisite APIs)
-        // not available outside the original hosting environment.
-        foreach ($manifest->paths_to_remove as $rel_path) {
-            $full_path = $abs_fs_root . '/' . ltrim($rel_path, '/');
-            if (!file_exists($full_path) && !is_link($full_path)) {
-                continue;
-            }
-            if (is_dir($full_path) && !is_link($full_path)) {
-                self::rmdir_recursive($full_path);
-            } else {
-                unlink($full_path);
-            }
-            $summary[] = "Removed production drop-in: {$rel_path}";
-            $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (production-only)");
-        }
-
-        foreach ($summary as $line) {
-            $this->audit_log("APPLY-RUNTIME | {$line}");
-        }
+        $result = (new RuntimeConfigurationApplier())->apply(
+            [
+                "runtime" => $options["runtime"] ?? null,
+                "output_dir" => $options["output_dir"] ?? null,
+                "fs_root" => $this->fs_root,
+                "flat_document_root" => $options["flat_document_root"] ?? null,
+                "preflight_data" => $preflight_data,
+                "webhost" => $webhost,
+                "apply_state" => $this->state["apply"] ?? [],
+                "host" => $options["host"] ?? null,
+                "port" => $options["port"] ?? null,
+                "enable_remote_upload_proxy" => $this->should_enable_remote_upload_proxy(),
+                "state_dir" => $this->state_dir,
+            ],
+            function (string $message, bool $verbose = false): void {
+                $this->audit_log($message, $verbose);
+            },
+        );
 
         // Persist which paths were removed so callers can inspect state.
-        $this->state["apply"]["remote_paths_removed_from_local_site"] = $manifest->paths_to_remove;
+        $this->state["apply"]["remote_paths_removed_from_local_site"] = $result["paths_removed"];
         $this->save_state($this->state);
-
-        // Read the structured start config if the applier wrote one.
-        // Playground CLI writes start.json with mount paths as seen by
-        // this PHP process — callers (e.g. Studio) map them to host paths.
-        $start_config_path = $abs_output_dir . '/start.json';
-        $start_config = null;
-        if (file_exists($start_config_path)) {
-            $start_config = json_decode(file_get_contents($start_config_path), true);
-        }
 
         // Output the summary and manifest as structured JSON for callers,
         // and print the human-readable summary to stderr.
         $this->output_progress([
             "status" => "complete",
             "command" => "apply-runtime",
-            "runtime" => $runtime,
-            "webhost" => $webhost,
-            "webhost_source" => $manifest->source,
-            "target_engine" => $target_engine,
-            "paths_removed" => $manifest->paths_to_remove,
-            "extra_directories" => $manifest->extra_directories,
-            "start_config" => $start_config,
-            "message" => "apply-runtime complete (runtime: {$runtime})",
+            "runtime" => $result["runtime"],
+            "webhost" => $result["webhost"],
+            "webhost_source" => $result["webhost_source"],
+            "target_engine" => $result["target_engine"],
+            "paths_removed" => $result["paths_removed"],
+            "extra_directories" => $result["extra_directories"],
+            "start_config" => $result["start_config"],
+            "message" => "apply-runtime complete (runtime: " . $result["runtime"] . ")",
         ]);
 
         if (!$this->progress->is_quiet_lifecycle()) {
             fwrite(STDERR, "\n");
-            fwrite(STDERR, "Runtime: {$runtime}\n");
-            fwrite(STDERR, "Source host: {$webhost}\n");
-            if ($target_engine !== null) {
-                fwrite(STDERR, "Target database: {$target_engine}\n");
+            fwrite(STDERR, "Runtime: " . $result["runtime"] . "\n");
+            fwrite(STDERR, "Source host: " . $result["webhost"] . "\n");
+            if ($result["target_engine"] !== null) {
+                fwrite(STDERR, "Target database: " . $result["target_engine"] . "\n");
             }
             fwrite(STDERR, "\n");
-            foreach ($summary as $line) {
+            foreach ($result["summary"] as $line) {
                 fwrite(STDERR, "{$line}\n");
             }
         }
-    }
-
-    /**
-     * Enable the temporary remote upload proxy when uploads may still be
-     * missing locally.
-     *
-     * The proxy is active in two cases:
-     * - files-pull is still incomplete
-     * - a prior --filter=essential-files run left skipped uploads on disk
-     */
-    private function maybe_enable_remote_upload_proxy(RuntimeManifest $manifest, array $preflight_data): void
-    {
-        if (!$this->should_enable_remote_upload_proxy()) {
-            return;
-        }
-
-        $base_url = $this->get_remote_upload_proxy_base_url($preflight_data);
-        if ($base_url === null) {
-            $this->audit_log(
-                "APPLY-RUNTIME | remote upload proxy skipped (no source uploads URL available)",
-                true,
-            );
-            return;
-        }
-
-        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL"] = $base_url;
-        $state_dir = realpath($this->state_dir) ?: $this->state_dir;
-        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
-            rtrim($state_dir, "/") . "/.import-state.json";
-        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
-            rtrim($state_dir, "/") . "/.import-download-list-skipped.jsonl";
-        $manifest->routes[] = [
-            "handler" => "remote-upload-proxy",
-            "path_pattern" => "/wp-content/uploads/.*",
-            "condition" => "file_not_found",
-            "description" => "Proxy missing uploads from the source site until files-pull completes",
-        ];
-        $this->audit_log(
-            "APPLY-RUNTIME | enabled remote upload proxy ({$base_url})",
-            true,
-        );
     }
 
     /**
@@ -2657,10 +2423,7 @@ class ImportClient
      */
     private function should_enable_remote_upload_proxy(): bool
     {
-        if (
-            file_exists($this->skipped_download_list_file) &&
-            filesize($this->skipped_download_list_file) > 0
-        ) {
+        if ($this->has_skipped_files_pending()) {
             return true;
         }
 
@@ -2670,32 +2433,6 @@ class ImportClient
 
         $status = $this->state["status"] ?? null;
         return $status !== null && $status !== "complete";
-    }
-
-    /**
-     * Resolve the source uploads base URL used by the temporary runtime proxy.
-     */
-    private function get_remote_upload_proxy_base_url(array $preflight_data): ?string
-    {
-        $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
-        $uploads_baseurl = $paths_urls["uploads"]["baseurl"] ?? null;
-        if (is_string($uploads_baseurl) && $uploads_baseurl !== "") {
-            return rtrim($uploads_baseurl, "/");
-        }
-
-        $site_urls = [
-            $paths_urls["home_url"] ?? null,
-            $paths_urls["site_url"] ?? null,
-            $preflight_data["database"]["wp"]["home"] ?? null,
-            $preflight_data["database"]["wp"]["siteurl"] ?? null,
-        ];
-        foreach ($site_urls as $site_url) {
-            if (is_string($site_url) && $site_url !== "") {
-                return rtrim($site_url, "/") . "/wp-content/uploads";
-            }
-        }
-
-        return null;
     }
 
     /**
