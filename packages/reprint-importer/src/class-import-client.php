@@ -14,6 +14,7 @@ use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightCommand;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchListBuilder;
+use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Index\IndexFileSorter;
@@ -4750,16 +4751,9 @@ class ImportClient
     }
 
     /**
-     * Download files from a prepared list.
-     *
-     * @param string $list_file   Path to the JSONL download list to process.
-     * @param string $state_key   Key in $this->state that holds fetch progress
-     *                            (e.g. "fetch" or "fetch_skipped").
-     */
-    /**
      * Count newlines in a file using buffered reads.  Much faster than
      * fgets() on large JSONL files because it never allocates per-line
-     * strings — just scans raw bytes in 64 KB chunks.
+     * strings - just scans raw bytes in 64 KB chunks.
      *
      * @param string $file       Path to the file.
      * @param int    $up_to_byte Stop after this byte offset (-1 = entire file).
@@ -4769,92 +4763,55 @@ class ImportClient
         return DownloadList::count_lines($file, $up_to_byte);
     }
 
+    /**
+     * Download files from a prepared list.
+     *
+     * @param string $list_file Path to the JSONL download list to process.
+     * @param string $state_key Key in $this->state that holds fetch progress
+     *                          (e.g. "fetch" or "fetch_skipped").
+     */
     private function download_files_from_list(
         string $list_file,
         string $state_key
     ): bool {
-        if (!file_exists($list_file)) {
-            return true;
-        }
-
-        if (filesize($list_file) === 0) {
-            return true;
-        }
-
-        // Compute download list counters once at the start of each list.
-        // These survive across batches within one invocation and are
-        // recomputed on restart from the state file's byte offset.
-        if ($this->download_list_total === null) {
-            $offset = (int) ($this->state[$state_key]["offset"] ?? 0);
-            $this->download_list_total = $this->count_newlines($list_file);
-            $this->download_list_done = $offset > 0
-                ? $this->count_newlines($list_file, $offset)
-                : 0;
-        }
         $fetch_state = $this->state[$state_key] ?? $this->default_state()[$state_key];
-        $batch_file = $fetch_state["batch_file"] ?? null;
-        $batch_offset = (int) ($fetch_state["offset"] ?? 0);
-        $next_offset = (int) ($fetch_state["next_offset"] ?? 0);
-        $cursor = $fetch_state["cursor"] ?? null;
+        $executor = new FetchListExecutor(
+            $this->download_list_total,
+            $this->download_list_done,
+            $this->files_imported,
+            $this->get_max_request_bytes(),
+            function (string $batch_file, $cursor, string $state_key): bool {
+                $post_data = [
+                    "file_list" => new CURLFile(
+                        $batch_file,
+                        "application/json",
+                        "file-list.json",
+                    ),
+                ];
 
-        $batch_entries = (int) ($fetch_state["batch_entries"] ?? 0);
+                return $this->download_file_fetch($post_data, $cursor, $state_key);
+            },
+            function (string $state_key, array $fetch_state): void {
+                $this->state[$state_key] = $fetch_state;
+                $this->save_state($this->state);
+            },
+            function (string $message): void {
+                $this->audit_log($message);
+            },
+        );
 
-        if ($batch_file === null || !file_exists($batch_file)) {
-            $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
-            if ($batch === null) {
-                return true;
-            }
-            $batch_file = $batch["file"];
-            $batch_offset = $batch["offset"];
-            $next_offset = $batch["next_offset"];
-            $batch_entries = $batch["entries"];
-            $cursor = null;
-            $this->state[$state_key] = [
-                "offset" => $batch_offset,
-                "next_offset" => $next_offset,
-                "batch_file" => $batch_file,
-                "batch_entries" => $batch_entries,
-                "cursor" => null,
-            ];
-            $this->save_state($this->state);
+        try {
+            return $executor->run(
+                $list_file,
+                $state_key,
+                $fetch_state,
+                $this->default_state()[$state_key],
+            );
+        } finally {
+            $this->download_list_total = $executor->download_list_total();
+            $this->download_list_done = $executor->download_list_done();
+            $this->files_imported = $executor->files_imported();
         }
-
-        $post_data = [
-            "file_list" => new CURLFile(
-                $batch_file,
-                "application/json",
-                "file-list.json",
-            ),
-        ];
-
-        $complete = $this->download_file_fetch($post_data, $cursor, $state_key);
-        if (!$complete) {
-            return false;
-        }
-
-        if (file_exists($batch_file)) {
-            @unlink($batch_file);
-            $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
-        }
-
-        // Advance the done counter by the known batch size and reset
-        // the per-batch file counter. files_imported counted files within
-        // this batch; now that the batch is complete, those files are
-        // accounted for in download_list_done.
-        if ($this->download_list_done !== null) {
-            $this->download_list_done += $batch_entries;
-        }
-        $this->files_imported = 0;
-
-        $this->state[$state_key] = [
-            "offset" => $next_offset,
-            "next_offset" => $next_offset,
-            "batch_file" => null,
-            "cursor" => null,
-        ];
-        $this->save_state($this->state);
-
-        return $next_offset >= filesize($list_file);
     }
 
     /**
