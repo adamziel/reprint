@@ -212,34 +212,51 @@ class StructuredDataUrlRewriterTest extends TestCase
 
     // --- Base64 ---
 
-    // Base64 processing is temporarily disabled for performance.
-    // These tests document the expected behavior when it's re-enabled.
-
-    public function testRewritesBase64EncodedHtml(): void
+    public function testBase64EncodedHtmlIsLeftUnchanged(): void
     {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
+        $rewriter = $this->createRewriter();
+        $input = base64_encode('<a href="https://old-site.com/page">Link</a>');
+
+        $this->assertSame($input, $rewriter->rewrite($input));
     }
 
-    public function testRewritesBase64EncodedJson(): void
+    public function testBase64EncodedJsonIsLeftUnchanged(): void
     {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
+        $rewriter = $this->createRewriter();
+        $json = json_encode(['url' => 'https://old-site.com/api'], JSON_UNESCAPED_SLASHES);
+        $input = base64_encode($json);
+
+        $this->assertSame($input, $rewriter->rewrite($input));
     }
 
-    public function testRewritesBase64EncodedSerializedPhp(): void
+    public function testBase64EncodedSerializedPhpIsLeftUnchanged(): void
     {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
+        $rewriter = $this->createRewriter();
+        $input = base64_encode(serialize(['url' => 'https://old-site.com/page']));
+
+        $this->assertSame($input, $rewriter->rewrite($input));
     }
 
-    public function testRewritesBase64EncodedBlockMarkup(): void
+    public function testBase64EncodedBlockMarkupIsLeftUnchanged(): void
     {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
+        $rewriter = $this->createRewriter();
+        $markup = '<!-- wp:image {"src":"https://old-site.com/img.jpg"} -->'
+            . '<figure><img src="https://old-site.com/img.jpg"/></figure>'
+            . '<!-- /wp:image -->';
+        $input = base64_encode($markup);
+
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
     }
 
     // --- Combinations: formats nested inside other formats ---
 
-    public function testBase64InsideSerializedPhp(): void
+    public function testBase64InsideSerializedPhpIsLeftUnchanged(): void
     {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
+        $rewriter = $this->createRewriter();
+        $encoded = base64_encode('https://old-site.com/deep');
+        $input = serialize(['data' => $encoded]);
+
+        $this->assertSame($input, $rewriter->rewrite($input));
     }
 
     public function testSerializedPhpInsideJson(): void
@@ -253,9 +270,14 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('https://new-site.com/deep', $unserialized['url']);
     }
 
-    public function testBase64InsideJsonInsideSerializedPhp(): void
+    public function testBase64InsideJsonInsideSerializedPhpIsLeftUnchanged(): void
     {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
+        $rewriter = $this->createRewriter();
+        $encoded = base64_encode('https://old-site.com/deep');
+        $json = json_encode(['data' => $encoded], JSON_UNESCAPED_SLASHES);
+        $input = serialize(['config' => $json]);
+
+        $this->assertSame($input, $rewriter->rewrite($input));
     }
 
     public function testBase64WithNoUrlsIsUnchanged(): void
@@ -512,9 +534,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $decoded['html']);
     }
 
-    public function testBlockMarkupHintPropagatesThroughBase64(): void
+    public function testBlockMarkupHintDoesNotDecodeBase64(): void
     {
-        $this->markTestSkipped('Base64 processing is temporarily disabled for performance.');
+        $rewriter = $this->createRewriter();
+        $input = base64_encode('<a href="https://old-site.com/page">Link</a>');
+
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
     }
 
     public function testValueMightContainSourceDomainIgnoresSchemeEscaping(): void

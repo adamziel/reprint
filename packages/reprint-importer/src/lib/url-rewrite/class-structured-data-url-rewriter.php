@@ -20,15 +20,13 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  *    iterate string values and recurse on each
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
- * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or
+ * 3. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or
  *    URLInTextProcessor (default)
  *
  * HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
  * The hint propagates through recursive calls so that leaf strings inside
- * serialized PHP, JSON, or base64 eventually reach the same block-markup
- * parser.
+ * serialized PHP or JSON eventually reach the same block-markup parser.
  */
 class StructuredDataUrlRewriter
 {
@@ -190,10 +188,11 @@ class StructuredDataUrlRewriter
             }
         }
 
-        // Base64 decoding is temporarily disabled for performance.
-        // The base64 transport layer in SQL is already handled by
-        // Base64ValueScanner in SqlStatementRewriter — this block
-        // was for base64-within-base64 nesting which is rare in practice.
+        // Intentionally do not decode arbitrary base64-looking values here.
+        // SQL FROM_BASE64 payloads are handled by SqlStatementRewriter using
+        // Base64ValueScanner, where the statement structure identifies which
+        // values are encoded. At this layer base64 detection would be a broad
+        // heuristic over every decoded string value.
 
         $rewritten_value = $this->rewrite_urls($value, $content_type);
         $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
