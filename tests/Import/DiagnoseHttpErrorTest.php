@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Transport\HttpErrorDiagnoser;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -15,22 +16,12 @@ class DiagnoseHttpErrorTest extends TestCase
 {
     private function diagnose(int $http_code, ?string $body = null, ?string $redirect_url = null, bool $has_secret = true): array
     {
-        $client = new ImportClient(
-            'http://example.com',
-            sys_get_temp_dir(),
-            sys_get_temp_dir(),
+        return HttpErrorDiagnoser::diagnose(
+            $http_code,
+            $body,
+            $redirect_url,
+            $has_secret,
         );
-
-        $ref = new \ReflectionClass(ImportClient::class);
-
-        if ($has_secret) {
-            $hmac = $ref->getProperty('hmac_client');
-            // Any truthy object — we just need it non-null.
-            $hmac->setValue($client, new \stdClass());
-        }
-
-        $method = $ref->getMethod('diagnose_http_error');
-        return $method->invoke($client, $http_code, $body, $redirect_url);
     }
 
     // ── Redirects ────────────────────────────────────────────────

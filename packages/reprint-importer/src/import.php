@@ -66,7 +66,7 @@ require_once __DIR__ . '/lib/pull/class-pull.php';
 
 // Load reusable importer modules.
 require_once __DIR__ . '/lib/protocol/load.php';
-require_once __DIR__ . '/lib/transport/curl-options.php';
+require_once __DIR__ . '/lib/transport/load.php';
 require_once __DIR__ . '/lib/sqlite/functions.php';
 require_once __DIR__ . '/lib/tuning/class-adaptive-tuner.php';
 require_once __DIR__ . '/lib/version.php';
