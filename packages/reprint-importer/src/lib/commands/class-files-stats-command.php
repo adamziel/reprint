@@ -2,6 +2,7 @@
 
 namespace Reprint\Importer\Command;
 
+use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\ImportClient;
 
 final class FilesStatsCommand extends ImportCommand
@@ -37,7 +38,7 @@ final class FilesStatsCommand extends ImportCommand
                     fseek($handle, $fetch_offset);
                 }
                 while (($line = fgets($handle)) !== false) {
-                    $path = $this->read_download_list_path($line);
+                    $path = DownloadList::read_path($line);
                     if ($path === null) {
                         continue;
                     }
@@ -59,7 +60,7 @@ final class FilesStatsCommand extends ImportCommand
                     fseek($handle, $skipped_offset);
                 }
                 while (($line = fgets($handle)) !== false) {
-                    $path = $this->read_download_list_path($line);
+                    $path = DownloadList::read_path($line);
                     if ($path === null) {
                         continue;
                     }
@@ -89,26 +90,5 @@ final class FilesStatsCommand extends ImportCommand
         }
 
         return new FilesStatsResult($stats);
-    }
-
-    private function read_download_list_path(string $line): ?string
-    {
-        $line = trim($line);
-        if ($line === "") {
-            return null;
-        }
-
-        $data = json_decode($line, true);
-        if (!is_array($data)) {
-            return null;
-        }
-
-        $path_encoded = $data["path"] ?? "";
-        $path = base64_decode($path_encoded, true);
-        if ($path === false || $path === "") {
-            return null;
-        }
-
-        return $path;
     }
 }

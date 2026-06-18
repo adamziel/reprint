@@ -51,6 +51,7 @@ require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 require_once __DIR__ . '/lib/support/load.php';
 require_once __DIR__ . '/lib/filesystem/load.php';
 require_once __DIR__ . '/lib/index/load.php';
+require_once __DIR__ . '/lib/file-sync/load.php';
 require_once __DIR__ . '/lib/sql/load.php';
 
 // Session paths and state persistence helpers.

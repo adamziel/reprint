@@ -12,6 +12,7 @@ use RuntimeException;
 use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightCommand;
+use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Index\IndexFileSorter;
@@ -4897,26 +4898,7 @@ class ImportClient
      */
     private function count_newlines(string $file, int $up_to_byte = -1): int
     {
-        if (!is_file($file)) {
-            return 0;
-        }
-        $handle = fopen($file, "r");
-        if (!$handle) {
-            return 0;
-        }
-        $count = 0;
-        $chunk_size = 65536;
-        $remaining = $up_to_byte >= 0 ? $up_to_byte : PHP_INT_MAX;
-        while ($remaining > 0 && !feof($handle)) {
-            $data = fread($handle, min($chunk_size, $remaining));
-            if ($data === false || $data === '') {
-                break;
-            }
-            $count += substr_count($data, "\n");
-            $remaining -= strlen($data);
-        }
-        fclose($handle);
-        return $count;
+        return DownloadList::count_lines($file, $up_to_byte);
     }
 
     private function download_files_from_list(
@@ -5026,125 +5008,11 @@ class ImportClient
      */
     private function prepare_fetch_batch(string $list_file, int $offset): ?array
     {
-        // Cap the batch at 80% of the server's max request size so the
-        // multipart envelope and headers still fit.  Floor at 256 KB so
-        // tiny max_request values don't produce degenerate single-file batches.
-        $max_request = $this->get_max_request_bytes();
-        $limit = (int) max(256 * 1024, $max_request * 0.8);
-
-        // Open the download list and seek to where the previous batch left off.
-        $handle = fopen($list_file, "r");
-        if (!$handle) {
-            throw new RuntimeException("Failed to open download list file");
-        }
-
-        if ($offset > 0) {
-            fseek($handle, $offset);
-        }
-
-        // The output is a temp file containing a JSON array of paths, e.g.
-        // ["/wp-content/uploads/photo.jpg","/wp-content/themes/flavor/style.css"]
-        // This file gets uploaded as the request body for the file_fetch endpoint.
-        $tmp = tempnam(sys_get_temp_dir(), "file-fetch-");
-        if ($tmp === false) {
-            fclose($handle);
-            throw new RuntimeException("Failed to create fetch batch file");
-        }
-        $out = fopen($tmp, "w");
-        if (!$out) {
-            fclose($handle);
-            @unlink($tmp);
-            throw new RuntimeException("Failed to open fetch batch file");
-        }
-
-        // Read lines from the download list (one JSON entry per line) and
-        // accumulate them into the JSON array until we approach the size limit.
-        // The download list supports two formats:
-        //   - A bare JSON string:   "/path/to/file"
-        //   - A JSON object:        {"path": "<base64-encoded path>"}
-        $bytes = 0;
-        $entries = 0;
-        $first = true;
-        fwrite($out, "[");
-        $bytes = 1;
-        while (true) {
-            // Remember where this line started so we can rewind if the
-            // entry doesn't fit in the current batch.
-            $line_start = ftell($handle);
-            $line = fgets($handle);
-            if ($line === false) {
-                break;
-            }
-            $line = trim($line);
-            if ($line === "") {
-                continue;
-            }
-            $decoded = json_decode($line, true);
-            if (is_string($decoded)) {
-                $path = $decoded;
-            } elseif (is_array($decoded) && isset($decoded["path"])) {
-                $path = base64_decode($decoded["path"]);
-            } else {
-                continue;
-            }
-            if (!is_string($path) || $path === "") {
-                continue;
-            }
-            $json_path = json_encode(
-                $path,
-                JSON_UNESCAPED_SLASHES,
-            );
-            if ($json_path === false) {
-                continue;
-            }
-            $prefix = $first ? "" : ",";
-            $chunk = $prefix . $json_path;
-            $needed = $bytes + strlen($chunk) + 1; // +1 for closing bracket
-
-            // Would this entry push us over the limit?
-            if (!$first && $needed > $limit) {
-                // Rewind to the start of this line so the next batch picks it up.
-                fseek($handle, $line_start);
-                break;
-            }
-            if ($first && $needed > $limit) {
-                // Still write at least one entry even if it exceeds the limit,
-                // otherwise we'd loop forever on a single long path.
-                if (fwrite($out, $chunk) === false) {
-                    throw new RuntimeException("Failed to write fetch batch file (disk full?)");
-                }
-                $bytes += strlen($chunk);
-                $entries++;
-                $first = false;
-                break;
-            }
-
-            if (fwrite($out, $chunk) === false) {
-                throw new RuntimeException("Failed to write fetch batch file (disk full?)");
-            }
-            $bytes += strlen($chunk);
-            $entries++;
-            $first = false;
-        }
-        fwrite($out, "]");
-        $bytes += 1;
-
-        $next_offset = ftell($handle);
-        fclose($handle);
-        fclose($out);
-
-        // An empty batch (just "[]") means we've exhausted the download list.
-        if ($bytes <= 2) {
-            @unlink($tmp);
-            return null;
-        }
-
-        return [
-            "file" => $tmp,
-            "offset" => $offset,
-            "next_offset" => $next_offset,
-            "entries" => $entries,
-        ];
+        return DownloadList::prepare_batch(
+            $list_file,
+            $offset,
+            $this->get_max_request_bytes(),
+        );
     }
 
     /**
@@ -5204,13 +5072,7 @@ class ImportClient
      */
     private function append_download_list(string $path, $handle): void
     {
-        $line = json_encode(
-            ["path" => base64_encode($path)],
-            JSON_UNESCAPED_SLASHES,
-        );
-        if ($line !== false) {
-            fwrite($handle, $line . "\n");
-        }
+        DownloadList::append_path($handle, $path);
         $this->audit_log("Added to the download list: {$path}", false);
     }
 
