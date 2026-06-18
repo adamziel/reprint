@@ -15,6 +15,7 @@ use Reprint\Importer\Command\PreflightCommand;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
+use Reprint\Importer\FileSync\FileChunkApplier;
 use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Index\IndexFileSorter;
@@ -6020,194 +6021,67 @@ class ImportClient
         array $chunk,
         StreamingContext $context
     ): void {
-        $headers = $chunk["headers"];
-        $raw_header = $headers["x-file-path"] ?? "";
-        $path = base64_decode($raw_header, true);
-        $is_first = ($headers["x-first-chunk"] ?? "0") === "1";
-        $is_last = ($headers["x-last-chunk"] ?? "0") === "1";
-
-        if ($path === false || $path === "") {
-            if ($raw_header !== "") {
-                $this->audit_log(
-                    "Warning: base64_decode failed for x-file-path header: " .
-                        substr($raw_header, 0, 100),
-                    true,
-                );
-            }
-            return;
-        }
-
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
-
-        // Open file on first chunk
-        if ($is_first) {
-            // Reset skip flag for each new file
-            $context->skip_current_file = false;
-
-            if (
-                (file_exists($local_path) || is_link($local_path)) &&
-                (!is_file($local_path) || is_link($local_path))
-            ) {
-                if (
-                    !$this->remove_local_path_without_following_symlinks(
-                        $local_path
-                    )
-                ) {
-                    throw new RuntimeException(
-                        "Failed to replace path with file: {$path}",
-                    );
-                }
-            }
-
-            // Check if file exists locally
-            $exists_locally = file_exists($local_path);
-            $local_size = $exists_locally ? filesize($local_path) : 0;
-            $file_size = (int) ($headers["x-file-size"] ?? 0);
-
-            // Log file import with useful context
-            $this->audit_log(
-                sprintf(
-                    "File: %s (remote_size=%d, ctime=%d, local_exists=%s, local_size=%d)",
-                    $path,
-                    $file_size,
-                    (int) ($headers["x-file-ctime"] ?? 0),
-                    $exists_locally ? "yes" : "no",
-                    $local_size,
-                ),
-                false,
-            );
-
-            $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
-            $files_total = $this->download_list_total;
-            $file_fraction = ($files_total !== null && $files_total > 0)
-                ? $files_done / $files_total
-                : null;
-            $file_progress_message = $files_total !== null
-                ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
-                : sprintf("Downloading — %s files", number_format($files_done));
-            $this->progress->show_progress_line($file_progress_message, $file_fraction);
-            $progress_record = [
-                "type" => "file_progress",
-                "files_done" => $files_done,
-                "path" => $path,
-                "size" => $file_size,
-                "message" => $file_progress_message,
-            ];
-            if ($this->download_list_total !== null) {
-                $progress_record["files_total"] = $this->download_list_total;
-            }
-            $this->output_progress($progress_record);
-        }
-
-        // Skip body/close for files being preserved
-        if ($context->skip_current_file) {
-            return;
-        }
-
-        // Open file handle on first chunk
-        if ($is_first) {
-            // Close previous file if any
-            if ($context->file_handle) {
-                fclose($context->file_handle);
-                if ($context->file_ctime && $context->file_path) {
-                    touch($context->file_path, $context->file_ctime);
-                }
-            }
-
-            // Create parent directory if needed
-            $dir = dirname($local_path);
-            if (!is_dir($dir)) {
-                // Check if any component of the path exists as a file and remove it
-                try {
-                    $this->ensure_directory_path($dir);
-                } catch (PreserveLocalSkipException $e) {
-                    $context->skip_current_file = true;
-                    $this->audit_log($e->getMessage(), true);
-                    $this->emit_skip_progress($path);
-                    return;
-                }
-            }
-
-            // Open new file
-            $context->file_handle = fopen($local_path, "wb");
-            if (!$context->file_handle) {
-                $error = error_get_last();
-                throw new RuntimeException(
-                    "Failed to open file for writing: {$local_path}\n" .
-                        "Parent directory: {$dir}\n" .
-                        "Directory exists: " .
-                        (is_dir($dir) ? "yes" : "no") .
-                        "\n" .
-                        "Error: " .
-                        ($error["message"] ?? "unknown"),
-                );
-            }
-            $context->file_path = $local_path;
-            $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
-            $context->file_bytes_written = 0;  // Reset byte counter for new file
-        }
-
-        // Write body data if present
-        if (isset($chunk["body"]) && $chunk["body"] !== "") {
-            if ($context->file_handle) {
-                $data = $chunk["body"];
-                $bytes = fwrite($context->file_handle, $data);
-                if ($bytes === false || $bytes !== strlen($data)) {
-                    throw new RuntimeException(
-                        "Write failed for {$context->file_path}: wrote " .
-                        ($bytes === false ? "0" : $bytes) . "/" . strlen($data) .
-                        " bytes (disk full?)"
-                    );
-                }
-                $context->file_bytes_written += $bytes;
-            }
-        }
-
-        // Close on last chunk
-        if ($is_last && $context->file_handle) {
-            fclose($context->file_handle);
-
-            // Set file modification time
-            if ($context->file_ctime && $context->file_path) {
-                touch($context->file_path, $context->file_ctime);
-            }
-
-            // Index update (JSON lines)
-            $file_size = (int) ($headers["x-file-size"] ?? 0);
-            $final_size = file_exists($context->file_path)
-                ? filesize($context->file_path)
-                : 0;
-
-            $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
-
-            if ($context->file_ctime && !$file_changed) {
-                $this->upsert_index_entry(
-                    $path,
-                    $context->file_ctime,
-                    $file_size,
-                    "file",
-                );
-                $this->files_imported++; // Count completed files only
+        $applier = new FileChunkApplier(
+            $this->files_imported,
+            function (string $path): string {
+                return $this->remote_path_to_local_path_within_import_root($path);
+            },
+            function (string $local_path): bool {
+                return $this->remove_local_path_without_following_symlinks($local_path);
+            },
+            function (string $dir): void {
+                $this->ensure_directory_path($dir);
+            },
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (string $path, int $file_size): void {
+                $this->show_file_fetch_progress($path, $file_size);
+            },
+            function (string $path): void {
+                $this->emit_skip_progress($path);
+            },
+            function (string $path, int $ctime, int $size, string $type): void {
+                $this->upsert_index_entry($path, $ctime, $size, $type);
+            },
+            function (string $path): void {
                 $this->clear_volatile_file($path);
-                $this->audit_log(
-                    sprintf("  Indexed (wrote %d bytes)", $final_size),
-                    false,
-                );
-            } elseif ($file_changed) {
-                $this->audit_log(
-                    "  File changed during stream; index not updated",
-                    true,
-                );
-            }
+            },
+            function (?string $path, ?int $bytes): void {
+                $this->state["current_file"] = $path;
+                $this->state["current_file_bytes"] = $bytes;
+            },
+        );
 
-            $context->file_handle = null;
-            $context->file_path = null;
-            $context->file_ctime = null;
-            $context->file_bytes_written = 0;
-            // Clear crash recovery tracking - file is complete
-            $this->state["current_file"] = null;
-            $this->state["current_file_bytes"] = null;
+        try {
+            $applier->handle($chunk, $context);
+        } finally {
+            $this->files_imported = $applier->files_imported();
         }
+    }
+
+    private function show_file_fetch_progress(string $path, int $file_size): void
+    {
+        $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
+        $files_total = $this->download_list_total;
+        $file_fraction = ($files_total !== null && $files_total > 0)
+            ? $files_done / $files_total
+            : null;
+        $file_progress_message = $files_total !== null
+            ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
+            : sprintf("Downloading — %s files", number_format($files_done));
+        $this->progress->show_progress_line($file_progress_message, $file_fraction);
+        $progress_record = [
+            "type" => "file_progress",
+            "files_done" => $files_done,
+            "path" => $path,
+            "size" => $file_size,
+            "message" => $file_progress_message,
+        ];
+        if ($this->download_list_total !== null) {
+            $progress_record["files_total"] = $this->download_list_total;
+        }
+        $this->output_progress($progress_record);
     }
 
     /**
