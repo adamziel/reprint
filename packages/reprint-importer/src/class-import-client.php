@@ -40,7 +40,7 @@ use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Session\VolatileFileTracker;
 use Reprint\Importer\Sql\ActivePluginDeactivator;
 use Reprint\Importer\Sql\DbApplyQueryExecutor;
-use Reprint\Importer\Sql\DbIndexResponseHandler;
+use Reprint\Importer\Sql\DbIndexDownloader;
 use Reprint\Importer\Sql\SqlResponseHandler;
 use Reprint\Importer\Sql\SqlStatementInspector;
 use Reprint\Importer\Sql\TargetDatabaseConnectionFactory;
@@ -4156,134 +4156,58 @@ class ImportClient
      */
     private function download_db_index(): void
     {
-        $cursor = $this->state["cursor"] ?? null;
-        $complete = false;
         $tables_file = $this->state_dir . "/db-tables.jsonl";
 
-        $stats = $this->state["db_index"] ?? [];
-        $tables_written = (int) ($stats["tables"] ?? 0);
-        $rows_estimated = (int) ($stats["rows_estimated"] ?? 0);
-        $bytes_written = (int) ($stats["bytes"] ?? 0);
-
-        if ($bytes_written > 0 && file_exists($tables_file)) {
-            $actual_size = filesize($tables_file);
-            if ($actual_size > $bytes_written) {
-                $this->audit_log(
-                    sprintf(
-                        "CRASH RECOVERY | Truncating db-tables.jsonl from %d to %d bytes",
-                        $actual_size,
-                        $bytes_written,
-                    ),
-                    true,
+        (new DbIndexDownloader(
+            function (string $endpoint, ?string $cursor, array $params): string {
+                return $this->build_url($endpoint, $cursor, $params);
+            },
+            function (
+                string $url,
+                ?string $cursor,
+                StreamingContext $context,
+                ?array $post_data,
+                string $phase
+            ): void {
+                $this->fetch_streaming($url, $cursor, $context, $post_data, $phase);
+            },
+            function (): bool {
+                return $this->shutdown_requested;
+            },
+            function (array $chunk, string $phase): void {
+                $this->handle_progress($chunk, $phase);
+            },
+            function (
+                array $chunk,
+                string $phase,
+                StreamingContext $context
+            ): void {
+                $this->handle_error_chunk($chunk, $phase, $context);
+            },
+            function (array $progress): void {
+                $this->output_progress($progress, true);
+            },
+            function (
+                string $phase,
+                ?string $cursor_before,
+                ?string $cursor_after
+            ): void {
+                $this->assert_can_retry_consecutive_timeout(
+                    $phase,
+                    $cursor_before,
+                    $cursor_after,
                 );
-                $handle = fopen($tables_file, "r+");
-                if ($handle) {
-                    ftruncate($handle, $bytes_written);
-                    fclose($handle);
-                }
-            }
-        }
-
-        $handle = fopen($tables_file, $cursor ? "a" : "w");
-        if (!$handle) {
-            throw new RuntimeException("Cannot open table stats file: {$tables_file}");
-        }
-
-        try {
-            while (!$complete) {
-                $params = [
-                    "tables_per_batch" => 1000,
-                ];
-                $url = $this->build_url("db_index", $cursor, $params);
-
-                $context = new StreamingContext();
-                $response_handler = new DbIndexResponseHandler(
-                    $handle,
-                    $cursor,
-                    $context,
-                    $tables_written,
-                    $rows_estimated,
-                    $bytes_written,
-                    function (): bool {
-                        return $this->shutdown_requested;
-                    },
-                    function (array $chunk, string $phase): void {
-                        $this->handle_progress($chunk, $phase);
-                    },
-                    function (
-                        array $chunk,
-                        string $phase,
-                        StreamingContext $context
-                    ): void {
-                        $this->handle_error_chunk($chunk, $phase, $context);
-                    },
-                    function (array $progress): void {
-                        $this->output_progress($progress, true);
-                    },
-                );
-                $context->on_chunk = [$response_handler, "handle"];
-
-                $cursor_before = $cursor;
-                $request_start = microtime(true);
-                try {
-                    $this->fetch_streaming(
-                        $url,
-                        $cursor,
-                        $context,
-                        null,
-                        "db_index",
-                    );
-                } catch (CurlTimeoutException $e) {
-                    $cursor = $response_handler->cursor();
-                    $complete = $response_handler->complete();
-                    $tables_written = $response_handler->tables_written();
-                    $rows_estimated = $response_handler->rows_estimated();
-                    $bytes_written = $response_handler->bytes_written();
-
-                    // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
-                    // with no progress, so we don't retry forever.
-                    $this->assert_can_retry_consecutive_timeout("db_index", $cursor_before, $cursor);
-                    fflush($handle);
-                    $this->state["cursor"] = $cursor;
-                    $this->state["db_index"] = [
-                        "file" => $tables_file,
-                        "tables" => $tables_written,
-                        "rows_estimated" => $rows_estimated,
-                        "bytes" => $bytes_written,
-                        "updated_at" => time(),
-                    ];
-                    $this->state["status"] = "partial";
-                    $this->save_state($this->state);
-                    return;
-                }
-                $cursor = $response_handler->cursor();
-                $complete = $response_handler->complete();
-                $tables_written = $response_handler->tables_written();
-                $rows_estimated = $response_handler->rows_estimated();
-                $bytes_written = $response_handler->bytes_written();
-
-                $this->state["consecutive_timeouts"] = 0;
-                $wall_time = microtime(true) - $request_start;
-                $this->finalize_tuned_request(
-                    "db_index",
-                    $wall_time,
-                    $context->response_stats ?? [],
-                );
-
-                fflush($handle);
-                $this->state["cursor"] = $cursor;
-                $this->state["db_index"] = [
-                    "file" => $tables_file,
-                    "tables" => $tables_written,
-                    "rows_estimated" => $rows_estimated,
-                    "bytes" => $bytes_written,
-                    "updated_at" => time(),
-                ];
-                $this->save_state($this->state);
-            }
-        } finally {
-            fclose($handle);
-        }
+            },
+            function (string $endpoint, float $wall_time, array $stats): void {
+                $this->finalize_tuned_request($endpoint, $wall_time, $stats);
+            },
+            function (array $state): void {
+                $this->save_state($state);
+            },
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+        ))->download($this->state, $tables_file);
     }
 
 
