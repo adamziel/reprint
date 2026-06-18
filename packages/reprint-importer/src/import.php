@@ -5402,6 +5402,11 @@ class ImportClient
                     $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
                 }
 
+                // Drop editor locks captured from the remote. On the imported
+                // copy they only produce phantom "X is currently editing"
+                // badges.
+                $this->strip_ephemeral_edit_locks($pdo);
+
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
@@ -5492,6 +5497,49 @@ class ImportClient
         }
 
         $pdo->exec($executed_query);
+    }
+
+    /**
+     * Delete ephemeral editor locks from the imported database.
+     *
+     * `_edit_lock` postmeta is runtime state (it records that a user has a
+     * post open in the editor right now) that the SQL dump captures
+     * verbatim. On the imported copy the lock is meaningless: the remote
+     * editing session has no relationship to the local site, but WordPress
+     * still renders it as a "X is currently editing" badge for up to 150
+     * seconds after the captured timestamp whenever the pull ran while a
+     * post was open remotely. WordPress regenerates the meta locally on the
+     * next edit, and core's own WXR exporter skips it too, so deleting it
+     * loses nothing.
+     *
+     * Runs at the end of db-apply while the PDO connection is open. A dump
+     * without a postmeta table is tolerated.
+     */
+    private function strip_ephemeral_edit_locks(PDO $pdo): void
+    {
+        $preflight_data = $this->state["preflight"]["data"] ?? [];
+        $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
+        // Quote the table name to prevent SQL injection from a crafted prefix.
+        $postmeta_table = '`' . str_replace('`', '``', $table_prefix . 'postmeta') . '`';
+
+        try {
+            $deleted = $pdo->exec(
+                "DELETE FROM {$postmeta_table} WHERE meta_key = '_edit_lock'"
+            );
+            // The SQL dump runs with AUTOCOMMIT=0 and issues a final COMMIT,
+            // but autocommit stays off, so our DELETE needs an explicit COMMIT.
+            $pdo->exec('COMMIT');
+            if ($deleted) {
+                $this->audit_log(
+                    "DB-APPLY | removed {$deleted} _edit_lock meta(s) (ephemeral editor locks)",
+                );
+            }
+        } catch (\Throwable $e) {
+            // A dump without the postmeta table isn't an error.
+            $this->audit_log(
+                "DB-APPLY | skipped _edit_lock cleanup: " . $e->getMessage(),
+            );
+        }
     }
 
     /**
