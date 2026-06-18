@@ -1,3 +1,5 @@
 <?php
 
 require_once __DIR__ . '/class-index-line-parser.php';
+require_once __DIR__ . '/class-index-store.php';
+require_once __DIR__ . '/class-index-file-sorter.php';
