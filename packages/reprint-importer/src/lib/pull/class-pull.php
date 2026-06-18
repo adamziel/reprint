@@ -421,6 +421,9 @@ class Pull
 
         foreach ([
             $state_dir . "/db.sql",
+            // The --sql-output=mysql crash-recovery buffer; a stale one would
+            // otherwise be replayed into the target on the next db-pull.
+            $state_dir . "/.sql-buffer",
             $state_dir . "/.import-domains.json",
             $state_dir . "/.import-remote-index.jsonl",
             $state_dir . "/.import-download-list.jsonl",

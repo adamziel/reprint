@@ -218,4 +218,35 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('none', $state["filter"]);
         $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
     }
+
+    public function testRepullClearsStaleSqlBuffer(): void
+    {
+        // Complete an initial pull so the next run takes the delta re-pull path.
+        ob_start();
+        $this->makeClient(false)->run([
+            "command" => "pull",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        // Simulate a leftover --sql-output=mysql crash-recovery buffer from the
+        // prior run. Replaying it into the target on a re-pull would corrupt
+        // the freshly re-downloaded database.
+        $sqlBuffer = $this->stateDir . '/.sql-buffer';
+        file_put_contents($sqlBuffer, "INSERT INTO wp_posts VALUES (1);\n");
+        $this->assertFileExists($sqlBuffer);
+
+        // Re-pull: prepare_repull() must delete the stale buffer.
+        ob_start();
+        $this->makeClient(false)->run([
+            "command" => "pull",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        $this->assertFileDoesNotExist(
+            $sqlBuffer,
+            'A delta re-pull must clear the stale .sql-buffer crash-recovery file',
+        );
+    }
 }
