@@ -42,6 +42,7 @@ use Reprint\Importer\Sql\DbIndexResponseHandler;
 use Reprint\Importer\Sql\SqlResponseHandler;
 use Reprint\Importer\Sql\SqlStatementInspector;
 use Reprint\Importer\Support\ByteFormatter;
+use Reprint\Importer\Support\PathDisplayFormatter;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 use Reprint\Importer\Transport\HttpErrorDiagnoser;
 use Reprint\Importer\Transport\HttpRequestBuilder;
@@ -543,7 +544,7 @@ class ImportClient
      */
     private function emit_skip_progress(string $path): void
     {
-        $this->progress->show_progress_line("[skip] " . $this->display_path($path));
+        $this->progress->show_progress_line("[skip] " . PathDisplayFormatter::short_path($path));
         $this->output_progress([
             "type" => "skip",
             "path" => $path,
@@ -3103,21 +3104,6 @@ class ImportClient
     }
 
     /**
-     * Compute a relative path from $from to $to.
-     *
-     * Both paths must be absolute. Returns a relative path such that
-     * a symlink at $from/$name pointing to the result will resolve to $to.
-     *
-     * Example: relative_path('/a/b/c', '/a/d/e') => '../../d/e'
-     */
-    private static function compute_relative_path(
-        string $from,
-        string $to
-    ): string {
-        return PathUtils::relative_path($from, $to);
-    }
-
-    /**
      * Create or refresh a symlink at $target pointing to $source.
      * Handles conflicts (existing non-symlinks) based on --force flag.
      *
@@ -3157,7 +3143,7 @@ class ImportClient
             );
         }
 
-        $link_value = self::compute_relative_path($target_parent_real, $abs_source);
+        $link_value = PathUtils::relative_path($target_parent_real, $abs_source);
 
         // If the target is already a symlink, check if it resolves to the
         // same place. Refresh if not, skip if already correct.
@@ -5469,7 +5455,7 @@ class ImportClient
         }
 
         $mapped_absolute = $root . $normalized_target;
-        $mapped_relative = self::compute_relative_path(
+        $mapped_relative = PathUtils::relative_path(
             dirname($local_path),
             $mapped_absolute
         );
@@ -5638,20 +5624,6 @@ class ImportClient
             $progress_record["files_total"] = $this->download_list_total;
         }
         $this->output_progress($progress_record);
-    }
-
-    /**
-     * Build a short display path for progress messages: strip leading slash,
-     * truncate from the left when too long.
-     */
-    private function display_path(string $path): string
-    {
-        $rel = ltrim($path, "/");
-        $max = 60;
-        if (strlen($rel) > $max) {
-            $rel = "..." . substr($rel, -($max - 3));
-        }
-        return $rel;
     }
 
     /**

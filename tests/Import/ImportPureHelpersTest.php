@@ -7,6 +7,7 @@ use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Sql\SqlStatementInspector;
 use Reprint\Importer\Support\ByteFormatter;
+use Reprint\Importer\Support\PathDisplayFormatter;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -33,6 +34,15 @@ final class ImportPureHelpersTest extends TestCase
         $this->assertSame('../../d/e', PathUtils::relative_path('/a/b/c', '/a/d/e'));
         $this->assertSame('e', PathUtils::relative_path('/a/d', '/a/d/e'));
         $this->assertSame('.', PathUtils::relative_path('/a/d/e', '/a/d/e'));
+    }
+
+    public function testPathDisplayFormatterShortensLongPaths(): void
+    {
+        $this->assertSame('wp-content/file.txt', PathDisplayFormatter::short_path('/wp-content/file.txt'));
+        $this->assertSame(
+            '...ong-directory-name/file.txt',
+            PathDisplayFormatter::short_path('/wp-content/uploads/long-directory-name/file.txt', 30),
+        );
     }
 
     public function testIndexLineParserParsesJsonlEntry(): void
