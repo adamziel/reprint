@@ -61,6 +61,10 @@ require_once __DIR__ . '/lib/session/load.php';
 require_once __DIR__ . '/lib/commands/load.php';
 require_once __DIR__ . '/lib/pull/commands/load.php';
 
+// Input and output adapters for CLI, web, and embedded consumers.
+require_once __DIR__ . '/lib/input/load.php';
+require_once __DIR__ . '/lib/output/load.php';
+
 // Pull command — orchestrates the lower-level commands into a pipeline
 require_once __DIR__ . '/lib/pull/class-pull.php';
 

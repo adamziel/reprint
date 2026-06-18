@@ -11,6 +11,7 @@ use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightAssertCommand;
 use Reprint\Importer\Command\PreflightAssertResult;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Output\BufferedImportOutput;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -104,6 +105,21 @@ class ImportCommandResultTest extends TestCase
         $this->assertSame('', $output);
         $this->assertInstanceOf(FilesStatsResult::class, $result);
         $this->assertSame('files-stats', $result->type());
+    }
+
+    public function testImportClientCanReportThroughBufferedOutput(): void
+    {
+        $output = new BufferedImportOutput();
+        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot, $output);
+
+        ob_start();
+        $client->output_progress(['status' => 'starting', 'message' => 'Starting import'], true);
+        $stdout = ob_get_clean();
+
+        $this->assertSame('', $stdout);
+        $this->assertSame([
+            ['status' => 'starting', 'message' => 'Starting import'],
+        ], $output->events());
     }
 
     public function testPreflightAssertHandlesMalformedPreflightDataWithoutFormatting(): void

@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;
 
@@ -129,15 +130,13 @@ class CurlTimeoutRecoveryTest extends TestCase
             'http://fake.url',
             $this->stateDir,
             $this->fs_root,
+            new BufferedImportOutput(),
         );
         $reflection = new \ReflectionClass(ImportClient::class);
 
         $stateProperty = $reflection->getProperty('state');
         $loadState = $reflection->getMethod('load_state');
         $stateProperty->setValue($client, $loadState->invoke($client));
-
-        $ttyProperty = $reflection->getProperty('is_tty');
-        $ttyProperty->setValue($client, false);
 
         return [$client, $reflection];
     }

@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\StreamingContext;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -61,7 +62,12 @@ class FilesSyncStateTest extends TestCase
 
     private function makeClient(): ImportClient
     {
-        return new ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
+        return new ImportClient(
+            'http://fake.url',
+            $this->stateDir,
+            $this->fs_root,
+            new BufferedImportOutput(),
+        );
     }
 
     /**
@@ -140,9 +146,6 @@ class FilesSyncStateTest extends TestCase
         $stateProperty = $reflection->getProperty('state');
         $loadState = $reflection->getMethod('load_state');
         $stateProperty->setValue($client, $loadState->invoke($client));
-
-        $ttyProperty = $reflection->getProperty('is_tty');
-        $ttyProperty->setValue($client, false);
 
         $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
         $behaviorProp->setValue($client, 'preserve-local');

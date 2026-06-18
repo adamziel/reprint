@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\MultipartStreamParser;
 use Reprint\Importer\Protocol\StreamingContext;
 
@@ -34,9 +35,9 @@ class FileBodyStreamingTest extends TestCase
             'http://fake.url',
             $this->tempDir . '/state',
             $this->tempDir . '/fs-root',
+            new BufferedImportOutput(),
         );
         $reflection = new \ReflectionClass($client);
-        $reflection->getProperty('is_tty')->setValue($client, true);
         $reflection->getProperty('state')->setValue($client, []);
 
         $handleFileChunk = $reflection->getMethod('handle_file_chunk');
@@ -106,9 +107,9 @@ class FileBodyStreamingTest extends TestCase
             'http://fake.url',
             $this->tempDir . '/state',
             $this->tempDir . '/fs-root',
+            new BufferedImportOutput(),
         );
         $reflection = new \ReflectionClass($client);
-        $reflection->getProperty('is_tty')->setValue($client, true);
         $reflection->getProperty('state')->setValue($client, []);
 
         $body = str_repeat('0123456789abcdef', 64 * 1024); // 1 MiB

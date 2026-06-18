@@ -26,6 +26,9 @@ use Reprint\Importer\Index\IndexFileSorter;
 use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Index\IndexPathPrefixMatcher;
 use Reprint\Importer\Index\IndexStore;
+use Reprint\Importer\Input\ImportRunRequest;
+use Reprint\Importer\Output\CliImportOutput;
+use Reprint\Importer\Output\ImportOutput;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\MultipartStreamParser;
 use Reprint\Importer\Protocol\StreamingContext;
@@ -46,7 +49,6 @@ use Reprint\Importer\Sql\TargetDatabaseConnectionFactory;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\Support\PathDisplayFormatter;
 use Reprint\Importer\TargetRuntime\RuntimeConfigurationApplier;
-use Reprint\Importer\TerminalProgress\TerminalProgress;
 use Reprint\Importer\Transport\HttpErrorDiagnoser;
 use Reprint\Importer\Transport\HttpRequestBuilder;
 use Reprint\Importer\Tuning\AdaptiveTuner;
@@ -89,15 +91,6 @@ class ImportClient
     private $state_file;
 
     /**
-     * @var float Monotonic timestamp of last progress JSON line emitted.
-     * Used with $progress_throttle to rate-limit stdout progress output.
-     */
-    private $last_progress_output = 0;
-
-    /** @var float Minimum seconds between progress output lines. */
-    private $progress_throttle = 1.0;
-
-    /**
      * @var string Path to .import-index.jsonl — sorted JSON-lines file tracking every
      * imported file's path, ctime, size, and type. Used for delta detection: on the next
      * sync we compare this against the remote index to decide what to download or delete.
@@ -124,12 +117,6 @@ class ImportClient
 
     /** @var string Path to .import-volatile-files.json — files the server marks as frequently-changing. */
     private $volatile_files_file;
-
-    /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
-    private $verbose_mode = false;
-
-    /** @var bool Whether stdout is a TTY (enables interactive progress display). */
-    private $is_tty;
 
     /** @var int Running count of files imported in the current invocation. */
     private $files_imported = 0;
@@ -233,8 +220,8 @@ class ImportClient
     /** @var string|null Machine-readable error code from the last diagnose_http_error() call. */
     public $last_error_code = null;
 
-    /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
-    private TerminalProgress $progress;
+    /** @var ImportOutput Reports progress, status, and human-readable output. */
+    private ImportOutput $output;
 
     /** @var Pull Orchestrates the pull command pipeline. */
     private Pull $pull;
@@ -272,20 +259,23 @@ class ImportClient
     /** @var string|null MySQL database for --sql-output=mysql. */
     private $mysql_database;
 
-    /** @var resource File descriptor for progress output — STDOUT normally, STDERR in stdout mode. */
-    private $progress_fd;
-
     /**
      * @var int Process exit code. 0 = import complete, 2 = partial progress
      * (caller should invoke again to continue).
      */
     public $exit_code = 0;
 
-    public function __construct(string $remote_url, string $state_dir, string $fs_root)
+    public function __construct(
+        string $remote_url,
+        string $state_dir,
+        string $fs_root,
+        ?ImportOutput $output = null
+    )
     {
         $this->remote_url = rtrim($remote_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->fs_root = rtrim($fs_root, "/");
+        $this->output = $output ?? CliImportOutput::create_default();
         $this->paths = new ImportPaths($this->state_dir);
         $this->state_path_codec = new StatePathCodec(function (string $message): void {
             $this->audit_log($message, true);
@@ -299,12 +289,7 @@ class ImportClient
         $this->volatile_files_file = $this->paths->volatile_files_file();
         $this->status_file = $this->paths->status_file();
 
-        // Detect TTY for progress display. In stdout mode this is re-evaluated
-        // against STDERR in run() once we know the output mode.
-        $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
-        $this->progress_fd = STDOUT;
-        $this->progress = new TerminalProgress($this->is_tty, $this->progress_fd);
-        $this->pull = new Pull($this, $this->progress);
+        $this->pull = new Pull($this, $this->output->progress());
         $this->index_store = new IndexStore(
             $this->index_file,
             $this->paths->index_updates_file(),
@@ -317,7 +302,7 @@ class ImportClient
                 $this->audit_log($message);
             },
             function (): void {
-                $this->progress->tick_spinner();
+                $this->output->tick_spinner();
             },
         );
 
@@ -395,8 +380,8 @@ class ImportClient
         file_put_contents($this->audit_log, $log_line, FILE_APPEND);
 
         // Output to console if verbose mode or if explicitly requested
-        if ($to_console && $this->verbose_mode) {
-            fwrite($this->progress_fd, $log_line);
+        if ($to_console && $this->output->is_verbose()) {
+            $this->output->write($log_line);
         }
     }
 
@@ -514,14 +499,14 @@ class ImportClient
             true,
         );
 
-        $this->progress->show_lifecycle_line("{$count} file(s) changed during sync and need re-syncing (run files-pull again):\n");
+        $this->output->show_lifecycle_line("{$count} file(s) changed during sync and need re-syncing (run files-pull again):\n");
 
         foreach ($files as $path => $changes) {
             $suffix = $changes >= 3
                 ? " (changed {$changes} times — may be too volatile to sync)"
                 : " (changed {$changes} time" . ($changes > 1 ? "s" : "") . ")";
             $this->audit_log("  VOLATILE FILE | path={$path} | count={$changes}");
-            $this->progress->show_lifecycle_line("  {$path}{$suffix}\n");
+            $this->output->show_lifecycle_line("  {$path}{$suffix}\n");
         }
 
         $this->output_progress(
@@ -540,7 +525,7 @@ class ImportClient
      */
     private function emit_skip_progress(string $path): void
     {
-        $this->progress->show_progress_line("[skip] " . PathDisplayFormatter::short_path($path));
+        $this->output->show_progress_line("[skip] " . PathDisplayFormatter::short_path($path));
         $this->output_progress([
             "type" => "skip",
             "path" => $path,
@@ -560,44 +545,35 @@ class ImportClient
      */
     public function run(array $options = []): ?ImportCommandResult
     {
-        $this->verbose_mode = $options["verbose"] ?? false;
-        $this->progress->set_verbose_mode($this->verbose_mode);
-        $this->follow_symlinks = $options["follow_symlinks"] ?? true;
-        $this->include_caches = $options["include_caches"] ?? false;
-        $this->extra_directory = $options["extra_directory"] ?? null;
-        if (isset($options["fs_root_nonempty_behavior"])) {
-            $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
-            if (!in_array($this->fs_root_nonempty_behavior, ['error', 'preserve-local'])) {
-                throw new InvalidArgumentException(
-                    "Invalid --on-fs-root-nonempty value: {$this->fs_root_nonempty_behavior}. " .
-                        "Valid values: error, preserve-local",
-                );
-            }
-        }
-        $command = ImportCommands::normalize_name($options["command"] ?? null);
+        return $this->run_request(ImportRunRequest::from_options($options));
+    }
 
-        $abort = $options["abort"] ?? false;
-        $this->pipeline_step = $options["pipeline_step"] ?? null;
-        $this->pipeline_steps = $options["pipeline_steps"] ?? null;
+    /**
+     * Run the import process using a validated request.
+     */
+    public function run_request(ImportRunRequest $request): ?ImportCommandResult
+    {
+        $options = $request->options();
+        $command = $request->command();
+        $command_runner = $request->command_runner();
 
-        if (!$command) {
-            throw new InvalidArgumentException(
-                "Command is required. Valid commands: " . ImportCommands::valid_names_message(),
-            );
+        $this->output->set_verbose_mode($request->verbose());
+        $this->follow_symlinks = $request->value("follow_symlinks", true);
+        $this->include_caches = $request->value("include_caches", false);
+        $this->extra_directory = $request->value("extra_directory");
+        if ($request->has("fs_root_nonempty_behavior")) {
+            $this->fs_root_nonempty_behavior = $request->value("fs_root_nonempty_behavior");
         }
 
-        $command_runner = ImportCommands::get($command);
-        if ($command_runner === null) {
-            throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: " . ImportCommands::valid_names_message(),
-            );
-        }
+        $abort = $request->abort();
+        $this->pipeline_step = $request->value("pipeline_step");
+        $this->pipeline_steps = $request->value("pipeline_steps");
 
         $this->state = $this->load_state();
 
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
-        if (isset($options["follow_symlinks"])) {
+        if ($request->has("follow_symlinks")) {
             $this->state["follow_symlinks"] = $this->follow_symlinks;
             $this->save_state($this->state);
         } elseif (isset($this->state["follow_symlinks"])) {
@@ -607,7 +583,7 @@ class ImportClient
         // Persist fs_root_nonempty_behavior in state so it survives across invocations.
         // 'preserve-local' preserves existing local files instead of overwriting
         // them, and gracefully skips non-writable directories.
-        if (isset($options["fs_root_nonempty_behavior"])) {
+        if ($request->has("fs_root_nonempty_behavior")) {
             $this->state["fs_root_nonempty_behavior"] = $this->fs_root_nonempty_behavior;
             $this->save_state($this->state);
         } else {
@@ -623,17 +599,8 @@ class ImportClient
         // Changing the filter mid-flight is not allowed.  The user must either
         // start fresh (--abort) or finish the current sync before switching.
         // The one valid transition is: essential-files (complete) → skipped-earlier.
-        if (isset($options["filter"])) {
-            $next = $options["filter"];
-            if (
-                $command === "pull" &&
-                !in_array($next, ["none", "essential-files"], true)
-            ) {
-                throw new InvalidArgumentException(
-                    "Invalid --filter value for pull: {$next}. " .
-                        "Valid values: none, essential-files",
-                );
-            }
+        if ($request->has("filter")) {
+            $next = $request->value("filter");
             $prev = $this->state["filter"] ?? null;
             $status = $this->state["status"] ?? null;
             $is_mid_flight = $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
@@ -653,8 +620,8 @@ class ImportClient
         // Persist max_allowed_packet in state so it survives across invocations.
         // The client sends this to the server so SQL statements are capped to a
         // size the client's MySQL instance can actually import.
-        if (isset($options["max_allowed_packet"])) {
-            $this->max_allowed_packet = (int) $options["max_allowed_packet"];
+        if ($request->has("max_allowed_packet")) {
+            $this->max_allowed_packet = (int) $request->value("max_allowed_packet");
             $this->state["max_allowed_packet"] = $this->max_allowed_packet;
             $this->save_state($this->state);
         } elseif (isset($this->state["max_allowed_packet"])) {
@@ -664,13 +631,8 @@ class ImportClient
         // Persist sql_output_mode in state so it survives across resume invocations.
         // The password is NOT persisted — it must be supplied on every run (or via
         // the MYSQL_PASSWORD environment variable).
-        if (isset($options["sql_output"])) {
-            $mode = $options["sql_output"];
-            if (!in_array($mode, ["file", "stdout", "mysql"])) {
-                throw new InvalidArgumentException(
-                    "Invalid --sql-output mode: {$mode}. Valid modes: file, stdout, mysql",
-                );
-            }
+        if ($request->has("sql_output")) {
+            $mode = $request->value("sql_output");
             $this->sql_output_mode = $mode;
             $this->state["sql_output"] = $mode;
         } elseif (isset($this->state["sql_output"])) {
@@ -680,36 +642,33 @@ class ImportClient
         // In stdout mode, SQL goes to STDOUT, so progress/status output must
         // go to STDERR to keep the streams separate.
         if ($this->sql_output_mode === "stdout") {
-            $this->progress_fd = STDERR;
-            $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
-            $this->progress->set_progress_fd($this->progress_fd);
-            $this->progress->set_is_tty($this->is_tty);
+            $this->output->use_error_stream();
         }
 
         // MySQL connection parameters for --sql-output=mysql.
-        if (isset($options["mysql_host"])) {
-            $this->mysql_host = $options["mysql_host"];
+        if ($request->has("mysql_host")) {
+            $this->mysql_host = $request->value("mysql_host");
             $this->state["mysql_host"] = $this->mysql_host;
         } elseif (isset($this->state["mysql_host"])) {
             $this->mysql_host = $this->state["mysql_host"];
         }
 
-        if (isset($options["mysql_port"])) {
-            $this->mysql_port = (int) $options["mysql_port"];
+        if ($request->has("mysql_port")) {
+            $this->mysql_port = (int) $request->value("mysql_port");
             $this->state["mysql_port"] = $this->mysql_port;
         } elseif (isset($this->state["mysql_port"])) {
             $this->mysql_port = (int) $this->state["mysql_port"];
         }
 
-        if (isset($options["mysql_user"])) {
-            $this->mysql_user = $options["mysql_user"];
+        if ($request->has("mysql_user")) {
+            $this->mysql_user = $request->value("mysql_user");
             $this->state["mysql_user"] = $this->mysql_user;
         } elseif (isset($this->state["mysql_user"])) {
             $this->mysql_user = $this->state["mysql_user"];
         }
 
-        if (isset($options["mysql_database"])) {
-            $this->mysql_database = $options["mysql_database"];
+        if ($request->has("mysql_database")) {
+            $this->mysql_database = $request->value("mysql_database");
             $this->state["mysql_database"] = $this->mysql_database;
         } elseif (isset($this->state["mysql_database"])) {
             $this->mysql_database = $this->state["mysql_database"];
@@ -718,8 +677,8 @@ class ImportClient
         $this->save_state($this->state);
 
         // Password is never persisted — must be supplied each run or via env.
-        if (isset($options["mysql_password"])) {
-            $this->mysql_password = $options["mysql_password"];
+        if ($request->has("mysql_password")) {
+            $this->mysql_password = $request->value("mysql_password");
         } elseif (getenv("MYSQL_PASSWORD") !== false) {
             $this->mysql_password = getenv("MYSQL_PASSWORD");
         }
@@ -737,13 +696,13 @@ class ImportClient
         // When set, every outgoing HTTP request will include X-Auth-Signature,
         // X-Auth-Nonce, and X-Auth-Timestamp headers so the export API can verify
         // the caller without a SECRET_KEY in the URL.
-        if (!empty($options["secret"])) {
+        if (!empty($request->value("secret"))) {
             if (!class_exists(\Reprint\Exporter\Site_Export_HMAC_Client::class)) {
                 throw new RuntimeException(
                     'Streaming exporter runtime not found. Run composer install before using --secret.'
                 );
             }
-            $this->hmac_client = new \Reprint\Exporter\Site_Export_HMAC_Client($options["secret"]);
+            $this->hmac_client = new \Reprint\Exporter\Site_Export_HMAC_Client($request->value("secret"));
         }
 
         if ($abort) {
@@ -934,7 +893,7 @@ class ImportClient
                 break;
         }
 
-        $this->progress->show_lifecycle_line("State cleared for {$command}.\n");
+        $this->output->show_lifecycle_line("State cleared for {$command}.\n");
 
         $this->output_progress(["status" => "aborted", "message" => "State cleared for {$command}."]);
     }
@@ -1183,7 +1142,7 @@ class ImportClient
                     "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
                     true,
                 );
-                $this->progress->show_lifecycle_line("Downloading previously skipped files\n");
+                $this->output->show_lifecycle_line("Downloading previously skipped files\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
@@ -1199,7 +1158,7 @@ class ImportClient
             }
 
             $index_size = $this->index_count();
-            $this->progress->clear_progress_line();
+            $this->output->clear_progress_line();
 
             $skipped_note = $has_skipped
                 ? " (some files were skipped — re-run with --filter=skipped-earlier to download them)"
@@ -1209,11 +1168,11 @@ class ImportClient
                 true,
             );
 
-            $this->progress->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
+            $this->output->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
             if ($has_skipped) {
-                $this->progress->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
+                $this->output->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
             } else {
-                $this->progress->show_lifecycle_line("To re-sync, run with --abort first to clear state.\n");
+                $this->output->show_lifecycle_line("To re-sync, run with --abort first to clear state.\n");
             }
             $this->output_progress([
                 "type" => "lifecycle",
@@ -1269,9 +1228,9 @@ class ImportClient
                 true,
             );
 
-            $this->progress->show_lifecycle_line("Resuming files-pull\n");
-            $this->progress->show_lifecycle_line("  Stage: {$stage}\n");
-            $this->progress->show_lifecycle_line("  Already indexed: {$index_size} files\n");
+            $this->output->show_lifecycle_line("Resuming files-pull\n");
+            $this->output->show_lifecycle_line("  Stage: {$stage}\n");
+            $this->output->show_lifecycle_line("  Already indexed: {$index_size} files\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -1309,9 +1268,9 @@ class ImportClient
                     true,
                 );
 
-                $this->progress->show_lifecycle_line("Starting files-pull (delta)\n");
-                $this->progress->show_lifecycle_line("  Index contains: {$index_size} files\n");
-                $this->progress->show_lifecycle_line("  Stage: index\n");
+                $this->output->show_lifecycle_line("Starting files-pull (delta)\n");
+                $this->output->show_lifecycle_line("  Index contains: {$index_size} files\n");
+                $this->output->show_lifecycle_line("  Stage: index\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
@@ -1326,7 +1285,7 @@ class ImportClient
                     true,
                 );
 
-                $this->progress->show_lifecycle_line("Starting files-pull\n");
+                $this->output->show_lifecycle_line("Starting files-pull\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
@@ -1350,7 +1309,7 @@ class ImportClient
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
-        $this->progress->clear_progress_line();
+        $this->output->clear_progress_line();
         $index_size = $this->index_count();
         $label = $is_delta ? "files-pull (delta)" : "files-pull";
 
@@ -1359,8 +1318,8 @@ class ImportClient
             true,
         );
 
-        $this->progress->show_lifecycle_line("{$label} complete: {$index_size} files indexed\n");
-        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
+        $this->output->show_lifecycle_line("{$label} complete: {$index_size} files indexed\n");
+        $this->output->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
@@ -1446,16 +1405,16 @@ class ImportClient
 
             // In pull mode, finalize the scanning line with a checkmark
             // and start the download progress on a fresh line.
-            if ($has_downloads && $this->progress->is_quiet_lifecycle()) {
+            if ($has_downloads && $this->output->is_quiet_lifecycle()) {
                 $green = "\033[32m";
                 $dim = "\033[2m";
                 $r = "\033[0m";
                 $scanned = number_format($this->index_entries_counted);
-                $this->progress->clear_progress_line();
-                $this->progress->print_line("  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
+                $this->output->clear_progress_line();
+                $this->output->print_line("  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
                 $total = $this->count_newlines($this->download_list_file);
-                $this->progress->set_active_label(null);
-                $this->progress->show_progress_line(
+                $this->output->set_active_label(null);
+                $this->output->show_progress_line(
                     "Downloading — 0 / " . number_format($total) . " files",
                     0.0
                 );
@@ -1584,7 +1543,7 @@ class ImportClient
             $this->state["stage"] = "index";
             $this->save_state($this->state);
             $this->audit_log("START files-index", true);
-            $this->progress->show_lifecycle_line("Starting files-index\n");
+            $this->output->show_lifecycle_line("Starting files-index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
@@ -1600,7 +1559,7 @@ class ImportClient
                 ),
                 true,
             );
-            $this->progress->show_lifecycle_line("Resuming files-index\n");
+            $this->output->show_lifecycle_line("Resuming files-index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -1669,9 +1628,9 @@ class ImportClient
             true,
         );
 
-        $this->progress->show_lifecycle_line("files-index complete: {$count} entries indexed\n");
-        $this->progress->show_lifecycle_line("Remote index: {$this->remote_index_file}\n");
-        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
+        $this->output->show_lifecycle_line("files-index complete: {$count} entries indexed\n");
+        $this->output->show_lifecycle_line("Remote index: {$this->remote_index_file}\n");
+        $this->output->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
@@ -1730,7 +1689,7 @@ class ImportClient
                 "FOLLOW SYMLINK | indexing target directory: {$dir}",
                 true,
             );
-            $this->progress->show_lifecycle_line("Following symlink target: {$dir}\n");
+            $this->output->show_lifecycle_line("Following symlink target: {$dir}\n");
             $this->output_progress([
                 "type" => "symlink_follow",
                 "directory" => $dir,
@@ -1766,7 +1725,7 @@ class ImportClient
                                 substr($msg, 0, 200),
                             true,
                         );
-                        $this->progress->show_lifecycle_line("  Skipped (server rejected): {$dir}\n");
+                        $this->output->show_lifecycle_line("  Skipped (server rejected): {$dir}\n");
                         $this->output_progress([
                             "type" => "symlink_follow_rejected",
                             "directory" => $dir,
@@ -2079,7 +2038,7 @@ class ImportClient
                 true,
             );
 
-            $this->progress->show_lifecycle_line("Resuming db-pull (stage: {$stage})\n");
+            $this->output->show_lifecycle_line("Resuming db-pull (stage: {$stage})\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -2099,7 +2058,7 @@ class ImportClient
 
             $this->audit_log("START db-pull", true);
 
-            $this->progress->show_lifecycle_line("Starting db-pull\n");
+            $this->output->show_lifecycle_line("Starting db-pull\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
@@ -2158,15 +2117,15 @@ class ImportClient
 
         $this->audit_log("db-pull complete", true);
 
-        $this->progress->show_lifecycle_line("db-pull complete\n");
+        $this->output->show_lifecycle_line("db-pull complete\n");
         if ($this->sql_output_mode === "file") {
-            $this->progress->show_lifecycle_line("SQL file: {$sql_file}\n");
+            $this->output->show_lifecycle_line("SQL file: {$sql_file}\n");
         } elseif ($this->sql_output_mode === "stdout") {
-            $this->progress->show_lifecycle_line("SQL written to stdout\n");
+            $this->output->show_lifecycle_line("SQL written to stdout\n");
         } elseif ($this->sql_output_mode === "mysql") {
-            $this->progress->show_lifecycle_line("SQL imported into {$this->mysql_database}\n");
+            $this->output->show_lifecycle_line("SQL imported into {$this->mysql_database}\n");
         }
-        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
+        $this->output->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $db_sync_complete = [
             "type" => "lifecycle",
             "event" => "complete",
@@ -2258,17 +2217,18 @@ class ImportClient
             "message" => "apply-runtime complete (runtime: " . $result["runtime"] . ")",
         ]);
 
-        if (!$this->progress->is_quiet_lifecycle()) {
-            fwrite(STDERR, "\n");
-            fwrite(STDERR, "Runtime: " . $result["runtime"] . "\n");
-            fwrite(STDERR, "Source host: " . $result["webhost"] . "\n");
+        if (!$this->output->is_quiet_lifecycle()) {
+            $summary = "\n";
+            $summary .= "Runtime: " . $result["runtime"] . "\n";
+            $summary .= "Source host: " . $result["webhost"] . "\n";
             if ($result["target_engine"] !== null) {
-                fwrite(STDERR, "Target database: " . $result["target_engine"] . "\n");
+                $summary .= "Target database: " . $result["target_engine"] . "\n";
             }
-            fwrite(STDERR, "\n");
+            $summary .= "\n";
             foreach ($result["summary"] as $line) {
-                fwrite(STDERR, "{$line}\n");
+                $summary .= "{$line}\n";
             }
+            $this->output->write_error($summary);
         }
     }
 
@@ -2336,8 +2296,8 @@ class ImportClient
             },
         );
 
-        if (!$this->progress->is_quiet_lifecycle()) {
-            fwrite($this->progress_fd, json_encode($result) . "\n");
+        if (!$this->output->is_quiet_lifecycle()) {
+            $this->output->write(json_encode($result) . "\n");
         }
         $this->output_progress(array_merge(["type" => "flat_docroot_complete"], $result));
     }
@@ -2377,7 +2337,7 @@ class ImportClient
                 }
                 $target_path = $this->get_filesystem_root_path() . $content_dir . '/database/.ht.sqlite';
                 $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
-                $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
+                $this->output->show_lifecycle_line("SQLite path: {$target_path}\n");
             }
 
             // Persist target database configuration for apply-runtime.
@@ -2467,12 +2427,12 @@ class ImportClient
                     sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
                     false,
                 );
-                $this->progress->show_lifecycle_line("Discovered domains in SQL dump:\n");
+                $this->output->show_lifecycle_line("Discovered domains in SQL dump:\n");
                 foreach ($domains as $domain) {
                     $mapped = isset($url_mapping[$domain]) ? " => {$url_mapping[$domain]}" : " (not mapped)";
-                    $this->progress->show_lifecycle_line("  {$domain}{$mapped}\n");
+                    $this->output->show_lifecycle_line("  {$domain}{$mapped}\n");
                 }
-                $this->progress->show_lifecycle_line("\n");
+                $this->output->show_lifecycle_line("\n");
                 $domain_map = [];
                 foreach ($domains as $domain) {
                     $domain_map[$domain] = $url_mapping[$domain] ?? null;
@@ -2509,7 +2469,7 @@ class ImportClient
                 ),
                 true,
             );
-            $this->progress->show_lifecycle_line("Resuming db-apply (executed: {$statements_executed} statements)\n");
+            $this->output->show_lifecycle_line("Resuming db-apply (executed: {$statements_executed} statements)\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -2530,7 +2490,7 @@ class ImportClient
             $bytes_read = 0;
 
             $this->audit_log("START db-apply", true);
-            $this->progress->show_lifecycle_line("Starting db-apply\n");
+            $this->output->show_lifecycle_line("Starting db-apply\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
@@ -2603,16 +2563,16 @@ class ImportClient
                 $this->output_progress($progress, $force);
             },
             function (string $message, ?float $fraction): void {
-                $this->progress->show_progress_line($message, $fraction);
+                $this->output->show_progress_line($message, $fraction);
             },
             function (string $message): void {
-                $this->progress->show_lifecycle_line($message);
+                $this->output->show_lifecycle_line($message);
             },
             function (): void {
-                $this->progress->clear_progress_line();
+                $this->output->clear_progress_line();
             },
             function (): bool {
-                return $this->progress->is_quiet_lifecycle();
+                return $this->output->is_quiet_lifecycle();
             },
             function (PDO $pdo): array {
                 return $this->deactivate_host_plugins($pdo);
@@ -2738,7 +2698,7 @@ class ImportClient
             $this->save_state($this->state);
 
             $this->audit_log("START db-index", true);
-            $this->progress->show_lifecycle_line("Starting db-index\n");
+            $this->output->show_lifecycle_line("Starting db-index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
@@ -2753,7 +2713,7 @@ class ImportClient
                 ),
                 true,
             );
-            $this->progress->show_lifecycle_line("Resuming db-index\n");
+            $this->output->show_lifecycle_line("Resuming db-index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
@@ -2776,9 +2736,9 @@ class ImportClient
             true,
         );
 
-        $this->progress->show_lifecycle_line("db-index complete: {$tables} tables\n");
-        $this->progress->show_lifecycle_line("Table stats: {$tables_file}\n");
-        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
+        $this->output->show_lifecycle_line("db-index complete: {$tables} tables\n");
+        $this->output->show_lifecycle_line("Table stats: {$tables_file}\n");
+        $this->output->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
@@ -2961,14 +2921,14 @@ class ImportClient
     private function show_remote_index_progress(int $entries_counted): void
     {
         if ($entries_counted > 0) {
-            $this->progress->show_progress_line(
+            $this->output->show_progress_line(
                 "Scanning remote files — " .
                 number_format($entries_counted) . " scanned"
             );
             return;
         }
 
-        $this->progress->show_progress_line("Scanning remote files");
+        $this->output->show_progress_line("Scanning remote files");
     }
 
     /**
@@ -2995,7 +2955,7 @@ class ImportClient
                 return $this->shutdown_requested;
             },
             function (): void {
-                $this->progress->tick_spinner();
+                $this->output->tick_spinner();
             },
             function (string $message, bool $to_console = true): void {
                 $this->audit_log($message, $to_console);
@@ -3257,7 +3217,7 @@ class ImportClient
                 if ($est_is_useful) {
                     $sql_progress .= " / " . $this->format_bytes($db_bytes_est);
                 }
-                $this->progress->show_progress_line($sql_progress, $sql_fraction);
+                $this->output->show_progress_line($sql_progress, $sql_fraction);
             },
             function (array $chunk, string $phase): void {
                 $this->handle_progress($chunk, $phase);
@@ -3675,7 +3635,7 @@ class ImportClient
         $file_progress_message = $files_total !== null
             ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
             : sprintf("Downloading — %s files", number_format($files_done));
-        $this->progress->show_progress_line($file_progress_message, $file_fraction);
+        $this->output->show_progress_line($file_progress_message, $file_fraction);
         $progress_record = [
             "type" => "file_progress",
             "files_done" => $files_done,
@@ -3884,7 +3844,7 @@ class ImportClient
         }
 
         $error_progress_message = "Remote error: {$error_type} " . ($path !== "" ? $path : "");
-        $this->progress->show_progress_line($error_progress_message);
+        $this->output->show_progress_line($error_progress_message);
         $this->output_progress(
             [
                 "type" => "error",
@@ -4229,7 +4189,7 @@ class ImportClient
             CURLOPT_NOPROGRESS => false,
             CURLOPT_PROGRESSFUNCTION =>
                 function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
-                    $this->progress->tick_spinner();
+                    $this->output->tick_spinner();
                     return 0;
                 },
         ]);
@@ -4408,7 +4368,7 @@ class ImportClient
             CURLOPT_NOPROGRESS => false,
             CURLOPT_PROGRESSFUNCTION =>
                 function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
-                    $this->progress->tick_spinner();
+                    $this->output->tick_spinner();
                     return 0; // 0 = continue, non-zero = abort
                 },
             CURLOPT_HTTPHEADER => $headers,
@@ -4526,15 +4486,12 @@ class ImportClient
                     $bytes_since_check = $bytes_received - $last_bytes_received;
                     $rate = $bytes_since_check / 5.0; // bytes per second
 
-                    // Only output progress_check in verbose mode or non-TTY
-                    if ($this->verbose_mode || !$this->is_tty) {
-                        fwrite($this->progress_fd, json_encode([
-                            "progress_check" => true,
-                            "bytes_received" => $bytes_received,
-                            "bytes_last_5s" => $bytes_since_check,
-                            "rate_bps" => round($rate),
-                        ]) . "\n");
-                    }
+                    $this->output_progress([
+                        "progress_check" => true,
+                        "bytes_received" => $bytes_received,
+                        "bytes_last_5s" => $bytes_since_check,
+                        "rate_bps" => round($rate),
+                    ], true);
 
                     // If we're receiving less than 1KB/s for 5 seconds, something is wrong
                     if ($bytes_since_check < 1024 && $bytes_received > 0) {
@@ -4550,22 +4507,20 @@ class ImportClient
 
                 // Output heartbeat every second (only in verbose/non-TTY mode)
                 if ($now - $last_heartbeat >= 1.0) {
-                    if ($this->verbose_mode || !$this->is_tty) {
-                        $heartbeat = [
-                            "heartbeat" => true,
-                            "bytes_received" => $bytes_received,
-                        ];
-                        // Only emit file counters when the download list has
-                        // been counted (fetch phase).  During indexing the
-                        // list doesn't exist yet and emitting files_done:0
-                        // without files_total confuses consumers.
-                        if ($this->download_list_total !== null) {
-                            $heartbeat["files_done"] =
-                                ($this->download_list_done ?? 0) + $this->files_imported;
-                            $heartbeat["files_total"] = $this->download_list_total;
-                        }
-                        fwrite($this->progress_fd, json_encode($heartbeat) . "\n");
+                    $heartbeat = [
+                        "heartbeat" => true,
+                        "bytes_received" => $bytes_received,
+                    ];
+                    // Only emit file counters when the download list has
+                    // been counted (fetch phase).  During indexing the
+                    // list doesn't exist yet and emitting files_done:0
+                    // without files_total confuses consumers.
+                    if ($this->download_list_total !== null) {
+                        $heartbeat["files_done"] =
+                            ($this->download_list_done ?? 0) + $this->files_imported;
+                        $heartbeat["files_total"] = $this->download_list_total;
                     }
+                    $this->output_progress($heartbeat, true);
                     $last_heartbeat = $now;
                 }
 
@@ -4795,7 +4750,7 @@ class ImportClient
         // Keep the spinner alive between curl requests. save_state is
         // called frequently during streaming operations, so this fills
         // the gaps where curl's progress callback doesn't fire.
-        $this->progress->tick_spinner();
+        $this->output->tick_spinner();
 
         if ($this->tuner instanceof AdaptiveTuner) {
             $state["tuning"] = [
@@ -4899,7 +4854,7 @@ class ImportClient
         $already_shutting_down = true;
 
         $this->shutdown_requested = true;
-        $this->progress->clear_progress_line();
+        $this->output->clear_progress_line();
 
         // Flush index updates so progress is not lost on interrupt
         try {
@@ -4927,10 +4882,10 @@ class ImportClient
             true,
         );
 
-        $this->progress->show_lifecycle_line("\nInterrupted - saving state...\n");
-        $this->progress->show_lifecycle_line("  Command: {$current_command}\n");
-        $this->progress->show_lifecycle_line("  Total files indexed: {$indexed}\n");
-        $this->progress->show_lifecycle_line("  Files completed in this run: {$files_imported}\n");
+        $this->output->show_lifecycle_line("\nInterrupted - saving state...\n");
+        $this->output->show_lifecycle_line("  Command: {$current_command}\n");
+        $this->output->show_lifecycle_line("  Total files indexed: {$indexed}\n");
+        $this->output->show_lifecycle_line("  Files completed in this run: {$files_imported}\n");
         $this->output_progress([
             "type" => "interrupt",
             "command" => $current_command,
@@ -4942,16 +4897,16 @@ class ImportClient
         // Save current state (with timeout protection)
         try {
             $this->save_state($this->state);
-            $this->progress->show_lifecycle_line("✓ State saved successfully\n");
+            $this->output->show_lifecycle_line("✓ State saved successfully\n");
             $this->output_progress([
                 "type" => "state_saved",
                 "message" => "State saved successfully",
             ], true);
         } catch (Exception $e) {
-            fwrite($this->progress_fd, "Warning: Failed to save state: " . $e->getMessage() . "\n");
+            $this->output->write("Warning: Failed to save state: " . $e->getMessage() . "\n");
         }
 
-        $this->progress->show_lifecycle_line("Exiting...\n");
+        $this->output->show_lifecycle_line("Exiting...\n");
 
         // CRITICAL: Use SIGKILL for immediate termination
         // Regular exit() hangs because PHP's shutdown sequence tries to
@@ -4975,32 +4930,10 @@ class ImportClient
      */
     public function output_progress(array $data, bool $force = false): void
     {
-        // In TTY non-verbose mode, suppress JSON output (use show_progress_line instead)
-        if ($this->is_tty && !$this->verbose_mode) {
-            return;
-        }
-
-        $now = microtime(true);
-
-        // Always output status changes
-        $is_status_change =
-            isset($data["status"]) &&
-            in_array($data["status"], ["starting", "complete", "error"]);
-
-        // Output if forced, status change, or throttle time passed
-        if (
-            $force ||
-            $is_status_change ||
-            $now - $this->last_progress_output >= $this->progress_throttle
-        ) {
-            $written = @fwrite($this->progress_fd, json_encode($data) . "\n");
-            if ($written === false) {
-                // Broken pipe — save state and exit cleanly
-                $this->save_state($this->state);
-                exit(0);
-            }
-            @flush();
-            $this->last_progress_output = $now;
+        if (!$this->output->emit_event($data, $force)) {
+            // Broken pipe — save state and exit cleanly.
+            $this->save_state($this->state);
+            exit(0);
         }
     }
 }

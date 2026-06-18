@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Output\BufferedImportOutput;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -58,7 +59,12 @@ class DownloadListProgressTest extends TestCase
 
     private function makeClient(): ImportClient
     {
-        return new ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
+        return new ImportClient(
+            'http://fake.url',
+            $this->stateDir,
+            $this->fs_root,
+            new BufferedImportOutput(),
+        );
     }
 
     /**
@@ -106,9 +112,6 @@ class DownloadListProgressTest extends TestCase
         $loadState = $reflection->getMethod('load_state');
         $stateProperty = $reflection->getProperty('state');
         $stateProperty->setValue($client, $loadState->invoke($client));
-
-        $ttyProperty = $reflection->getProperty('is_tty');
-        $ttyProperty->setValue($client, false);
 
         $filterProp = $reflection->getProperty('filter');
         $filterProp->setValue($client, $filter);
