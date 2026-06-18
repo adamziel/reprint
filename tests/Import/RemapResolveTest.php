@@ -225,13 +225,41 @@ class RemapResolveTest extends TestCase
         );
     }
 
-    public function testAbspathTokenWithoutPreflightThrows(): void
+    /**
+     * A token whose value preflight didn't determine yields a clear,
+     * preflight-naming error — from the single place that resolves tokens,
+     * regardless of which token it is.
+     *
+     * @dataProvider provideUnavailableTokens
+     */
+    public function testUnavailableTokenNamesPreflight(array $pathsUrls, string $source): void
     {
-        // :abspath: present but unavailable (no abspath, no wp_detect roots) gets
-        // a clear message naming preflight, not the generic path error.
-        $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
+        $c = $this->client($pathsUrls);
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('preflight');
-        $this->resolve($c, array(':abspath:/wp-admin', ':fs-root:/wp-admin'));
+        $this->resolve($c, array($source, ':fs-root:/x'));
+    }
+
+    public static function provideUnavailableTokens(): array
+    {
+        return array(
+            ':abspath: with no abspath in preflight' => array(
+                array('content_dir' => '/var/www/html/wp-content'),
+                ':abspath:/wp-admin',
+            ),
+            ':wp-content: with no content_dir in preflight' => array(
+                array(),
+                ':wp-content:',
+            ),
+        );
+    }
+
+    public function testRawOnlyRemapNeedsNoPreflightComponents(): void
+    {
+        // Raw absolute source + target reference no tokens, so they resolve even
+        // when preflight provided no component locations at all.
+        $c = $this->client(array());
+        $rules = $this->resolve($c, array('/var/www/site', $this->root . '/site'));
+        $this->assertSame($this->root . '/site', $rules['/var/www/site']);
     }
 }

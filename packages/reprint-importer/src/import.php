@@ -8343,12 +8343,11 @@ class ImportClient
     }
 
     /**
-     * The source site's real component locations from preflight data, as
-     * name => absolute path (abspath, content, plugins, mu-plugins, uploads).
-     * Each wp-content component falls back to its conventional spot under
-     * content_dir; one resolving outside content_dir is relocated and routed
-     * separately. abspath anchors any path outside wp-content and may be null
-     * if undetermined.
+     * The source site's real component locations from preflight data, as name => absolute path.
+     *
+     * A wp-content component falls back to its conventional spot under
+     * content_dir when that is known. This is a pure data-gatherer: any entry
+     * may be null when preflight lacks it (no content_dir, abspath undetermined).
      */
     private function wp_component_source_paths(): array
     {
@@ -8356,23 +8355,23 @@ class ImportClient
         $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
 
         $content_dir = $this->flatten_clean_path($paths["content_dir"] ?? null);
-        if ($content_dir === null) {
-            throw new InvalidArgumentException(
-                "Cannot resolve --remap: preflight has no content_dir. Run preflight first.",
-            );
-        }
 
         $abspath = $this->flatten_clean_path($paths["abspath"] ?? null);
         if ($abspath === null) {
             $abspath = $this->flatten_clean_path($preflight["wp_detect"]["roots"][0]["path"] ?? null);
         }
 
+        // Conventional spot under content_dir, but only when content_dir is known.
+        $maybe_under_content_dir = function (?string $dir, string $name) use ($content_dir): ?string {
+            return $dir ?? ($content_dir === null ? null : $content_dir . "/" . $name);
+        };
+
         return [
             "abspath" => $abspath,
             "content" => $content_dir,
-            "plugins" => $this->flatten_clean_path($paths["plugins_dir"] ?? null) ?? $content_dir . "/plugins",
-            "mu-plugins" => $this->flatten_clean_path($paths["mu_plugins_dir"] ?? null) ?? $content_dir . "/mu-plugins",
-            "uploads" => $this->flatten_clean_path($paths["uploads"]["basedir"] ?? null) ?? $content_dir . "/uploads",
+            "plugins" => $maybe_under_content_dir($this->flatten_clean_path($paths["plugins_dir"] ?? null), "plugins"),
+            "mu-plugins" => $maybe_under_content_dir($this->flatten_clean_path($paths["mu_plugins_dir"] ?? null), "mu-plugins"),
+            "uploads" => $maybe_under_content_dir($this->flatten_clean_path($paths["uploads"]["basedir"] ?? null), "uploads"),
         ];
     }
 
@@ -8398,8 +8397,7 @@ class ImportClient
 
             if ($value === null) {
                 throw new InvalidArgumentException(
-                    "Cannot resolve --remap token \":{$name}:\": not available in " .
-                        "preflight data. Run preflight first.",
+                    "Cannot resolve --remap token \":{$name}:\": not available in preflight data. Run preflight first."
                 );
             }
 
@@ -8470,6 +8468,9 @@ class ImportClient
      */
     private static function path_remainder_under(string $path, string $prefix): ?string
     {
+        $path = rtrim($path, "/");
+        $prefix = rtrim($prefix, "/");
+
         if ($path === $prefix) {
             return "";
         }

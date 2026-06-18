@@ -124,4 +124,29 @@ class RemapSeamTest extends TestCase
         ));
         $this->assertSame($this->root . '/var/www/html/wp-content/x.txt', $local);
     }
+
+    /**
+     * The path-prefix helper underpinning rule matching. A trailing slash on
+     * either argument is path-equivalent and must be ignored.
+     *
+     * @dataProvider providePathRemainderCases
+     */
+    public function testPathRemainderUnder(?string $expected, string $path, string $prefix): void
+    {
+        $c = $this->clientWithRules(array());
+        $this->assertSame($expected, $this->call($c, 'path_remainder_under', array($path, $prefix)));
+    }
+
+    public static function providePathRemainderCases(): array
+    {
+        return array(
+            'exact match' => array('', '/a/b', '/a/b'),
+            'under prefix' => array('/c', '/a/b/c', '/a/b'),
+            'not under (prefix is not a path boundary)' => array(null, '/a/bc', '/a/b'),
+            'trailing slash on prefix' => array('', '/home/adam', '/home/adam/'),
+            'trailing slash on path' => array('', '/home/adam/', '/home/adam'),
+            'trailing slash on both' => array('', '/home/adam/', '/home/adam/'),
+            'under, prefix has trailing slash' => array('/c', '/a/b/c', '/a/b/'),
+        );
+    }
 }
