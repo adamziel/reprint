@@ -12,10 +12,12 @@ use RuntimeException;
 use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightCommand;
+use Reprint\Importer\FileSync\DirectoryChunkApplier;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileChunkApplier;
+use Reprint\Importer\FileSync\SymlinkChunkApplier;
 use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Index\IndexFileSorter;
@@ -6301,74 +6303,32 @@ class ImportClient
      */
     private function handle_directory_chunk(array $chunk): void
     {
-        $headers = $chunk["headers"];
-        $raw_header = $headers["x-directory-path"] ?? "";
-        $path = base64_decode($raw_header, true);
-        $ctime = (int) ($headers["x-directory-ctime"] ?? 0);
-
-        if ($path === false || $path === "") {
-            if ($raw_header !== "") {
-                $this->audit_log(
-                    "Warning: base64_decode failed for x-directory-path header: " .
-                        substr($raw_header, 0, 100),
-                    true,
-                );
-            }
-            return;
-        }
-
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
-
-        // In preserve-local mode, if the directory already exists (as a real
-        // directory or via a symlink to a directory), keep it as-is.
-        // Also skip if any parent component is a symlink — we never create
-        // new directories through symlinked paths.
-        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (is_dir($local_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
+        $applier = new DirectoryChunkApplier(
+            $this->fs_root_nonempty_behavior === 'preserve-local',
+            function (string $path): string {
+                return $this->remote_path_to_local_path_within_import_root($path);
+            },
+            function (string $path): bool {
+                return $this->path_traverses_symlink($path);
+            },
+            function (string $local_path): bool {
+                return $this->remove_local_path_without_following_symlinks($local_path);
+            },
+            function (string $dir): void {
+                $this->ensure_directory_path($dir);
+            },
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (string $path): void {
                 $this->emit_skip_progress($path);
-                if ($ctime > 0) {
-                    $this->upsert_index_entry($path, $ctime, 0, "dir");
-                }
-                return;
-            }
-            if ($this->path_traverses_symlink($local_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$path}", true);
-                $this->emit_skip_progress($path);
-                if ($ctime > 0) {
-                    $this->upsert_index_entry($path, $ctime, 0, "dir");
-                }
-                return;
-            }
-        }
+            },
+            function (string $path, int $ctime, int $size, string $type): void {
+                $this->upsert_index_entry($path, $ctime, $size, $type);
+            },
+        );
 
-        if (
-            (file_exists($local_path) || is_link($local_path)) &&
-            (!is_dir($local_path) || is_link($local_path))
-        ) {
-            if (
-                !$this->remove_local_path_without_following_symlinks($local_path)
-            ) {
-                throw new RuntimeException(
-                    "Failed to replace path with directory: {$path}",
-                );
-            }
-        }
-
-        // Create directory, removing any files that block the path
-        try {
-            $this->ensure_directory_path($local_path);
-        } catch (PreserveLocalSkipException $e) {
-            $this->audit_log($e->getMessage(), true);
-            $this->emit_skip_progress($path);
-            return;
-        }
-
-        $this->audit_log("Directory: {$path}", false);
-
-        if ($ctime > 0) {
-            $this->upsert_index_entry($path, $ctime, 0, "dir");
-        }
+        $applier->handle($chunk);
     }
 
     /**
@@ -6385,149 +6345,45 @@ class ImportClient
      */
     private function handle_symlink_chunk(array $chunk): void
     {
-        $headers = $chunk["headers"];
-        $raw_path = $headers["x-symlink-path"] ?? "";
-        $path = base64_decode($raw_path, true);
-        $target = base64_decode($headers["x-symlink-target"] ?? "", true);
-        $ctime = (int) ($headers["x-symlink-ctime"] ?? 0);
-
-        // Skip if path or target is missing/empty
-        if ($path === false || $path === "" || $target === false || $target === "") {
-            if ($raw_path !== "" && ($path === false || $path === "")) {
-                $this->audit_log(
-                    "Warning: base64_decode failed for x-symlink-path header: " .
-                        substr($raw_path, 0, 100),
-                    true,
+        $applier = new SymlinkChunkApplier(
+            $this->fs_root_nonempty_behavior === 'preserve-local',
+            function (string $path): string {
+                return $this->remote_path_to_local_path_within_import_root($path);
+            },
+            function (string $path, string $local_path, string $target): string {
+                return $this->map_absolute_symlink_target_for_local_mirror(
+                    $path,
+                    $local_path,
+                    $target,
                 );
-            }
-            return;
-        }
-
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
-        $target_for_local = $this->map_absolute_symlink_target_for_local_mirror(
-            $path,
-            $local_path,
-            $target,
+            },
+            function (): string {
+                return $this->get_filesystem_root_path();
+            },
+            function (string $path): bool {
+                return $this->path_traverses_symlink($path);
+            },
+            function (string $local_path): bool {
+                return $this->remove_local_path_without_following_symlinks($local_path);
+            },
+            function (string $dir): void {
+                $this->ensure_directory_path($dir);
+            },
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (string $path): void {
+                $this->emit_skip_progress($path);
+            },
+            function (string $path, int $ctime, int $size, string $type): void {
+                $this->upsert_index_entry($path, $ctime, $size, $type);
+            },
+            function (array $progress): void {
+                $this->output_progress($progress);
+            },
         );
 
-        // In preserve-local mode, if something already exists at the symlink
-        // path, keep it — whether it's a file, directory, or another symlink.
-        // Also skip if any parent component is a symlink — we never create
-        // new content through symlinked directories.
-        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (file_exists($local_path) || is_link($local_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
-            if ($this->path_traverses_symlink(dirname($local_path))) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
-        }
-
-        // Validate that the symlink target doesn't escape the filesystem root.
-        $root = $this->get_filesystem_root_path();
-        try {
-            $this->assert_symlink_target_within_root(
-                dirname($local_path),
-                $target_for_local,
-                $root
-            );
-        } catch (RuntimeException $e) {
-            $this->audit_log($e->getMessage(), true);
-            $this->output_progress([
-                "type" => "symlink_error",
-                "path" => $path,
-                "target" => $target_for_local,
-                "error" => $e->getMessage(),
-                "message" => "Symlink error: {$path} -> {$target}",
-            ]);
-            return;
-        }
-
-        // Remove existing file/symlink if present
-        if (file_exists($local_path) || is_link($local_path)) {
-            if (
-                !$this->remove_local_path_without_following_symlinks($local_path)
-            ) {
-                $this->audit_log(
-                    "Failed to remove existing path for symlink: {$local_path}",
-                    true,
-                );
-                $this->output_progress([
-                    "type" => "symlink_error",
-                    "path" => $path,
-                    "target" => $target_for_local,
-                    "error" => "Failed to replace existing path",
-                    "message" => "Symlink error: {$path} -> {$target}",
-                ]);
-                return;
-            }
-        }
-
-        // Create parent directory
-        $dir = dirname($local_path);
-        if (!is_dir($dir)) {
-            try {
-                $this->ensure_directory_path($dir);
-            } catch (PreserveLocalSkipException $e) {
-                $this->audit_log($e->getMessage(), true);
-                $this->emit_skip_progress($path);
-                return;
-            } catch (RuntimeException $e) {
-                // Log error and skip this symlink
-                $this->audit_log(
-                    "Failed to create directory for symlink: {$dir}",
-                    true,
-                );
-                $this->output_progress([
-                    "type" => "symlink_error",
-                    "path" => $path,
-                    "target" => $target_for_local,
-                    "error" => "Failed to create parent directory",
-                    "message" => "Symlink error: {$path} -> {$target}",
-                ]);
-                return;
-            }
-        }
-
-        // Create symlink
-        $symlink_result = symlink($target_for_local, $local_path);
-        if (true !== $symlink_result || !is_link($local_path)) {
-            // Log error and skip this symlink
-            $this->audit_log(
-                "Failed to create symlink: {$local_path} -> {$target_for_local}",
-                true,
-            );
-            $this->output_progress([
-                "type" => "symlink_error",
-                "path" => $path,
-                "target" => $target_for_local,
-                "error" => "Failed to create symlink",
-                "message" => "Symlink error: {$path} -> {$target}",
-            ]);
-            return;
-        }
-
-        // Try to set the ctime (may not work on all systems)
-        if ($ctime > 0) {
-            @touch($local_path, $ctime);
-        }
-
-        $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
-
-        if ($ctime > 0) {
-            $this->upsert_index_entry($path, $ctime, 0, "link");
-        }
-
-        $this->output_progress([
-            "type" => "symlink",
-            "path" => $path,
-            "target" => $target_for_local,
-            "message" => "Symlink: {$path} -> {$target}",
-        ]);
+        $applier->handle($chunk);
     }
 
     /**
