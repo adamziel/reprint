@@ -32,6 +32,7 @@ use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Pull\Pull;
 use Reprint\Importer\QueryStream\WP_MySQL_FastQueryStream;
 use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
+use Reprint\Importer\Session\ExportDirectoryResolver;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
@@ -6045,25 +6046,12 @@ class ImportClient
      */
     private function get_root_directories_from_preflight(): array
     {
-        $roots = $this->state["preflight"]["data"]["wp_detect"]["roots"] ?? [];
-        if (!is_array($roots) || empty($roots)) {
-            return [];
-        }
-        $dirs = [];
-        foreach ($roots as $root) {
-            $path = $root["path"] ?? null;
-            if (is_string($path) && $path !== "") {
-                $dirs[] = rtrim($path, "/");
-            }
-        }
-        $dirs = array_values(array_unique($dirs));
-        if (!empty($dirs)) {
-            $this->audit_log(
-                "DIRECTORY AUTO-DETECT | from preflight wp_detect.roots: " .
-                    implode(", ", $dirs),
-            );
-        }
-        return $dirs;
+        return ExportDirectoryResolver::root_directories_from_preflight(
+            $this->state["preflight"]["data"] ?? [],
+            function (string $message): void {
+                $this->audit_log($message);
+            },
+        );
     }
 
     /**
@@ -6078,62 +6066,13 @@ class ImportClient
      */
     private function get_export_directories(): array
     {
-        $dirs = $this->get_root_directories_from_preflight();
-        if (empty($dirs)) {
-            return [];
-        }
-
-        $preflight = $this->state["preflight"]["data"] ?? [];
-
-        // Collect extra paths that may live outside the wp_detect roots.
-        $extra_paths = [
-            "document_root" => rtrim($preflight["runtime"]["document_root"] ?? "", "/"),
-            "content_dir" => rtrim($preflight["database"]["wp"]["paths_urls"]["content_dir"] ?? "", "/"),
-        ];
-
-        if ($this->extra_directory !== null && $this->extra_directory !== "") {
-            $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
-        }
-
-        // auto_prepend_file / auto_append_file may point to directories
-        // outside the WordPress roots (e.g. /scripts/env.php on Atomic).
-        // Include those directories so the remote exporter traverses them.
-        $ini_all = $preflight["runtime"]["ini_get_all"] ?? [];
-        foreach (["auto_prepend_file", "auto_append_file"] as $ini_key) {
-            $ini_path = $ini_all[$ini_key] ?? "";
-            if (is_string($ini_path) && $ini_path !== "" && $ini_path[0] === "/") {
-                $ini_dir = rtrim(dirname($ini_path), "/");
-                if ($ini_dir !== "" && $ini_dir !== "/") {
-                    $extra_paths[$ini_key] = $ini_dir;
-                }
-            }
-        }
-
-        foreach ($extra_paths as $label => $path) {
-            if ($path === "") {
-                continue;
-            }
-            // Check if this path is already covered by an existing dir.
-            $covered = false;
-            foreach ($dirs as $root) {
-                if (
-                    $path === $root ||
-                    str_starts_with($path, $root . "/")
-                ) {
-                    $covered = true;
-                    break;
-                }
-            }
-            if (!$covered) {
-                $dirs[] = $path;
-                $this->audit_log(
-                    "DIRECTORY AUTO-DETECT | adding {$label} outside roots: " .
-                        $path,
-                );
-            }
-        }
-
-        return $dirs;
+        return ExportDirectoryResolver::export_directories(
+            $this->state["preflight"]["data"] ?? [],
+            $this->extra_directory,
+            function (string $message): void {
+                $this->audit_log($message);
+            },
+        );
     }
 
     /**
