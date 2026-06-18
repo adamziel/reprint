@@ -18,6 +18,7 @@ use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileChunkApplier;
 use Reprint\Importer\FileSync\SymlinkChunkApplier;
+use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Index\IndexFileSorter;
@@ -25,7 +26,6 @@ use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\MultipartStreamParser;
-use Reprint\Importer\Protocol\PreserveLocalSkipException;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Pull\Pull;
 use Reprint\Importer\QueryStream\WP_MySQL_FastQueryStream;
@@ -4909,6 +4909,17 @@ class ImportClient
         $this->audit_log("Failed to delete: {$path}", true);
     }
 
+    private function local_filesystem(): LocalImportFilesystem
+    {
+        return new LocalImportFilesystem(
+            $this->fs_root,
+            $this->fs_root_nonempty_behavior,
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+        );
+    }
+
     /**
      * Remove a local path recursively without traversing symlink targets.
      *
@@ -4918,35 +4929,7 @@ class ImportClient
     private function remove_local_path_without_following_symlinks(
         string $local_path
     ): bool {
-        if (!file_exists($local_path) && !is_link($local_path)) {
-            return true;
-        }
-
-        if (is_link($local_path) || is_file($local_path)) {
-            return true === @unlink($local_path);
-        }
-
-        if (is_dir($local_path)) {
-            $entries = @scandir($local_path);
-            if ($entries === false) {
-                return false;
-            }
-            foreach ($entries as $entry) {
-                if ($entry === "." || $entry === "..") {
-                    continue;
-                }
-                if (
-                    !$this->remove_local_path_without_following_symlinks(
-                        $local_path . "/" . $entry
-                    )
-                ) {
-                    return false;
-                }
-            }
-            return true === @rmdir($local_path);
-        }
-
-        return true === @unlink($local_path);
+        return $this->local_filesystem()->remove_path_without_following_symlinks($local_path);
     }
 
     /**
@@ -5826,20 +5809,11 @@ class ImportClient
         string $target,
         string $root
     ): void {
-        if (str_starts_with($target, "/")) {
-            // Absolute target: must be under root
-            $resolved = normalize_path($target);
-        } else {
-            // Relative target: resolve against the symlink's parent directory
-            $resolved = normalize_path($symlink_parent_dir . "/" . $target);
-        }
-
-        if (!path_is_within_root($resolved, $root)) {
-            throw new RuntimeException(
-                "Security: symlink target escapes filesystem root: {$target} " .
-                "(resolves to {$resolved}, root is {$root})"
-            );
-        }
+        $this->local_filesystem()->assert_symlink_target_within_root(
+            $symlink_parent_dir,
+            $target,
+            $root,
+        );
     }
 
     /**
@@ -5966,22 +5940,7 @@ class ImportClient
      */
     private function get_filesystem_root_path(): string
     {
-        if (!is_dir($this->fs_root)) {
-            if (!mkdir($this->fs_root, 0755, true) && !is_dir($this->fs_root)) {
-                throw new RuntimeException(
-                    "Failed to create fs root directory: {$this->fs_root}",
-                );
-            }
-        }
-
-        $real = realpath($this->fs_root);
-        if ($real === false) {
-            throw new RuntimeException(
-                "Failed to resolve fs root path: {$this->fs_root}",
-            );
-        }
-
-        return $real;
+        return $this->local_filesystem()->filesystem_root_path();
     }
 
 
@@ -5996,8 +5955,7 @@ class ImportClient
     private function remote_path_to_local_path_within_import_root(
         string $path
     ): string {
-        assert_valid_path($path, "remote path");
-        return $this->get_filesystem_root_path() . $path;
+        return $this->local_filesystem()->local_path_for_remote_path($path);
     }
 
     /**
@@ -6139,26 +6097,7 @@ class ImportClient
 
     private function path_traverses_symlink(string $path): bool
     {
-        $root = $this->get_filesystem_root_path();
-        $relative = ltrim(substr($path, strlen($root)), "/");
-        if ($relative === "") {
-            return false;
-        }
-
-        $current = $root;
-        foreach (explode("/", $relative) as $part) {
-            if ($part === "") {
-                continue;
-            }
-            $current .= "/" . $part;
-            if (is_link($current)) {
-                return true;
-            }
-            if (!file_exists($current)) {
-                break;
-            }
-        }
-        return false;
+        return $this->local_filesystem()->path_traverses_symlink($path);
     }
 
     /**
@@ -6169,133 +6108,7 @@ class ImportClient
      */
     private function ensure_directory_path(string $dir): void
     {
-        // Security: Ensure path is under the fs root
-        $real_filesystem_root = $this->get_filesystem_root_path();
-
-        // Resolve the target path (or what it would be)
-        // For non-existent paths, resolve the parent and append the final component
-        $check_path = $dir;
-        while (
-            !file_exists($check_path) &&
-            $check_path !== dirname($check_path)
-        ) {
-            $check_path = dirname($check_path);
-        }
-
-        if (file_exists($check_path)) {
-            $real_check = realpath($check_path);
-            if (
-                $real_check === false ||
-                !path_is_within_root($real_check, $real_filesystem_root)
-            ) {
-                // In preserve-local mode, a path that resolves outside the
-                // fs root is expected when a directory like wp-content/plugins
-                // is symlinked to a shared hosting location.  Skip gracefully
-                // instead of treating it as a security violation.
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: path resolves outside fs root via symlink: {$dir}",
-                    );
-                }
-                throw new RuntimeException(
-                    "Security: Refusing to create directory outside fs root: {$dir}",
-                );
-            }
-        }
-
-        if (is_dir($dir) && !is_link($dir)) {
-            if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($dir)) {
-                throw new PreserveLocalSkipException(
-                    "PRESERVE-LOCAL: directory not writable: {$dir}",
-                );
-            }
-            return;
-        }
-
-        if (
-            $dir !== $real_filesystem_root &&
-            !str_starts_with($dir, $real_filesystem_root . "/")
-        ) {
-            throw new RuntimeException(
-                "Security: Refusing to create directory outside fs root: {$dir}",
-            );
-        }
-
-        $relative = ltrim(substr($dir, strlen($real_filesystem_root)), "/");
-        if ($relative === "") {
-            return;
-        }
-
-        $current = $real_filesystem_root;
-        foreach (explode("/", $relative) as $part) {
-            if ($part === "") {
-                continue;
-            }
-            $current .= "/" . $part;
-
-            if (is_link($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    // Never create directories through symlinks — the symlink
-                    // and its target contents are shared hosting infrastructure
-                    // that must not be modified.
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: symlink in directory path: {$current}",
-                    );
-                }
-                $this->audit_log(
-                    "Removing symlink blocking directory: {$current}",
-                    true,
-                );
-                if (!unlink($current)) {
-                    throw new RuntimeException(
-                        "Failed to remove symlink blocking directory: {$current}",
-                    );
-                }
-                // Clear cached realpath so the subsequent realpath() check
-                // sees the new directory instead of the removed symlink.
-                clearstatcache(true, $current);
-            }
-
-            // Remove file if blocking directory creation
-            if (is_file($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: file blocks directory creation: {$current}",
-                    );
-                }
-                $this->audit_log(
-                    "Removing file blocking directory: {$current}",
-                    true,
-                );
-                if (!unlink($current)) {
-                    throw new RuntimeException(
-                        "Failed to remove file blocking directory: {$current}",
-                    );
-                }
-            }
-
-            // Create directory if it doesn't exist
-            if (is_dir($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($current)) {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: directory not writable: {$current}",
-                    );
-                }
-            } elseif (!mkdir($current, 0755) && !is_dir($current)) {
-                throw new RuntimeException(
-                    "Failed to create directory: {$current}\n" .
-                        "Error: " .
-                        (error_get_last()["message"] ?? "unknown"),
-                );
-            }
-
-            $resolved = realpath($current);
-            if ($resolved === false || !path_is_within_root($resolved, $real_filesystem_root)) {
-                throw new RuntimeException(
-                    "Security: Refusing to create directory outside fs root: {$current}",
-                );
-            }
-        }
+        $this->local_filesystem()->ensure_directory_path($dir);
     }
 
     /**
