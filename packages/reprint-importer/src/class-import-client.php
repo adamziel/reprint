@@ -27,8 +27,8 @@ use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Index\IndexPathPrefixMatcher;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Input\ImportRunRequest;
-use Reprint\Importer\Output\CliImportOutput;
 use Reprint\Importer\Output\ImportOutput;
+use Reprint\Importer\Output\NullImportOutput;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\MultipartStreamParser;
 use Reprint\Importer\Protocol\StreamingContext;
@@ -275,7 +275,7 @@ class ImportClient
         $this->remote_url = rtrim($remote_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->fs_root = rtrim($fs_root, "/");
-        $this->output = $output ?? CliImportOutput::create_default();
+        $this->output = $output ?? new NullImportOutput();
         $this->paths = new ImportPaths($this->state_dir);
         $this->state_path_codec = new StatePathCodec(function (string $message): void {
             $this->audit_log($message, true);

@@ -12,6 +12,7 @@ use Reprint\Importer\Command\PreflightAssertCommand;
 use Reprint\Importer\Command\PreflightAssertResult;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Output\BufferedImportOutput;
+use Reprint\Importer\Output\CliImportOutput;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -120,6 +121,35 @@ class ImportCommandResultTest extends TestCase
         $this->assertSame([
             ['status' => 'starting', 'message' => 'Starting import'],
         ], $output->events());
+    }
+
+    public function testImportClientDefaultOutputIsSilent(): void
+    {
+        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+
+        ob_start();
+        $client->output_progress(['status' => 'starting', 'message' => 'Starting import'], true);
+        $stdout = ob_get_clean();
+
+        $this->assertSame('', $stdout);
+    }
+
+    public function testCliOutputCanBeCapturedWithoutStdoutPollution(): void
+    {
+        $progress = fopen('php://temp', 'w+');
+        $error = fopen('php://temp', 'w+');
+        $output = new CliImportOutput($progress, false, $error);
+
+        ob_start();
+        $output->emit_event(['status' => 'starting', 'message' => 'Starting import'], true);
+        $stdout = ob_get_clean();
+
+        rewind($progress);
+        $this->assertSame('', $stdout);
+        $this->assertSame(
+            json_encode(['status' => 'starting', 'message' => 'Starting import']) . "\n",
+            stream_get_contents($progress),
+        );
     }
 
     public function testPreflightAssertHandlesMalformedPreflightDataWithoutFormatting(): void

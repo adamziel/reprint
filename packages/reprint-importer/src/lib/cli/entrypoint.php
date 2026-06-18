@@ -3,6 +3,7 @@
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Cli\CliCommandResultRenderer;
 use Reprint\Importer\Command\ImportCommands;
+use Reprint\Importer\Output\CliImportOutput;
 
 // ============================================================================
 // CLI Entry Point
@@ -1161,7 +1162,7 @@ if (
     }
 
     try {
-        $client = new ImportClient($remote_url, $state_dir, $fs_root);
+        $client = new ImportClient($remote_url, $state_dir, $fs_root, CliImportOutput::create_default());
         $client->audit_log_argv($command, $argv);
         $result = $client->run($options ?? []);
         (new CliCommandResultRenderer())->render($client, $result);
