@@ -10171,9 +10171,6 @@ class ImportClient
     }
 
     /**
-     * Return the default compact state structure.
-     */
-    /**
      * Empty the skipped-files download list by truncating it in place
      * rather than deleting it.
      *
@@ -10221,6 +10218,9 @@ class ImportClient
         }
     }
 
+    /**
+     * Return the default compact state structure.
+     */
     public function default_state(): array
     {
         return [
