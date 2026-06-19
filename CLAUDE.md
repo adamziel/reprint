@@ -45,18 +45,34 @@ Uses multipart/mixed content-type to split large files into chunks while transmi
 ### Running Tests
 
 ```bash
-# Run all PHPUnit tests
-composer test
+# Run the regular PHPUnit suite.
+# MySQL-backed tests are skipped when no database is reachable.
+composer run test
+
+# Run the full PHPUnit suite with a local Docker MySQL container.
+# Use this before finalizing changes that touch database export/import behavior.
+composer run test:local-db
+
+# Pass PHPUnit arguments through to the local-DB runner.
+composer run test:local-db -- --filter ReentrancyTest
+composer run test:local-db -- MySQLDumpProducer/BasicDumpTest.php
 
 # Run with coverage (requires Xdebug)
-composer test:coverage
+composer run test:coverage
 
-# Run specific test file
-cd tests && vendor/bin/phpunit MySQLDumpProducer/BasicDumpTest.php
+# Run a specific test without the local Docker MySQL wrapper.
+# This is useful for non-DB tests or when you already have DB_HOST configured.
+cd tests && ../vendor/bin/phpunit MySQLDumpProducer/BasicDumpTest.php
 
 # Run specific test method
-cd tests && vendor/bin/phpunit --filter testRoundTripIntegrity
+cd tests && ../vendor/bin/phpunit --filter testRoundTripIntegrity
 ```
+
+`composer run test:local-db` starts the MySQL service from
+`tests/docker-compose.mysql.yml`, sets `REPRINT_REQUIRE_MYSQL=1`, raises the PHP
+memory limit to 512M by default, and tears the container down when the run
+finishes. It is intended for local development only; GitHub Actions already
+provides its own MySQL service and continues to run `composer run test`.
 
 ### Coding Standards
 
@@ -95,13 +111,18 @@ There are 49 E2E test files in `tests/e2e/tests/`, named `import-NN-description.
 
 ### Database Configuration
 
-Tests use environment variables defined in tests/phpunit.xml:
-- DB_HOST (default: 127.0.0.1)
-- DB_USER (default: root)
-- DB_PASS (default: my-secret-pw)
-- DB_NAME (default: test_mysql_dump)
+Tests use environment variables defined in `tests/phpunit.xml` and the local DB
+runner:
+- `DB_HOST` (default: `127.0.0.1`)
+- `DB_PORT` (default: `3306`, or `3307` under `composer run test:local-db`)
+- `DB_USER` (default: `root`)
+- `DB_PASS` (default: `my-secret-pw`)
+- `DB_NAME` (default: `test_mysql_dump`)
 
-Override with environment variables if needed.
+Override with environment variables if needed. The local Docker runner also
+accepts `REPRINT_TEST_DB_PORT`, `REPRINT_TEST_DB_PASS`,
+`REPRINT_TEST_DB_NAME`, `REPRINT_TEST_MYSQL_PROJECT`, and
+`REPRINT_KEEP_TEST_MYSQL=1` for debugging.
 
 ## Important Implementation Details
 
