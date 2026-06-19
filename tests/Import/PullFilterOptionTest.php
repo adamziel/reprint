@@ -260,18 +260,16 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame($flatten_to, $client->apply_runtime_options["flat_document_root"]);
     }
 
-    public function testRepullBypassesTheMidFlightFilterGuard(): void
+    public function testRepullAfterSkippedEarlierTailUsesCompletedFilesPullState(): void
     {
-        // The state a completed pull leaves once its deferred "skipped-earlier"
-        // tail has run: pull.stage=complete, but the sub-command state still
-        // reads filter=skipped-earlier / status=in_progress. A delta re-pull
-        // (filter=essential-files) must not be blocked by the mid-flight filter
-        // guard — Pull::run() calls prepare_repull() to clear that stale state.
+        // The deferred "skipped-earlier" tail belongs to a files-pull that
+        // has finished. Once that lifecycle state is truthful, a completed
+        // pull can delta re-pull without bypassing the mid-flight guard.
         file_put_contents(
             $this->stateDir . '/.import-state.json',
             json_encode([
                 "command" => "files-pull",
-                "status" => "in_progress",
+                "status" => "complete",
                 "stage" => null,
                 "filter" => "skipped-earlier",
                 "pull" => [
@@ -293,7 +291,6 @@ class PullFilterOptionTest extends TestCase
         ]);
         ob_end_clean();
 
-        // The re-pull ran to completion instead of throwing the filter guard.
         $state = $this->readState();
         $this->assertSame('complete', $state["pull"]["stage"]);
         $this->assertSame('essential-files', $state["filter"]);

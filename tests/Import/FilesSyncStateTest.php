@@ -173,6 +173,46 @@ class FilesSyncStateTest extends TestCase
     }
 
     /**
+     * The deferred skipped-files tail reopens a completed files-pull, and a
+     * successful tail must restore the completed status before returning.
+     */
+    public function testSkippedEarlierTailRestoresCompletedStatus()
+    {
+        $this->writeState([
+            "command" => "files-pull",
+            "status" => "complete",
+            "stage" => null,
+            "filter" => "essential-files",
+        ]);
+        file_put_contents(
+            $this->stateDir . '/.import-download-list-skipped.jsonl',
+            json_encode([
+                "path" => base64_encode('/wp-content/uploads/2024/01/photo.jpg'),
+            ], JSON_UNESCAPED_SLASHES) . "\n",
+        );
+
+        $client = new CompletedFileFetchClient(
+            'http://fake.url',
+            $this->stateDir,
+            $this->fs_root,
+        );
+
+        ob_start();
+        $client->run([
+            "command" => "files-pull",
+            "filter" => "skipped-earlier",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertEquals("complete", $state["status"]);
+        $this->assertEquals("files-pull", $state["command"]);
+        $this->assertNull($state["stage"]);
+        $this->assertEquals("skipped-earlier", $state["filter"]);
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
+    }
+
+    /**
      * After --abort, the state should not be "complete".
      */
     public function testAbortClearsCompletedStatus()
@@ -367,5 +407,27 @@ class FilesSyncStateTest extends TestCase
             file_get_contents($localFile),
             "Fetch stage must overwrite existing files that were placed in the download list",
         );
+    }
+}
+
+/**
+ * Test double that completes a file_fetch request without real network I/O.
+ */
+class CompletedFileFetchClient extends \ImportClient
+{
+    protected function fetch_streaming(
+        string $url,
+        ?string $cursor,
+        \StreamingContext $context,
+        ?array $post_data = null,
+        ?string $endpoint = null
+    ): void {
+        ($context->on_chunk)([
+            "headers" => [
+                "x-chunk-type" => "completion",
+                "x-status" => "complete",
+            ],
+            "body" => "",
+        ]);
     }
 }
