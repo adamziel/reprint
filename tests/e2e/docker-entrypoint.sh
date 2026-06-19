@@ -147,7 +147,10 @@ nginx
 
 echo "=== All services running ==="
 
-# Run tests
+# Run tests. Any args passed to the container are forwarded to vitest, so you
+# can target specific files, e.g.:
+#   docker run --rm reprint-e2e tests/import-51-only-remap-managed-composition.test.js
+# With no args, the full suite runs (CI default).
 cd /app/tests/e2e
 echo "=== Running E2E tests ==="
-npx vitest run
+npx vitest run "$@"

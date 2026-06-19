@@ -124,6 +124,9 @@
     },
     "file-body-resume": {
       "port": 8120
+    },
+    "only-remap-managed": {
+      "port": 8121
     }
   }
 }
