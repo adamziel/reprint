@@ -579,6 +579,14 @@ still running, completed, or needs resuming. The `command` + `status` fields
 tell you where the pipeline is. The `stage` field gives finer granularity
 (e.g., `"scanning"`, `"sorting"`, `"streaming"` for file sync).
 
+For pull-level lifecycle checks, prefer `import-metadata` over reading
+`.import-state.json` directly. It exposes Reprint-owned pull state as a small,
+stable JSON contract for host integrations:
+
+```bash
+php reprint.phar import-metadata --state-dir="$STATE_DIR" | jq '.hasCompletedOnce'
+```
+
 #### `.import-volatile-files.json` — files that changed during sync
 
 During `files-pull`, a file on the source may be modified while the importer is
@@ -633,6 +641,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
+* `import-metadata` — Prints local pull lifecycle metadata as JSON, including `hasCompletedOnce`. Requires only `--state-dir`; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 

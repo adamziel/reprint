@@ -1348,6 +1348,7 @@ class ImportClient
     public function mark_pull_complete(): void
     {
         $this->state['pull']['stage'] = 'complete';
+        $this->state['pull']['has_completed_once'] = true;
         $this->state['status'] = 'complete';
         $this->save_state($this->state);
     }
@@ -1538,34 +1539,40 @@ class ImportClient
         $this->pipeline_step = $options["pipeline_step"] ?? null;
         $this->pipeline_steps = $options["pipeline_steps"] ?? null;
 
+        $valid_commands = [
+            "pull",
+            "files-pull",
+            "files-index",
+            "files-stats",
+            "db-pull",
+            "db-index",
+            "db-domains",
+            "db-apply",
+            "import-metadata",
+            "preflight",
+            "preflight-assert",
+            "flat-docroot",
+            "apply-runtime",
+        ];
+
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Command is required. Valid commands: " . implode(", ", $valid_commands),
             );
         }
 
-        if (
-            !in_array($command, [
-                "pull",
-                "files-pull",
-                "files-index",
-                "db-pull",
-                "db-index",
-                "db-domains",
-                "db-apply",
-                "files-stats",
-                "preflight",
-                "preflight-assert",
-                "flat-docroot",
-                "apply-runtime",
-            ])
-        ) {
+        if (!in_array($command, $valid_commands, true)) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Invalid command: {$command}. Valid commands: " . implode(", ", $valid_commands),
             );
         }
 
         $this->state = $this->load_state();
+
+        if ($command === "import-metadata") {
+            $this->run_import_metadata();
+            return;
+        }
 
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
@@ -3810,6 +3817,42 @@ class ImportClient
         echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
     }
 
+    /**
+     * Prints host-facing import lifecycle metadata without mutating state.
+     */
+    private function run_import_metadata(): void
+    {
+        echo json_encode(
+            $this->build_import_metadata(),
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+        ) . "\n";
+    }
+
+    /**
+     * Builds the small metadata contract exposed to host integrations.
+     *
+     * `hasCompletedOnce` is derived from Reprint-owned pull state so
+     * callers do not need to persist a parallel flag that could drift.
+     *
+     * @return array{hasCompletedOnce: bool, pullStage: mixed}
+     */
+    private function build_import_metadata(): array
+    {
+        $pull = $this->state["pull"] ?? [];
+        if (!is_array($pull)) {
+            $pull = [];
+        }
+
+        $pull_stage = $pull["stage"] ?? null;
+        $has_completed_once =
+            !empty($pull["has_completed_once"]) ||
+            $pull_stage === "complete";
+
+        return [
+            "hasCompletedOnce" => $has_completed_once,
+            "pullStage" => $pull_stage,
+        ];
+    }
 
     /**
      * Format a byte count into a human-readable string.
@@ -10310,6 +10353,7 @@ class ImportClient
                 "stage" => null,
                 "files_filter" => null,
                 "skipped_pending" => false,
+                "has_completed_once" => false,
             ],
         ];
     }
@@ -11565,7 +11609,8 @@ if (
         }
 
         $info = $command_info[$command];
-        echo "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
+        $usage = $info["usage"] ?? "reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]";
+        echo "Usage: {$usage}\n";
         echo "\n";
         echo $info["description"];
 
@@ -11915,6 +11960,17 @@ if (
                 "  reprint db-domains - --state-dir=/path/to/state\n",
             "extra" => null,
         ],
+        "import-metadata" => [
+            "level" => "low",
+            "short" => "Print local import lifecycle metadata as JSON",
+            "usage" => "reprint import-metadata --state-dir=DIR",
+            "description" =>
+                "Reads --state-dir/.import-state.json and prints metadata for\n" .
+                "host integrations. No network calls are made.\n",
+            "extra" =>
+                "Example:\n" .
+                "  reprint import-metadata --state-dir=./state | jq '.hasCompletedOnce'\n",
+        ],
         "db-apply" => [
             "level" => "low",
             "short" => "Import the SQL dump into a local MySQL or SQLite database",
@@ -12042,10 +12098,10 @@ if (
         exit(0);
     }
 
-    // Only apply-runtime truly doesn't need a remote URL. Other local-only
-    // commands (db-domains, db-apply, etc.) still accept it for CLI
-    // consistency and backward compatibility with existing callers.
-    $local_only_commands = ["apply-runtime"];
+    // apply-runtime and import-metadata don't need a remote URL. Other
+    // local-only commands (db-domains, db-apply, etc.) still accept it for
+    // CLI consistency and backward compatibility with existing callers.
+    $local_only_commands = ["apply-runtime", "import-metadata"];
     $is_local_only = in_array($command, $local_only_commands, true);
 
     if ($is_local_only) {
@@ -12079,7 +12135,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$fs_root && !$flat_document_root) {
+    if (!$fs_root && !$flat_document_root && $command !== "import-metadata") {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
@@ -12087,7 +12143,10 @@ if (
     if (!$fs_root) {
         // For commands that need an fs root in the constructor, use the
         // flattened fs root. run_apply_runtime will resolve it properly.
-        $fs_root = $flat_document_root;
+        // import-metadata reads only state, but ImportClient still expects
+        // an fs root path. Point it at state-dir rather than requiring an
+        // otherwise-unused CLI option.
+        $fs_root = $flat_document_root ?: $state_dir;
     }
 
     try {
