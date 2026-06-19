@@ -40,7 +40,6 @@ use Reprint\Importer\Sql\DbPullWorkflow;
 use Reprint\Importer\Sql\SqlDownloader;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TargetRuntime\RuntimeConfigurationApplier;
-use Reprint\Importer\Transport\HttpErrorDiagnoser;
 use Reprint\Importer\Transport\ImportHttpTransport;
 use Reprint\Importer\Transport\HttpRequestBuilder;
 use Reprint\Importer\Tuning\AdaptiveTuner;
@@ -196,7 +195,7 @@ class ImportClient
      */
     private $max_allowed_packet = null;
 
-    /** @var string|null Machine-readable error code from the last diagnose_http_error() call. */
+    /** @var string|null Machine-readable error code from the last HTTP diagnosis. */
     public $last_error_code = null;
 
     /** @var ImportOutput Reports progress, status, and human-readable output. */
@@ -2100,32 +2099,6 @@ class ImportClient
     }
 
     /**
-     * Builds a JSON batch file listing the next set of paths to download.
-     *
-     * Reads from the download list (.import-download-list.jsonl) starting at
-     * $offset, accumulating paths into a JSON array until the batch approaches
-     * 80% of the server's max request size.  Always includes at least one path,
-     * even if it alone exceeds the limit.
-     *
-     * The batch file is written to a temp file and intended to be uploaded as
-     * the request body for the file_fetch endpoint.
-     *
-     * @param string $list_file Path to the JSONL download list.
-     * @param int    $offset    Byte offset into the download list file.
-     * @return array{file: string, offset: int, next_offset: int, entries: int}|null
-     *         The temp file path, byte offsets, and entry count, or null if
-     *         no paths remain.
-     */
-    private function prepare_fetch_batch(string $list_file, int $offset): ?array
-    {
-        return DownloadList::prepare_batch(
-            $list_file,
-            $offset,
-            $this->get_max_request_bytes(),
-        );
-    }
-
-    /**
      * Determine maximum request size for file_fetch uploads.
      */
     private function get_max_request_bytes(): int
@@ -2468,39 +2441,6 @@ class ImportClient
     }
 
     /**
-     * Diagnose an HTTP error and return a user-friendly message with
-     * actionable advice. Used by fetch_json() and fetch_streaming() to
-     * turn opaque "HTTP 403" messages into something a non-expert can
-     * act on.
-     *
-     * Returns ['message' => ..., 'code' => ...].
-     *
-     * @param int         $http_code    HTTP status code (0 for connection failures).
-     * @param string|null $body         Response body (may be HTML, JSON, or empty).
-     * @param string|null $redirect_url The Location header / CURLINFO_REDIRECT_URL for 3xx responses.
-     */
-    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null): array
-    {
-        return HttpErrorDiagnoser::diagnose(
-            $http_code,
-            $body,
-            $redirect_url,
-            $this->hmac_client !== null,
-        );
-    }
-
-    /**
-     * Format a diagnosed error as a single string for display.
-     * Also stores the error code on the instance for output_progress
-     * and write_status_file to pick up.
-     */
-    private function format_diagnosed_error(array $diagnosis): string
-    {
-        $this->last_error_code = $diagnosis['code'];
-        return $diagnosis['message'];
-    }
-
-    /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
     public function fetch_json(string $url): array
@@ -2572,24 +2512,6 @@ class ImportClient
     private function decode_preflight_data_paths(array $data): array
     {
         return $this->state_path_codec->decode_preflight_data_paths($data);
-    }
-
-    /**
-     * @param mixed $value
-     * @return mixed
-     */
-    private function encode_state_path_value($value)
-    {
-        return $this->state_path_codec->encode_value($value);
-    }
-
-    /**
-     * @param mixed $value
-     * @return mixed
-     */
-    private function decode_state_path_value($value)
-    {
-        return $this->state_path_codec->decode_value($value);
     }
 
     /**

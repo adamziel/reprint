@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Output\BufferedImportOutput;
 
@@ -325,9 +326,7 @@ class DownloadListProgressTest extends TestCase
             "stage" => "fetch",
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
-        $batch = $reflection->getMethod('prepare_fetch_batch')
-            ->invoke($client, $listFile, 0);
+        $batch = DownloadList::prepare_batch($listFile, 0, 4 * 1024 * 1024);
 
         $this->assertNotNull($batch);
         $this->assertSame(10, $batch['entries']);

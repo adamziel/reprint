@@ -3,13 +3,12 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\ImportClient;
 use Reprint\Importer\Transport\HttpErrorDiagnoser;
 
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Verify that diagnose_http_error() maps HTTP status codes and response
+ * Verify that HttpErrorDiagnoser maps HTTP status codes and response
  * bodies to the correct error codes and actionable messages.
  */
 class DiagnoseHttpErrorTest extends TestCase
@@ -236,23 +235,4 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertSame('SERVER_ERROR', $result['code']);
     }
 
-    // ── error_code is stored on instance ─────────────────────────
-
-    public function testFormatDiagnosedErrorStoresCodeOnInstance()
-    {
-        $client = new ImportClient(
-            'http://example.com',
-            sys_get_temp_dir(),
-            sys_get_temp_dir(),
-        );
-
-        $ref = new \ReflectionClass(ImportClient::class);
-        $diagnose = $ref->getMethod('diagnose_http_error');
-        $format = $ref->getMethod('format_diagnosed_error');
-
-        $diagnosis = $diagnose->invoke($client, 404, '');
-        $format->invoke($client, $diagnosis);
-
-        $this->assertSame('NOT_FOUND', $client->last_error_code);
-    }
 }
