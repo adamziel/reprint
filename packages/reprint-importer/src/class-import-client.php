@@ -569,96 +569,134 @@ class ImportClient
         $command = $request->command();
         $command_runner = $request->command_runner();
 
+        $this->prepare_request_state($request);
+
+        $this->initialize_tuner($options);
+        $this->initialize_hmac_client($request);
+
+        if ($request->abort()) {
+            if (!$command_runner->supports_abort()) {
+                throw new InvalidArgumentException("Command {$command} does not support --abort");
+            }
+            $command_runner->abort($this, $command);
+            return null;
+        }
+
+        if ($command_runner->requires_preflight()) {
+            $this->require_preflight();
+        }
+
+        try {
+            $result = $command_runner->execute($this, $options);
+            if ($command_runner->emits_final_status()) {
+                $this->finish_command_status($command);
+            }
+            return $result;
+        } catch (Exception $e) {
+            $this->report_command_exception($e);
+            throw $e;
+        }
+    }
+
+    private function prepare_request_state(ImportRunRequest $request): void
+    {
         $this->output->set_verbose_mode($request->verbose());
         $this->follow_symlinks = $request->value("follow_symlinks", true);
         $this->include_caches = $request->value("include_caches", false);
         $this->extra_directory = $request->value("extra_directory");
-        if ($request->has("fs_root_nonempty_behavior")) {
-            $this->fs_root_nonempty_behavior = $request->value("fs_root_nonempty_behavior");
-        }
-
-        $abort = $request->abort();
         $this->pipeline_step = $request->value("pipeline_step");
         $this->pipeline_steps = $request->value("pipeline_steps");
-
         $this->state = $this->load_state();
 
-        // Persist follow_symlinks in state so it survives across invocations.
-        // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
+        $this->apply_follow_symlinks_option($request);
+        $this->apply_fs_root_behavior_option($request);
+        $this->apply_filter_option($request);
+        $this->apply_max_allowed_packet_option($request);
+        $this->apply_sql_output_option($request);
+        $this->apply_mysql_connection_options($request);
+        $this->save_state($this->state);
+
+        $this->apply_mysql_password_option($request);
+        $this->validate_sql_output_options();
+    }
+
+    private function apply_follow_symlinks_option(ImportRunRequest $request): void
+    {
         if ($request->has("follow_symlinks")) {
             $this->state["follow_symlinks"] = $this->follow_symlinks;
-            $this->save_state($this->state);
-        } elseif (isset($this->state["follow_symlinks"])) {
-            $this->follow_symlinks = $this->state["follow_symlinks"];
+            return;
         }
 
-        // Persist fs_root_nonempty_behavior in state so it survives across invocations.
-        // 'preserve-local' preserves existing local files instead of overwriting
-        // them, and gracefully skips non-writable directories.
+        if (isset($this->state["follow_symlinks"])) {
+            $this->follow_symlinks = $this->state["follow_symlinks"];
+        }
+    }
+
+    private function apply_fs_root_behavior_option(ImportRunRequest $request): void
+    {
         if ($request->has("fs_root_nonempty_behavior")) {
+            $this->fs_root_nonempty_behavior = $request->value("fs_root_nonempty_behavior");
             $this->state["fs_root_nonempty_behavior"] = $this->fs_root_nonempty_behavior;
-            $this->save_state($this->state);
         } else {
             $this->fs_root_nonempty_behavior = $this->state["fs_root_nonempty_behavior"] ?? 'error';
         }
-        $this->local_filesystem = null;
 
-        // Persist filter in state so it survives across resume cycles.
-        //
-        //   --filter=none             download everything (default)
-        //   --filter=essential-files   skip uploads, download code/config/themes/plugins
-        //   --filter=skipped-earlier   download only files skipped by a prior essential-files run
-        //
-        // Changing the filter mid-flight is not allowed.  The user must either
-        // start fresh (--abort) or finish the current sync before switching.
-        // The one valid transition is: essential-files (complete) → skipped-earlier.
-        if ($request->has("filter")) {
-            $next = $request->value("filter");
-            $prev = $this->state["filter"] ?? null;
-            $status = $this->state["status"] ?? null;
-            $is_mid_flight = $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
-            if ($is_mid_flight) {
-                throw new RuntimeException(
-                    "Cannot change --filter from '{$prev}' to '{$next}' while a sync is in progress. " .
-                        "Finish the current sync or use --abort to start over.",
-                );
+        $this->local_filesystem = null;
+    }
+
+    private function apply_filter_option(ImportRunRequest $request): void
+    {
+        if (!$request->has("filter")) {
+            if (isset($this->state["filter"])) {
+                $this->filter = $this->state["filter"];
             }
-            $this->filter = $next;
-            $this->state["filter"] = $this->filter;
-            $this->save_state($this->state);
-        } elseif (isset($this->state["filter"])) {
-            $this->filter = $this->state["filter"];
+            return;
         }
 
-        // Persist max_allowed_packet in state so it survives across invocations.
-        // The client sends this to the server so SQL statements are capped to a
-        // size the client's MySQL instance can actually import.
+        $next = $request->value("filter");
+        $prev = $this->state["filter"] ?? null;
+        $status = $this->state["status"] ?? null;
+        $is_mid_flight = $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
+        if ($is_mid_flight) {
+            throw new RuntimeException(
+                "Cannot change --filter from '{$prev}' to '{$next}' while a sync is in progress. " .
+                    "Finish the current sync or use --abort to start over.",
+            );
+        }
+
+        $this->filter = $next;
+        $this->state["filter"] = $this->filter;
+    }
+
+    private function apply_max_allowed_packet_option(ImportRunRequest $request): void
+    {
         if ($request->has("max_allowed_packet")) {
             $this->max_allowed_packet = (int) $request->value("max_allowed_packet");
             $this->state["max_allowed_packet"] = $this->max_allowed_packet;
-            $this->save_state($this->state);
-        } elseif (isset($this->state["max_allowed_packet"])) {
-            $this->max_allowed_packet = (int) $this->state["max_allowed_packet"];
+            return;
         }
 
-        // Persist sql_output_mode in state so it survives across resume invocations.
-        // The password is NOT persisted — it must be supplied on every run (or via
-        // the MYSQL_PASSWORD environment variable).
+        if (isset($this->state["max_allowed_packet"])) {
+            $this->max_allowed_packet = (int) $this->state["max_allowed_packet"];
+        }
+    }
+
+    private function apply_sql_output_option(ImportRunRequest $request): void
+    {
         if ($request->has("sql_output")) {
-            $mode = $request->value("sql_output");
-            $this->sql_output_mode = $mode;
-            $this->state["sql_output"] = $mode;
+            $this->sql_output_mode = $request->value("sql_output");
+            $this->state["sql_output"] = $this->sql_output_mode;
         } elseif (isset($this->state["sql_output"])) {
             $this->sql_output_mode = $this->state["sql_output"];
         }
 
-        // In stdout mode, SQL goes to STDOUT, so progress/status output must
-        // go to STDERR to keep the streams separate.
         if ($this->sql_output_mode === "stdout") {
             $this->output->use_error_stream();
         }
+    }
 
-        // MySQL connection parameters for --sql-output=mysql.
+    private function apply_mysql_connection_options(ImportRunRequest $request): void
+    {
         if ($request->has("mysql_host")) {
             $this->mysql_host = $request->value("mysql_host");
             $this->state["mysql_host"] = $this->mysql_host;
@@ -686,60 +724,42 @@ class ImportClient
         } elseif (isset($this->state["mysql_database"])) {
             $this->mysql_database = $this->state["mysql_database"];
         }
+    }
 
-        $this->save_state($this->state);
-
-        // Password is never persisted — must be supplied each run or via env.
+    private function apply_mysql_password_option(ImportRunRequest $request): void
+    {
         if ($request->has("mysql_password")) {
             $this->mysql_password = $request->value("mysql_password");
         } elseif (getenv("MYSQL_PASSWORD") !== false) {
             $this->mysql_password = getenv("MYSQL_PASSWORD");
         }
+    }
 
-        // Validate mysql mode requirements.
-        if ($this->sql_output_mode === "mysql" && empty($this->mysql_database)) {
-            throw new InvalidArgumentException(
-                "--mysql-database is required when using --sql-output=mysql",
+    private function validate_sql_output_options(): void
+    {
+        if ($this->sql_output_mode !== "mysql" || !empty($this->mysql_database)) {
+            return;
+        }
+
+        throw new InvalidArgumentException(
+            "--mysql-database is required when using --sql-output=mysql",
+        );
+    }
+
+    private function initialize_hmac_client(ImportRunRequest $request): void
+    {
+        $secret = $request->value("secret");
+        if (empty($secret)) {
+            return;
+        }
+
+        if (!class_exists(\Reprint\Exporter\Site_Export_HMAC_Client::class)) {
+            throw new RuntimeException(
+                'Streaming exporter runtime not found. Run composer install before using --secret.'
             );
         }
 
-        $this->initialize_tuner($options);
-
-        // Initialize HMAC authentication if a shared secret was provided.
-        // When set, every outgoing HTTP request will include X-Auth-Signature,
-        // X-Auth-Nonce, and X-Auth-Timestamp headers so the export API can verify
-        // the caller without a SECRET_KEY in the URL.
-        if (!empty($request->value("secret"))) {
-            if (!class_exists(\Reprint\Exporter\Site_Export_HMAC_Client::class)) {
-                throw new RuntimeException(
-                    'Streaming exporter runtime not found. Run composer install before using --secret.'
-                );
-            }
-            $this->hmac_client = new \Reprint\Exporter\Site_Export_HMAC_Client($request->value("secret"));
-        }
-
-        if ($abort) {
-            if (!$command_runner->supports_abort()) {
-                throw new InvalidArgumentException("Command {$command} does not support --abort");
-            }
-            $command_runner->abort($this, $command);
-            return null;
-        }
-
-        if ($command_runner->requires_preflight()) {
-            $this->require_preflight();
-        }
-
-        try {
-            $result = $command_runner->execute($this, $options);
-            if ($command_runner->emits_final_status()) {
-                $this->finish_command_status($command);
-            }
-            return $result;
-        } catch (Exception $e) {
-            $this->report_command_exception($e);
-            throw $e;
-        }
+        $this->hmac_client = new \Reprint\Exporter\Site_Export_HMAC_Client($secret);
     }
 
     public function run_pull(array $options): void
@@ -1033,72 +1053,11 @@ class ImportClient
 
         $this->recover_index_updates();
 
-        // Already completed.
         if ($current_status === "complete") {
-            $has_skipped =
-                file_exists($this->skipped_download_list_file) &&
-                filesize($this->skipped_download_list_file) > 0;
-
-            // --filter=skipped-earlier: download only the files that a prior
-            // --filter=essential-files run skipped.  This is the only way to
-            // resume downloading those files — no implicit behavior.
-            if ($this->filter === "skipped-earlier") {
-                if (!$has_skipped) {
-                    throw new RuntimeException(
-                        "--filter=skipped-earlier was requested but there is no skipped file list. " .
-                            "Run files-pull with --filter=essential-files first.",
-                    );
-                }
-                $this->audit_log(
-                    "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
-                    true,
-                );
-                $this->output->show_lifecycle_line("Downloading previously skipped files\n");
-                $this->output_progress([
-                    "type" => "lifecycle",
-                    "event" => "starting",
-                    "command" => "files-pull",
-                    "stage" => "fetch-skipped",
-                    "message" => "Downloading previously skipped files",
-                ], true);
-                $this->state["status"] = "in_progress";
-                $this->state["stage"] = "fetch-skipped";
-                $this->save_state($this->state);
-                $this->run_files_sync_pipeline();
-                return;
-            }
-
-            $index_size = $this->index_count();
-            $this->output->clear_progress_line();
-
-            $skipped_note = $has_skipped
-                ? " (some files were skipped — re-run with --filter=skipped-earlier to download them)"
-                : "";
-            $this->audit_log(
-                sprintf("files-pull already complete: %d files indexed%s", $index_size, $skipped_note),
-                true,
-            );
-
-            $this->output->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
-            if ($has_skipped) {
-                $this->output->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
-            } else {
-                $this->output->show_lifecycle_line("To re-sync, run with --abort first to clear state.\n");
-            }
-            $this->output_progress([
-                "type" => "lifecycle",
-                "event" => "already_complete",
-                "command" => "files-pull",
-                "files_indexed" => $index_size,
-                "has_skipped" => $has_skipped,
-                "message" => "files-pull already complete: {$index_size} files indexed",
-            ], true);
+            $this->handle_completed_files_sync();
             return;
         }
 
-        // --filter=skipped-earlier is only valid after a completed
-        // --filter=essential-files run.  It doesn't make sense as a fresh
-        // start or resume of an in-progress sync.
         if ($this->filter === "skipped-earlier") {
             throw new RuntimeException(
                 "--filter=skipped-earlier was requested but there is no completed sync with skipped files. " .
@@ -1106,104 +1065,12 @@ class ImportClient
             );
         }
 
-        // Filter out "." and ".." explicitly: standard PHP scandir() returns them,
-        // but WASM PHP (WordPress Playground) does not, so a `count <= 2` shortcut
-        // would mis-classify directories with one or two real entries as empty.
-        $is_empty = !is_dir($this->fs_root) || count(array_diff(
-            scandir($this->fs_root) ?: [],
-            [".", ".."]
-        )) === 0;
+        $is_delta = $this->has_local_file_index();
 
-        // A local index from a prior completed sync means the next run is a
-        // delta: re-index the remote, diff against local, fetch only changes.
-        $is_delta =
-            file_exists($this->index_file) &&
-            filesize($this->index_file) > 0;
-
-        // Resuming an in-progress sync
         if ($has_progress) {
-            // Don't reset files_imported here — it counts files within
-            // the current batch and is only reset when a batch completes
-            // (in download_files_from_list). Resetting it on entry would
-            // cause the progress counter to dip between pull retries.
-            $index_size = $this->index_count();
-
-
-            $stage = $this->state["stage"] ?? "index";
-            $this->audit_log(
-                sprintf(
-                    "RESUME files-pull | stage=%s | indexed_files=%d",
-                    $stage,
-                    $index_size,
-                ),
-                true,
-            );
-
-            $this->output->show_lifecycle_line("Resuming files-pull\n");
-            $this->output->show_lifecycle_line("  Stage: {$stage}\n");
-            $this->output->show_lifecycle_line("  Already indexed: {$index_size} files\n");
-            $this->output_progress([
-                "type" => "lifecycle",
-                "event" => "resuming",
-                "command" => "files-pull",
-                "stage" => $stage,
-                "index_size" => $index_size,
-                "message" => "Resuming files-pull (stage: {$stage}, indexed: {$index_size} files)",
-            ], true);
+            $this->report_files_sync_resume();
         } else {
-            // Starting fresh — validate that target directory is empty.
-            // A delta sync ($is_delta) naturally has a non-empty fs root
-            // because we put those files there during the initial sync.
-            if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
-                throw new RuntimeException(
-                    "Target directory is not empty and no cursor found. " .
-                        "Either clear the target directory, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
-                );
-            }
-
-            $this->state["command"] = "files-pull";
-            $this->state["status"] = "in_progress";
-            $this->state["stage"] = "index";
-            $this->state["diff"] = $this->default_state()["diff"];
-            $this->state["index"] = $this->default_state()["index"];
-            $this->state["fetch"] = $this->default_state()["fetch"];
-            $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
-            $this->save_state($this->state);
-
-            if ($is_delta) {
-                $this->files_imported = 0;
-                $index_size = $this->index_count();
-
-                $this->audit_log(
-                    "START files-pull (delta) | index_files={$index_size}",
-                    true,
-                );
-
-                $this->output->show_lifecycle_line("Starting files-pull (delta)\n");
-                $this->output->show_lifecycle_line("  Index contains: {$index_size} files\n");
-                $this->output->show_lifecycle_line("  Stage: index\n");
-                $this->output_progress([
-                    "type" => "lifecycle",
-                    "event" => "starting",
-                    "command" => "files-pull",
-                    "delta" => true,
-                    "index_size" => $index_size,
-                    "message" => "Starting files-pull (delta, {$index_size} files indexed)",
-                ], true);
-            } else {
-                $this->audit_log(
-                    "START files-pull ({$this->fs_root_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
-                    true,
-                );
-
-                $this->output->show_lifecycle_line("Starting files-pull\n");
-                $this->output_progress([
-                    "type" => "lifecycle",
-                    "event" => "starting",
-                    "command" => "files-pull",
-                    "message" => "Starting files-pull",
-                ], true);
-            }
+            $this->start_files_sync($is_delta);
         }
 
         $this->state["command"] = "files-pull";
@@ -1212,11 +1079,197 @@ class ImportClient
 
         $this->run_files_sync_pipeline();
 
-        // Pipeline returns early with partial status if interrupted
         if (($this->state["status"] ?? null) === "partial") {
             return;
         }
 
+        $this->complete_files_sync($is_delta);
+    }
+
+    private function handle_completed_files_sync(): void
+    {
+        $has_skipped = $this->has_skipped_download_list();
+
+        if ($this->filter === "skipped-earlier") {
+            $this->start_skipped_files_fetch($has_skipped);
+            return;
+        }
+
+        $this->report_files_sync_already_complete($has_skipped);
+    }
+
+    private function has_skipped_download_list(): bool
+    {
+        return
+            file_exists($this->skipped_download_list_file) &&
+            filesize($this->skipped_download_list_file) > 0;
+    }
+
+    private function start_skipped_files_fetch(bool $has_skipped): void
+    {
+        if (!$has_skipped) {
+            throw new RuntimeException(
+                "--filter=skipped-earlier was requested but there is no skipped file list. " .
+                    "Run files-pull with --filter=essential-files first.",
+            );
+        }
+
+        $this->audit_log(
+            "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
+            true,
+        );
+        $this->output->show_lifecycle_line("Downloading previously skipped files\n");
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "starting",
+            "command" => "files-pull",
+            "stage" => "fetch-skipped",
+            "message" => "Downloading previously skipped files",
+        ], true);
+        $this->state["status"] = "in_progress";
+        $this->state["stage"] = "fetch-skipped";
+        $this->save_state($this->state);
+        $this->run_files_sync_pipeline();
+    }
+
+    private function report_files_sync_already_complete(bool $has_skipped): void
+    {
+        $index_size = $this->index_count();
+        $this->output->clear_progress_line();
+
+        $skipped_note = $has_skipped
+            ? " (some files were skipped — re-run with --filter=skipped-earlier to download them)"
+            : "";
+        $this->audit_log(
+            sprintf("files-pull already complete: %d files indexed%s", $index_size, $skipped_note),
+            true,
+        );
+
+        $this->output->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
+        if ($has_skipped) {
+            $this->output->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
+        } else {
+            $this->output->show_lifecycle_line("To re-sync, run with --abort first to clear state.\n");
+        }
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "already_complete",
+            "command" => "files-pull",
+            "files_indexed" => $index_size,
+            "has_skipped" => $has_skipped,
+            "message" => "files-pull already complete: {$index_size} files indexed",
+        ], true);
+    }
+
+    private function has_local_file_index(): bool
+    {
+        return
+            file_exists($this->index_file) &&
+            filesize($this->index_file) > 0;
+    }
+
+    private function is_fs_root_empty(): bool
+    {
+        return !is_dir($this->fs_root) || count(array_diff(
+            scandir($this->fs_root) ?: [],
+            [".", ".."]
+        )) === 0;
+    }
+
+    private function report_files_sync_resume(): void
+    {
+        $index_size = $this->index_count();
+        $stage = $this->state["stage"] ?? "index";
+
+        $this->audit_log(
+            sprintf(
+                "RESUME files-pull | stage=%s | indexed_files=%d",
+                $stage,
+                $index_size,
+            ),
+            true,
+        );
+
+        $this->output->show_lifecycle_line("Resuming files-pull\n");
+        $this->output->show_lifecycle_line("  Stage: {$stage}\n");
+        $this->output->show_lifecycle_line("  Already indexed: {$index_size} files\n");
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "resuming",
+            "command" => "files-pull",
+            "stage" => $stage,
+            "index_size" => $index_size,
+            "message" => "Resuming files-pull (stage: {$stage}, indexed: {$index_size} files)",
+        ], true);
+    }
+
+    private function start_files_sync(bool $is_delta): void
+    {
+        $is_empty = $this->is_fs_root_empty();
+        if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
+            throw new RuntimeException(
+                "Target directory is not empty and no cursor found. " .
+                    "Either clear the target directory, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
+            );
+        }
+
+        $this->state["command"] = "files-pull";
+        $this->state["status"] = "in_progress";
+        $this->state["stage"] = "index";
+        $this->state["diff"] = $this->default_state()["diff"];
+        $this->state["index"] = $this->default_state()["index"];
+        $this->state["fetch"] = $this->default_state()["fetch"];
+        $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
+        $this->save_state($this->state);
+
+        if ($is_delta) {
+            $this->report_files_sync_delta_start();
+        } else {
+            $this->report_files_sync_initial_start($is_empty);
+        }
+    }
+
+    private function report_files_sync_delta_start(): void
+    {
+        $this->files_imported = 0;
+        $index_size = $this->index_count();
+
+        $this->audit_log(
+            "START files-pull (delta) | index_files={$index_size}",
+            true,
+        );
+
+        $this->output->show_lifecycle_line("Starting files-pull (delta)\n");
+        $this->output->show_lifecycle_line("  Index contains: {$index_size} files\n");
+        $this->output->show_lifecycle_line("  Stage: index\n");
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "starting",
+            "command" => "files-pull",
+            "delta" => true,
+            "index_size" => $index_size,
+            "message" => "Starting files-pull (delta, {$index_size} files indexed)",
+        ], true);
+    }
+
+    private function report_files_sync_initial_start(bool $is_empty): void
+    {
+        $this->audit_log(
+            "START files-pull ({$this->fs_root_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
+            true,
+        );
+
+        $this->output->show_lifecycle_line("Starting files-pull\n");
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "starting",
+            "command" => "files-pull",
+            "message" => "Starting files-pull",
+        ], true);
+    }
+
+    private function complete_files_sync(bool $is_delta): void
+    {
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
