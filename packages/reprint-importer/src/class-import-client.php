@@ -40,6 +40,7 @@ use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Session\VolatileFileTracker;
 use Reprint\Importer\Sql\DbApplyWorkflow;
 use Reprint\Importer\Sql\DbIndexDownloader;
+use Reprint\Importer\Sql\DbPullWorkflow;
 use Reprint\Importer\Sql\SqlDownloader;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\Support\PathDisplayFormatter;
@@ -1524,150 +1525,31 @@ class ImportClient
      */
     public function run_db_sync(): void
     {
-        $state_command = $this->state["command"] ?? null;
-        $sql_file = $this->state_dir . "/db.sql";
-
-        $has_progress =
-            $state_command === "db-pull" &&
-            ($this->state["status"] ?? null) === "in_progress";
-        $current_status =
-            $state_command === "db-pull"
-                ? $this->state["status"] ?? null
-                : null;
-
-        // Check if already completed
-        if ($current_status === "complete") {
-            if ($this->sql_output_mode === "file") {
-                $sql_exists = file_exists($sql_file);
-                if ($sql_exists) {
-                    throw new RuntimeException(
-                        "db-pull already completed and db.sql exists. Use --abort flag to start over.",
-                    );
-                } else {
-                    throw new RuntimeException(
-                        "db-pull marked complete but db.sql is missing. Use --abort flag to re-sync.",
-                    );
-                }
-            } else {
-                throw new RuntimeException(
-                    "db-pull already completed. Use --abort flag to start over.",
-                );
-            }
-        }
-
-        if ($has_progress) {
-            $stage = $this->state["stage"] ?? "db-index";
-            $this->audit_log(
-                sprintf(
-                    "RESUME db-pull | stage=%s | cursor=%s",
-                    $stage,
-                    !empty($this->state["cursor"])
-                        ? substr($this->state["cursor"], 0, 20) . "..."
-                        : "none",
-                ),
-                true,
-            );
-
-            $this->output->show_lifecycle_line("Resuming db-pull (stage: {$stage})\n");
-            $this->output_progress([
-                "type" => "lifecycle",
-                "event" => "resuming",
-                "command" => "db-pull",
-                "stage" => $stage,
-                "message" => "Resuming db-pull (stage: {$stage})",
-            ], true);
-        } else {
-            // Starting fresh
-            $this->state["command"] = "db-pull";
-            $this->state["status"] = "in_progress";
-            $this->state["cursor"] = null;
-            $this->state["stage"] = "db-index";
-            $this->state["diff"] = $this->default_state()["diff"];
-            $this->state["db_index"] = $this->default_state()["db_index"];
-            $this->save_state($this->state);
-
-            $this->audit_log("START db-pull", true);
-
-            $this->output->show_lifecycle_line("Starting db-pull\n");
-            $this->output_progress([
-                "type" => "lifecycle",
-                "event" => "starting",
-                "command" => "db-pull",
-                "message" => "Starting db-pull",
-            ], true);
-        }
-
-        $this->state["command"] = "db-pull";
-        $this->save_state($this->state);
-
-        // Stage 1: db-index (table metadata for progress estimation)
-        $stage = $this->state["stage"] ?? "db-index";
-        if ($stage === "db-index") {
-            $this->output_progress([
-                "status" => "starting",
-                "phase" => "db-index",
-                "message" => "Downloading table metadata",
-            ]);
-
-            $this->download_db_index();
-
-            // Timeout during db-index — state already saved, exit partial.
-            if (($this->state["status"] ?? null) === "partial") {
-                return;
-            }
-
-            $tables = (int) ($this->state["db_index"]["tables"] ?? 0);
-            $this->audit_log(
-                sprintf("db-pull db-index stage complete: %d tables", $tables),
-            );
-
-            // Transition to sql stage
-            $this->state["stage"] = "sql";
-            $this->state["cursor"] = null;
-            $this->save_state($this->state);
-        }
-
-        // Stage 2: SQL dump download
-        $this->output_progress([
-            "status" => "starting",
-            "phase" => "sql",
-            "message" => "Downloading SQL dump",
-        ]);
-
-        $this->download_sql();
-
-        // Timeout during SQL download — state already saved, exit partial.
-        if (($this->state["status"] ?? null) === "partial") {
-            return;
-        }
-
-        // Mark as complete
-        $this->state["status"] = "complete";
-        $this->save_state($this->state);
-
-        $this->audit_log("db-pull complete", true);
-
-        $this->output->show_lifecycle_line("db-pull complete\n");
-        if ($this->sql_output_mode === "file") {
-            $this->output->show_lifecycle_line("SQL file: {$sql_file}\n");
-        } elseif ($this->sql_output_mode === "stdout") {
-            $this->output->show_lifecycle_line("SQL written to stdout\n");
-        } elseif ($this->sql_output_mode === "mysql") {
-            $this->output->show_lifecycle_line("SQL imported into {$this->mysql_database}\n");
-        }
-        $this->output->show_lifecycle_line("Audit log: {$this->audit_log}\n");
-        $db_sync_complete = [
-            "type" => "lifecycle",
-            "event" => "complete",
-            "command" => "db-pull",
-            "sql_output_mode" => $this->sql_output_mode,
-            "audit_log" => $this->audit_log,
-            "message" => "db-pull complete",
-        ];
-        if ($this->sql_output_mode === "file") {
-            $db_sync_complete["sql_file"] = $sql_file;
-        }
-        $this->output_progress($db_sync_complete, true);
+        (new DbPullWorkflow(
+            $this->state_dir,
+            $this->audit_log,
+            $this->sql_output_mode,
+            $this->mysql_database,
+            $this->output,
+            function (array $state): void {
+                $this->state = $state;
+                $this->save_state($this->state);
+            },
+            function (string $message, bool $to_console = true): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (array $progress, bool $force = false): void {
+                $this->output_progress($progress, $force);
+            },
+            function (array &$state): void {
+                $this->download_db_index();
+                $state = $this->state;
+            },
+            function (array &$state): void {
+                $this->download_sql();
+                $state = $this->state;
+            },
+        ))->run($this->state);
     }
 
     /**
