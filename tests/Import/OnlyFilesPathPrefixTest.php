@@ -33,14 +33,23 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     protected function tearDown(): void
     {
-        foreach (array_reverse(glob($this->tempDir . '/*') ?: array()) as $p) {
-            is_dir($p) ? @rmdir($p) : @unlink($p);
-        }
-        @rmdir($this->stateDir);
-        @rmdir($this->fsRoot);
-        @rmdir($this->tempDir . '/srv');
-        @rmdir($this->tempDir);
+        $this->recursiveDelete($this->tempDir);
         parent::tearDown();
+    }
+
+    private function recursiveDelete(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        foreach (scandir($dir) as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $path = $dir . '/' . $item;
+            (is_dir($path) && !is_link($path)) ? $this->recursiveDelete($path) : unlink($path);
+        }
+        rmdir($dir);
     }
 
     private function call($c, string $m, array $a = array())
@@ -65,6 +74,68 @@ class OnlyFilesPathPrefixTest extends TestCase
     private function withPaths(array $pathsUrls): \ImportClient
     {
         return $this->client(array('database' => array('wp' => array('paths_urls' => $pathsUrls))));
+    }
+
+    private function onlyFingerprint(array $prefixes): string
+    {
+        return hash('sha256', json_encode($prefixes, JSON_UNESCAPED_SLASHES));
+    }
+
+    private function writeFilesPullState(array $state): void
+    {
+        $defaults = array(
+            'command' => 'files-pull',
+            'status' => 'in_progress',
+            'stage' => 'diff',
+            'preflight' => array(
+                'data' => array(
+                    'database' => array(
+                        'wp' => array(
+                            'paths_urls' => array(
+                                'content_dir' => '/var/www/html/wp-content',
+                                'uploads' => array('basedir' => '/var/www/html/wp-content/uploads'),
+                            ),
+                        ),
+                    ),
+                    'wp_detect' => array(
+                        'roots' => array(array('path' => '/var/www/html')),
+                    ),
+                ),
+                'http_code' => 200,
+            ),
+            'follow_symlinks' => false,
+            'fs_root_nonempty_behavior' => 'preserve-local',
+            'filter' => 'none',
+        );
+
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode(array_replace_recursive($defaults, $state), JSON_PRETTY_PRINT)
+        );
+    }
+
+    private function runFilesPullWithOnly(array $only): void
+    {
+        $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
+        $output = fopen('php://temp', 'w');
+        $clientReflection = new \ReflectionClass($c);
+        $clientReflection->getProperty('progress_fd')->setValue($c, $output);
+        $progress = $clientReflection->getProperty('progress')->getValue($c);
+        (new \ReflectionClass($progress))->getProperty('progress_fd')->setValue($progress, $output);
+
+        try {
+            $c->run(array(
+                'command' => 'files-pull',
+                'only' => $only,
+            ));
+        } finally {
+            fclose($output);
+        }
+    }
+
+    private function readState(): array
+    {
+        return json_decode(file_get_contents($this->stateDir . '/.import-state.json'), true);
     }
 
     public function testResolvePullOnlyFilesPrefixAddsDirectoriesOutsideWpContent(): void
@@ -151,6 +222,91 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->assertFalse($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/var/www/html/wp-config.php')));
         // Byte-order sibling must not match the prefix.
         $this->assertFalse($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/var/www/html/wp-content.bak/x')));
+    }
+
+    public function testChangingOnlyPrefixesWhileResumingFilesPullIsRejected(): void
+    {
+        $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
+
+        $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/plugins'));
+        $original_fingerprint = $this->call($c, 'files_pull_only_fingerprint');
+
+        $this->set($c, 'state', array('files_pull_only_fingerprint' => $original_fingerprint));
+        $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Cannot change --only while resuming files-pull');
+        $this->call($c, 'assert_files_pull_only_unchanged_while_resuming', array(true));
+    }
+
+    public function testChangingOnlyPrefixesAfterCompletedFilesPullIsAllowed(): void
+    {
+        $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
+
+        $this->set($c, 'state', array('files_pull_only_fingerprint' => 'different'));
+        $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
+
+        $this->call($c, 'assert_files_pull_only_unchanged_while_resuming', array(false));
+        $this->addToAssertionCount(1);
+    }
+
+
+    public function testRunRejectsChangingOnlyPrefixesWhileFilesPullIsInProgress(): void
+    {
+        $this->writeFilesPullState(array(
+            'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
+        ));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Cannot change --only while resuming files-pull');
+        $this->runFilesPullWithOnly(array(':wp-uploads:'));
+    }
+
+    public function testRunAllowsSameOnlyPrefixesWhileFilesPullIsInProgress(): void
+    {
+        file_put_contents($this->stateDir . '/.import-remote-index.jsonl', '');
+        $this->writeFilesPullState(array(
+            'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
+        ));
+
+        $this->runFilesPullWithOnly(array(':wp-content:/plugins'));
+
+        $state = $this->readState();
+        $this->assertSame('complete', $state['status'] ?? null);
+        $this->assertSame(
+            $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
+            $state['files_pull_only_fingerprint'] ?? null
+        );
+    }
+
+    public function testRunRecordsOnlyFingerprintForLegacyInProgressFilesPullState(): void
+    {
+        file_put_contents($this->stateDir . '/.import-remote-index.jsonl', '');
+        $this->writeFilesPullState(array(
+            'files_pull_only_fingerprint' => null,
+        ));
+
+        $this->runFilesPullWithOnly(array(':wp-content:/plugins'));
+
+        $state = $this->readState();
+        $this->assertSame(
+            $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
+            $state['files_pull_only_fingerprint'] ?? null
+        );
+    }
+
+    public function testRunAllowsChangingOnlyPrefixesAfterCompletedFilesPull(): void
+    {
+        $this->writeFilesPullState(array(
+            'status' => 'complete',
+            'stage' => null,
+            'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
+        ));
+
+        $this->runFilesPullWithOnly(array(':wp-uploads:'));
+
+        $state = $this->readState();
+        $this->assertSame('complete', $state['status'] ?? null);
     }
 
     public function testPullOnlyFilesPrefixesReplaceRootsAndIgnoreUnselectedRemap(): void
