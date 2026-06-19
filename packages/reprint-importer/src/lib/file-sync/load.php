@@ -8,6 +8,7 @@ require_once __DIR__ . '/class-fetch-list-builder.php';
 require_once __DIR__ . '/class-fetch-list-executor.php';
 require_once __DIR__ . '/class-file-fetch-response-handler.php';
 require_once __DIR__ . '/class-index-response-handler.php';
+require_once __DIR__ . '/class-intermediate-symlink-recreator.php';
 require_once __DIR__ . '/class-remote-index-downloader.php';
 require_once __DIR__ . '/class-runtime-files-downloader.php';
 require_once __DIR__ . '/class-symlink-chunk-applier.php';

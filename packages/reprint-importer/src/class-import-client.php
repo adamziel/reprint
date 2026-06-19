@@ -16,6 +16,7 @@ use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileChunkApplier;
 use Reprint\Importer\FileSync\FileFetchDownloader;
+use Reprint\Importer\FileSync\IntermediateSymlinkRecreator;
 use Reprint\Importer\FileSync\RemoteIndexDownloader;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\FileSync\SymlinkChunkApplier;
@@ -1552,7 +1553,12 @@ class ImportClient
         // works locally.  The server discovers these (e.g. /srv/wordpress
         // -> /wordpress) and includes them in the remote index.
         if ($this->follow_symlinks) {
-            $this->recreate_intermediate_symlinks();
+            (new IntermediateSymlinkRecreator(
+                $this->local_filesystem(),
+                function (string $message, bool $to_console): void {
+                    $this->audit_log($message, $to_console);
+                },
+            ))->recreate($this->remote_index_file);
         }
     }
 
@@ -1877,151 +1883,6 @@ class ImportClient
         fclose($handle);
 
         return array_values(array_unique($targets));
-    }
-
-    /**
-     * Recreate intermediate symlinks discovered by the server's
-     * discover_path_symlinks() function.
-     *
-     * When following symlinks, the server walks each target path component by
-     * component and emits index entries for any intermediate symlinks it finds.
-     * For example, if /srv/wordpress is a symlink to /wordpress, the server
-     * emits an index entry with path=/srv/wordpress, target=/wordpress,
-     * type=link, intermediate=true.
-     *
-     * Since the server indexes everything under realpath()-resolved paths,
-     * the files are already downloaded to the target location (e.g.
-     * fs-root/wordpress/...).  We just need to create the symlink
-     * (e.g. fs-root/srv/wordpress -> /wordpress) so the directory
-     * layout matches the server.
-     */
-    private function recreate_intermediate_symlinks(): void
-    {
-        if (!file_exists($this->remote_index_file)) {
-            return;
-        }
-
-        $h = fopen($this->remote_index_file, "r");
-        if (!$h) {
-            return;
-        }
-
-        $created = 0;
-        while (($line = fgets($h)) !== false) {
-            $entry = json_decode($line, true);
-            if (!is_array($entry)) {
-                continue;
-            }
-            if (($entry["type"] ?? "") !== "link") {
-                continue;
-            }
-            if (empty($entry["intermediate"])) {
-                continue;
-            }
-            $target_encoded = $entry["target"] ?? null;
-            if (!is_string($target_encoded) || $target_encoded === "") {
-                continue;
-            }
-            $path_encoded = $entry["path"] ?? null;
-            if (!is_string($path_encoded) || $path_encoded === "") {
-                continue;
-            }
-
-            /**
-             * base64_decode second parameter is a `strict` flag. It rejects the entire
-             * input if it contains any bytes that are not produced by base64_encode().
-             *
-             * @see https://www.php.net/base64_decode
-             */
-            $path = base64_decode($path_encoded, true);
-            $target = base64_decode($target_encoded, true);
-            if ($path === false || $path === "" || $target === false || $target === "") {
-                continue;
-            }
-
-            try {
-                $local_path = $this->remote_path_to_local_path_within_import_root($path);
-            } catch (RuntimeException $e) {
-                $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: invalid path {$path}: " . $e->getMessage(),
-                    true,
-                );
-                continue;
-            }
-
-            // Already correct — skip
-            if (is_link($local_path) && readlink($local_path) === $target) {
-                continue;
-            }
-
-            // Create parent directory
-            $parent = dirname($local_path);
-            if (!is_dir($parent)) {
-                try {
-                    $this->ensure_directory_path($parent);
-                } catch (RuntimeException $e) {
-                    $this->audit_log(
-                        "INTERMEDIATE SYMLINK SKIP: failed to prepare parent for {$path}: " .
-                            $e->getMessage(),
-                        true,
-                    );
-                    continue;
-                }
-            }
-
-            // Remove stale symlink if present
-            if (is_link($local_path)) {
-                @unlink($local_path);
-            }
-
-            // Don't overwrite a real directory — that shouldn't exist for
-            // an intermediate symlink path, and if it does something else
-            // is wrong.
-            if (file_exists($local_path)) {
-                $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: {$path} already exists as a real file/dir",
-                    true,
-                );
-                continue;
-            }
-
-            // Validate that the symlink target doesn't escape the filesystem root.
-            $root = $this->get_filesystem_root_path();
-            try {
-                $this->assert_symlink_target_within_root(
-                    dirname($local_path),
-                    $target,
-                    $root
-                );
-            } catch (RuntimeException $e) {
-                $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
-                    true,
-                );
-                continue;
-            }
-
-            if (@symlink($target, $local_path)) {
-                $created++;
-                $this->audit_log(
-                    "INTERMEDIATE SYMLINK: {$path} -> {$target}",
-                    false,
-                );
-            } else {
-                $this->audit_log(
-                    "Failed to create intermediate symlink: {$path} -> {$target}",
-                    true,
-                );
-            }
-        }
-        fclose($h);
-
-        if ($created > 0) {
-            $this->audit_log(
-                "Recreated {$created} intermediate symlink(s)",
-                false,
-            );
-        }
     }
 
     /**
