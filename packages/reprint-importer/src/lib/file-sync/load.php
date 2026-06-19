@@ -12,3 +12,4 @@ require_once __DIR__ . '/class-intermediate-symlink-recreator.php';
 require_once __DIR__ . '/class-remote-index-downloader.php';
 require_once __DIR__ . '/class-runtime-files-downloader.php';
 require_once __DIR__ . '/class-symlink-chunk-applier.php';
+require_once __DIR__ . '/class-symlink-target-indexer.php';

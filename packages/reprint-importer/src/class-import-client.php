@@ -20,6 +20,7 @@ use Reprint\Importer\FileSync\IntermediateSymlinkRecreator;
 use Reprint\Importer\FileSync\RemoteIndexDownloader;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\FileSync\SymlinkChunkApplier;
+use Reprint\Importer\FileSync\SymlinkTargetIndexer;
 use Reprint\Importer\Filesystem\FlatDocumentRootBuilder;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Filesystem\PathUtils;
@@ -1602,190 +1603,27 @@ class ImportClient
      */
     private function discover_symlink_targets(): void
     {
-        $roots = $this->get_root_directories_from_preflight();
-
-        // Collect all indexed directory real paths for containment checks
-        $visited = [];
-        foreach ($roots as $root) {
-            $visited[$root] = true;
-        }
-
-        $queue = $this->extract_symlink_dirs_from_index($visited);
-
-        while (!empty($queue)) {
-            $dir = array_shift($queue);
-            if (isset($visited[$dir])) {
-                continue;
-            }
-            // Skip if this directory is a subdirectory of an already-visited path,
-            // since those files were already included in the parent's index.
-            $already_covered = false;
-            foreach ($visited as $v => $_) {
-                if (str_starts_with($dir, $v . "/")) {
-                    $already_covered = true;
-                    break;
-                }
-            }
-            if ($already_covered) {
-                $this->audit_log(
-                    "FOLLOW SYMLINK SKIP | {$dir} already covered by a visited parent",
-                    true,
-                );
-                continue;
-            }
-            $visited[$dir] = true;
-
-            $this->audit_log(
-                "FOLLOW SYMLINK | indexing target directory: {$dir}",
-                true,
-            );
-            $this->output->show_lifecycle_line("Following symlink target: {$dir}\n");
-            $this->output_progress([
-                "type" => "symlink_follow",
-                "directory" => $dir,
-                "message" => "Following symlink target: {$dir}",
-            ], true);
-
-            // Reset the index cursor so download_remote_index starts fresh
-            // for this directory, but appends to the existing index file.
-            // Note we are not losing the previous cursor position. This code
-            // runs only after the previous directory was fully indexed so
-            // we won't need any prior cursor information again.
-            $this->state["index"]["cursor"] = null;
-            $this->save_state($this->state);
-
-            $attempts = 0;
-            $last_cursor = null;
-            while (true) {
-                try {
-                    $complete = $this->download_remote_index($dir);
-                } catch (RuntimeException $e) {
-                    // We won't be able to follow every symlink. If
-                    // the response seems like the remote server rejecting
-                    // our attempt to index this directory, log a warning
-                    // and skip to the next directory instead of crashing.
-                    $msg = $e->getMessage();
-                    if (
-                        strpos($msg, "HTTP error 4") !== false ||
-                        strpos($msg, "dir_outside_root") !== false ||
-                        strpos($msg, "outside of allowed roots") !== false
-                    ) {
-                        $this->audit_log(
-                            "FOLLOW SYMLINK SKIP | server rejected {$dir}: " .
-                                substr($msg, 0, 200),
-                            true,
-                        );
-                        $this->output->show_lifecycle_line("  Skipped (server rejected): {$dir}\n");
-                        $this->output_progress([
-                            "type" => "symlink_follow_rejected",
-                            "directory" => $dir,
-                            "message" => "Skipped (server rejected): {$dir}",
-                        ], true);
-                        continue 2;
-                    }
-
-                    // Still throw all the other errors.
-                    throw $e;
-                }
-                if ($complete) {
-                    break;
-                }
-
-                if ($this->shutdown_requested) {
-                    return;
-                }
-
-                $current_cursor = $this->state["index"]["cursor"] ?? null;
-                if ($current_cursor === $last_cursor) {
-                    throw new RuntimeException(
-                        "files-index (symlink follow) made no progress (cursor unchanged)",
-                    );
-                }
-                $last_cursor = $current_cursor;
-
-                $attempts++;
-                if ($attempts > 10_000) {
-                    // @TODO: Consider a configurable maximum attempts for really large sites that
-                    //        require more than 10,000 requests to index.
-                    throw new RuntimeException(
-                        "files-index (symlink follow) exceeded maximum attempts",
-                    );
-                }
-            }
-
-            // Scan newly added entries for more symlink targets
-            $new_targets = $this->extract_symlink_dirs_from_index($visited);
-            foreach ($new_targets as $target) {
-                if (!isset($visited[$target])) {
-                    $queue[] = $target;
-                }
-            }
-        }
-    }
-
-    /**
-     * Scan the remote index file for symlink entries whose targets are
-     * directories not already in $visited.  Returns an array of real paths.
-     *
-     * Skips entries marked as "intermediate" — those are path-component
-     * symlinks (e.g. /srv/wordpress -> /wordpress) emitted by the server's
-     * discover_path_symlinks() for local recreation only, not for indexing.
-     */
-    private function extract_symlink_dirs_from_index(array $visited): array
-    {
-        $targets = [];
-        if (!file_exists($this->remote_index_file)) {
-            return $targets;
-        }
-
-        $handle = fopen($this->remote_index_file, "r");
-        if (!$handle) {
-            return $targets;
-        }
-
-        while (($line = fgets($handle)) !== false) {
-            $entry = json_decode($line, true);
-            if (!is_array($entry)) {
-                continue;
-            }
-            if (($entry["type"] ?? "") !== "link") {
-                continue;
-            }
-            if (!empty($entry["intermediate"])) {
-                continue;
-            }
-            $target_encoded = $entry["target"] ?? null;
-            if (!is_string($target_encoded) || $target_encoded === "") {
-                continue;
-            }
-            $target = base64_decode($target_encoded);
-            if ($target === false || $target === "") {
-                continue;
-            }
-
-            // If we've seen this target already, we can move on
-            // to the next one.
-            if (isset($visited[$target])) {
-                continue;
-            }
-
-            // Check containment: skip if already under a visited root
-            $contained = false;
-            foreach ($visited as $root => $_) {
-                if (str_starts_with($target, $root . "/")) {
-                    $contained = true;
-                    break;
-                }
-            }
-            if ($contained) {
-                continue;
-            }
-
-            $targets[] = $target;
-        }
-        fclose($handle);
-
-        return array_values(array_unique($targets));
+        (new SymlinkTargetIndexer(
+            $this->remote_index_file,
+            function (string $directory): bool {
+                return $this->download_remote_index($directory);
+            },
+            function (array $state): void {
+                $this->save_state($state);
+            },
+            function (): bool {
+                return $this->shutdown_requested;
+            },
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (string $message): void {
+                $this->output->show_lifecycle_line($message);
+            },
+            function (array $progress): void {
+                $this->output_progress($progress, true);
+            },
+        ))->discover($this->state, $this->get_root_directories_from_preflight());
     }
 
     /**
