@@ -342,6 +342,16 @@ class Pull
             );
         }
 
+        // When --flatten-to produces a flattened document root, the
+        // apply-runtime stage must target that flattened directory rather
+        // than its default (the raw download tree + remote document_root).
+        // Derive flat_document_root from flatten_to so a single
+        // `pull --flatten-to=X --runtime=...` generates a runtime rooted at
+        // the flattened layout.
+        if (!empty($options['flatten_to']) && empty($options['flat_document_root'])) {
+            $options['flat_document_root'] = $options['flatten_to'];
+        }
+
         return $options;
     }
 

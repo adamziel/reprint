@@ -2615,6 +2615,14 @@ class ImportClient
                 $this->state["stage"] = "fetch-skipped";
                 $this->save_state($this->state);
                 $this->run_files_sync_pipeline();
+                // The deferred tail reopens a completed files-pull. Once the
+                // tail finishes, restore the completed status so later filter
+                // changes are judged against the actual lifecycle state.
+                if (($this->state["status"] ?? null) === "partial") {
+                    return;
+                }
+                $this->state["status"] = "complete";
+                $this->save_state($this->state);
                 return;
             }
 
