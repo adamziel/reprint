@@ -8453,8 +8453,8 @@ class ImportClient
      *
      * With --remap active, an in-scope source path is first routed to its
      * target (e.g. "/var/www/html/wp-content/x" -> "<docroot>/wp-content/x");
-     * paths under no remap rule fall through to the legacy nested mapping,
-     * exactly as a plain pull.
+     * paths under no remap rule are still written under --fs-root using their
+     * remote absolute path, exactly as a plain pull.
      */
     private function remote_path_to_local_path_within_import_root(
         string $path
