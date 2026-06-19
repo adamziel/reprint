@@ -8291,7 +8291,7 @@ class ImportClient
      * Target arguments resolve under --fs-root and must stay within it.
      * Each rule is a full source path => full local target path (both absolute).
      *
-     * @param array<int,array{0:string,1:string}> $remap_raw Raw (SRC, TGT) pairs.
+     * @param array<int,array{0:string,1:string}> $remap_raw Raw (SOURCE, TARGET) pairs.
      * @return array<string,string> Source path => target path (both absolute).
      */
     private function resolve_remap(array $remap_raw): array
