@@ -201,6 +201,18 @@ class ImportClient
     /** @var ImportOutput Reports progress, status, and human-readable output. */
     private ImportOutput $output;
 
+    /** @var bool Whether per-run runtime resources have been prepared. */
+    private bool $runtime_prepared = false;
+
+    /** @var bool Whether this instance installed process signal handlers. */
+    private bool $signal_handlers_installed = false;
+
+    /** @var array<int, mixed> Signal handlers that were installed before this run. */
+    private array $previous_signal_handlers = [];
+
+    /** @var bool|null Async signal setting that was active before this run. */
+    private ?bool $previous_async_signals = null;
+
     /** @var ImportHttpTransport|null HTTP and streaming multipart transport. */
     private ?ImportHttpTransport $http_transport = null;
 
@@ -286,18 +298,31 @@ class ImportClient
                 $this->output->tick_spinner();
             },
         );
+    }
 
-        // Register signal handlers for graceful shutdown
-        if (function_exists("pcntl_signal")) {
-            // Enable async signals (PHP 7.1+) so signals work during blocking operations
-            if (function_exists("pcntl_async_signals")) {
-                pcntl_async_signals(true);
-            }
-            pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
-            pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
+    private function prepare_runtime(): void
+    {
+        if ($this->runtime_prepared) {
+            return;
         }
 
-        // Create directories
+        $this->ensure_runtime_directories();
+        $this->install_signal_handlers();
+        $this->runtime_prepared = true;
+    }
+
+    private function cleanup_runtime(): void
+    {
+        if (!$this->runtime_prepared) {
+            return;
+        }
+
+        $this->restore_signal_handlers();
+        $this->runtime_prepared = false;
+    }
+
+    private function ensure_runtime_directories(): void
+    {
         if (!is_dir($this->state_dir)) {
             if (!mkdir($this->state_dir, 0755, true)) {
                 throw new RuntimeException("Failed to create directory: {$this->state_dir}");
@@ -308,6 +333,52 @@ class ImportClient
                 throw new RuntimeException("Failed to create directory: {$this->fs_root}");
             }
         }
+    }
+
+    private function install_signal_handlers(): void
+    {
+        if (!function_exists("pcntl_signal")) {
+            return;
+        }
+
+        $signals = [SIGINT, SIGTERM];
+        if (function_exists("pcntl_signal_get_handler")) {
+            foreach ($signals as $signal) {
+                $this->previous_signal_handlers[$signal] = pcntl_signal_get_handler($signal);
+            }
+        }
+
+        if (function_exists("pcntl_async_signals")) {
+            $this->previous_async_signals = pcntl_async_signals();
+            pcntl_async_signals(true);
+        }
+
+        pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
+        pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
+        $this->signal_handlers_installed = true;
+    }
+
+    private function restore_signal_handlers(): void
+    {
+        if (!$this->signal_handlers_installed || !function_exists("pcntl_signal")) {
+            return;
+        }
+
+        foreach ([SIGINT, SIGTERM] as $signal) {
+            if (array_key_exists($signal, $this->previous_signal_handlers)) {
+                pcntl_signal($signal, $this->previous_signal_handlers[$signal]);
+            } else {
+                pcntl_signal($signal, SIG_DFL);
+            }
+        }
+
+        if ($this->previous_async_signals !== null && function_exists("pcntl_async_signals")) {
+            pcntl_async_signals($this->previous_async_signals);
+        }
+
+        $this->previous_signal_handlers = [];
+        $this->previous_async_signals = null;
+        $this->signal_handlers_installed = false;
     }
 
     private function http_transport(): ImportHttpTransport
@@ -538,63 +609,54 @@ class ImportClient
     }
 
     /**
-     * Emit a preserve-local skip event to both TTY progress line and JSONL.
-     */
-    private function emit_skip_progress(string $path): void
-    {
-        $this->file_sync_local_applier()->emit_skip_progress($path);
-    }
-
-    /**
      * Run the import process with explicit command validation.
      *
-     * @param array $options Options:
+     * @param array $raw_options Options:
      *   - command: Required. One of the commands registered in ImportCommands.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      *
      * @return ImportCommandResult|null Structured command result for the caller to format.
      */
-    public function run(array $options = []): ?ImportCommandResult
+    public function run(array $raw_options = []): ?ImportCommandResult
     {
-        return $this->run_request(ImportRunRequest::from_options($options));
-    }
-
-    /**
-     * Run the import process using a validated request.
-     */
-    public function run_request(ImportRunRequest $request): ?ImportCommandResult
-    {
-        $options = $request->options();
-        $command = $request->command();
-        $command_runner = $request->command_runner();
-
-        $this->prepare_request_state($request);
-
-        $this->initialize_tuner($options);
-        $this->initialize_hmac_client($request);
-
-        if ($request->abort()) {
-            if (!$command_runner->supports_abort()) {
-                throw new InvalidArgumentException("Command {$command} does not support --abort");
-            }
-            $command_runner->abort($this, $command);
-            return null;
-        }
-
-        if ($command_runner->requires_preflight()) {
-            $this->require_preflight();
-        }
+        $this->prepare_runtime();
 
         try {
-            $result = $command_runner->execute($this, $options);
-            if ($command_runner->emits_final_status()) {
-                $this->finish_command_status($command);
+            $request = ImportRunRequest::from_options($raw_options);
+            $options = $request->options();
+            $command = $request->command();
+            $command_runner = $request->command_runner();
+
+            $this->prepare_request_state($request);
+
+            $this->initialize_tuner($options);
+            $this->initialize_hmac_client($request);
+
+            if ($request->abort()) {
+                if (!$command_runner->supports_abort()) {
+                    throw new InvalidArgumentException("Command {$command} does not support --abort");
+                }
+                $command_runner->abort($this, $command);
+                return null;
             }
-            return $result;
-        } catch (Exception $e) {
-            $this->report_command_exception($e);
-            throw $e;
+
+            if ($command_runner->requires_preflight()) {
+                $this->require_preflight();
+            }
+
+            try {
+                $result = $command_runner->execute($this, $options);
+                if ($command_runner->emits_final_status()) {
+                    $this->finish_command_status($command);
+                }
+                return $result;
+            } catch (Exception $e) {
+                $this->report_command_exception($e);
+                throw $e;
+            }
+        } finally {
+            $this->cleanup_runtime();
         }
     }
 

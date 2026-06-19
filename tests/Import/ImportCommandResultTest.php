@@ -108,6 +108,58 @@ class ImportCommandResultTest extends TestCase
         $this->assertSame('files-stats', $result->type());
     }
 
+    public function testImportClientConstructorDoesNotCreateRuntimeDirectories(): void
+    {
+        $stateDir = $this->tempDir . '/lazy-state';
+        $fsRoot = $this->tempDir . '/lazy-fs-root';
+
+        new ImportClient('http://example.invalid', $stateDir, $fsRoot);
+
+        $this->assertDirectoryDoesNotExist($stateDir);
+        $this->assertDirectoryDoesNotExist($fsRoot);
+    }
+
+    public function testImportClientRunCreatesRuntimeDirectoriesWhenNeeded(): void
+    {
+        $stateDir = $this->tempDir . '/runtime-state';
+        $fsRoot = $this->tempDir . '/runtime-fs-root';
+        $client = new ImportClient('http://example.invalid', $stateDir, $fsRoot);
+
+        $result = $client->run(['command' => 'files-stats']);
+
+        $this->assertInstanceOf(FilesStatsResult::class, $result);
+        $this->assertDirectoryExists($stateDir);
+        $this->assertDirectoryExists($fsRoot);
+    }
+
+    public function testImportClientRunRestoresSignalHandlers(): void
+    {
+        if (!function_exists('pcntl_signal') || !function_exists('pcntl_signal_get_handler')) {
+            $this->markTestSkipped('pcntl signal handler inspection is unavailable.');
+        }
+
+        $previousIntHandler = pcntl_signal_get_handler(SIGINT);
+        $previousTermHandler = pcntl_signal_get_handler(SIGTERM);
+        $intHandler = static function (): void {
+        };
+        $termHandler = static function (): void {
+        };
+
+        pcntl_signal(SIGINT, $intHandler);
+        pcntl_signal(SIGTERM, $termHandler);
+
+        try {
+            $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+            $client->run(['command' => 'files-stats']);
+
+            $this->assertSame($intHandler, pcntl_signal_get_handler(SIGINT));
+            $this->assertSame($termHandler, pcntl_signal_get_handler(SIGTERM));
+        } finally {
+            pcntl_signal(SIGINT, $previousIntHandler);
+            pcntl_signal(SIGTERM, $previousTermHandler);
+        }
+    }
+
     public function testImportClientCanReportThroughBufferedOutput(): void
     {
         $output = new BufferedImportOutput();
