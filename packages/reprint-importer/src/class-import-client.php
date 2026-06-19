@@ -29,8 +29,6 @@ use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Input\ImportRunRequest;
 use Reprint\Importer\Output\ImportOutput;
 use Reprint\Importer\Output\NullImportOutput;
-use Reprint\Importer\Protocol\CurlTimeoutException;
-use Reprint\Importer\Protocol\MultipartStreamParser;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Pull\Pull;
 use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
@@ -50,6 +48,7 @@ use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\Support\PathDisplayFormatter;
 use Reprint\Importer\TargetRuntime\RuntimeConfigurationApplier;
 use Reprint\Importer\Transport\HttpErrorDiagnoser;
+use Reprint\Importer\Transport\ImportHttpTransport;
 use Reprint\Importer\Transport\HttpRequestBuilder;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 use Reprint\Importer\UrlRewrite\Base64ValueScanner;
@@ -211,17 +210,14 @@ class ImportClient
      */
     private $max_allowed_packet = null;
 
-    /** @var int|null Last curl error number, for retry/diagnostic logic. */
-    private $last_curl_errno = null;
-
-    /** @var bool Whether the last curl request timed out. */
-    private $last_curl_timeout = false;
-
     /** @var string|null Machine-readable error code from the last diagnose_http_error() call. */
     public $last_error_code = null;
 
     /** @var ImportOutput Reports progress, status, and human-readable output. */
     private ImportOutput $output;
+
+    /** @var ImportHttpTransport|null HTTP and streaming multipart transport. */
+    private ?ImportHttpTransport $http_transport = null;
 
     /** @var Pull Orchestrates the pull command pipeline. */
     private Pull $pull;
@@ -327,6 +323,55 @@ class ImportClient
                 throw new RuntimeException("Failed to create directory: {$this->fs_root}");
             }
         }
+    }
+
+    private function http_transport(): ImportHttpTransport
+    {
+        if ($this->http_transport instanceof ImportHttpTransport) {
+            return $this->http_transport;
+        }
+
+        $this->http_transport = new ImportHttpTransport(
+            $this->output,
+            function (string $message, bool $to_console): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (array $data, bool $force = false): void {
+                $this->output_progress($data, $force);
+            },
+            function (): ?string {
+                return $this->state["user_agent"] ?? null;
+            },
+            function (string $body): array {
+                if ($this->hmac_client === null) {
+                    return [];
+                }
+
+                return $this->hmac_client->get_curl_headers($body);
+            },
+            function (): bool {
+                return $this->hmac_client !== null;
+            },
+            function (string $code): void {
+                $this->last_error_code = $code;
+            },
+            function (string $endpoint, array $error): void {
+                $this->handle_tuner_error($endpoint, $error);
+            },
+            function (): array {
+                if ($this->download_list_total === null) {
+                    return [];
+                }
+
+                return [
+                    "files_done" =>
+                        ($this->download_list_done ?? 0) + $this->files_imported,
+                    "files_total" => $this->download_list_total,
+                ];
+            },
+        );
+
+        return $this->http_transport;
     }
 
     /**
@@ -3927,48 +3972,12 @@ class ImportClient
     }
 
     /**
-     * Return HMAC authentication headers formatted for curl ("Name: value"),
-     * or an empty array if no secret was configured.
-     *
-     * @param string $body The request body content whose SHA-256 hash will
-     *                     be included in the HMAC signature.  For CURLFile
-     *                     uploads, pass the raw file content (not the
-     *                     multipart envelope); for form-encoded POST, pass
-     *                     the http_build_query() output; for GET, omit or
-     *                     pass empty string.
-     */
-    private function get_hmac_headers(string $body = ''): array
-    {
-        if ($this->hmac_client === null) {
-            return [];
-        }
-        return $this->hmac_client->get_curl_headers($body);
-    }
-
-    /**
-     * Reset curl-related state at the start of each HTTP request.
-     */
-    private function reset_curl_state(): void
-    {
-        $this->last_curl_errno = null;
-        $this->last_curl_timeout = false;
-    }
-
-    /**
      * User-Agent strings to try during preflight, in order of preference.
      * Some WAFs block browser UAs that carry custom auth headers, so we
      * start with an honest non-browser identity and fall back to common
      * browser strings.
      */
     public const USER_AGENTS = HttpRequestBuilder::USER_AGENTS;
-
-    private function get_base_headers(string $accept): array
-    {
-        return HttpRequestBuilder::base_headers(
-            $accept,
-            $this->state["user_agent"] ?? null,
-        );
-    }
 
     /**
      * Build the multipart chunk handler callback shared by both parser
@@ -3982,107 +3991,7 @@ class ImportClient
         StreamingContext $context,
         &$current_chunk
     ): callable {
-        return function ($event) use ($context, &$current_chunk) {
-            if ($event["type"] === "body") {
-                $headers = $event["headers"];
-                $chunk_type = $headers["x-chunk-type"] ?? "";
-                if ($chunk_type === "file") {
-                    if (!$current_chunk) {
-                        $current_chunk = [
-                            "headers" => $headers,
-                            "body_streamed" => true,
-                            "started" => false,
-                        ];
-                    }
-
-                    if ($context->on_chunk) {
-                        $stream_headers = $headers;
-                        if (!empty($current_chunk["started"])) {
-                            $stream_headers["x-first-chunk"] = "0";
-                        }
-                        // The parser emits a separate complete event after the
-                        // last body bytes, so close/index the file from there.
-                        $stream_headers["x-last-chunk"] = "0";
-                        ($context->on_chunk)([
-                            "headers" => $stream_headers,
-                            "body" => $event["data"],
-                            // Suppresses state saves while a streamed file
-                            // part body is still being written.
-                            "is_streaming_body" => true,
-                        ]);
-                    }
-                    $current_chunk["started"] = true;
-                    return;
-                }
-
-                if (!$current_chunk) {
-                    $current_chunk = [
-                        "headers" => $headers,
-                        "body" => $event["data"],
-                    ];
-                } else {
-                    $current_chunk["body"] =
-                        ($current_chunk["body"] ?? "") .
-                        $event["data"];
-                }
-            } elseif ($event["type"] === "complete") {
-                $headers = $event["headers"];
-                $chunk_type = $headers["x-chunk-type"] ?? "";
-                if ($chunk_type === "file" && !empty($current_chunk["body_streamed"])) {
-                    if ($context->on_chunk) {
-                        $close_headers = $headers;
-                        $close_headers["x-first-chunk"] = "0";
-                        ($context->on_chunk)([
-                            "headers" => $close_headers,
-                            "body" => "",
-                            // Forces a save at every streamed file-part
-                            // boundary, even if the periodic counter has not
-                            // reached SAVE_STATE_EVERY_N_CHUNKS.
-                            "is_streaming_close" => true,
-                        ]);
-                    }
-                } elseif ($current_chunk) {
-                    // Chunk complete - emit to handler
-                    if ($context->on_chunk) {
-                        ($context->on_chunk)(
-                            $current_chunk,
-                        );
-                    }
-                } elseif ($headers) {
-                    // No body data - emit just headers
-                    if ($context->on_chunk) {
-                        ($context->on_chunk)([
-                            "headers" =>
-                                $headers,
-                            "body" => "",
-                        ]);
-                    }
-                }
-                $current_chunk = null;
-            }
-        };
-    }
-
-    /**
-     * Check for curl errors after curl_exec and record timeout state.
-     * Throws RuntimeException on any curl error.
-     */
-    private function check_curl_error($ch): void
-    {
-        if (!curl_errno($ch)) {
-            return;
-        }
-        $errno = curl_errno($ch);
-        $error = curl_error($ch);
-        $timeout_errno = defined("CURLE_OPERATION_TIMEDOUT")
-            ? CURLE_OPERATION_TIMEDOUT
-            : 28;
-        $this->last_curl_errno = $errno;
-        $this->last_curl_timeout = $errno === $timeout_errno;
-        if ($this->last_curl_timeout) {
-            throw new CurlTimeoutException("cURL error: {$error}");
-        }
-        throw new RuntimeException("cURL error ($errno): {$error}");
+        return $this->http_transport()->make_chunk_handler($context, $current_chunk);
     }
 
     /**
@@ -4167,98 +4076,7 @@ class ImportClient
      */
     public function fetch_json(string $url): array
     {
-        $this->reset_curl_state();
-
-        $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
-
-        $ch = curl_init($url);
-        reprint_apply_curl_proxy_from_env($ch);
-        reprint_apply_curl_ca_bundle($ch);
-
-        $headers = [
-            ...$this->get_base_headers("application/json"),
-            ...($this->get_hmac_headers()),
-        ];
-
-        curl_setopt_array($ch, [
-            CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_ENCODING => "gzip, deflate",
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_NOPROGRESS => false,
-            CURLOPT_PROGRESSFUNCTION =>
-                function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
-                    $this->output->tick_spinner();
-                    return 0;
-                },
-        ]);
-
-        $start = microtime(true);
-        $body = curl_exec($ch);
-        $elapsed = microtime(true) - $start;
-
-        try {
-            $this->check_curl_error($ch);
-        } catch (RuntimeException $e) {
-            @curl_close($ch);
-            return [
-                "ok" => false,
-                "http_code" => 0,
-                "elapsed" => $elapsed,
-                "body" => null,
-                "json" => null,
-                "error" => $e->getMessage(),
-                "curl_errno" => $this->last_curl_errno,
-                "timeout" => $this->last_curl_timeout,
-            ];
-        }
-
-        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
-        @curl_close($ch);
-
-        if ($http_code !== 200) {
-            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
-            return [
-                "ok" => false,
-                "http_code" => $http_code,
-                "elapsed" => $elapsed,
-                "body" => $body,
-                "json" => null,
-                "error" => $this->format_diagnosed_error($diagnosis),
-                "error_code" => $diagnosis['code'],
-            ];
-        }
-
-        $json = null;
-        $json_error = null;
-        $error_code = null;
-        if ($body !== false && $body !== "") {
-            $json = json_decode($body, true);
-            if ($json === null && json_last_error() !== JSON_ERROR_NONE) {
-                // HTTP 200 but body isn't valid JSON — likely an HTML page
-                // from a site that doesn't have the exporter installed.
-                $diagnosis = $this->diagnose_http_error(200, $body);
-                if ($diagnosis['code'] === 'HTML_RESPONSE') {
-                    $json_error = $this->format_diagnosed_error($diagnosis);
-                    $error_code = $diagnosis['code'];
-                } else {
-                    $json_error = "Invalid JSON: " . json_last_error_msg();
-                    $error_code = 'INVALID_JSON';
-                }
-            }
-        }
-
-        return [
-            "ok" => $json_error === null,
-            "http_code" => $http_code,
-            "elapsed" => $elapsed,
-            "body" => $body,
-            "json" => $json,
-            "error" => $json_error,
-            "error_code" => $error_code,
-        ];
+        return $this->http_transport()->fetch_json($url);
     }
 
     /**
@@ -4271,343 +4089,13 @@ class ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        $this->reset_curl_state();
-
-        // Log HTTP request details
-        $log_parts = ["HTTP_REQUEST", $post_data ? "POST" : "GET", $url];
-
-        if ($post_data && isset($post_data["file_list"])) {
-            $file_list_part = $post_data["file_list"];
-            if ($file_list_part instanceof CURLFile) {
-                $upload_path = $file_list_part->getFilename();
-                $upload_size = is_string($upload_path)
-                    ? filesize($upload_path)
-                    : false;
-                $upload_size = $upload_size === false ? 0 : $upload_size;
-                $log_parts[] = "file_list_file=" . $upload_size . "b";
-            } else {
-                $log_parts[] =
-                    "file_list=" . strlen((string) $file_list_part) . "b";
-            }
-        }
-
-        $this->audit_log(implode(" | ", $log_parts), false);
-
-        $ch = curl_init($url);
-        reprint_apply_curl_proxy_from_env($ch);
-        reprint_apply_curl_ca_bundle($ch);
-
-        $parser = null;
-        $current_chunk = null;
-        $bytes_received = 0;
-        $last_heartbeat = microtime(true);
-        $last_progress_check = microtime(true);
-        $last_bytes_received = 0;
-        $error_body = "";
-
-        // Build headers to look like a real browser
-        $headers = [
-            ...$this->get_base_headers("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
-            "Upgrade-Insecure-Requests: 1",
-            "Sec-Fetch-Dest: document",
-            "Sec-Fetch-Mode: navigate",
-            "Sec-Fetch-Site: none",
-            "Sec-Fetch-User: ?1",
-        ];
-
-        if ($cursor) {
-            $headers[] = "X-Export-Cursor: {$cursor}";
-        }
-
-        // Configure POST data if provided.  We need to know the body
-        // content BEFORE generating HMAC headers so the content hash
-        // can be included in the signature.
-        $body_for_signing = '';
-        if ($post_data !== null) {
-            curl_setopt($ch, CURLOPT_POST, true);
-            $has_file = false;
-            foreach ($post_data as $value) {
-                if ($value instanceof CURLFile) {
-                    $has_file = true;
-                    break;
-                }
-            }
-            if ($has_file) {
-                // For CURLFile uploads, sign the raw file content — this
-                // is the logical payload the server will receive, even
-                // though curl wraps it in multipart framing.
-                foreach ($post_data as $value) {
-                    if ($value instanceof CURLFile) {
-                        $body_for_signing .= file_get_contents(
-                            $value->getFilename(),
-                        );
-                    }
-                }
-                curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
-            } else {
-                $body_for_signing = http_build_query($post_data);
-                curl_setopt($ch, CURLOPT_POSTFIELDS, $body_for_signing);
-            }
-        }
-
-        // Append HMAC auth headers now that we know the body content
-        array_push($headers, ...($this->get_hmac_headers($body_for_signing)));
-
-        curl_setopt_array($ch, [
-            CURLOPT_FOLLOWLOCATION => false,
-            // Don't cap total transfer time — streaming responses can
-            // legitimately run for 20+ minutes. Instead, detect stalled
-            // connections: timeout only when fewer than 1 byte/sec is
-            // received for 300 consecutive seconds.
-            CURLOPT_LOW_SPEED_LIMIT => 1,
-            CURLOPT_LOW_SPEED_TIME => 300,
-            CURLOPT_ENCODING => "gzip, deflate",
-            // Tick the spinner during transfers. curl calls this roughly
-            // once per second even when no data is flowing, which keeps
-            // the Braille spinner rotating so it looks alive.
-            CURLOPT_NOPROGRESS => false,
-            CURLOPT_PROGRESSFUNCTION =>
-                function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
-                    $this->output->tick_spinner();
-                    return 0; // 0 = continue, non-zero = abort
-                },
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
-                &$parser,
-                $context,
-                &$current_chunk
-            ) {
-                $len = strlen($header_line);
-
-                // Parse Content-Type to extract boundary
-                if (stripos($header_line, "Content-Type:") === 0) {
-                    // Find boundary parameter
-                    $pos = stripos($header_line, "boundary=");
-                    if ($pos !== false) {
-                        $boundary_start = $pos + 9; // length of 'boundary='
-                        $boundary_value = substr($header_line, $boundary_start);
-                        $boundary_value = trim($boundary_value);
-
-                        // Remove quotes if present
-                        if ($boundary_value[0] === '"') {
-                            $quote_end = strpos($boundary_value, '"', 1);
-                            if ($quote_end !== false) {
-                                $boundary_value = substr(
-                                    $boundary_value,
-                                    1,
-                                    $quote_end - 1,
-                                );
-                            }
-                        } else {
-                            // Find end (semicolon, comma, or whitespace)
-                            $end_pos = strcspn($boundary_value, ";,\r\n \t");
-                            $boundary_value = substr(
-                                $boundary_value,
-                                0,
-                                $end_pos,
-                            );
-                        }
-
-                        if ($boundary_value !== "") {
-                            $this->audit_log(
-                                "Creating multipart parser with boundary: $boundary_value",
-                                false,
-                            );
-                            $parser = new MultipartStreamParser(
-                                $boundary_value,
-                                $this->make_chunk_handler($context, $current_chunk),
-                            );
-                        }
-                    }
-                }
-
-                return $len;
-            },
-            CURLOPT_WRITEFUNCTION => function ($ch, $data) use (
-                &$parser,
-                &$current_chunk,
-                $context,
-                &$bytes_received,
-                &$last_heartbeat,
-                &$last_progress_check,
-                &$last_bytes_received,
-                &$error_body
-            ) {
-                // If no parser yet, we might be receiving an error response
-                if (!$parser) {
-                    $error_body .= $data;
-                    if (strlen($error_body) > 65536) {
-                        $error_body = substr($error_body, -65536);
-                    }
-
-                    // Strict fallback: if body starts with a boundary line, parse it.
-                    if (strncmp($error_body, "--boundary-", 11) === 0) {
-                        $line_end = strpos($error_body, "\n");
-                        if ($line_end !== false) {
-                            $line = rtrim(substr($error_body, 0, $line_end), "\r\n");
-                            if (strncmp($line, "--boundary-", 11) === 0) {
-                                $boundary = substr($line, 2);
-                                if ($boundary !== "") {
-                                    $this->audit_log(
-                                        "Detected boundary in body (no Content-Type): {$boundary}",
-                                        false,
-                                    );
-                                    $parser = new MultipartStreamParser(
-                                        $boundary,
-                                        $this->make_chunk_handler($context, $current_chunk),
-                                    );
-                                    $parser->feed($error_body);
-                                    $error_body = "";
-                                }
-                            }
-                        }
-                    }
-
-                    static $logged_no_parser = false;
-                    if (!$logged_no_parser && strlen($error_body) > 0) {
-                        $this->audit_log(
-                            "No parser, accumulating error body (first 500 chars): " .
-                                substr($error_body, 0, 500),
-                            false,
-                        );
-                        $logged_no_parser = true;
-                    }
-                }
-
-                if ($parser) {
-                    $parser->feed($data);
-                }
-
-                $bytes_received += strlen($data);
-
-                // Check for stuck/slow transfer every 5 seconds
-                $now = microtime(true);
-                if ($now - $last_progress_check >= 5.0) {
-                    $bytes_since_check = $bytes_received - $last_bytes_received;
-                    $rate = $bytes_since_check / 5.0; // bytes per second
-
-                    $this->output_progress([
-                        "progress_check" => true,
-                        "bytes_received" => $bytes_received,
-                        "bytes_last_5s" => $bytes_since_check,
-                        "rate_bps" => round($rate),
-                    ], true);
-
-                    // If we're receiving less than 1KB/s for 5 seconds, something is wrong
-                    if ($bytes_since_check < 1024 && $bytes_received > 0) {
-                        $this->audit_log(
-                            "Warning: Slow transfer detected - {$bytes_since_check} bytes in 5 seconds",
-                            false,
-                        );
-                    }
-
-                    $last_progress_check = $now;
-                    $last_bytes_received = $bytes_received;
-                }
-
-                // Output heartbeat every second (only in verbose/non-TTY mode)
-                if ($now - $last_heartbeat >= 1.0) {
-                    $heartbeat = [
-                        "heartbeat" => true,
-                        "bytes_received" => $bytes_received,
-                    ];
-                    // Only emit file counters when the download list has
-                    // been counted (fetch phase).  During indexing the
-                    // list doesn't exist yet and emitting files_done:0
-                    // without files_total confuses consumers.
-                    if ($this->download_list_total !== null) {
-                        $heartbeat["files_done"] =
-                            ($this->download_list_done ?? 0) + $this->files_imported;
-                        $heartbeat["files_total"] = $this->download_list_total;
-                    }
-                    $this->output_progress($heartbeat, true);
-                    $last_heartbeat = $now;
-                }
-
-                return strlen($data);
-            },
-        ]);
-
-        $this->audit_log("Executing curl request...", false);
-        $this->output_progress(["debug" => "Waiting for server response..."]);
-        $result = curl_exec($ch);
-        $this->audit_log(
-            "curl_exec completed, result=" .
-                ($result === false ? "false" : "true"),
-            false,
+        $this->http_transport()->fetch_streaming(
+            $url,
+            $cursor,
+            $context,
+            $post_data,
+            $endpoint,
         );
-
-        try {
-            try {
-                $this->check_curl_error($ch);
-            } catch (RuntimeException $curl_error) {
-                if ($endpoint !== null) {
-                    $this->handle_tuner_error($endpoint, [
-                        "http_code" => 0,
-                        "timeout" => $this->last_curl_timeout,
-                        "curl_errno" => $this->last_curl_errno,
-                    ]);
-                }
-                throw $curl_error;
-            }
-
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
-            $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
-            $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
-        } finally {
-            @curl_close($ch);
-        }
-
-        if (!isset($context->response_stats) || !is_array($context->response_stats)) {
-            $context->response_stats = [];
-        }
-        $context->response_stats["ttfb"] = $ttfb;
-        $context->response_stats["total_time"] = $total_time;
-
-        if ($http_code !== 200) {
-            if ($endpoint !== null) {
-                $this->handle_tuner_error($endpoint, [
-                    "http_code" => $http_code,
-                    "timeout" => false,
-                    "curl_errno" => 0,
-                ]);
-            }
-
-            // Log what we received
-            $this->audit_log(
-                "HTTP error {$http_code} | error_body length: " .
-                    strlen($error_body),
-                true,
-            );
-
-            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url);
-            $error_msg = $this->format_diagnosed_error($diagnosis);
-
-            // Append stack trace from the server if available.
-            if ($error_body) {
-                $error_data = json_decode($error_body, true);
-                if (is_array($error_data) && isset($error_data["trace"])) {
-                    $error_msg .= "\n\nServer stack trace:\n" . $error_data["trace"];
-                }
-            }
-
-            throw new RuntimeException($error_msg);
-        }
-
-        if (!$parser) {
-            $snippet = $error_body ? substr($error_body, 0, 500) : "";
-            throw new RuntimeException(
-                "Invalid response: missing multipart boundary. " .
-                    ($snippet !== "" ? "Body: {$snippet}" : ""),
-            );
-        }
-
-        if (!$context->saw_completion) {
-            throw new RuntimeException(
-                "Invalid response: missing completion chunk from server.",
-            );
-        }
     }
 
     /**
