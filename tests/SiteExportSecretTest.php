@@ -31,6 +31,8 @@ final class SiteExportSecretTest extends TestCase
 
         $GLOBALS['site_export_test_options'] = [];
         $GLOBALS['site_export_registered_settings'] = [];
+        $GLOBALS['site_export_test_actions'] = [];
+        $GLOBALS['site_export_test_filters'] = [];
         $_SERVER = [];
         $_FILES = [];
 
@@ -71,6 +73,8 @@ final class SiteExportSecretTest extends TestCase
 
         $GLOBALS['site_export_test_options'] = [];
         $GLOBALS['site_export_registered_settings'] = [];
+        $GLOBALS['site_export_test_actions'] = [];
+        $GLOBALS['site_export_test_filters'] = [];
 
         $this->bootstrapWordPressFunctions();
 
@@ -111,11 +115,15 @@ final class SiteExportSecretTest extends TestCase
         }
 
         if (!function_exists('add_action')) {
-            function add_action(...$args): void {}
+            function add_action(...$args): void {
+                $GLOBALS['site_export_test_actions'][] = $args;
+            }
         }
 
         if (!function_exists('add_filter')) {
-            function add_filter(...$args): void {}
+            function add_filter(...$args): void {
+                $GLOBALS['site_export_test_filters'][] = $args;
+            }
         }
 
         if (!function_exists('plugin_basename')) {
@@ -191,6 +199,34 @@ final class SiteExportSecretTest extends TestCase
         $this->assertTrue($setting['args']['show_in_rest']);
         $this->assertSame('string', $setting['args']['type']);
         $this->assertSame('', $setting['args']['default']);
+    }
+
+    public function testPluginConstructorDoesNotRegisterHooks(): void
+    {
+        Site_Export_Plugin::get_instance();
+
+        $this->assertSame([], $GLOBALS['site_export_test_actions']);
+        $this->assertSame([], $GLOBALS['site_export_test_filters']);
+    }
+
+    public function testPluginRegistersHooksExplicitlyOnce(): void
+    {
+        $plugin = Site_Export_Plugin::get_instance();
+
+        $plugin->register_hooks();
+        $plugin->register_hooks();
+
+        $action_names = array_map(
+            static fn(array $args): string => $args[0],
+            $GLOBALS['site_export_test_actions'],
+        );
+        $filter_names = array_map(
+            static fn(array $args): string => $args[0],
+            $GLOBALS['site_export_test_filters'],
+        );
+
+        $this->assertSame(['init', 'admin_menu', 'admin_init', 'admin_bar_menu'], $action_names);
+        $this->assertSame(['plugin_action_links_index.php'], $filter_names);
     }
 
     public function testPluginHmacVerifierDelegatesToPackageServer(): void

@@ -15,6 +15,7 @@
 class Site_Export_Plugin {
 
     private static $instance = null;
+    private $hooks_registered = false;
 
     public static function get_instance() {
         if (self::$instance === null) {
@@ -24,11 +25,20 @@ class Site_Export_Plugin {
     }
 
     private function __construct() {
+    }
+
+    public function register_hooks() {
+        if ($this->hooks_registered) {
+            return;
+        }
+
         add_action('init', [$this, 'register_settings']);
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'handle_settings_save']);
         add_filter('plugin_action_links_' . plugin_basename(REPRINT_EXPORTER_PLUGIN_DIR . 'index.php'), [$this, 'add_settings_link']);
         add_action('admin_bar_menu', [$this, 'add_admin_bar_node'], 100);
+
+        $this->hooks_registered = true;
     }
 
     /** Register the option so core's /wp/v2/settings endpoint can update it. */
@@ -337,7 +347,7 @@ class Site_Export_Plugin {
 
 // Initialize
 add_action('plugins_loaded', function() {
-    Site_Export_Plugin::get_instance();
+    Site_Export_Plugin::get_instance()->register_hooks();
 });
 
 // On activation: set a transient so we can redirect on the next admin page load.

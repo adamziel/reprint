@@ -39,13 +39,16 @@ class WpdbDriverPDO
     public function __construct($wpdb)
     {
         $this->wpdb = $wpdb;
+    }
 
+    public function suppress_errors(): void
+    {
         // Prevent wpdb from echoing HTML error blocks into the response stream.
         // The export endpoints emit gzip multipart, so even one HTML chunk
         // would corrupt the output stream irrecoverably. No restore on
         // shutdown: export endpoints terminate the request after streaming.
-        $wpdb->suppress_errors(true);
-        $wpdb->hide_errors();
+        $this->wpdb->suppress_errors(true);
+        $this->wpdb->hide_errors();
     }
 
     public function prepare(string $sql): WpdbDriverPDOStatement

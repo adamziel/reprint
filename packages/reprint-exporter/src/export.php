@@ -323,7 +323,9 @@ function create_wpdb_pdo_adapter()
         );
     }
 
-    return new WpdbDriverPDO($wpdb);
+    $adapter = new WpdbDriverPDO($wpdb);
+    $adapter->suppress_errors();
+    return $adapter;
 }
 
 // Guard with existence checks: when loaded via Composer autoloader, both
