@@ -124,6 +124,9 @@
     },
     "file-body-resume": {
       "port": 8120
+    },
+    "edit-locks": {
+      "port": 8121
     }
   }
 }

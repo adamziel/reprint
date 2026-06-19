@@ -2446,10 +2446,30 @@ class ImportClient
             return [];
         }
         $params = $this->tuner->get_request_params($endpoint);
-        // Tell the server about the client's max_allowed_packet so it can
-        // cap SQL statements to a size the client can actually import.
-        if ($endpoint === "sql_chunk" && $this->max_allowed_packet !== null) {
-            $params["max_allowed_packet"] = $this->max_allowed_packet;
+        if ($endpoint === "sql_chunk") {
+            /**
+             * Ask the exporter to omit source rows that should not enter the local clone.
+             *
+             * The protocol is intentionally data-shaped instead of exporter-defined
+             * tokens: table_suffix is resolved against the source site's table prefix,
+             * column is matched against the source table metadata, and value_base64 lets
+             * the exporter compare with FROM_BASE64(...) without interpolating the raw
+             * value into SQL. _edit_lock is ephemeral editor session state and would
+             * otherwise create stale "being edited" notices in the imported site.
+             */
+            $params["skip_rows"] = [
+                [
+                    "table_suffix" => "postmeta",
+                    "column" => "meta_key",
+                    "value_base64" => base64_encode("_edit_lock"),
+                ],
+            ];
+
+            // Tell the server about the client's max_allowed_packet so it can
+            // cap SQL statements to a size the client can actually import.
+            if ($this->max_allowed_packet !== null) {
+                $params["max_allowed_packet"] = $this->max_allowed_packet;
+            }
         }
         if (!empty($params)) {
             $this->audit_log(

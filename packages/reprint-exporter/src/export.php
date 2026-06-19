@@ -184,8 +184,15 @@ function resolve_db_credentials(): array
     $db_user = defined("DB_USER") ? DB_USER : getenv("DB_USER");
     $db_password = defined("DB_PASSWORD") ? DB_PASSWORD : getenv("DB_PASSWORD");
 
+    global $wpdb;
+
     $wp_config_path = null;
-    $table_prefix = $GLOBALS['table_prefix'] ?? null;
+    $table_prefix = null;
+    if (isset($GLOBALS['table_prefix']) && is_string($GLOBALS['table_prefix']) && $GLOBALS['table_prefix'] !== '') {
+        $table_prefix = $GLOBALS['table_prefix'];
+    } elseif (isset($wpdb) && is_object($wpdb) && isset($wpdb->prefix) && is_string($wpdb->prefix) && $wpdb->prefix !== '') {
+        $table_prefix = $wpdb->prefix;
+    }
 
     // On SQLite sites, the driver is already loaded by WordPress via the
     // db.php drop-in. We just need to confirm it's available and skip the
@@ -836,6 +843,11 @@ function endpoint_sql_chunk(
         if ($query_time_limit > 0) {
             $producer_options["query_time_limit_ms"] = $query_time_limit;
         }
+    }
+
+    $exclude_rows = sql_exclude_rows_from_config($config, $creds["table_prefix"] ?? null);
+    if ($exclude_rows) {
+        $producer_options["exclude_rows"] = $exclude_rows;
     }
 
     if (isset($config["cursor"])) {
@@ -3607,6 +3619,91 @@ function path_is_default_skipped(string $path): bool
     }
 
     return false;
+}
+
+/**
+ * Maps importer-requested SQL row filters to producer row-exclusion rules.
+ *
+ * Rules are data, not exporter-known tokens. A client may provide:
+ *
+ *   skip_rows[0][table_suffix]=postmeta
+ *   skip_rows[0][column]=meta_key
+ *   skip_rows[0][value_base64]=X2VkaXRfbG9jaw==
+ *
+ * `table_suffix` is appended to the server-side WordPress table prefix. The
+ * prefix must come from WordPress; if it cannot be resolved, clients must use
+ * explicit `table` instead. Values are base64-encoded so raw bytes never travel
+ * as SQL text.
+ *
+ * @return list<array{table: string, column: string, value: string}>
+ */
+function sql_exclude_rows_from_config(array $config, ?string $table_prefix): array
+{
+    if (!isset($config["skip_rows"])) {
+        return [];
+    }
+
+    $requested = $config["skip_rows"];
+    if (is_string($requested)) {
+        $decoded = json_decode($requested, true);
+        if (!is_array($decoded)) {
+            throw new InvalidArgumentException("skip_rows string must be a JSON array");
+        }
+        $requested = $decoded;
+    }
+    if (!is_array($requested)) {
+        throw new InvalidArgumentException("skip_rows must be an array");
+    }
+
+    $rules = [];
+    foreach ($requested as $index => $rule) {
+        if (!is_array($rule)) {
+            throw new InvalidArgumentException("skip_rows[{$index}] must be an object");
+        }
+
+        $has_table = isset($rule["table"]);
+        $has_suffix = isset($rule["table_suffix"]);
+        if ($has_table === $has_suffix) {
+            throw new InvalidArgumentException("skip_rows[{$index}] must include exactly one of table or table_suffix");
+        }
+        if (!isset($rule["column"], $rule["value_base64"])) {
+            throw new InvalidArgumentException("skip_rows[{$index}] must include column and value_base64");
+        }
+        if (!is_string($rule["column"]) || $rule["column"] === "") {
+            throw new InvalidArgumentException("skip_rows[{$index}].column must be a non-empty string");
+        }
+        if (!is_string($rule["value_base64"])) {
+            throw new InvalidArgumentException("skip_rows[{$index}].value_base64 must be a string");
+        }
+
+        if ($has_suffix) {
+            if (!is_string($rule["table_suffix"]) || $rule["table_suffix"] === "") {
+                throw new InvalidArgumentException("skip_rows[{$index}].table_suffix must be a non-empty string");
+            }
+            if ($table_prefix === null || $table_prefix === "") {
+                throw new InvalidArgumentException("skip_rows[{$index}].table_suffix requires a table_prefix");
+            }
+            $table = $table_prefix . $rule["table_suffix"];
+        } else {
+            if (!is_string($rule["table"]) || $rule["table"] === "") {
+                throw new InvalidArgumentException("skip_rows[{$index}].table must be a non-empty string");
+            }
+            $table = $rule["table"];
+        }
+
+        $value = base64_decode($rule["value_base64"], true);
+        if ($value === false) {
+            throw new InvalidArgumentException("skip_rows[{$index}].value_base64 must be valid base64");
+        }
+
+        $rules[] = [
+            "table" => $table,
+            "column" => $rule["column"],
+            "value" => $value,
+        ];
+    }
+
+    return $rules;
 }
 
 /**

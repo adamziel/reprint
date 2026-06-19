@@ -142,6 +142,14 @@ class MySQLDumpProducer
     private $query_time_limit_ms = null;
 
     /**
+     * Row exclusion rules keyed by table name. Each rule is an array with
+     * 'column' and 'value' keys.
+     *
+     * @var array<string, list<array{column: string, value: string}>>
+     */
+    private $exclude_rows_by_table = [];
+
+    /**
      * When a row is too large for a single INSERT, its big columns are split
      * into chunks and queued here. Each entry tracks the column name, its
      * data type, the current byte offset into the value, and the total value
@@ -183,6 +191,24 @@ class MySQLDumpProducer
         if (isset($options["query_time_limit_ms"])) {
             $limit = (int) $options["query_time_limit_ms"];
             $this->query_time_limit_ms = $limit > 0 ? $limit : null;
+        }
+
+        if (isset($options["exclude_rows"]) && is_array($options["exclude_rows"])) {
+            foreach ($options["exclude_rows"] as $rule) {
+                if (
+                    !is_array($rule) ||
+                    !isset($rule["table"], $rule["column"], $rule["value"]) ||
+                    !is_string($rule["table"]) ||
+                    !is_string($rule["column"]) ||
+                    !is_string($rule["value"])
+                ) {
+                    continue;
+                }
+                $this->exclude_rows_by_table[$rule["table"]][] = [
+                    "column" => $rule["column"],
+                    "value" => $rule["value"],
+                ];
+            }
         }
 
         if (isset($options["cursor"])) {
@@ -593,10 +619,16 @@ class MySQLDumpProducer
             $query = $select . " * FROM " . $this->quote_identifier($table);
         }
 
+        $where_conditions = $this->build_row_exclusion_where_conditions();
         if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {
             if ($this->last_pk_values) {
-                $where_conditions = $this->build_pk_where_clause();
-                $query .= " WHERE {$where_conditions}";
+                $where_conditions[] = $this->build_pk_where_clause();
+            }
+
+            if ($where_conditions) {
+                $query .= " WHERE " . implode(" AND ", array_map(function ($condition) {
+                    return "({$condition})";
+                }, $where_conditions));
             }
 
             $order_cols = array_map(function ($col) {
@@ -605,6 +637,12 @@ class MySQLDumpProducer
             $query .= " ORDER BY " . implode(", ", $order_cols);
             $query .= " LIMIT {$this->batch_size}";
         } else {
+            if ($where_conditions) {
+                $query .= " WHERE " . implode(" AND ", array_map(function ($condition) {
+                    return "({$condition})";
+                }, $where_conditions));
+            }
+
             // Best effort pagination for tables without a primary key.
             if ($this->current_offset > 0) {
                 $query .= " LIMIT {$this->batch_size} OFFSET {$this->current_offset}";
@@ -614,6 +652,26 @@ class MySQLDumpProducer
         }
 
         return $query;
+    }
+
+    /** Builds WHERE fragments for configured row exclusions on the current table. */
+    private function build_row_exclusion_where_conditions(): array
+    {
+        if (!$this->current_table || empty($this->exclude_rows_by_table[$this->current_table])) {
+            return [];
+        }
+
+        $conditions = [];
+        foreach ($this->exclude_rows_by_table[$this->current_table] as $rule) {
+            $column = $rule["column"];
+            if (!isset($this->current_column_types[$column])) {
+                continue;
+            }
+            $quoted_col = $this->quote_identifier($column);
+            $encoded_value = base64_encode($rule["value"]);
+            $conditions[] = "{$quoted_col} IS NULL OR {$quoted_col} <> FROM_BASE64('{$encoded_value}')";
+        }
+        return $conditions;
     }
 
     /**
