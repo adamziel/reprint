@@ -8325,7 +8325,7 @@ class ImportClient
         if ($wp_content_target !== null) {
             foreach (["wp-plugins" => "plugins", "wp-mu-plugins" => "mu-plugins", "wp-uploads" => "uploads"] as $token => $name) {
                 $source = $source_tokens[$token];
-                $is_outside_content_dir = self::path_remainder_under($source, $source_tokens["wp-content"]) === null;
+                $is_outside_content_dir = !path_is_within_root($source, $source_tokens["wp-content"]);
                 if ($is_outside_content_dir && !isset($rules[$source])) {
                     $rules[$source] = wp_join_unix_paths($wp_content_target, $name);
                 }
