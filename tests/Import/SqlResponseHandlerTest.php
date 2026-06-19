@@ -4,7 +4,10 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
+use Reprint\Importer\Sql\SqlDomainScanner;
 use Reprint\Importer\Sql\SqlResponseHandler;
+use Reprint\Importer\UrlRewrite\DomainCollector;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -14,7 +17,6 @@ final class SqlResponseHandlerTest extends TestCase
     private string $buffer_file;
     private array $saved = [];
     private array $persisted_domains = [];
-    private array $drained = [];
     private array $progress = [];
     private array $errors = [];
     private array $completion_progress = [];
@@ -26,7 +28,6 @@ final class SqlResponseHandlerTest extends TestCase
         $this->buffer_file = tempnam(sys_get_temp_dir(), 'sql-response-handler-buffer-');
         $this->saved = [];
         $this->persisted_domains = [];
-        $this->drained = [];
         $this->progress = [];
         $this->errors = [];
         $this->completion_progress = [];
@@ -43,8 +44,8 @@ final class SqlResponseHandlerTest extends TestCase
     {
         $handle = fopen($this->sql_file, 'w+');
         $context = new StreamingContext();
-        $query_stream = new FakeSqlQueryStream();
-        $domain_collector = new FakeSqlDomainCollector();
+        $query_stream = new WP_MySQL_Naive_Query_Stream();
+        $domain_collector = new DomainCollector();
         $handler = $this->make_handler([
             'mode' => 'file',
             'cursor' => 'cursor-0',
@@ -53,6 +54,7 @@ final class SqlResponseHandlerTest extends TestCase
             'sql_bytes_written' => 4,
             'query_stream' => $query_stream,
             'domain_collector' => $domain_collector,
+            'domain_scanner' => new SqlDomainScanner(),
             'sql_statements_counted' => 2,
         ]);
 
@@ -71,22 +73,16 @@ final class SqlResponseHandlerTest extends TestCase
         $this->assertSame('cursor-1', $handler->cursor());
         $this->assertSame(13, $handler->sql_bytes_written());
         $this->assertSame(3, $handler->sql_statements_counted());
-        $this->assertSame(['SELECT 1;'], $query_stream->appended);
+        $this->assertSame([], $domain_collector->get_domains());
         $this->assertSame([13], $this->progress);
-        $this->assertSame([
-            [
-                'query_stream' => $query_stream,
-                'domain_collector' => $domain_collector,
-                'statements' => 2,
-            ],
-        ], $this->drained);
     }
 
     public function testCheckpointPersistsCurrentCursorAndDomains(): void
     {
         $handle = fopen($this->sql_file, 'w+');
         $context = new StreamingContext();
-        $domain_collector = new FakeSqlDomainCollector(['https://example.com']);
+        $domain_collector = new DomainCollector();
+        $domain_collector->merge(['https://example.com']);
         $handler = $this->make_handler([
             'mode' => 'file',
             'cursor' => 'cursor-0',
@@ -249,6 +245,7 @@ final class SqlResponseHandlerTest extends TestCase
             $overrides['sql_bytes_written'] ?? 0,
             $overrides['query_stream'] ?? null,
             $overrides['domain_collector'] ?? null,
+            $overrides['domain_scanner'] ?? null,
             $overrides['sql_statements_counted'] ?? 0,
             $overrides['chunks_since_save'] ?? 0,
             $overrides['save_every'] ?? 50,
@@ -266,18 +263,6 @@ final class SqlResponseHandlerTest extends TestCase
             },
             function (array $domains): void {
                 $this->persisted_domains[] = $domains;
-            },
-            function (
-                $query_stream,
-                $domain_collector,
-                int $sql_statements_counted
-            ): int {
-                $this->drained[] = [
-                    'query_stream' => $query_stream,
-                    'domain_collector' => $domain_collector,
-                    'statements' => $sql_statements_counted,
-                ];
-                return $sql_statements_counted + 1;
             },
             function (int $sql_bytes_written): void {
                 $this->progress[] = $sql_bytes_written;
@@ -298,31 +283,6 @@ final class SqlResponseHandlerTest extends TestCase
             function (): void {
             },
         );
-    }
-}
-
-final class FakeSqlQueryStream
-{
-    public array $appended = [];
-
-    public function append_sql(string $sql): void
-    {
-        $this->appended[] = $sql;
-    }
-}
-
-final class FakeSqlDomainCollector
-{
-    private array $domains;
-
-    public function __construct(array $domains = [])
-    {
-        $this->domains = $domains;
-    }
-
-    public function get_domains(): array
-    {
-        return $this->domains;
     }
 }
 

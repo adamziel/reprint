@@ -4,9 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Protocol\StreamingContext;
-use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
 use Reprint\Importer\Sql\SqlDownloader;
-use Reprint\Importer\UrlRewrite\DomainCollector;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -84,13 +82,6 @@ final class SqlDownloaderTest extends TestCase
             fn(): bool => false,
             function (array $state) use (&$saved_states): void {
                 $saved_states[] = $state;
-            },
-            function (
-                WP_MySQL_Naive_Query_Stream $query_stream,
-                DomainCollector $domain_collector,
-                int $sql_statements_counted
-            ): int {
-                return $sql_statements_counted;
             },
             function (int $sql_bytes_written) use (&$progress_bytes): void {
                 $progress_bytes[] = $sql_bytes_written;

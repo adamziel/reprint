@@ -5,6 +5,7 @@ namespace Reprint\Importer\Command;
 use RuntimeException;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
+use Reprint\Importer\Sql\SqlDomainScanner;
 use Reprint\Importer\UrlRewrite\DomainCollector;
 
 final class DbDomainsCommand extends ImportCommand
@@ -31,6 +32,11 @@ final class DbDomainsCommand extends ImportCommand
 
         $query_stream = new WP_MySQL_Naive_Query_Stream();
         $domain_collector = new DomainCollector();
+        $domain_scanner = new SqlDomainScanner(
+            function (string $message, bool $to_console) use ($client): void {
+                $client->audit_log($message, $to_console);
+            },
+        );
 
         $sql_handle = fopen($sql_file, "r");
         if (!$sql_handle) {
@@ -45,14 +51,14 @@ final class DbDomainsCommand extends ImportCommand
                     break;
                 }
                 $query_stream->append_sql($data);
-                $client->drain_query_stream_for_domains(
+                $domain_scanner->drain_query_stream(
                     $query_stream,
                     $domain_collector,
                 );
             }
 
             $query_stream->mark_input_complete();
-            $client->drain_query_stream_for_domains(
+            $domain_scanner->drain_query_stream(
                 $query_stream,
                 $domain_collector,
             );

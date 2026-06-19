@@ -3,6 +3,8 @@
 namespace Reprint\Importer\Sql;
 
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
+use Reprint\Importer\UrlRewrite\DomainCollector;
 use RuntimeException;
 
 final class SqlResponseHandler
@@ -23,11 +25,11 @@ final class SqlResponseHandler
     private string $sql_buffer;
     private int $sql_bytes_written;
 
-    /** @var object|null */
-    private $query_stream;
+    private ?WP_MySQL_Naive_Query_Stream $query_stream;
 
-    /** @var object|null */
-    private $domain_collector;
+    private ?DomainCollector $domain_collector;
+
+    private ?SqlDomainScanner $domain_scanner;
 
     private int $sql_statements_counted;
     private int $chunks_since_save;
@@ -42,9 +44,6 @@ final class SqlResponseHandler
 
     /** @var callable */
     private $persist_domains;
-
-    /** @var callable */
-    private $drain_query_stream;
 
     /** @var callable */
     private $show_sql_progress;
@@ -70,15 +69,15 @@ final class SqlResponseHandler
         $buffer_handle,
         string $sql_buffer,
         int $sql_bytes_written,
-        $query_stream,
-        $domain_collector,
+        ?WP_MySQL_Naive_Query_Stream $query_stream,
+        ?DomainCollector $domain_collector,
+        ?SqlDomainScanner $domain_scanner,
         int $sql_statements_counted,
         int $chunks_since_save,
         int $save_every,
         callable $should_stop,
         callable $save_checkpoint,
         callable $persist_domains,
-        callable $drain_query_stream,
         callable $show_sql_progress,
         callable $handle_progress,
         callable $handle_error,
@@ -95,13 +94,13 @@ final class SqlResponseHandler
         $this->sql_bytes_written = $sql_bytes_written;
         $this->query_stream = $query_stream;
         $this->domain_collector = $domain_collector;
+        $this->domain_scanner = $domain_scanner;
         $this->sql_statements_counted = $sql_statements_counted;
         $this->chunks_since_save = $chunks_since_save;
         $this->save_every = $save_every;
         $this->should_stop = $should_stop;
         $this->save_checkpoint = $save_checkpoint;
         $this->persist_domains = $persist_domains;
-        $this->drain_query_stream = $drain_query_stream;
         $this->show_sql_progress = $show_sql_progress;
         $this->handle_progress = $handle_progress;
         $this->handle_error = $handle_error;
@@ -205,9 +204,9 @@ final class SqlResponseHandler
             $this->write_mysql_sql($data, $query_complete);
         }
 
-        if ($this->query_stream && $this->domain_collector) {
+        if ($this->query_stream && $this->domain_collector && $this->domain_scanner) {
             $this->query_stream->append_sql($data);
-            $this->sql_statements_counted = $this->drain_query_stream(
+            $this->sql_statements_counted = $this->domain_scanner->drain_query_stream(
                 $this->query_stream,
                 $this->domain_collector,
                 $this->sql_statements_counted,
@@ -333,18 +332,6 @@ final class SqlResponseHandler
         if (!empty($domains)) {
             ($this->persist_domains)($domains);
         }
-    }
-
-    private function drain_query_stream(
-        $query_stream,
-        $domain_collector,
-        int $sql_statements_counted
-    ): int {
-        return (int) ($this->drain_query_stream)(
-            $query_stream,
-            $domain_collector,
-            $sql_statements_counted,
-        );
     }
 
     private function show_sql_progress(int $sql_bytes_written): void

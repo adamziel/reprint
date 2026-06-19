@@ -27,9 +27,6 @@ final class SqlDownloader
     private $save_state;
 
     /** @var callable */
-    private $drain_query_stream;
-
-    /** @var callable */
     private $show_sql_progress;
 
     /** @var callable */
@@ -59,7 +56,6 @@ final class SqlDownloader
         callable $get_tuned_params,
         callable $should_stop,
         callable $save_state,
-        callable $drain_query_stream,
         callable $show_sql_progress,
         callable $handle_progress,
         callable $handle_error,
@@ -74,7 +70,6 @@ final class SqlDownloader
         $this->get_tuned_params = $get_tuned_params;
         $this->should_stop = $should_stop;
         $this->save_state = $save_state;
-        $this->drain_query_stream = $drain_query_stream;
         $this->show_sql_progress = $show_sql_progress;
         $this->handle_progress = $handle_progress;
         $this->handle_error = $handle_error;
@@ -189,28 +184,23 @@ final class SqlDownloader
             }
         }
 
-        $query_stream = class_exists(WP_MySQL_Naive_Query_Stream::class)
-            ? new WP_MySQL_Naive_Query_Stream()
-            : null;
-        $domain_collector = class_exists(DomainCollector::class)
-            ? new DomainCollector()
-            : null;
+        $query_stream = new WP_MySQL_Naive_Query_Stream();
+        $domain_collector = new DomainCollector();
+        $domain_scanner = new SqlDomainScanner($this->audit);
         $domains_file = $state_dir . "/.import-domains.json";
         $sql_stats_file = $state_dir . "/.import-sql-stats.json";
         $sql_statements_counted = (int) ($state["sql_statements_counted"] ?? 0);
 
-        if ($domain_collector) {
-            $parsed_url = parse_url($config["remote_url"]);
-            if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
-                $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
-                if (!empty($parsed_url['port'])) {
-                    $source_origin .= ':' . $parsed_url['port'];
-                }
-                $domain_collector->merge([$source_origin]);
+        $parsed_url = parse_url($config["remote_url"]);
+        if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
+            $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
+            if (!empty($parsed_url['port'])) {
+                $source_origin .= ':' . $parsed_url['port'];
             }
+            $domain_collector->merge([$source_origin]);
         }
 
-        if ($domain_collector && file_exists($domains_file)) {
+        if (file_exists($domains_file)) {
             $prev = json_decode(file_get_contents($domains_file), true);
             if (is_array($prev)) {
                 $domain_collector->merge($prev);
@@ -268,6 +258,7 @@ final class SqlDownloader
                     $sql_bytes_written,
                     $query_stream,
                     $domain_collector,
+                    $domain_scanner,
                     $sql_statements_counted,
                     $chunks_since_save,
                     $config["save_every"],
@@ -288,7 +279,6 @@ final class SqlDownloader
                             json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
                         );
                     },
-                    $this->drain_query_stream,
                     $this->show_sql_progress,
                     $this->handle_progress,
                     $this->handle_error,
@@ -369,42 +359,40 @@ final class SqlDownloader
                 ($this->save_state)($state);
             }
 
-            if ($query_stream && $domain_collector) {
-                $query_stream->mark_input_complete();
-                $sql_statements_counted = (int) ($this->drain_query_stream)(
-                    $query_stream,
-                    $domain_collector,
-                    $sql_statements_counted,
+            $query_stream->mark_input_complete();
+            $sql_statements_counted = $domain_scanner->drain_query_stream(
+                $query_stream,
+                $domain_collector,
+                $sql_statements_counted,
+            );
+
+            $domains = $domain_collector->get_domains();
+            if (!empty($domains)) {
+                file_put_contents(
+                    $domains_file,
+                    json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
                 );
+                ($this->audit)(
+                    sprintf(
+                        "DOMAINS DISCOVERED | %d unique domains saved to .import-domains.json",
+                        count($domains),
+                    ),
+                    false,
+                );
+            }
 
-                $domains = $domain_collector->get_domains();
-                if (!empty($domains)) {
-                    file_put_contents(
-                        $domains_file,
-                        json_encode($domains, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n",
-                    );
-                    ($this->audit)(
-                        sprintf(
-                            "DOMAINS DISCOVERED | %d unique domains saved to .import-domains.json",
-                            count($domains),
-                        ),
-                        false,
-                    );
-                }
-
-                if ($sql_statements_counted > 0) {
-                    file_put_contents(
-                        $sql_stats_file,
-                        json_encode(["statements_total" => $sql_statements_counted]) . "\n",
-                    );
-                    ($this->audit)(
-                        sprintf(
-                            "SQL STATS | %d statements counted during download",
-                            $sql_statements_counted,
-                        ),
-                        false,
-                    );
-                }
+            if ($sql_statements_counted > 0) {
+                file_put_contents(
+                    $sql_stats_file,
+                    json_encode(["statements_total" => $sql_statements_counted]) . "\n",
+                );
+                ($this->audit)(
+                    sprintf(
+                        "SQL STATS | %d statements counted during download",
+                        $sql_statements_counted,
+                    ),
+                    false,
+                );
             }
         } catch (Throwable $e) {
             $caught_exception = $e;

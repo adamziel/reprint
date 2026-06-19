@@ -31,7 +31,6 @@ use Reprint\Importer\Output\ImportOutput;
 use Reprint\Importer\Output\NullImportOutput;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Pull\Pull;
-use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
 use Reprint\Importer\Session\ExportDirectoryResolver;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
@@ -42,7 +41,6 @@ use Reprint\Importer\Sql\DbApplyQueryExecutor;
 use Reprint\Importer\Sql\DbIndexDownloader;
 use Reprint\Importer\Sql\SqlDumpApplier;
 use Reprint\Importer\Sql\SqlDownloader;
-use Reprint\Importer\Sql\SqlStatementInspector;
 use Reprint\Importer\Sql\TargetDatabaseConnectionFactory;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\Support\PathDisplayFormatter;
@@ -51,8 +49,6 @@ use Reprint\Importer\Transport\HttpErrorDiagnoser;
 use Reprint\Importer\Transport\ImportHttpTransport;
 use Reprint\Importer\Transport\HttpRequestBuilder;
 use Reprint\Importer\Tuning\AdaptiveTuner;
-use Reprint\Importer\UrlRewrite\Base64ValueScanner;
-use Reprint\Importer\UrlRewrite\DomainCollector;
 use Reprint\Importer\UrlRewrite\NewSiteUrlResolver;
 use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
 use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
@@ -3240,18 +3236,6 @@ class ImportClient
             function (array $state): void {
                 $this->save_state($state);
             },
-            function (
-                WP_MySQL_Naive_Query_Stream $query_stream,
-                DomainCollector $domain_collector,
-                int $sql_statements_counted
-            ): int {
-                $this->drain_query_stream_for_domains(
-                    $query_stream,
-                    $domain_collector,
-                    $sql_statements_counted,
-                );
-                return $sql_statements_counted;
-            },
             function (int $sql_bytes_written): void {
                 $db_bytes_est = (int) ($this->state["db_index"]["bytes"] ?? 0);
                 $est_is_useful = $db_bytes_est > $sql_bytes_written;
@@ -3312,116 +3296,6 @@ class ImportClient
                 "save_every" => self::SAVE_STATE_EVERY_N_CHUNKS,
             ],
         );
-    }
-
-    /**
-     * Drain complete SQL statements from a query stream and scan their
-     * base64-decoded values for URL domains.
-     */
-    public function drain_query_stream_for_domains(
-        WP_MySQL_Naive_Query_Stream $query_stream,
-        DomainCollector $domain_collector,
-        ?int &$statements_counted = null
-    ): void {
-        while ($query_stream->next_query()) {
-            $query = $query_stream->get_query();
-            if ($statements_counted !== null) {
-                $statements_counted++;
-            }
-            // Only scan INSERT statements (they contain data values).
-            if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
-                continue;
-            }
-            // Only scan statements with base64 values
-            if (strpos($query, "FROM_BASE64(") === false) {
-                continue;
-            }
-
-            $table = self::extract_insert_table($query);
-            $is_options_table = substr($table, -8) === '_options';
-
-            $scanner = new Base64ValueScanner($query);
-            while ($scanner->next_value()) {
-                // For _options tables, extract the option_name (second column)
-                // and skip transients — they contain ephemeral cached data
-                // that would pollute the domain list.
-                $option_name = null;
-                $match_offset = $scanner->get_match_offset();
-                if ($is_options_table) {
-                    $option_name = self::extract_option_name($query, $match_offset);
-                    if ($option_name !== null && (
-                        strpos($option_name, '_transient') === 0 ||
-                        strpos($option_name, '_site_transient') === 0
-                    )) {
-                        continue;
-                    }
-                }
-
-                $new_domains = $domain_collector->scan($scanner->get_value());
-                if (!empty($new_domains)) {
-                    $row_id = self::extract_row_identifier($query, $match_offset);
-
-                    $option_ctx = '';
-                    if ($option_name !== null) {
-                        $option_ctx = ' option=' . $option_name;
-                    }
-
-                    foreach ($new_domains as $domain) {
-                        $this->audit_log(
-                            sprintf(
-                                "NEW DOMAIN | %s | table=%s %s%s",
-                                $domain,
-                                $table,
-                                $row_id,
-                                $option_ctx,
-                            ),
-                            false,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Extract the table name from an INSERT INTO statement.
-     */
-    private static function extract_insert_table(string $query): string
-    {
-        return SqlStatementInspector::extract_insert_table($query);
-    }
-
-    /**
-     * Extract a row identifier (PK value or offset) from the INSERT row
-     * containing the base64 expression at $offset.
-     *
-     * Scans backwards from $offset to find the row-opening parenthesis,
-     * then reads the first column value — typically the primary key.
-     */
-    private static function extract_row_identifier(string $query, int $offset): string
-    {
-        return SqlStatementInspector::extract_row_identifier($query, $offset);
-    }
-
-    /**
-     * Extract the option_name (second column) from a wp_options INSERT row.
-     *
-     * WordPress options tables have columns: option_id, option_name, option_value, autoload.
-     * Given an offset inside the row, this finds the row-opening '(' and reads
-     * past the first column (option_id) to extract the second column (option_name).
-     */
-    private static function extract_option_name(string $query, int $offset): ?string
-    {
-        return SqlStatementInspector::extract_option_name($query, $offset);
-    }
-
-    /**
-     * Check whether a SQL statement's first keyword token matches a given token ID.
-     * Skips leading whitespace and comments before the first SQL keyword.
-     */
-    private static function sql_starts_with_token(string $sql, int $expected_token_id): bool
-    {
-        return SqlStatementInspector::starts_with_token($sql, $expected_token_id);
     }
 
     /**
