@@ -11,5 +11,6 @@ if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/reprint-exporter-wp/co
     composer install --no-dev --no-interaction --prefer-dist --working-dir="$PROJECT_ROOT/reprint-exporter-wp"
 fi
 
-cd "$(dirname "$0")"
-npm install --silent
+# JavaScript dependencies are installed by the dedicated workflow step after
+# setup. Keep this script focused on PHP/runtime dependencies so npm failures
+# are reported by that explicit install step instead of being hidden here.

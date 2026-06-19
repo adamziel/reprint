@@ -10,6 +10,7 @@
  * - Three-phase import: files, SQL, then file deltas
  */
 
+use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
@@ -1131,6 +1132,13 @@ class ImportClient
     /** @var string|null Extra remote directory to include in the export (--extra-directory). */
     private $extra_directory = null;
 
+    /**
+     * @var array<string,string> Resolved remap rules: full source path => its
+     * full local target path (both absolute). Empty = no remapping (files land
+     * nested based on their source).
+     */
+    private $remap_rules = [];
+
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
@@ -1799,6 +1807,12 @@ class ImportClient
         // All other commands require a prior preflight run.
         $this->require_preflight();
 
+        // Resolve the `--remap` rules (requires preflight to be available first)
+        $remap_raw = $options["remap"] ?? [];
+        if (!empty($remap_raw)) {
+            $this->remap_rules = $this->resolve_remap($remap_raw);
+        }
+
         // Handle --abort: clear state for the command and exit immediately.
         // To abort a sync, run `<command> --abort` (clears state), then
         // run `<command>` again (starts fresh).
@@ -1807,6 +1821,10 @@ class ImportClient
             //        for that command.
             $this->handle_abort($command);
             return;
+        }
+
+        if ($command === "files-pull") {
+            $this->assert_files_remap_consistent();
         }
 
         // Dispatch to appropriate command handler
@@ -2738,7 +2756,7 @@ class ImportClient
             if ($is_delta) {
                 $this->files_imported = 0;
                 $index_size = $this->index_count();
-    
+
                 $this->audit_log(
                     "START files-pull (delta) | index_files={$index_size}",
                     true,
@@ -3365,7 +3383,7 @@ class ImportClient
             /**
              * base64_decode second parameter is a `strict` flag. It rejects the entire
              * input if it contains any bytes that are not produced by base64_encode().
-             * 
+             *
              * @see https://www.php.net/base64_decode
              */
             $path = base64_decode($path_encoded, true);
@@ -4294,13 +4312,13 @@ class ImportClient
         $uploads_basedir = null;
 
         if (is_array($paths_urls)) {
-            $abspath = $this->flatten_clean_path($paths_urls["abspath"] ?? null);
-            $wp_admin_path = $this->flatten_clean_path($paths_urls["wp_admin_path"] ?? null);
-            $wp_includes_path = $this->flatten_clean_path($paths_urls["wp_includes_path"] ?? null);
-            $content_dir = $this->flatten_clean_path($paths_urls["content_dir"] ?? null);
-            $plugins_dir = $this->flatten_clean_path($paths_urls["plugins_dir"] ?? null);
-            $mu_plugins_dir = $this->flatten_clean_path($paths_urls["mu_plugins_dir"] ?? null);
-            $uploads_basedir = $this->flatten_clean_path(
+            $abspath = $this->clean_preflight_path( $paths_urls["abspath"] ?? null);
+            $wp_admin_path = $this->clean_preflight_path( $paths_urls["wp_admin_path"] ?? null);
+            $wp_includes_path = $this->clean_preflight_path( $paths_urls["wp_includes_path"] ?? null);
+            $content_dir = $this->clean_preflight_path( $paths_urls["content_dir"] ?? null);
+            $plugins_dir = $this->clean_preflight_path( $paths_urls["plugins_dir"] ?? null);
+            $mu_plugins_dir = $this->clean_preflight_path( $paths_urls["mu_plugins_dir"] ?? null);
+            $uploads_basedir = $this->clean_preflight_path(
                 $paths_urls["uploads"]["basedir"] ?? null,
             );
         }
@@ -4309,7 +4327,7 @@ class ImportClient
         if ($abspath === null) {
             $roots = $preflight["wp_detect"]["roots"] ?? [];
             if (!empty($roots)) {
-                $abspath = $this->flatten_clean_path($roots[0]["path"] ?? null);
+                $abspath = $this->clean_preflight_path( $roots[0]["path"] ?? null);
             }
         }
 
@@ -4638,7 +4656,7 @@ class ImportClient
      * Clean a path value from preflight data: trim, strip trailing slash.
      * Returns null if the value is not a non-empty string.
      */
-    private function flatten_clean_path($value): ?string
+    private function clean_preflight_path($value): ?string
     {
         if (!is_string($value) || trim($value) === "") {
             return null;
@@ -8325,6 +8343,211 @@ class ImportClient
         return $real;
     }
 
+    /**
+     * Refuse to reuse a files index with different --remap rules.
+     *
+     * The files index stores remote paths. Local writes/deletes derive their
+     * targets from the current remap rules, so changing those rules while the
+     * same index is still in use can point future updates at the wrong path.
+     */
+    private function assert_files_remap_consistent(): void
+    {
+        $fingerprint = $this->files_remap_fingerprint();
+        $previous = $this->state["files_remap_fingerprint"] ?? null;
+
+        $has_existing_index = file_exists($this->index_file) && filesize($this->index_file) > 0;
+        if ($previous === null && $has_existing_index && !empty($this->remap_rules)) {
+            throw new RuntimeException(
+                "Cannot use --remap with an existing files index that was created before remap tracking. " .
+                    "Use a new --state-dir or clear the existing files index first.",
+            );
+        }
+
+        if ($previous !== null && $previous !== $fingerprint) {
+            throw new RuntimeException(
+                "Cannot change --remap rules while reusing the same files index. " .
+                    "Use the original --remap rules, or use a new --state-dir for a fresh files-pull.",
+            );
+        }
+
+        if ($previous === null) {
+            $this->state["files_remap_fingerprint"] = $fingerprint;
+            $this->save_state($this->state);
+        }
+    }
+
+    /**
+     * Stable fingerprint for the resolved remap rule set.
+     *
+     * Rule order does not matter: remap matching chooses the deepest source
+     * path, not the first matching rule.
+     */
+    private function files_remap_fingerprint(): string
+    {
+        $rules = $this->remap_rules;
+        ksort($rules, SORT_STRING);
+        return hash("sha256", json_encode($rules, JSON_UNESCAPED_SLASHES));
+    }
+
+    /**
+     * Build the remap rules from the raw remap pairs + preflight data.
+     *
+     * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
+     * Source arguments resolve against the remote site's component locations.
+     * Target arguments resolve under --fs-root and must stay within it.
+     * Each rule is a full source path => full local target path (both absolute).
+     *
+     * @param array<int,array{0:string,1:string}> $remap_raw Raw (SOURCE, TARGET) pairs.
+     * @return array<string,string> Source path => target path (both absolute).
+     */
+    private function resolve_remap(array $remap_raw): array
+    {
+        $fs_root = rtrim($this->get_filesystem_root_path(), "/");
+
+        $source_tokens = $this->wp_component_source_paths();
+        $target_tokens = ["fs-root" => $fs_root];
+
+        $rules = [];
+        $wp_content_target = null;
+        foreach ($remap_raw as [$source_raw, $target_raw]) {
+            $source = $this->resolve_remap_path($source_raw, $source_tokens);
+            $target = $this->resolve_remap_path($target_raw, $target_tokens);
+
+            if (!path_is_within_root($target, $fs_root)) {
+                throw new InvalidArgumentException(
+                    "--remap target \"{$target}\" resolves outside --fs-root ({$fs_root}); " .
+                        "targets must stay within the destination root",
+                );
+            }
+
+            $rules[$source] = $target;
+            if ($source === $source_tokens["wp-content"]) {
+                $wp_content_target = $target;
+            }
+        }
+
+        // Whole-tree remap of the wp-content components that can live outside the content_dir,
+        // unless an explicit rule has already placed them somewhere else.
+        if ($wp_content_target !== null) {
+            foreach (["wp-plugins" => "plugins", "wp-mu-plugins" => "mu-plugins", "wp-uploads" => "uploads"] as $token => $name) {
+                $source = $source_tokens[$token];
+                $is_outside_content_dir = !path_is_within_root($source, $source_tokens["wp-content"]);
+                if ($is_outside_content_dir && !isset($rules[$source])) {
+                    $rules[$source] = wp_join_unix_paths($wp_content_target, $name);
+                }
+            }
+        }
+
+        return $rules;
+    }
+
+    /**
+     * The source site's real component locations from preflight data, as remap token name => absolute path.
+     *
+     * A wp-content component falls back to its conventional spot under
+     * content_dir when that is known. This is a pure data-gatherer: any entry
+     * may be null when preflight lacks it (no content_dir, abspath undetermined).
+     */
+    private function wp_component_source_paths(): array
+    {
+        $preflight = $this->state["preflight"]["data"] ?? [];
+        $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
+
+        $content_dir = $this->clean_preflight_path( $paths["content_dir"] ?? null);
+
+        $abspath = $this->clean_preflight_path( $paths["abspath"] ?? null);
+        if ($abspath === null) {
+            $abspath = $this->clean_preflight_path( $preflight["wp_detect"]["roots"][0]["path"] ?? null);
+        }
+
+        $plugins_dir = $this->clean_preflight_path( $paths["plugins_dir"] ?? null);
+        $mu_plugins_dir = $this->clean_preflight_path( $paths["mu_plugins_dir"] ?? null);
+        $uploads_dir = $this->clean_preflight_path( $paths["uploads"]["basedir"] ?? null);
+
+        // If preflight did not report a component path, use its conventional
+        // location under WP_CONTENT_DIR when WP_CONTENT_DIR is known.
+        if ($content_dir !== null) {
+            $plugins_dir = $plugins_dir ?? wp_join_unix_paths( $content_dir, "plugins" );
+            $mu_plugins_dir = $mu_plugins_dir ?? wp_join_unix_paths( $content_dir, "mu-plugins" );
+            $uploads_dir = $uploads_dir ?? wp_join_unix_paths( $content_dir, "uploads" );
+        }
+
+        return [
+            "abspath" => $abspath,
+            "wp-content" => $content_dir,
+            "wp-plugins" => $plugins_dir,
+            "wp-mu-plugins" => $mu_plugins_dir,
+            "wp-uploads" => $uploads_dir,
+        ];
+    }
+
+    /**
+     * Resolve a --remap argument (source or target) into an absolute path.
+     *
+     * Substitutes a known leading `:token:` (see the token tables in resolve_remap)
+     * with its value, then trims trailing slashes. The
+     * result must be a valid absolute path with no `.`/`..` segments; a relative
+     * path or an unknown token (left unsubstituted) fails that check. Referencing
+     * a token whose value is unavailable in preflight is a distinct, clear error.
+     *
+     * @param string $raw The raw remap argument.
+     * @param array<string,string|null> $tokens Token name => value (null = unavailable).
+     */
+    private function resolve_remap_path(string $raw, array $tokens): string
+    {
+        $resolved = $raw;
+        foreach ($tokens as $name => $value) {
+            $token = ":{$name}:";
+            $token_offset = strpos($resolved, $token);
+            if ($token_offset === false) {
+                continue;
+            }
+
+            if ($token_offset !== 0 || strpos($resolved, $token, strlen($token)) !== false) {
+                throw new InvalidArgumentException(
+                    "--remap token \"{$token}\" must appear only at the beginning of the path"
+                );
+            }
+
+            if ($value === null) {
+                throw new InvalidArgumentException(
+                    "Cannot resolve --remap token \"{$token}\": not available in preflight data. Run preflight first."
+                );
+            }
+
+            $resolved = $value . substr($resolved, strlen($token));
+        }
+
+        $resolved = rtrim($resolved, "/");
+        assert_valid_path($resolved, "--remap path \"{$raw}\"");
+
+        return $resolved;
+    }
+
+    /**
+     * Map a source absolute path to its absolute local target via the remap
+     * rules (most specific source wins), or null when no rule applies.
+     *
+     * Any rules that match the same path are nested (each is a path-prefix of
+     * it, and prefixes of one string are ordered by length), so the longest
+     * matching source is the deepest — i.e. the most specific — match. Ranking
+     * by source, not target: a rule applies based purely on its source side.
+     */
+    private function remap_source_path_to_target(string $source_path): ?string
+    {
+        $best = null;
+        $best_source_length = -1;
+
+        foreach ($this->remap_rules as $source => $target) {
+            $rest = self::path_remainder_under($source_path, $source);
+            if ($rest !== null && strlen($source) > $best_source_length) {
+                $best = wp_join_unix_paths($target, $rest);
+                $best_source_length = strlen($source);
+            }
+        }
+
+        return $best;
+    }
 
     /**
      * Resolve a remote absolute path into a local path under the fs root.
@@ -8333,12 +8556,44 @@ class ImportClient
      * local path under the import fs root. Performs symlink traversal security
      * checks to prevent directory traversal attacks that could write files
      * outside the import root.
+     *
+     * With --remap active, an in-scope source path is first routed to its
+     * target (e.g. "/var/www/html/wp-content/x" -> "<docroot>/wp-content/x");
+     * paths under no remap rule are still written under --fs-root using their
+     * remote absolute path, exactly as a plain pull.
      */
     private function remote_path_to_local_path_within_import_root(
         string $path
     ): string {
         assert_valid_path($path, "remote path");
+        if (!empty($this->remap_rules)) {
+            $target = $this->remap_source_path_to_target($path);
+            if ($target !== null) {
+                return $target;
+            }
+        }
         return $this->get_filesystem_root_path() . $path;
+    }
+
+    /**
+     * Returns the remainder of $path underneath $prefix,
+     * empty string if $path === $prefix,
+     * or null if $path is not under $prefix.
+     */
+    private static function path_remainder_under(string $path, string $prefix): ?string
+    {
+        $path = rtrim($path, "/");
+        $prefix = rtrim($prefix, "/");
+
+        if ($path === $prefix) {
+            return "";
+        }
+
+        if (str_starts_with($path, $prefix . "/")) {
+            return substr($path, strlen($prefix));
+        }
+
+        return null;
     }
 
     /**
@@ -9157,6 +9412,15 @@ class ImportClient
 
         if ($this->extra_directory !== null && $this->extra_directory !== "") {
             $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
+        }
+
+        // Ensure every --remap source is enumerated — including a detached
+        // component (relocated uploads/plugins dir) that lives outside the
+        // WordPress roots and so wouldn't be discovered by traversal alone.
+        $remap_index = 0;
+        foreach (array_keys($this->remap_rules) as $source) {
+            $extra_paths["remap_source_{$remap_index}"] = $source;
+            $remap_index++;
         }
 
         // auto_prepend_file / auto_append_file may point to directories
@@ -10252,6 +10516,7 @@ class ImportClient
         $follow = $this->state["follow_symlinks"] ?? false;
         $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
+        $files_remap_fingerprint = $this->state["files_remap_fingerprint"] ?? null;
         $pull = $this->state["pull"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
@@ -10260,6 +10525,7 @@ class ImportClient
         $this->state["follow_symlinks"] = $follow;
         $this->state["fs_root_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
+        $this->state["files_remap_fingerprint"] = $files_remap_fingerprint;
         if ($pull !== null) {
             $this->state["pull"] = $pull;
         }
@@ -10281,6 +10547,7 @@ class ImportClient
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "max_allowed_packet" => null,
+            "files_remap_fingerprint" => null,
             "db_index" => [
                 "file" => null,
                 "tables" => 0,
@@ -11298,6 +11565,15 @@ if (
             'placeholder' => 'URL',
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
             'commands' => ['pull', 'db-apply'],
+        ],
+        [
+            'name' => 'remap',
+            'type' => 'pair',
+            'target' => 'remap',
+            'pair_args' => 'SOURCE TARGET',
+            'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
+                '(a :fs-root: path or an absolute path within --fs-root); repeatable',
+            'commands' => ['files-pull'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
