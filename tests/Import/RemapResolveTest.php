@@ -217,12 +217,21 @@ class RemapResolveTest extends TestCase
             'bare relative target' => array(':wp-content:', 'media'),
             'unclosed token (not substituted)' => array(':wp-plugins', ':fs-root:/p'),
             'unknown source token' => array(':bogus:', ':fs-root:/x'),
+            'source token not at beginning' => array('/tmp/:wp-content:', ':fs-root:/x'),
+            'same source token repeated after beginning' => array(':wp-content:/:wp-content:', ':fs-root:/x'),
             'fs-root token invalid as source' => array(':fs-root:/x', ':fs-root:/x'),
             'remote token invalid as target' => array(':wp-content:', ':wp-content:/x'),
             'absolute target outside fs-root' => array(':wp-content:', '/media'),
             'target climbs out via ".."' => array(':wp-content:', ':fs-root:/safe/../../../etc'),
             'empty source' => array('', ':fs-root:/x'),
         );
+    }
+
+    public function testRejectsTargetTokenNotAtBeginning(): void
+    {
+        $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
+        $this->expectException(\InvalidArgumentException::class);
+        $this->resolve($c, array(':wp-content:', $this->root . '/:fs-root:'));
     }
 
     /**

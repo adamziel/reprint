@@ -8378,8 +8378,8 @@ class ImportClient
     /**
      * Resolve a --remap argument (source or target) into an absolute path.
      *
-     * Substitutes every known `:token:` (see the token tables in resolve_remap)
-     * with its value, wherever it appears, then trims trailing slashes. The
+     * Substitutes a known leading `:token:` (see the token tables in resolve_remap)
+     * with its value, then trims trailing slashes. The
      * result must be a valid absolute path with no `.`/`..` segments; a relative
      * path or an unknown token (left unsubstituted) fails that check. Referencing
      * a token whose value is unavailable in preflight is a distinct, clear error.
@@ -8391,17 +8391,25 @@ class ImportClient
     {
         $resolved = $raw;
         foreach ($tokens as $name => $value) {
-            if (strpos($resolved, ":{$name}:") === false) {
+            $token = ":{$name}:";
+            $token_offset = strpos($resolved, $token);
+            if ($token_offset === false) {
                 continue;
+            }
+
+            if ($token_offset !== 0 || strpos($resolved, $token, strlen($token)) !== false) {
+                throw new InvalidArgumentException(
+                    "--remap token \"{$token}\" must appear only at the beginning of the path"
+                );
             }
 
             if ($value === null) {
                 throw new InvalidArgumentException(
-                    "Cannot resolve --remap token \":{$name}:\": not available in preflight data. Run preflight first."
+                    "Cannot resolve --remap token \"{$token}\": not available in preflight data. Run preflight first."
                 );
             }
 
-            $resolved = str_replace(":{$name}:", $value, $resolved);
+            $resolved = $value . substr($resolved, strlen($token));
         }
 
         $resolved = rtrim($resolved, "/");
