@@ -8296,16 +8296,9 @@ class ImportClient
      */
     private function resolve_remap(array $remap_raw): array
     {
-        $source_paths = $this->wp_component_source_paths();
         $fs_root = rtrim($this->get_filesystem_root_path(), "/");
 
-        $source_tokens = [
-            "wp-content" => $source_paths["content"],
-            "wp-plugins" => $source_paths["plugins"],
-            "wp-mu-plugins" => $source_paths["mu-plugins"],
-            "wp-uploads" => $source_paths["uploads"],
-            "abspath" => $source_paths["abspath"],
-        ];
+        $source_tokens = $this->wp_component_source_paths();
         $target_tokens = ["fs-root" => $fs_root];
 
         $rules = [];
@@ -8322,7 +8315,7 @@ class ImportClient
             }
 
             $rules[$source] = $target;
-            if ($source === $source_paths["content"]) {
+            if ($source === $source_tokens["wp-content"]) {
                 $wp_content_target = $target;
             }
         }
@@ -8330,9 +8323,9 @@ class ImportClient
         // Whole-tree remap of the wp-content components that can live outside the content_dir,
         // unless an explicit rule has already placed them somewhere else.
         if ($wp_content_target !== null) {
-            foreach (["plugins", "mu-plugins", "uploads"] as $name) {
-                $source = $source_paths[$name];
-                $is_outside_content_dir = self::path_remainder_under($source, $source_paths["content"]) === null;
+            foreach (["wp-plugins" => "plugins", "wp-mu-plugins" => "mu-plugins", "wp-uploads" => "uploads"] as $token => $name) {
+                $source = $source_tokens[$token];
+                $is_outside_content_dir = self::path_remainder_under($source, $source_tokens["wp-content"]) === null;
                 if ($is_outside_content_dir && !isset($rules[$source])) {
                     $rules[$source] = wp_join_unix_paths($wp_content_target, $name);
                 }
@@ -8343,7 +8336,7 @@ class ImportClient
     }
 
     /**
-     * The source site's real component locations from preflight data, as name => absolute path.
+     * The source site's real component locations from preflight data, as remap token name => absolute path.
      *
      * A wp-content component falls back to its conventional spot under
      * content_dir when that is known. This is a pure data-gatherer: any entry
@@ -8368,10 +8361,10 @@ class ImportClient
 
         return [
             "abspath" => $abspath,
-            "content" => $content_dir,
-            "plugins" => $maybe_under_content_dir($this->flatten_clean_path($paths["plugins_dir"] ?? null), "plugins"),
-            "mu-plugins" => $maybe_under_content_dir($this->flatten_clean_path($paths["mu_plugins_dir"] ?? null), "mu-plugins"),
-            "uploads" => $maybe_under_content_dir($this->flatten_clean_path($paths["uploads"]["basedir"] ?? null), "uploads"),
+            "wp-content" => $content_dir,
+            "wp-plugins" => $maybe_under_content_dir($this->flatten_clean_path($paths["plugins_dir"] ?? null), "plugins"),
+            "wp-mu-plugins" => $maybe_under_content_dir($this->flatten_clean_path($paths["mu_plugins_dir"] ?? null), "mu-plugins"),
+            "wp-uploads" => $maybe_under_content_dir($this->flatten_clean_path($paths["uploads"]["basedir"] ?? null), "uploads"),
         ];
     }
 
