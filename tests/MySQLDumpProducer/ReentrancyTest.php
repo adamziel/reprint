@@ -957,12 +957,6 @@ class ReentrancyTest extends MySQLDumpProducerTestBase
             }
         }
 
-        // Log for debugging
-        fwrite(
-            STDERR,
-            "Completed export in {$iterations} iterations, processed ~{$totalRowsProcessed} rows\n",
-        );
-
         return $allFragments;
     }
 }

@@ -4,6 +4,7 @@
          bootstrap="bootstrap.php"
          colors="true"
          testdox="true"
+         beStrictAboutOutputDuringTests="true"
          stopOnFailure="false">
     <testsuites>
         <testsuite name="MySQL Dump Producer Tests">

@@ -386,8 +386,7 @@ class EncodingTest extends MySQLDumpProducerTestBase
                 // before[BYTE]after
                 $this->pdo->exec("INSERT INTO latin1_undefined (data) VALUES (UNHEX('6265666F7265{$hex}6166746572'))");
             } catch (PDOException $e) {
-                // Some MySQL versions may reject these
-                fwrite(STDERR, "Note: Undefined codepoint rejected by MySQL: {$hex}\n");
+                // Some MySQL versions reject these bytes; assert only rows that were inserted.
             }
         }
 
