@@ -1816,6 +1816,10 @@ class ImportClient
             return;
         }
 
+        if ($command === "files-pull") {
+            $this->assert_files_remap_consistent();
+        }
+
         // Dispatch to appropriate command handler
         try {
             switch ($command) {
@@ -8284,6 +8288,52 @@ class ImportClient
     }
 
     /**
+     * Refuse to reuse a files index with different --remap rules.
+     *
+     * The files index stores remote paths. Local writes/deletes derive their
+     * targets from the current remap rules, so changing those rules while the
+     * same index is still in use can point future updates at the wrong path.
+     */
+    private function assert_files_remap_consistent(): void
+    {
+        $fingerprint = $this->files_remap_fingerprint();
+        $previous = $this->state["files_remap_fingerprint"] ?? null;
+
+        $has_existing_index = file_exists($this->index_file) && filesize($this->index_file) > 0;
+        if ($previous === null && $has_existing_index && !empty($this->remap_rules)) {
+            throw new RuntimeException(
+                "Cannot use --remap with an existing files index that was created before remap tracking. " .
+                    "Use a new --state-dir or clear the existing files index first.",
+            );
+        }
+
+        if ($previous !== null && $previous !== $fingerprint) {
+            throw new RuntimeException(
+                "Cannot change --remap rules while reusing the same files index. " .
+                    "Use the original --remap rules, or use a new --state-dir for a fresh files-pull.",
+            );
+        }
+
+        if ($previous === null) {
+            $this->state["files_remap_fingerprint"] = $fingerprint;
+            $this->save_state($this->state);
+        }
+    }
+
+    /**
+     * Stable fingerprint for the resolved remap rule set.
+     *
+     * Rule order does not matter: remap matching chooses the deepest source
+     * path, not the first matching rule.
+     */
+    private function files_remap_fingerprint(): string
+    {
+        $rules = $this->remap_rules;
+        ksort($rules, SORT_STRING);
+        return hash("sha256", json_encode($rules, JSON_UNESCAPED_SLASHES));
+    }
+
+    /**
      * Build the remap rules from the raw remap pairs + preflight data.
      *
      * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
@@ -10410,6 +10460,7 @@ class ImportClient
         $follow = $this->state["follow_symlinks"] ?? false;
         $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
+        $files_remap_fingerprint = $this->state["files_remap_fingerprint"] ?? null;
         $pull = $this->state["pull"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
@@ -10418,6 +10469,7 @@ class ImportClient
         $this->state["follow_symlinks"] = $follow;
         $this->state["fs_root_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
+        $this->state["files_remap_fingerprint"] = $files_remap_fingerprint;
         if ($pull !== null) {
             $this->state["pull"] = $pull;
         }
@@ -10439,6 +10491,7 @@ class ImportClient
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "max_allowed_packet" => null,
+            "files_remap_fingerprint" => null,
             "db_index" => [
                 "file" => null,
                 "tables" => 0,

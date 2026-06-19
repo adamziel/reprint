@@ -77,6 +77,16 @@ class RemapResolveTest extends TestCase
         return $this->call($c, 'resolve_remap', array($pairs));
     }
 
+    private function assertRemapConsistent($c): void
+    {
+        $this->call($c, 'assert_files_remap_consistent');
+    }
+
+    private function writeLocalIndex(): void
+    {
+        file_put_contents($this->stateDir . '/.import-index.jsonl', "{}\n");
+    }
+
     // --- resolution: SOURCE TARGET → one source => target rule -------------
 
     /**
@@ -193,6 +203,37 @@ class RemapResolveTest extends TestCase
             array(':wp-content:', ':fs-root:/wp-content')
         );
         $this->assertSame($this->root . '/special-plugins', $rules['/detached/plugins']);
+    }
+
+    // --- state consistency -------------------------------------------------
+
+    public function testRejectsChangedRemapRulesForSameState(): void
+    {
+        $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
+        $this->set($c, 'remap_rules', array(
+            '/var/www/html/wp-content' => $this->root . '/wp-content',
+        ));
+        $this->assertRemapConsistent($c);
+
+        $this->set($c, 'remap_rules', array(
+            '/var/www/html/wp-content' => $this->root . '/content',
+        ));
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Cannot change --remap rules');
+        $this->assertRemapConsistent($c);
+    }
+
+    public function testRejectsRemapWithUntrackedExistingFilesIndex(): void
+    {
+        $this->writeLocalIndex();
+        $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
+        $this->set($c, 'remap_rules', array(
+            '/var/www/html/wp-content' => $this->root . '/wp-content',
+        ));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('existing files index');
+        $this->assertRemapConsistent($c);
     }
 
     // --- errors ------------------------------------------------------------
