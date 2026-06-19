@@ -402,6 +402,7 @@ class Pull
             $state['pull']['stage'] = null;
             $state['pull']['files_filter'] = null;
             $state['pull']['skipped_pending'] = false;
+            $state['pull']['has_completed_once'] = true;
             $state['command'] = null;
             $state['status'] = null;
             $state['cursor'] = null;
