@@ -2623,6 +2623,7 @@ class ImportClient
             $current_status !== "complete";
 
         $this->recover_index_updates();
+        $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
 
         // Already completed.
         if ($current_status === "complete") {
@@ -2654,6 +2655,7 @@ class ImportClient
                 ], true);
                 $this->state["status"] = "in_progress";
                 $this->state["stage"] = "fetch-skipped";
+                $this->state["files_pull_only_fingerprint"] = $this->files_pull_only_fingerprint();
                 $this->save_state($this->state);
                 $this->run_files_sync_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
@@ -2763,6 +2765,7 @@ class ImportClient
             $this->state["command"] = "files-pull";
             $this->state["status"] = "in_progress";
             $this->state["stage"] = "index";
+            $this->state["files_pull_only_fingerprint"] = $this->files_pull_only_fingerprint();
             $this->state["diff"] = $this->default_state()["diff"];
             $this->state["index"] = $this->default_state()["index"];
             $this->state["fetch"] = $this->default_state()["fetch"];
@@ -8425,6 +8428,53 @@ class ImportClient
     }
 
     /**
+     * Refuse to resume a files-pull after changing --only.
+     *
+     * The in-progress remote index cursor/file was built from one directory[]
+     * allowlist. Switching the selected source path prefixes mid-resume would
+     * mix indexes from different traversals. Completed runs are allowed to use
+     * different --only prefixes because the local index is intentionally a union
+     * across files-pull --only runs.
+     */
+    private function assert_files_pull_only_unchanged_while_resuming(bool $has_progress): void
+    {
+        if (!$has_progress) {
+            return;
+        }
+
+        $fingerprint = $this->files_pull_only_fingerprint();
+        $previous = $this->state["files_pull_only_fingerprint"] ?? null;
+
+        if ($previous !== null && $previous !== $fingerprint) {
+            throw new RuntimeException(
+                "Cannot change --only while resuming files-pull. " .
+                    "Use the original --only values, or use --abort to start a new files-pull.",
+            );
+        }
+
+        // Older in-progress state may not have this guard persisted yet. Record
+        // the current value so subsequent resumes cannot drift.
+        if ($previous === null) {
+            $this->state["files_pull_only_fingerprint"] = $fingerprint;
+            $this->save_state($this->state);
+        }
+    }
+
+    /**
+     * Stable fingerprint for the resolved --only file path prefixes.
+     *
+     * Prefix order is part of the fingerprint because it determines the first
+     * list_dir used to start the traversal.
+     */
+    private function files_pull_only_fingerprint(): string
+    {
+        return hash(
+            "sha256",
+            json_encode($this->pull_only_files_with_path_prefixes, JSON_UNESCAPED_SLASHES),
+        );
+    }
+
+    /**
      * Build the remap rules from the raw remap pairs + preflight data.
      *
      * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
@@ -10700,6 +10750,7 @@ class ImportClient
             "filter" => "none",
             "max_allowed_packet" => null,
             "files_remap_fingerprint" => null,
+            "files_pull_only_fingerprint" => null,
             "db_index" => [
                 "file" => null,
                 "tables" => 0,
