@@ -15,18 +15,22 @@ abstract class MySQLDumpProducerTestBase extends TestCase
     protected function setUp(): void
     {
         $host = getenv("DB_HOST") ?: "localhost";
+        $port = getenv("DB_PORT") ?: "3306";
         $user = getenv("DB_USER") ?: "root";
         $pass = getenv("DB_PASS") ?: "";
         $this->dbName = getenv("DB_NAME") ?: "test_mysql_dump";
 
         // Connect without database selection
-        $dsn = "mysql:host={$host};charset=utf8mb4";
+        $dsn = "mysql:host={$host};port={$port};charset=utf8mb4";
         try {
             $this->pdo = new PDO($dsn, $user, $pass, [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             ]);
         } catch (PDOException $e) {
+            if (getenv("REPRINT_REQUIRE_MYSQL")) {
+                throw $e;
+            }
             $this->markTestSkipped("MySQL not reachable: " . $e->getMessage());
         }
 
@@ -89,11 +93,12 @@ abstract class MySQLDumpProducerTestBase extends TestCase
     protected function executeDumpInNewDatabase(string $sql): PDO
     {
         $host = getenv("DB_HOST") ?: "localhost";
+        $port = getenv("DB_PORT") ?: "3306";
         $user = getenv("DB_USER") ?: "root";
         $pass = getenv("DB_PASS") ?: "";
         $testDbName = $this->dbName . "_import";
 
-        $pdo = new PDO("mysql:host={$host};charset=utf8mb4", $user, $pass, [
+        $pdo = new PDO("mysql:host={$host};port={$port};charset=utf8mb4", $user, $pass, [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ]);

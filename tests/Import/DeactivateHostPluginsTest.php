@@ -214,16 +214,20 @@ class DeactivateHostPluginsTest extends TestCase
     private function createMysqlPdo(): PDO
     {
         $host = getenv('DB_HOST') ?: '127.0.0.1';
+        $port = getenv('DB_PORT') ?: '3306';
         $user = getenv('DB_USER') ?: 'root';
         $pass = getenv('DB_PASS') ?: '';
         $this->mysqlDbName = 'test_deactivate_host_plugins_' . bin2hex(random_bytes(4));
 
         try {
-            $root = new PDO("mysql:host={$host};charset=utf8mb4", $user, $pass, [
+            $root = new PDO("mysql:host={$host};port={$port};charset=utf8mb4", $user, $pass, [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             ]);
         } catch (PDOException $e) {
+            if (getenv('REPRINT_REQUIRE_MYSQL')) {
+                throw $e;
+            }
             $this->markTestSkipped('MySQL not reachable: ' . $e->getMessage());
         }
 
@@ -232,7 +236,7 @@ class DeactivateHostPluginsTest extends TestCase
         $this->cleanupPdo = $root;
 
         $pdo = new PDO(
-            "mysql:host={$host};dbname={$this->mysqlDbName};charset=utf8mb4",
+            "mysql:host={$host};port={$port};dbname={$this->mysqlDbName};charset=utf8mb4",
             $user,
             $pass,
             [

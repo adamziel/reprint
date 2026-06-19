@@ -537,10 +537,18 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
     }
 }
 
-require_once __DIR__ . "/class-mysql-dump-producer.php";
-require_once __DIR__ . "/class-file-tree-producer.php";
-require_once __DIR__ . "/class-gzip-output-stream.php";
-require_once __DIR__ . "/class-resource-budget.php";
+if (!class_exists(MySQLDumpProducer::class, false)) {
+    require_once __DIR__ . "/class-mysql-dump-producer.php";
+}
+if (!class_exists(FileTreeProducer::class, false)) {
+    require_once __DIR__ . "/class-file-tree-producer.php";
+}
+if (!class_exists(GzipOutputStream::class, false)) {
+    require_once __DIR__ . "/class-gzip-output-stream.php";
+}
+if (!class_exists(ResourceBudget::class, false)) {
+    require_once __DIR__ . "/class-resource-budget.php";
+}
 
 /**
  * Prepares the PHP environment for streaming by disabling output buffering,

@@ -37,6 +37,7 @@
     },
     "scripts": {
         "test": "cd tests && phpunit --testdox --colors",
+        "test:local-db": "tests/bin/phpunit-with-mysql",
         "test:coverage": "cd tests && phpunit --coverage-html coverage/ --coverage-text",
         "build:phar": "./bin/build-reprint-phar.sh",
         "build:exporter-plugin": "cd reprint-exporter-wp && composer install --no-dev && cd .. && zip -r reprint-exporter-wp.zip reprint-exporter-wp -x 'reprint-exporter-wp/secret.php'",

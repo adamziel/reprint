@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+COMPOSE_FILE="${PROJECT_ROOT}/tests/docker-compose.mysql.yml"
+
+if docker compose version >/dev/null 2>&1; then
+    COMPOSE=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE=(docker-compose)
+else
+    echo "Docker Compose is required to run local MySQL tests." >&2
+    exit 1
+fi
+
+DB_HOST="${DB_HOST:-127.0.0.1}"
+DB_PORT="${DB_PORT:-${REPRINT_TEST_DB_PORT:-3307}}"
+DB_USER="${DB_USER:-root}"
+DB_PASS="${DB_PASS:-${REPRINT_TEST_DB_PASS:-my-secret-pw}}"
+DB_NAME="${DB_NAME:-${REPRINT_TEST_DB_NAME:-test_mysql_dump}}"
+PROJECT_HASH="$(php -r 'echo substr(sha1($argv[1]), 0, 8);' "${PROJECT_ROOT}")"
+COMPOSE_PROJECT_NAME="${REPRINT_TEST_MYSQL_PROJECT:-reprint-phpunit-${PROJECT_HASH}}"
+
+export REPRINT_TEST_DB_PORT="${DB_PORT}"
+export REPRINT_TEST_DB_PASS="${DB_PASS}"
+export REPRINT_TEST_DB_NAME="${DB_NAME}"
+
+cleanup() {
+    if [ "${REPRINT_KEEP_TEST_MYSQL:-0}" = "1" ]; then
+        return
+    fi
+
+    "${COMPOSE[@]}" -f "${COMPOSE_FILE}" -p "${COMPOSE_PROJECT_NAME}" down --volumes --remove-orphans >/dev/null
+}
+trap cleanup EXIT
+
+"${COMPOSE[@]}" -f "${COMPOSE_FILE}" -p "${COMPOSE_PROJECT_NAME}" up -d mysql >/dev/null
+
+container_id="$("${COMPOSE[@]}" -f "${COMPOSE_FILE}" -p "${COMPOSE_PROJECT_NAME}" ps -q mysql)"
+if [ -z "${container_id}" ]; then
+    echo "Could not determine MySQL container id." >&2
+    exit 1
+fi
+
+echo "Waiting for local MySQL test container on ${DB_HOST}:${DB_PORT}..."
+for _ in $(seq 1 60); do
+    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container_id}" 2>/dev/null || true)"
+    if [ "${health}" = "healthy" ]; then
+        break
+    fi
+    sleep 1
+done
+
+if [ "${health:-}" != "healthy" ]; then
+    "${COMPOSE[@]}" -f "${COMPOSE_FILE}" -p "${COMPOSE_PROJECT_NAME}" logs mysql >&2 || true
+    echo "MySQL test container did not become healthy." >&2
+    exit 1
+fi
+
+PHPUNIT="${PHPUNIT:-${PROJECT_ROOT}/vendor/bin/phpunit}"
+if [ ! -x "${PHPUNIT}" ]; then
+    echo "PHPUnit not found at ${PHPUNIT}. Run composer install first." >&2
+    exit 1
+fi
+PHP_BINARY="${PHP_BINARY:-$(command -v php)}"
+PHPUNIT_MEMORY_LIMIT="${PHPUNIT_MEMORY_LIMIT:-512M}"
+
+cd "${PROJECT_ROOT}/tests"
+DB_HOST="${DB_HOST}" \
+DB_PORT="${DB_PORT}" \
+DB_USER="${DB_USER}" \
+DB_PASS="${DB_PASS}" \
+DB_NAME="${DB_NAME}" \
+REPRINT_REQUIRE_MYSQL=1 \
+"${PHP_BINARY}" -d "memory_limit=${PHPUNIT_MEMORY_LIMIT}" "${PHPUNIT}" --testdox --colors "$@"
