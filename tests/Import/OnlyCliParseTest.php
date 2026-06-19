@@ -6,10 +6,10 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * --only reuses the existing `value-or-next` option type (like --new-site-url),
- * taking a single comma-separated value. The parser lives inside the CLI
- * bootstrap guard (not require-able), so this exercises the real binary and
- * asserts `--only` is a recognized option in both `--only=VAL` and `--only VAL`
- * forms.
+ * but is repeatable because commas are valid path bytes. The parser lives
+ * inside the CLI bootstrap guard (not require-able), so this exercises the real
+ * binary and asserts `--only` is recognized in both `--only=VAL` and
+ * `--only VAL` forms.
  */
 class OnlyCliParseTest extends TestCase
 {
@@ -56,7 +56,27 @@ class OnlyCliParseTest extends TestCase
         return shell_exec($cmd . ' 2>&1') ?? '';
     }
 
-    public function testOnlyOptionIsRecognizedInBothForms(): void
+    private function writePreflightState(): void
+    {
+        file_put_contents($this->tempDir . '/state/.import-state.json', json_encode(array(
+            'preflight' => array(
+                'data' => array(
+                    'ok' => true,
+                    'database' => array(
+                        'wp' => array(
+                            'paths_urls' => array(
+                                'content_dir' => '/var/www/html/wp-content',
+                                'uploads' => array('basedir' => '/var/www/html/wp-content/uploads'),
+                            ),
+                        ),
+                    ),
+                ),
+                'http_code' => 200,
+            ),
+        ), JSON_PRETTY_PRINT));
+    }
+
+    public function testOnlyOptionIsRecognizedAsRepeatableInBothForms(): void
     {
         $tail = array(
             '--state-dir=' . $this->tempDir . '/state',
@@ -66,15 +86,35 @@ class OnlyCliParseTest extends TestCase
         // Both forms fail later (unreachable host) but must not be rejected as
         // an unknown option.
         $equals = $this->runCli(array_merge(
-            array('files-pull', 'http://fake.invalid/?site-export-api', '--only=:wp-content:,:wp-uploads:'),
+            array('files-pull', 'http://fake.invalid/?site-export-api', '--only=:wp-content:', '--only=:wp-uploads:/2025'),
             $tail
         ));
         $this->assertStringNotContainsString('Unknown option', $equals);
 
         $space = $this->runCli(array_merge(
-            array('files-pull', 'http://fake.invalid/?site-export-api', '--only', ':wp-content:'),
+            array('files-pull', 'http://fake.invalid/?site-export-api', '--only', ':wp-content:', '--only', ':wp-uploads:/2025'),
             $tail
         ));
         $this->assertStringNotContainsString('Unknown option', $space);
+    }
+
+    public function testOnlyOptionKeepsCommaInsideSourcePath(): void
+    {
+        // --abort runs after --only resolution, avoiding a network request while
+        // still proving the CLI did not split the SOURCE at the comma.
+        $this->writePreflightState();
+
+        $output = $this->runCli(array(
+            'files-pull',
+            'http://fake.invalid/?site-export-api',
+            '--only',
+            ':wp-content:/plugins,custom',
+            '--abort',
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $this->assertStringContainsString('"status":"aborted"', $output);
+        $this->assertStringNotContainsString('path "custom"', $output);
     }
 }
