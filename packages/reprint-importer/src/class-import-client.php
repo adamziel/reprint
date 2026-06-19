@@ -16,7 +16,7 @@ use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileChunkApplier;
 use Reprint\Importer\FileSync\FileFetchDownloader;
-use Reprint\Importer\FileSync\IntermediateSymlinkRecreator;
+use Reprint\Importer\FileSync\FilesSyncPipeline;
 use Reprint\Importer\FileSync\RemoteIndexDownloader;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\FileSync\SymlinkChunkApplier;
@@ -1287,183 +1287,77 @@ class ImportClient
      */
     private function run_files_sync_pipeline(): void
     {
-        $stage = $this->state["stage"] ?? "index";
-
-        if ($stage === "index") {
-            $complete = $this->download_remote_index();
-            if (!$complete) {
-                $this->state["status"] = "partial";
-                $this->save_state($this->state);
-                return;
-            }
-            if ($this->follow_symlinks) {
+        (new FilesSyncPipeline(
+            $this->remote_index_file,
+            $this->download_list_file,
+            $this->skipped_download_list_file,
+            $this->follow_symlinks,
+            $this->filter,
+            $this->local_filesystem(),
+            function (): array {
+                return $this->default_state();
+            },
+            function (): bool {
+                return $this->download_remote_index();
+            },
+            function (array &$state): void {
                 $this->discover_symlink_targets();
-                if ($this->shutdown_requested) {
-                    $this->state["status"] = "partial";
-                    $this->save_state($this->state);
-                    return;
-                }
-            }
-            $this->sort_index_file($this->remote_index_file);
-            $this->state["stage"] = "diff";
-            $this->state["diff"] = $this->default_state()["diff"];
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
-                );
-            }
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | clearing before diff stage",
-                );
-            }
-            $this->save_state($this->state);
-            $stage = "diff";
-        }
-
-        if ($stage === "diff") {
-            $complete = $this->diff_indexes_and_build_fetch_list();
-            if (!$complete) {
-                $this->state["status"] = "partial";
+                $state = $this->state;
+            },
+            function (): bool {
+                return $this->shutdown_requested;
+            },
+            function (string $path): void {
+                $this->sort_index_file($path);
+            },
+            function (): bool {
+                return $this->diff_indexes_and_build_fetch_list();
+            },
+            function (string $list_file, string $state_key): bool {
+                return $this->download_files_from_list($list_file, $state_key);
+            },
+            function (array $state): void {
+                $this->state = $state;
                 $this->save_state($this->state);
-                return;
-            }
-
-            $has_downloads =
-                file_exists($this->download_list_file) &&
-                filesize($this->download_list_file) > 0;
-            $has_skipped =
-                file_exists($this->skipped_download_list_file) &&
-                filesize($this->skipped_download_list_file) > 0;
-
-            // Determine the first fetch stage to run.
-            if ($has_downloads) {
-                $stage = "fetch";
-            } elseif ($has_skipped) {
-                $stage = "fetch-skipped";
-            } else {
-                $stage = null;
-            }
-            $this->state["stage"] = $stage;
-            $this->save_state($this->state);
-
-            // In pull mode, finalize the scanning line with a checkmark
-            // and start the download progress on a fresh line.
-            if ($has_downloads && $this->output->is_quiet_lifecycle()) {
-                $green = "\033[32m";
-                $dim = "\033[2m";
-                $r = "\033[0m";
-                $scanned = number_format($this->index_entries_counted);
-                $this->output->clear_progress_line();
-                $this->output->print_line("  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
-                $total = $this->count_newlines($this->download_list_file);
-                $this->output->set_active_label(null);
-                $this->output->show_progress_line(
-                    "Downloading — 0 / " . number_format($total) . " files",
-                    0.0
-                );
-            }
-
-            if (!$has_downloads && file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | no files to fetch",
-                );
-            }
-            if (!$has_skipped && file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | no skipped files to fetch",
-                );
-            }
-        }
-
-        if ($stage === "fetch") {
-            $complete = $this->download_files_from_list(
-                $this->download_list_file,
-                "fetch",
-            );
-            if (!$complete) {
-                $this->state["status"] = "partial";
-                $this->save_state($this->state);
-                return;
-            }
-            $this->state["fetch"] = $this->default_state()["fetch"];
-
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | fetch complete",
-                );
-            }
-
-            $has_skipped =
-                file_exists($this->skipped_download_list_file) &&
-                filesize($this->skipped_download_list_file) > 0;
-
-            if ($has_skipped && $this->filter === "essential-files") {
-                // Essential files are done — mark the sync as complete.
-                // The skipped list stays on disk for a later
-                // --filter=skipped-earlier run.
-                $this->state["stage"] = null;
-                $this->save_state($this->state);
-                $this->audit_log(
-                    "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_download_list_file} — run with --filter=skipped-earlier to download them",
-                    true,
-                );
-                $stage = null;
-            } elseif ($has_skipped) {
-                // Skipped list exists but filter is "none" — download now.
-                $this->state["stage"] = "fetch-skipped";
-                $this->save_state($this->state);
-                $stage = "fetch-skipped";
-                $this->audit_log(
-                    "ESSENTIAL FILES COMPLETE | transitioning to skipped files",
-                    true,
-                );
+            },
+            function (string $message, bool $to_console = true): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (): void {
                 $this->write_status_file();
-            } else {
-                $this->state["stage"] = null;
-                $this->save_state($this->state);
-                $stage = null;
-            }
+            },
+            function (): int {
+                return $this->index_entries_counted;
+            },
+            function (int $scanned, string $download_list_file): void {
+                $this->show_download_progress_start($scanned, $download_list_file);
+            },
+        ))->run($this->state);
+    }
+
+    private function show_download_progress_start(
+        int $scanned,
+        string $download_list_file
+    ): void {
+        if (!$this->output->is_quiet_lifecycle()) {
+            return;
         }
 
-        if ($stage === "fetch-skipped") {
-            $complete = $this->download_files_from_list(
-                $this->skipped_download_list_file,
-                "fetch_skipped",
-            );
-            if (!$complete) {
-                $this->state["status"] = "partial";
-                $this->save_state($this->state);
-                return;
-            }
-            $this->state["stage"] = null;
-            $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
-            $this->save_state($this->state);
-
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | skipped files fetch complete",
-                );
-            }
-        }
-
-        // Recreate intermediate path symlinks so the full symlink chain
-        // works locally.  The server discovers these (e.g. /srv/wordpress
-        // -> /wordpress) and includes them in the remote index.
-        if ($this->follow_symlinks) {
-            (new IntermediateSymlinkRecreator(
-                $this->local_filesystem(),
-                function (string $message, bool $to_console): void {
-                    $this->audit_log($message, $to_console);
-                },
-            ))->recreate($this->remote_index_file);
-        }
+        $green = "\033[32m";
+        $dim = "\033[2m";
+        $r = "\033[0m";
+        $this->output->clear_progress_line();
+        $this->output->print_line(
+            "  {$green}✓{$r} Scanned {$dim}— " .
+            number_format($scanned) .
+            " entries{$r}\n",
+        );
+        $this->output->set_active_label(null);
+        $total = $this->count_newlines($download_list_file);
+        $this->output->show_progress_line(
+            "Downloading — 0 / " . number_format($total) . " files",
+            0.0,
+        );
     }
 
     /**
