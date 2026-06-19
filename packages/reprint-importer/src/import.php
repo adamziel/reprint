@@ -1821,10 +1821,12 @@ class ImportClient
         }
 
         // Resolve the `--only` scope (also requires preflight).
-        // Comma-separated for multiple source paths.
-        $only_raw = $options["only"] ?? "";
-        if ($only_raw !== "") {
-            $this->scope = $this->resolve_scope(explode(",", $only_raw));
+        $only_raw = $options["only"] ?? [];
+        if (is_string($only_raw)) {
+            $only_raw = [$only_raw];
+        }
+        if (!empty($only_raw)) {
+            $this->scope = $this->resolve_scope($only_raw);
         }
 
         // Handle --abort: clear state for the command and exit immediately.
@@ -11425,6 +11427,7 @@ if (
     //   placeholder    Value placeholder in help, e.g. 'DIR' (value types)
     //   short          Single-char alias, e.g. 'v' for -v (flag types)
     //   aliases        Array of alternative --names (hidden from help)
+    //   repeatable     Append each value to target instead of replacing it
     //   cast           'int' | 'float' | 'size' (default: string)
     //   flag_value     What to store for flag types (default: true)
     //   valid_values   Array of allowed values (enforced at parse time)
@@ -11719,8 +11722,9 @@ if (
             'type' => 'value-or-next',
             'target' => 'only',
             'placeholder' => 'SOURCE',
+            'repeatable' => true,
             'help' => 'Scope the pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
-                'comma-separate for several. Default pulls everything',
+                'repeat for several. Default pulls everything',
             'commands' => ['files-pull'],
         ],
 
@@ -11952,6 +11956,13 @@ if (
         if ($target === 'fs_root')   { $fs_root = $value;   return; }
         if (strpos($target, 'tuning_config.') === 0) {
             $options['tuning_config'][substr($target, strlen('tuning_config.'))] = $value;
+            return;
+        }
+        if (!empty($def['repeatable'])) {
+            if (!isset($options[$target])) {
+                $options[$target] = [];
+            }
+            $options[$target][] = $value;
             return;
         }
         $options[$target] = $value;
