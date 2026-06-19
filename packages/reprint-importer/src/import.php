@@ -8354,17 +8354,24 @@ class ImportClient
             $abspath = $this->clean_preflight_path( $preflight["wp_detect"]["roots"][0]["path"] ?? null);
         }
 
-        // Conventional spot under content_dir, but only when content_dir is known.
-        $maybe_under_content_dir = function (?string $dir, string $name) use ($content_dir): ?string {
-            return $dir ?? ($content_dir === null ? null : $content_dir . "/" . $name);
-        };
+        $plugins_dir = $this->clean_preflight_path( $paths["plugins_dir"] ?? null);
+        $mu_plugins_dir = $this->clean_preflight_path( $paths["mu_plugins_dir"] ?? null);
+        $uploads_dir = $this->clean_preflight_path( $paths["uploads"]["basedir"] ?? null);
+
+        // If preflight did not report a component path, use its conventional
+        // location under WP_CONTENT_DIR when WP_CONTENT_DIR is known.
+        if ($content_dir !== null) {
+            $plugins_dir = $plugins_dir ?? wp_join_unix_paths( $content_dir, "plugins" );
+            $mu_plugins_dir = $mu_plugins_dir ?? wp_join_unix_paths( $content_dir, "mu-plugins" );
+            $uploads_dir = $uploads_dir ?? wp_join_unix_paths( $content_dir, "uploads" );
+        }
 
         return [
             "abspath" => $abspath,
             "wp-content" => $content_dir,
-            "wp-plugins" => $maybe_under_content_dir($this->clean_preflight_path( $paths["plugins_dir"] ?? null), "plugins"),
-            "wp-mu-plugins" => $maybe_under_content_dir($this->clean_preflight_path( $paths["mu_plugins_dir"] ?? null), "mu-plugins"),
-            "wp-uploads" => $maybe_under_content_dir($this->clean_preflight_path( $paths["uploads"]["basedir"] ?? null), "uploads"),
+            "wp-plugins" => $plugins_dir,
+            "wp-mu-plugins" => $mu_plugins_dir,
+            "wp-uploads" => $uploads_dir,
         ];
     }
 
