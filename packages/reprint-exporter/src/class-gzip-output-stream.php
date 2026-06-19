@@ -10,22 +10,24 @@ use RuntimeException;
  */
 class GzipOutputStream
 {
-    private $deflate_ctx;
+    /** @var resource|\DeflateContext|null */
+    private $deflate_ctx = null;
+
     private bool $enabled = true;
 
     public function __construct(bool $enabled = true)
     {
         $this->enabled = $enabled;
-        if ($this->enabled) {
-            $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
-            if ($this->deflate_ctx === false) {
-                throw new RuntimeException(
-                    "deflate_init() failed — zlib may be misconfigured",
-                );
-            }
-            if (!headers_sent()) {
-                @header("Content-Encoding: gzip");
-            }
+
+        if (!$this->enabled) {
+            return;
+        }
+
+        $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
+        if ($this->deflate_ctx === false) {
+            throw new RuntimeException(
+                "deflate_init() failed — zlib may be misconfigured",
+            );
         }
     }
 

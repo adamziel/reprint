@@ -126,11 +126,16 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
         );
     }
 
+    $gzip_enabled = $can_send_headers && $gzip;
+
     if ($can_send_headers) {
         @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+        if ($gzip_enabled) {
+            @header("Content-Encoding: gzip");
+        }
     }
 
-    $gz = new GzipOutputStream($can_send_headers && $gzip);
+    $gz = new GzipOutputStream($gzip_enabled);
     $streaming_context = ['gz' => $gz, 'boundary' => $boundary];
 
     return $streaming_context;
