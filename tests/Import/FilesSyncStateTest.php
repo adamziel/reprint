@@ -3,9 +3,13 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FileSyncLocalApplier;
+use Reprint\Importer\Filesystem\LocalImportFilesystem;
+use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Session\VolatileFileTracker;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -67,6 +71,36 @@ class FilesSyncStateTest extends TestCase
             $this->stateDir,
             $this->fs_root,
             new BufferedImportOutput(),
+        );
+    }
+
+    private function makeLocalApplier(array &$state): FileSyncLocalApplier
+    {
+        return new FileSyncLocalApplier(
+            new LocalImportFilesystem(
+                $this->fs_root,
+                'preserve-local',
+                function (string $message, bool $to_console): void {
+                },
+            ),
+            new IndexStore(
+                $this->stateDir . '/.import-index.jsonl',
+                $this->stateDir . '/.import-index-updates.jsonl',
+            ),
+            new VolatileFileTracker($this->stateDir . '/.import-volatile-files.json'),
+            new BufferedImportOutput(),
+            $this->fs_root,
+            $this->stateDir . '/.import-remote-index.jsonl',
+            'preserve-local',
+            false,
+            0,
+            null,
+            null,
+            $state,
+            function (string $message, bool $to_console = true): void {
+            },
+            function (array $progress, bool $force = false): void {
+            },
         );
     }
 
@@ -345,10 +379,9 @@ class FilesSyncStateTest extends TestCase
             "stage" => "fetch",
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
-
         // Send a file chunk with new content
-        $method = $reflection->getMethod('handle_file_chunk');
+        $state = [];
+        $applier = $this->makeLocalApplier($state);
         $context = new StreamingContext();
         $chunk = [
             'headers' => [
@@ -361,7 +394,7 @@ class FilesSyncStateTest extends TestCase
             'body' => 'new content',
         ];
 
-        $method->invoke($client, $chunk, $context);
+        $applier->handle_file_chunk($chunk, $context);
 
         if ($context->file_handle) {
             fclose($context->file_handle);

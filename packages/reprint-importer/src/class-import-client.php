@@ -9,23 +9,19 @@ use RuntimeException;
 use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightCommand;
-use Reprint\Importer\FileSync\DirectoryChunkApplier;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
-use Reprint\Importer\FileSync\FileChunkApplier;
 use Reprint\Importer\FileSync\FileFetchDownloader;
+use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\FileSync\FilesSyncPipeline;
 use Reprint\Importer\FileSync\RemoteIndexDownloader;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
-use Reprint\Importer\FileSync\SymlinkChunkApplier;
 use Reprint\Importer\FileSync\SymlinkTargetIndexer;
 use Reprint\Importer\Filesystem\FlatDocumentRootBuilder;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
-use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Index\IndexFileSorter;
 use Reprint\Importer\Index\IndexLineParser;
-use Reprint\Importer\Index\IndexPathPrefixMatcher;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Input\ImportRunRequest;
 use Reprint\Importer\Output\ImportOutput;
@@ -43,14 +39,11 @@ use Reprint\Importer\Sql\DbIndexDownloader;
 use Reprint\Importer\Sql\DbPullWorkflow;
 use Reprint\Importer\Sql\SqlDownloader;
 use Reprint\Importer\Support\ByteFormatter;
-use Reprint\Importer\Support\PathDisplayFormatter;
 use Reprint\Importer\TargetRuntime\RuntimeConfigurationApplier;
 use Reprint\Importer\Transport\HttpErrorDiagnoser;
 use Reprint\Importer\Transport\ImportHttpTransport;
 use Reprint\Importer\Transport\HttpRequestBuilder;
 use Reprint\Importer\Tuning\AdaptiveTuner;
-use function Reprint\Exporter\normalize_path;
-use function Reprint\Exporter\path_is_within_root;
 
 class ImportClient
 {
@@ -221,9 +214,6 @@ class ImportClient
     /** @var int Cumulative count of index entries written (survives retries). */
     private $index_entries_counted = 0;
 
-    /** @var IndexPathPrefixMatcher|null Memoized remote index path-prefix matcher. */
-    private ?IndexPathPrefixMatcher $remote_index_prefix_matcher = null;
-
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
 
@@ -379,26 +369,6 @@ class ImportClient
     }
 
     /**
-     * Upsert a file entry in the index.
-     */
-    private function upsert_index_entry(
-        string $path,
-        int $ctime,
-        int $size,
-        string $type
-    ): void {
-        $this->index_store->upsert($path, $ctime, $size, $type);
-    }
-
-    /**
-     * Delete a file entry from the index.
-     */
-    private function delete_index_entry(string $path): void
-    {
-        $this->index_store->delete($path);
-    }
-
-    /**
      * Recover and merge any pending index updates from a previous run.
      */
     private function recover_index_updates(): void
@@ -507,21 +477,28 @@ class ImportClient
         );
     }
 
-    /**
-     * Record that a file changed during streaming.
-     * Increments the change counter for the given path.
-     */
-    private function record_volatile_file(string $path): void
+    private function file_sync_local_applier(): FileSyncLocalApplier
     {
-        $this->volatile_file_tracker()->record($path);
-    }
-
-    /**
-     * Clear a file from the volatile tracker after a successful download.
-     */
-    private function clear_volatile_file(string $path): void
-    {
-        $this->volatile_file_tracker()->clear($path);
+        return new FileSyncLocalApplier(
+            $this->local_filesystem(),
+            $this->index_store,
+            $this->volatile_file_tracker(),
+            $this->output,
+            $this->fs_root,
+            $this->remote_index_file,
+            $this->fs_root_nonempty_behavior,
+            $this->follow_symlinks,
+            $this->files_imported,
+            $this->download_list_done,
+            $this->download_list_total,
+            $this->state,
+            function (string $message, bool $to_console = true): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (array $progress, bool $force = false): void {
+                $this->output_progress($progress, $force);
+            },
+        );
     }
 
     /**
@@ -566,12 +543,7 @@ class ImportClient
      */
     private function emit_skip_progress(string $path): void
     {
-        $this->output->show_progress_line("[skip] " . PathDisplayFormatter::short_path($path));
-        $this->output_progress([
-            "type" => "skip",
-            "path" => $path,
-            "message" => "[skip] " . $path,
-        ], true);
+        $this->file_sync_local_applier()->emit_skip_progress($path);
     }
 
     /**
@@ -1844,6 +1816,8 @@ class ImportClient
         ?string $cursor,
         string $state_key = "fetch"
     ): bool {
+        $local_applier = $this->file_sync_local_applier();
+
         return (new FileFetchDownloader(
             function (string $endpoint, ?string $cursor, array $params): string {
                 return $this->build_url($endpoint, $cursor, $params);
@@ -1866,27 +1840,28 @@ class ImportClient
             function (array $state): void {
                 $this->save_state($state);
             },
-            function (array $chunk, StreamingContext $context): void {
-                $this->handle_metadata_chunk($chunk, $context);
+            function (array $chunk, StreamingContext $context) use ($local_applier): void {
+                $local_applier->handle_metadata_chunk($chunk, $context);
             },
-            function (array $chunk, StreamingContext $context): void {
-                $this->handle_file_chunk($chunk, $context);
+            function (array $chunk, StreamingContext $context) use ($local_applier): void {
+                $local_applier->handle_file_chunk($chunk, $context);
+                $this->files_imported = $local_applier->files_imported();
             },
-            function (array $chunk): void {
-                $this->handle_directory_chunk($chunk);
+            function (array $chunk) use ($local_applier): void {
+                $local_applier->handle_directory_chunk($chunk);
             },
-            function (array $chunk): void {
-                $this->handle_symlink_chunk($chunk);
+            function (array $chunk) use ($local_applier): void {
+                $local_applier->handle_symlink_chunk($chunk);
             },
             function (
                 array $chunk,
                 string $phase,
                 StreamingContext $context
-            ): void {
-                $this->handle_error_chunk($chunk, $phase, $context);
+            ) use ($local_applier): void {
+                $local_applier->handle_error_chunk($chunk, $phase, $context);
             },
-            function (array $chunk, string $phase): void {
-                $this->handle_progress($chunk, $phase);
+            function (array $chunk, string $phase) use ($local_applier): void {
+                $local_applier->handle_progress($chunk, $phase);
             },
             function (array $progress): void {
                 $this->output_progress($progress, true);
@@ -1928,6 +1903,8 @@ class ImportClient
      */
     private function download_remote_index(?string $list_dir_override = null): bool
     {
+        $local_applier = $this->file_sync_local_applier();
+
         return (new RemoteIndexDownloader(
             function (string $endpoint, ?string $cursor, array $params): string {
                 return $this->build_url($endpoint, $cursor, $params);
@@ -1950,18 +1927,18 @@ class ImportClient
             function (array $state): void {
                 $this->save_state($state);
             },
-            function (array $chunk, StreamingContext $context): void {
-                $this->handle_metadata_chunk($chunk, $context);
+            function (array $chunk, StreamingContext $context) use ($local_applier): void {
+                $local_applier->handle_metadata_chunk($chunk, $context);
             },
             function (
                 array $chunk,
                 string $phase,
                 StreamingContext $context
-            ): void {
-                $this->handle_error_chunk($chunk, $phase, $context);
+            ) use ($local_applier): void {
+                $local_applier->handle_error_chunk($chunk, $phase, $context);
             },
-            function (array $chunk, string $phase): void {
-                $this->handle_progress($chunk, $phase);
+            function (array $chunk, string $phase) use ($local_applier): void {
+                $local_applier->handle_progress($chunk, $phase);
             },
             function (int $entries_counted): void {
                 $this->show_remote_index_progress($entries_counted);
@@ -2019,16 +1996,18 @@ class ImportClient
      */
     private function diff_indexes_and_build_fetch_list(): bool
     {
+        $local_applier = $this->file_sync_local_applier();
+
         $builder = new FetchListBuilder(
             $this->index_store,
-            function (string $path): void {
-                $this->delete_local_file_path($path);
+            function (string $path) use ($local_applier): void {
+                $local_applier->delete_local_file_path($path);
             },
-            function (string $path): ?string {
-                return $this->should_skip_for_preserve_local($path);
+            function (string $path) use ($local_applier): ?string {
+                return $local_applier->should_skip_for_preserve_local($path);
             },
-            function (string $path): void {
-                $this->emit_skip_progress($path);
+            function (string $path) use ($local_applier): void {
+                $local_applier->emit_skip_progress($path);
             },
             function (array $diff): void {
                 $this->state["diff"] = $diff;
@@ -2183,35 +2162,6 @@ class ImportClient
         return rtrim($basedir, "/") . "/";
     }
 
-    /**
-     * Delete a local file path safely under the fs root.
-     */
-    private function delete_local_file_path(string $path): void
-    {
-        if ($path === "") {
-            return;
-        }
-        try {
-            $local_path = $this->remote_path_to_local_path_within_import_root($path);
-        } catch (RuntimeException $e) {
-            $this->audit_log(
-                "Security: refusing to delete invalid path '{$path}': " . $e->getMessage(),
-                true,
-            );
-            return;
-        }
-        if (!file_exists($local_path) && !is_link($local_path)) {
-            return;
-        }
-
-        if ($this->remove_local_path_without_following_symlinks($local_path)) {
-            $this->audit_log("Deleted: {$path}", false);
-            return;
-        }
-
-        $this->audit_log("Failed to delete: {$path}", true);
-    }
-
     private function local_filesystem(): LocalImportFilesystem
     {
         if ($this->local_filesystem instanceof LocalImportFilesystem) {
@@ -2227,18 +2177,6 @@ class ImportClient
         );
 
         return $this->local_filesystem;
-    }
-
-    /**
-     * Remove a local path recursively without traversing symlink targets.
-     *
-     * Symlinks are always unlinked as links. Directories are traversed
-     * depth-first.
-     */
-    private function remove_local_path_without_following_symlinks(
-        string $local_path
-    ): bool {
-        return $this->local_filesystem()->remove_path_without_following_symlinks($local_path);
     }
 
     /**
@@ -2262,6 +2200,8 @@ class ImportClient
      */
     private function download_sql(): void
     {
+        $local_applier = $this->file_sync_local_applier();
+
         (new SqlDownloader(
             function (string $endpoint, ?string $cursor, array $params): string {
                 return $this->build_url($endpoint, $cursor, $params);
@@ -2296,15 +2236,15 @@ class ImportClient
                 }
                 $this->output->show_progress_line($sql_progress, $sql_fraction);
             },
-            function (array $chunk, string $phase): void {
-                $this->handle_progress($chunk, $phase);
+            function (array $chunk, string $phase) use ($local_applier): void {
+                $local_applier->handle_progress($chunk, $phase);
             },
             function (
                 array $chunk,
                 string $phase,
                 StreamingContext $context
-            ): void {
-                $this->handle_error_chunk($chunk, $phase, $context);
+            ) use ($local_applier): void {
+                $local_applier->handle_error_chunk($chunk, $phase, $context);
             },
             function (array $progress): void {
                 $this->output_progress($progress, true);
@@ -2352,6 +2292,7 @@ class ImportClient
     private function download_db_index(): void
     {
         $tables_file = $this->state_dir . "/db-tables.jsonl";
+        $local_applier = $this->file_sync_local_applier();
 
         (new DbIndexDownloader(
             function (string $endpoint, ?string $cursor, array $params): string {
@@ -2369,15 +2310,15 @@ class ImportClient
             function (): bool {
                 return $this->shutdown_requested;
             },
-            function (array $chunk, string $phase): void {
-                $this->handle_progress($chunk, $phase);
+            function (array $chunk, string $phase) use ($local_applier): void {
+                $local_applier->handle_progress($chunk, $phase);
             },
             function (
                 array $chunk,
                 string $phase,
                 StreamingContext $context
-            ): void {
-                $this->handle_error_chunk($chunk, $phase, $context);
+            ) use ($local_applier): void {
+                $local_applier->handle_error_chunk($chunk, $phase, $context);
             },
             function (array $progress): void {
                 $this->output_progress($progress, true);
@@ -2403,418 +2344,6 @@ class ImportClient
                 $this->audit_log($message, $to_console);
             },
         ))->download($this->state, $tables_file);
-    }
-
-
-    /**
-     * Map an absolute remote symlink target to the local fs-root mirror when possible.
-     *
-     * Example:
-     *
-     * Source site:
-     *
-     *   /srv/source-site/
-     *   `-- wp-content/
-     *       `-- themes/
-     *           `-- indice -> /tmp/e2e-shared-themes/pub/indice
-     *
-     *   /tmp/e2e-shared-themes/pub/indice/
-     *   |-- style.css
-     *   `-- index.php
-     *
-     * Local import state:
-     *
-     *   <state-dir>/fs-root/
-     *   |-- tmp/e2e-shared-themes/pub/indice/
-     *   |   |-- style.css
-     *   |   `-- index.php
-     *   `-- srv/source-site/
-     *       `-- wp-content/themes/
-     *
-     * Without this mapping, the symlink would point at /tmp/e2e-shared-themes/pub/indice
-     * (which does not exist on the local machine, or worse, exists with unrelated content).
-     * With this mapping, the symlink is rewritten to a relative path that resolves to the
-     * mirrored local copy under fs-root.
-     */
-    private function map_absolute_symlink_target_for_local_mirror(
-        string $path,
-        string $local_path,
-        string $target
-    ): string {
-        if (!str_starts_with($target, "/")) {
-            return $target;
-        }
-
-        $root = $this->get_filesystem_root_path();
-        $normalized_target = normalize_path($target);
-
-        // Already points inside fs-root, keep as-is.
-        if (path_is_within_root($normalized_target, $root)) {
-            return $target;
-        }
-
-        // Only rewrite when symlink-following is enabled and the target path
-        // was actually indexed from the source.
-        if (
-            !$this->follow_symlinks ||
-            !$this->remote_index_contains_path_prefix($normalized_target)
-        ) {
-            return $target;
-        }
-
-        $mapped_absolute = $root . $normalized_target;
-        $mapped_relative = PathUtils::relative_path(
-            dirname($local_path),
-            $mapped_absolute
-        );
-
-        $this->audit_log(
-            "SYMLINK TARGET REMAP | {$path}: {$target} -> {$mapped_relative}",
-            false,
-        );
-
-        return $mapped_relative;
-    }
-
-    private function remote_index_contains_path_prefix(string $path): bool
-    {
-        if ($this->remote_index_prefix_matcher === null) {
-            $this->remote_index_prefix_matcher = new IndexPathPrefixMatcher($this->remote_index_file);
-        }
-
-        return $this->remote_index_prefix_matcher->contains($path);
-    }
-
-    /**
-     * Return canonical fs root path, creating it if it doesn't exist.
-     */
-    private function get_filesystem_root_path(): string
-    {
-        return $this->local_filesystem()->filesystem_root_path();
-    }
-
-
-    /**
-     * Resolve a remote absolute path into a local path under the fs root.
-     *
-     * Maps a remote absolute path (e.g. "/wp-content/uploads/photo.jpg") to a
-     * local path under the import fs root. Performs symlink traversal security
-     * checks to prevent directory traversal attacks that could write files
-     * outside the import root.
-     */
-    private function remote_path_to_local_path_within_import_root(
-        string $path
-    ): string {
-        return $this->local_filesystem()->local_path_for_remote_path($path);
-    }
-
-    /**
-     * Handle a metadata chunk from multipart response.
-     */
-    private function handle_metadata_chunk(
-        array $chunk,
-        StreamingContext $context
-    ): void {
-        $headers = $chunk["headers"];
-        $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "", true);
-
-        if ($filesystem_root) {
-            $context->filesystem_root = $filesystem_root;
-            $this->audit_log("Filesystem root: {$filesystem_root}", false);
-        }
-    }
-
-    /**
-     * Handle a file chunk from multipart response.
-     */
-    private function handle_file_chunk(
-        array $chunk,
-        StreamingContext $context
-    ): void {
-        $applier = new FileChunkApplier(
-            $this->files_imported,
-            function (string $path): string {
-                return $this->remote_path_to_local_path_within_import_root($path);
-            },
-            function (string $local_path): bool {
-                return $this->remove_local_path_without_following_symlinks($local_path);
-            },
-            function (string $dir): void {
-                $this->ensure_directory_path($dir);
-            },
-            function (string $message, bool $to_console): void {
-                $this->audit_log($message, $to_console);
-            },
-            function (string $path, int $file_size): void {
-                $this->show_file_fetch_progress($path, $file_size);
-            },
-            function (string $path): void {
-                $this->emit_skip_progress($path);
-            },
-            function (string $path, int $ctime, int $size, string $type): void {
-                $this->upsert_index_entry($path, $ctime, $size, $type);
-            },
-            function (string $path): void {
-                $this->clear_volatile_file($path);
-            },
-            function (?string $path, ?int $bytes): void {
-                $this->state["current_file"] = $path;
-                $this->state["current_file_bytes"] = $bytes;
-            },
-        );
-
-        try {
-            $applier->handle($chunk, $context);
-        } finally {
-            $this->files_imported = $applier->files_imported();
-        }
-    }
-
-    private function show_file_fetch_progress(string $path, int $file_size): void
-    {
-        $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
-        $files_total = $this->download_list_total;
-        $file_fraction = ($files_total !== null && $files_total > 0)
-            ? $files_done / $files_total
-            : null;
-        $file_progress_message = $files_total !== null
-            ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
-            : sprintf("Downloading — %s files", number_format($files_done));
-        $this->output->show_progress_line($file_progress_message, $file_fraction);
-        $progress_record = [
-            "type" => "file_progress",
-            "files_done" => $files_done,
-            "path" => $path,
-            "size" => $file_size,
-            "message" => $file_progress_message,
-        ];
-        if ($this->download_list_total !== null) {
-            $progress_record["files_total"] = $this->download_list_total;
-        }
-        $this->output_progress($progress_record);
-    }
-
-    /**
-     * Check whether any component of the path (between the filesystem root
-     * and the target) is a symlink.  In preserve-local mode this is used
-     * to prevent creating new content through symlinked directories — their
-     * contents belong to shared hosting infrastructure and must not be
-     * modified.
-     */
-    private function should_skip_for_preserve_local(string $path): ?string
-    {
-        if ($this->fs_root_nonempty_behavior !== 'preserve-local') {
-            return null;
-        }
-
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
-
-        // Skip if anything already exists at this path — regular file, symlink
-        // (even to a file), or directory.  This preserves hosting symlinks like
-        // wp-load.php -> __wp__/wp-load.php and drop-in symlinks like
-        // object-cache.php -> ../../wordpress/drop-ins/...
-        if (file_exists($local_path) || is_link($local_path)) {
-            return "PRESERVE-LOCAL skip file (exists): {$path}";
-        }
-
-        // Skip if parent directory is not writable or if any directory component
-        // in the path is a symlink.  We never create new files through symlinks —
-        // the symlink and its target contents are shared hosting infrastructure.
-        $dir = dirname($local_path);
-        if (is_dir($dir) && !is_writable($dir)) {
-            return "PRESERVE-LOCAL skip file (dir not writable): {$path}";
-        }
-        if ($this->path_traverses_symlink($dir)) {
-            return "PRESERVE-LOCAL skip file (symlink in path): {$path}";
-        }
-
-        return null;
-    }
-
-    private function path_traverses_symlink(string $path): bool
-    {
-        return $this->local_filesystem()->path_traverses_symlink($path);
-    }
-
-    /**
-     * Ensure a directory path exists, removing any files that block it.
-     *
-     * @param string $dir Directory path to ensure
-     * @throws RuntimeException if directory cannot be created or is outside allowed path
-     */
-    private function ensure_directory_path(string $dir): void
-    {
-        $this->local_filesystem()->ensure_directory_path($dir);
-    }
-
-    /**
-     * Handle a directory chunk (create empty directory).
-     */
-    private function handle_directory_chunk(array $chunk): void
-    {
-        $applier = new DirectoryChunkApplier(
-            $this->fs_root_nonempty_behavior === 'preserve-local',
-            function (string $path): string {
-                return $this->remote_path_to_local_path_within_import_root($path);
-            },
-            function (string $path): bool {
-                return $this->path_traverses_symlink($path);
-            },
-            function (string $local_path): bool {
-                return $this->remove_local_path_without_following_symlinks($local_path);
-            },
-            function (string $dir): void {
-                $this->ensure_directory_path($dir);
-            },
-            function (string $message, bool $to_console): void {
-                $this->audit_log($message, $to_console);
-            },
-            function (string $path): void {
-                $this->emit_skip_progress($path);
-            },
-            function (string $path, int $ctime, int $size, string $type): void {
-                $this->upsert_index_entry($path, $ctime, $size, $type);
-            },
-        );
-
-        $applier->handle($chunk);
-    }
-
-    /**
-     * Recreates a symlink from the export stream in the local filesystem.
-     *
-     * Decodes the base64-encoded path and target from the chunk headers,
-     * validates that the target stays within the filesystem root (preventing
-     * directory traversal), then creates the symlink.  Failures are logged
-     * to the audit log and reported as symlink_error progress events — they
-     * do not halt the import.
-     *
-     * @param array $chunk Multipart chunk with x-symlink-path, x-symlink-target,
-     *                     and x-symlink-ctime headers (all base64-encoded).
-     */
-    private function handle_symlink_chunk(array $chunk): void
-    {
-        $applier = new SymlinkChunkApplier(
-            $this->fs_root_nonempty_behavior === 'preserve-local',
-            function (string $path): string {
-                return $this->remote_path_to_local_path_within_import_root($path);
-            },
-            function (string $path, string $local_path, string $target): string {
-                return $this->map_absolute_symlink_target_for_local_mirror(
-                    $path,
-                    $local_path,
-                    $target,
-                );
-            },
-            function (): string {
-                return $this->get_filesystem_root_path();
-            },
-            function (string $path): bool {
-                return $this->path_traverses_symlink($path);
-            },
-            function (string $local_path): bool {
-                return $this->remove_local_path_without_following_symlinks($local_path);
-            },
-            function (string $dir): void {
-                $this->ensure_directory_path($dir);
-            },
-            function (string $message, bool $to_console): void {
-                $this->audit_log($message, $to_console);
-            },
-            function (string $path): void {
-                $this->emit_skip_progress($path);
-            },
-            function (string $path, int $ctime, int $size, string $type): void {
-                $this->upsert_index_entry($path, $ctime, $size, $type);
-            },
-            function (array $progress): void {
-                $this->output_progress($progress);
-            },
-        );
-
-        $applier->handle($chunk);
-    }
-
-    /**
-     * Handle an error chunk from the server.
-     */
-    private function handle_error_chunk(
-        array $chunk,
-        string $phase,
-        StreamingContext $context
-    ): void {
-        $body = $chunk["body"] ?? "";
-        $data = json_decode($body, true);
-        if (!$data) {
-            $this->audit_log(
-                "REMOTE ERROR | phase={$phase} | raw (JSON decode failed): " .
-                    substr($body, 0, 500),
-                true,
-            );
-            return;
-        }
-
-        $error_type = $data["error_type"] ?? "unknown";
-        $path = $data["path"] ?? "";
-        $message = $data["message"] ?? "Error";
-
-        $this->audit_log(
-            "REMOTE ERROR | phase={$phase} | type={$error_type} | path={$path} | message={$message}",
-            true,
-        );
-
-        $is_file_error = in_array(
-            $error_type,
-            ["file_changed", "file_missing", "file_open", "file_read"],
-            true,
-        );
-        if ($path !== "" && $is_file_error) {
-            $local_path = $this->fs_root . $path;
-            if ($context->file_handle && $context->file_path === $local_path) {
-                fclose($context->file_handle);
-                $context->file_handle = null;
-                $context->file_path = null;
-                $context->file_ctime = null;
-                $context->file_bytes_written = 0;
-            }
-
-            if (file_exists($local_path)) {
-                @unlink($local_path);
-            }
-            $this->delete_index_entry($path);
-
-            if ($error_type === "file_changed") {
-                $this->record_volatile_file($path);
-            }
-        }
-
-        $error_progress_message = "Remote error: {$error_type} " . ($path !== "" ? $path : "");
-        $this->output->show_progress_line($error_progress_message);
-        $this->output_progress(
-            [
-                "type" => "error",
-                "phase" => $phase,
-                "error_type" => $error_type,
-                "path" => $path,
-                "error_message" => $message,
-                "message" => $error_progress_message,
-            ],
-            true,
-        );
-    }
-
-    /**
-     * Handle progress chunk.
-     */
-    private function handle_progress(array $chunk, string $phase): void
-    {
-        $body = $chunk["body"] ?? "";
-        $data = json_decode($body, true);
-        if (!$data) {
-            return;
-        }
-
-        $this->output_progress(array_merge(["phase" => $phase], $data));
     }
 
     /**

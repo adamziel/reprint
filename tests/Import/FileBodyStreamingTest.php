@@ -3,10 +3,14 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\FileSync\FileSyncLocalApplier;
+use Reprint\Importer\Filesystem\LocalImportFilesystem;
+use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\MultipartStreamParser;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Session\VolatileFileTracker;
+use Reprint\Importer\Transport\ImportHttpTransport;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -31,28 +35,19 @@ class FileBodyStreamingTest extends TestCase
 
     public function testFilePartBodiesAreWrittenIncrementally(): void
     {
-        $client = new ImportClient(
-            'http://fake.url',
-            $this->tempDir . '/state',
-            $this->tempDir . '/fs-root',
-            new BufferedImportOutput(),
-        );
-        $reflection = new \ReflectionClass($client);
-        $reflection->getProperty('state')->setValue($client, []);
-
-        $handleFileChunk = $reflection->getMethod('handle_file_chunk');
+        $state = [];
+        $applier = $this->makeApplier($state);
         $context = new StreamingContext();
         $bodyLengths = [];
-        $context->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context, &$bodyLengths): void {
+        $context->on_chunk = function (array $chunk) use ($applier, $context, &$bodyLengths): void {
             if (($chunk['headers']['x-chunk-type'] ?? '') === 'file') {
                 $bodyLengths[] = strlen($chunk['body'] ?? '');
             }
-            $handleFileChunk->invoke($client, $chunk, $context);
+            $applier->handle_file_chunk($chunk, $context);
         };
 
         $currentChunk = null;
-        $makeHandler = $reflection->getMethod('make_chunk_handler');
-        $handler = $makeHandler->invokeArgs($client, [$context, &$currentChunk]);
+        $handler = $this->makeChunkHandler($context, $currentChunk);
         $parser = new MultipartStreamParser('BOUNDARY', $handler);
 
         $body = str_repeat('0123456789abcdef', 64 * 1024);
@@ -103,19 +98,12 @@ class FileBodyStreamingTest extends TestCase
      */
     public function testMidFileResumeAppendsRemainingBytesWithoutDuplication(): void
     {
-        $client = new ImportClient(
-            'http://fake.url',
-            $this->tempDir . '/state',
-            $this->tempDir . '/fs-root',
-            new BufferedImportOutput(),
-        );
-        $reflection = new \ReflectionClass($client);
-        $reflection->getProperty('state')->setValue($client, []);
-
         $body = str_repeat('0123456789abcdef', 64 * 1024); // 1 MiB
         $halfwayPoint = (int) (strlen($body) / 2);
         $firstHalf = substr($body, 0, $halfwayPoint);
         $secondHalf = substr($body, $halfwayPoint);
+        $state = [];
+        $applier = $this->makeApplier($state);
 
         // Pass 1: stream the first half. The remote-side cursor would still
         // point at the start of this part because the server never finished
@@ -123,13 +111,11 @@ class FileBodyStreamingTest extends TestCase
         // mimic the *intended* behaviour (server cooperates and skips the
         // already-written prefix), pass 2 sends only the missing tail.
         $context1 = new StreamingContext();
-        $handleFileChunk = $reflection->getMethod('handle_file_chunk');
-        $context1->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context1): void {
-            $handleFileChunk->invoke($client, $chunk, $context1);
+        $context1->on_chunk = function (array $chunk) use ($applier, $context1): void {
+            $applier->handle_file_chunk($chunk, $context1);
         };
         $currentChunk1 = null;
-        $makeHandler = $reflection->getMethod('make_chunk_handler');
-        $handler1 = $makeHandler->invokeArgs($client, [$context1, &$currentChunk1]);
+        $handler1 = $this->makeChunkHandler($context1, $currentChunk1);
         $parser1 = new MultipartStreamParser('BOUNDARY', $handler1);
 
         $multipart1 = $this->buildMultipart('BOUNDARY', [
@@ -176,11 +162,11 @@ class FileBodyStreamingTest extends TestCase
         $context2->file_path = $target;
         $context2->file_ctime = 1234567890;
         $context2->file_bytes_written = $trackedBytes;
-        $context2->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context2): void {
-            $handleFileChunk->invoke($client, $chunk, $context2);
+        $context2->on_chunk = function (array $chunk) use ($applier, $context2): void {
+            $applier->handle_file_chunk($chunk, $context2);
         };
         $currentChunk2 = null;
-        $handler2 = $makeHandler->invokeArgs($client, [$context2, &$currentChunk2]);
+        $handler2 = $this->makeChunkHandler($context2, $currentChunk2);
         $parser2 = new MultipartStreamParser('BOUNDARY', $handler2);
 
         // Pass 2: continuation part for the same file. x-first-chunk=0 is the
@@ -212,6 +198,62 @@ class FileBodyStreamingTest extends TestCase
             'Final file size must equal source size — anything else means duplicated bytes (overlap) or missing bytes (gap).');
         $this->assertSame($body, $finalContents,
             'Final file must be byte-identical to source after mid-file resume.');
+    }
+
+    private function makeApplier(array &$state): FileSyncLocalApplier
+    {
+        return new FileSyncLocalApplier(
+            new LocalImportFilesystem(
+                $this->tempDir . '/fs-root',
+                'error',
+                function (string $message, bool $to_console): void {
+                },
+            ),
+            new IndexStore(
+                $this->tempDir . '/state/.import-index.jsonl',
+                $this->tempDir . '/state/.import-index-updates.jsonl',
+            ),
+            new VolatileFileTracker($this->tempDir . '/state/.import-volatile-files.json'),
+            new BufferedImportOutput(),
+            $this->tempDir . '/fs-root',
+            $this->tempDir . '/state/.import-remote-index.jsonl',
+            'error',
+            true,
+            0,
+            null,
+            null,
+            $state,
+            function (string $message, bool $to_console = true): void {
+            },
+            function (array $progress, bool $force = false): void {
+            },
+        );
+    }
+
+    private function makeChunkHandler(StreamingContext $context, &$currentChunk): callable
+    {
+        return (new ImportHttpTransport(
+            new BufferedImportOutput(),
+            function (string $message, bool $to_console = true): void {
+            },
+            function (array $progress, bool $force = false): void {
+            },
+            function (): string {
+                return 'test';
+            },
+            function (string $body): array {
+                return [];
+            },
+            function (): bool {
+                return false;
+            },
+            function (?string $error_code): void {
+            },
+            function (string $endpoint, array $error): void {
+            },
+            function (): void {
+            },
+        ))->make_chunk_handler($context, $currentChunk);
     }
 
     private function buildMultipart(string $boundary, array $parts): string

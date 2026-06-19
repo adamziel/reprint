@@ -3,8 +3,12 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\FileSync\FileSyncLocalApplier;
+use Reprint\Importer\Filesystem\LocalImportFilesystem;
+use Reprint\Importer\Index\IndexStore;
+use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Session\VolatileFileTracker;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -58,16 +62,46 @@ class TypeSwapTest extends TestCase
         rmdir($dir);
     }
 
+    private function makeFilesystem(): LocalImportFilesystem
+    {
+        return new LocalImportFilesystem(
+            $this->tempDir . '/fs-root',
+            'error',
+            function (string $message, bool $to_console): void {
+            },
+        );
+    }
+
+    private function makeApplier(array &$state): FileSyncLocalApplier
+    {
+        return new FileSyncLocalApplier(
+            $this->makeFilesystem(),
+            new IndexStore(
+                $this->tempDir . '/.import-index.jsonl',
+                $this->tempDir . '/.import-index-updates.jsonl',
+            ),
+            new VolatileFileTracker($this->tempDir . '/.import-volatile-files.json'),
+            new BufferedImportOutput(),
+            $this->tempDir . '/fs-root',
+            $this->tempDir . '/.import-remote-index.jsonl',
+            'error',
+            true,
+            0,
+            null,
+            null,
+            $state,
+            function (string $message, bool $to_console = true): void {
+            },
+            function (array $progress, bool $force = false): void {
+            },
+        );
+    }
+
     /**
      * ensure_directory_path should remove a symlink that blocks directory creation.
      */
     public function testEnsureDirectoryPathRemovesBlockingSymlink()
     {
-        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
-
-        $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('ensure_directory_path');
-
         // Resolve the fs-root path so it matches the realpath() check
         // inside ensure_directory_path (on macOS, /var -> /private/var).
         $fsRoot = realpath($this->tempDir . '/fs-root');
@@ -80,7 +114,7 @@ class TypeSwapTest extends TestCase
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
         // ensure_directory_path for a child should replace the symlink with a real dir
-        $method->invoke($client, $fsRoot . '/some-dir/child');
+        $this->makeFilesystem()->ensure_directory_path($fsRoot . '/some-dir/child');
 
         $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
         $this->assertTrue(is_dir($symlinkPath), 'Should be a real directory now');
@@ -92,8 +126,6 @@ class TypeSwapTest extends TestCase
      */
     public function testFileChunkReplacesSymlinkToDirectory()
     {
-        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
-
         $fsRoot = $this->tempDir . '/fs-root';
 
         // Create a real directory and a symlink pointing to it
@@ -103,10 +135,8 @@ class TypeSwapTest extends TestCase
         symlink($realDir, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        // Send a file chunk at the same path
-        $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_file_chunk');
-
+        $state = [];
+        $applier = $this->makeApplier($state);
         $context = new StreamingContext();
         $chunk = [
             'headers' => [
@@ -119,7 +149,7 @@ class TypeSwapTest extends TestCase
             'body' => 'hello',
         ];
 
-        $method->invoke($client, $chunk, $context);
+        $applier->handle_file_chunk($chunk, $context);
 
         // Clean up streaming context
         if ($context->file_handle) {
@@ -136,8 +166,6 @@ class TypeSwapTest extends TestCase
      */
     public function testDirectoryChunkReplacesSymlinkToFile()
     {
-        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
-
         $fsRoot = $this->tempDir . '/fs-root';
 
         // Create a real file and a symlink pointing to it
@@ -147,10 +175,8 @@ class TypeSwapTest extends TestCase
         symlink($realFile, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        // Send a directory chunk at the same path
-        $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_directory_chunk');
-
+        $state = [];
+        $applier = $this->makeApplier($state);
         $chunk = [
             'headers' => [
                 'x-directory-path' => base64_encode('/swapped-dir'),
@@ -158,7 +184,7 @@ class TypeSwapTest extends TestCase
             ],
         ];
 
-        $method->invoke($client, $chunk);
+        $applier->handle_directory_chunk($chunk);
 
         $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
         $this->assertTrue(is_dir($symlinkPath), 'Should be a real directory now');
@@ -172,8 +198,6 @@ class TypeSwapTest extends TestCase
      */
     public function testFileChunkUnderFormerSymlink()
     {
-        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
-
         $fsRoot = $this->tempDir . '/fs-root';
 
         // Create a symlink at the path
@@ -183,11 +207,11 @@ class TypeSwapTest extends TestCase
         symlink($realFile, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        $reflection = new \ReflectionClass($client);
+        $state = [];
+        $applier = $this->makeApplier($state);
 
         // Step 1: directory chunk replaces the symlink
-        $dirMethod = $reflection->getMethod('handle_directory_chunk');
-        $dirMethod->invoke($client, [
+        $applier->handle_directory_chunk([
             'headers' => [
                 'x-directory-path' => base64_encode('/parent'),
                 'x-directory-ctime' => '1234567890',
@@ -197,9 +221,8 @@ class TypeSwapTest extends TestCase
         $this->assertTrue(is_dir($symlinkPath), 'Should be a real directory after dir chunk');
 
         // Step 2: file chunk writes a nested file
-        $fileMethod = $reflection->getMethod('handle_file_chunk');
         $context = new StreamingContext();
-        $fileMethod->invoke($client, [
+        $applier->handle_file_chunk([
             'headers' => [
                 'x-file-path' => base64_encode('/parent/sub/file.txt'),
                 'x-first-chunk' => '1',
@@ -225,8 +248,6 @@ class TypeSwapTest extends TestCase
      */
     public function testNestedFileUnderExistingSymlinkViaEnsureDirectory()
     {
-        $client = new ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
-
         // Resolve the fs-root path so it matches the realpath() check
         // inside ensure_directory_path (on macOS, /var -> /private/var).
         $fsRoot = realpath($this->tempDir . '/fs-root');
@@ -239,9 +260,7 @@ class TypeSwapTest extends TestCase
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
         // Call ensure_directory_path for a deeply nested path
-        $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('ensure_directory_path');
-        $method->invoke($client, $fsRoot . '/top/sub/deep');
+        $this->makeFilesystem()->ensure_directory_path($fsRoot . '/top/sub/deep');
 
         $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
         $this->assertTrue(is_dir($symlinkPath), 'top should be a real directory');
