@@ -33,6 +33,7 @@ use Reprint\Importer\Output\NullImportOutput;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Pull\Pull;
 use Reprint\Importer\Session\ExportDirectoryResolver;
+use Reprint\Importer\Session\ImportAbortHandler;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
@@ -822,122 +823,20 @@ class ImportClient
      */
     private function handle_abort(string $command): void
     {
-        switch ($command) {
-            case "files-pull":
-                // Clear sync progress (cursor, stage, status) and transient
-                // files, but keep the local index and downloaded files intact.
-                // This way the next `files-pull` sees a completed local index
-                // and runs a delta sync rather than re-downloading everything.
-                $this->audit_log(
-                    "RESTART | Clearing files-pull progress (keeping local index and files)",
-                    true,
-                );
-                $this->reset_state();
+        $handler = new ImportAbortHandler(
+            $this->paths,
+            $this->index_store,
+            function (string $message, bool $to_console = true): void {
+                $this->audit_log($message, $to_console);
+            },
+        );
 
-                // Merge any pending index updates into the main index before
-                // clearing transient state so we don't lose work.
-                $this->recover_index_updates();
-                $this->index_store->delete_updates_file();
-                $this->index_store->clear_updates_state();
-
-                if (file_exists($this->remote_index_file)) {
-                    @unlink($this->remote_index_file);
-                    $this->audit_log("FILE DELETE | {$this->remote_index_file}");
-                }
-                if (file_exists($this->download_list_file)) {
-                    @unlink($this->download_list_file);
-                    $this->audit_log("FILE DELETE | {$this->download_list_file}");
-                }
-                if (file_exists($this->skipped_download_list_file)) {
-                    @unlink($this->skipped_download_list_file);
-                    $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
-                }
-                if (file_exists($this->volatile_files_file)) {
-                    @unlink($this->volatile_files_file);
-                    $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
-                }
-                $this->state["index"] = $this->default_state()["index"];
-                $this->state["fetch"] = $this->default_state()["fetch"];
-                $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
-
-                $this->save_state($this->state);
-                break;
-
-            case "files-index":
-                $this->audit_log(
-                    "RESTART | Clearing files-index state",
-                    true,
-                );
-                $this->state["command"] = "files-index";
-                $this->state["status"] = null;
-                $this->state["stage"] = null;
-                $this->state["index"] = $this->default_state()["index"];
-                if (file_exists($this->remote_index_file)) {
-                    @unlink($this->remote_index_file);
-                    $this->audit_log("FILE DELETE | {$this->remote_index_file}");
-                }
-                $this->save_state($this->state);
-                break;
-
-            case "db-pull":
-                $this->audit_log(
-                    "RESTART | Clearing db-pull state",
-                    true,
-                );
-                $this->reset_state();
-                $this->save_state($this->state);
-
-                if ($this->sql_output_mode === "file") {
-                    $sql_file = $this->state_dir . "/db.sql";
-                    if (file_exists($sql_file)) {
-                        unlink($sql_file);
-                        $this->audit_log(
-                            "FILE DELETE | {$sql_file} | abort db-pull",
-                        );
-                    }
-                }
-                $tables_file = $this->state_dir . "/db-tables.jsonl";
-                if (file_exists($tables_file)) {
-                    unlink($tables_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$tables_file} | abort db-pull",
-                    );
-                }
-                $domains_file = $this->state_dir . "/.import-domains.json";
-                if (file_exists($domains_file)) {
-                    unlink($domains_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$domains_file} | abort db-pull",
-                    );
-                }
-                break;
-
-            case "db-index":
-                $this->audit_log(
-                    "RESTART | Clearing db-index state",
-                    true,
-                );
-                $this->reset_state();
-                $this->save_state($this->state);
-
-                $tables_file = $this->state_dir . "/db-tables.jsonl";
-                if (file_exists($tables_file)) {
-                    unlink($tables_file);
-                    $this->audit_log(
-                        "FILE DELETE | {$tables_file} | abort db-index",
-                    );
-                }
-                break;
-
-            case "db-apply":
-                $this->audit_log(
-                    "RESTART | Clearing db-apply state",
-                    true,
-                );
-                $this->reset_state();
-                $this->save_state($this->state);
-                break;
-        }
+        $this->state = $handler->abort(
+            $this->state ?? $this->default_state(),
+            $command,
+            $this->sql_output_mode,
+        );
+        $this->save_state($this->state);
 
         $this->output->show_lifecycle_line("State cleared for {$command}.\n");
 
@@ -3819,34 +3718,6 @@ class ImportClient
             $post_data,
             $endpoint,
         );
-    }
-
-    /**
-     * Return the default compact state structure.
-     */
-    /**
-     * Reset state to defaults while preserving cross-command data like
-     * preflight results, version, and follow_symlinks.
-     */
-    private function reset_state(): void
-    {
-        $preflight = $this->state["preflight"] ?? null;
-        $version = $this->state["version"] ?? null;
-        $webhost = $this->state["webhost"] ?? null;
-        $follow = $this->state["follow_symlinks"] ?? false;
-        $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
-        $max_packet = $this->state["max_allowed_packet"] ?? null;
-        $pull = $this->state["pull"] ?? null;
-        $this->state = $this->default_state();
-        $this->state["preflight"] = $preflight;
-        $this->state["version"] = $version;
-        $this->state["webhost"] = $webhost;
-        $this->state["follow_symlinks"] = $follow;
-        $this->state["fs_root_nonempty_behavior"] = $nonempty;
-        $this->state["max_allowed_packet"] = $max_packet;
-        if ($pull !== null) {
-            $this->state["pull"] = $pull;
-        }
     }
 
     public function default_state(): array
