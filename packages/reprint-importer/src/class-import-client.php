@@ -216,6 +216,9 @@ class ImportClient
     /** @var ImportHttpTransport|null HTTP and streaming multipart transport. */
     private ?ImportHttpTransport $http_transport = null;
 
+    /** @var LocalImportFilesystem|null Filesystem operations scoped to the import root. */
+    private ?LocalImportFilesystem $local_filesystem = null;
+
     /** @var Pull Orchestrates the pull command pipeline. */
     private Pull $pull;
 
@@ -631,6 +634,7 @@ class ImportClient
         } else {
             $this->fs_root_nonempty_behavior = $this->state["fs_root_nonempty_behavior"] ?? 'error';
         }
+        $this->local_filesystem = null;
 
         // Persist filter in state so it survives across resume cycles.
         //
@@ -3033,13 +3037,19 @@ class ImportClient
 
     private function local_filesystem(): LocalImportFilesystem
     {
-        return new LocalImportFilesystem(
+        if ($this->local_filesystem instanceof LocalImportFilesystem) {
+            return $this->local_filesystem;
+        }
+
+        $this->local_filesystem = new LocalImportFilesystem(
             $this->fs_root,
             $this->fs_root_nonempty_behavior,
             function (string $message, bool $to_console): void {
                 $this->audit_log($message, $to_console);
             },
         );
+
+        return $this->local_filesystem;
     }
 
     /**
@@ -3218,28 +3228,6 @@ class ImportClient
         ))->download($this->state, $tables_file);
     }
 
-
-    /**
-     * Assert that a symlink target resolves to a path within $root.
-     *
-     * For absolute targets, the target itself must be under $root.
-     * For relative targets, the resolved path (parent dir + target) must be
-     * under $root. We normalize ".." segments without touching the filesystem,
-     * since the target may not exist yet.
-     *
-     * @throws RuntimeException if the target escapes the root.
-     */
-    private function assert_symlink_target_within_root(
-        string $symlink_parent_dir,
-        string $target,
-        string $root
-    ): void {
-        $this->local_filesystem()->assert_symlink_target_within_root(
-            $symlink_parent_dir,
-            $target,
-            $root,
-        );
-    }
 
     /**
      * Map an absolute remote symlink target to the local fs-root mirror when possible.
