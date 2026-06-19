@@ -2737,7 +2737,7 @@ class ImportClient
             if ($is_delta) {
                 $this->files_imported = 0;
                 $index_size = $this->index_count();
-    
+
                 $this->audit_log(
                     "START files-pull (delta) | index_files={$index_size}",
                     true,
@@ -3364,7 +3364,7 @@ class ImportClient
             /**
              * base64_decode second parameter is a `strict` flag. It rejects the entire
              * input if it contains any bytes that are not produced by base64_encode().
-             * 
+             *
              * @see https://www.php.net/base64_decode
              */
             $path = base64_decode($path_encoded, true);
@@ -4252,13 +4252,13 @@ class ImportClient
         $uploads_basedir = null;
 
         if (is_array($paths_urls)) {
-            $abspath = $this->flatten_clean_path($paths_urls["abspath"] ?? null);
-            $wp_admin_path = $this->flatten_clean_path($paths_urls["wp_admin_path"] ?? null);
-            $wp_includes_path = $this->flatten_clean_path($paths_urls["wp_includes_path"] ?? null);
-            $content_dir = $this->flatten_clean_path($paths_urls["content_dir"] ?? null);
-            $plugins_dir = $this->flatten_clean_path($paths_urls["plugins_dir"] ?? null);
-            $mu_plugins_dir = $this->flatten_clean_path($paths_urls["mu_plugins_dir"] ?? null);
-            $uploads_basedir = $this->flatten_clean_path(
+            $abspath = $this->clean_preflight_path( $paths_urls["abspath"] ?? null);
+            $wp_admin_path = $this->clean_preflight_path( $paths_urls["wp_admin_path"] ?? null);
+            $wp_includes_path = $this->clean_preflight_path( $paths_urls["wp_includes_path"] ?? null);
+            $content_dir = $this->clean_preflight_path( $paths_urls["content_dir"] ?? null);
+            $plugins_dir = $this->clean_preflight_path( $paths_urls["plugins_dir"] ?? null);
+            $mu_plugins_dir = $this->clean_preflight_path( $paths_urls["mu_plugins_dir"] ?? null);
+            $uploads_basedir = $this->clean_preflight_path(
                 $paths_urls["uploads"]["basedir"] ?? null,
             );
         }
@@ -4267,7 +4267,7 @@ class ImportClient
         if ($abspath === null) {
             $roots = $preflight["wp_detect"]["roots"] ?? [];
             if (!empty($roots)) {
-                $abspath = $this->flatten_clean_path($roots[0]["path"] ?? null);
+                $abspath = $this->clean_preflight_path( $roots[0]["path"] ?? null);
             }
         }
 
@@ -4596,7 +4596,7 @@ class ImportClient
      * Clean a path value from preflight data: trim, strip trailing slash.
      * Returns null if the value is not a non-empty string.
      */
-    private function flatten_clean_path($value): ?string
+    private function clean_preflight_path($value): ?string
     {
         if (!is_string($value) || trim($value) === "") {
             return null;
@@ -8347,11 +8347,11 @@ class ImportClient
         $preflight = $this->state["preflight"]["data"] ?? [];
         $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
 
-        $content_dir = $this->flatten_clean_path($paths["content_dir"] ?? null);
+        $content_dir = $this->clean_preflight_path( $paths["content_dir"] ?? null);
 
-        $abspath = $this->flatten_clean_path($paths["abspath"] ?? null);
+        $abspath = $this->clean_preflight_path( $paths["abspath"] ?? null);
         if ($abspath === null) {
-            $abspath = $this->flatten_clean_path($preflight["wp_detect"]["roots"][0]["path"] ?? null);
+            $abspath = $this->clean_preflight_path( $preflight["wp_detect"]["roots"][0]["path"] ?? null);
         }
 
         // Conventional spot under content_dir, but only when content_dir is known.
@@ -8362,9 +8362,9 @@ class ImportClient
         return [
             "abspath" => $abspath,
             "wp-content" => $content_dir,
-            "wp-plugins" => $maybe_under_content_dir($this->flatten_clean_path($paths["plugins_dir"] ?? null), "plugins"),
-            "wp-mu-plugins" => $maybe_under_content_dir($this->flatten_clean_path($paths["mu_plugins_dir"] ?? null), "mu-plugins"),
-            "wp-uploads" => $maybe_under_content_dir($this->flatten_clean_path($paths["uploads"]["basedir"] ?? null), "uploads"),
+            "wp-plugins" => $maybe_under_content_dir($this->clean_preflight_path( $paths["plugins_dir"] ?? null), "plugins"),
+            "wp-mu-plugins" => $maybe_under_content_dir($this->clean_preflight_path( $paths["mu_plugins_dir"] ?? null), "mu-plugins"),
+            "wp-uploads" => $maybe_under_content_dir($this->clean_preflight_path( $paths["uploads"]["basedir"] ?? null), "uploads"),
         ];
     }
 
