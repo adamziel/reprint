@@ -1140,11 +1140,11 @@ class ImportClient
     private $remap_rules = [];
 
     /**
-     * @var array<int,string> Resolved `--only` scope: a list of real source
-     * absolute path prefixes the pull is restricted to. Empty = full sync
+     * @var array<int,string> Resolved `--only` file paths: a list of real source
+     * absolute path prefixes the files-pull command is restricted to. Empty = full sync
      * (every detected root).
      */
-    private $scope = [];
+    private $pull_only_files_with_path_prefixes = [];
 
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
@@ -1820,13 +1820,13 @@ class ImportClient
             $this->remap_rules = $this->resolve_remap($remap_raw);
         }
 
-        // Resolve the `--only` scope (also requires preflight).
+        // Resolve the `--only` file path prefixes (also requires preflight).
         $only_raw = $options["only"] ?? [];
         if (is_string($only_raw)) {
             $only_raw = [$only_raw];
         }
         if (!empty($only_raw)) {
-            $this->scope = $this->resolve_scope($only_raw);
+            $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
         }
 
         // Handle --abort: clear state for the command and exit immediately.
@@ -6091,9 +6091,13 @@ class ImportClient
 
         if ($cursor === null) {
             $start = $roots[0];
-            if (!empty($this->scope)) {
-                // When in scoped mode (--only), we need to start at the first export dir
-                // to appease the exporter's constraint of list_dir falling within directory[].
+            if (!empty($this->pull_only_files_with_path_prefixes)) {
+                // With --only, get_export_directories() returns only the resolved
+                // file path prefixes, and those become the request's directory[]
+                // allowlist. The exporter rejects list_dir unless it is inside
+                // that allowlist, so $roots[0] may no longer be valid. Start from
+                // the first --only file path prefix; the exporter still traverses
+                // the remaining directory[] entries.
                 $start = $export_dirs[0] ?? $roots[0];
             }
 
@@ -6375,9 +6379,9 @@ class ImportClient
                 $local !== null &&
                 strcmp($local["path"], $remote["path"]) < 0
             ) {
-                // When in scoped mode (--only), we will only delete local files when they fall under our scope.
-                // The local files index ends up being a union across scoped runs.
-                if ($this->in_scope($local["path"])) {
+                // When --only file prefixes are active, only delete local files that fall under those prefixes.
+                // The local files index ends up being a union across files-pull --only runs.
+                if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
                     $this->delete_local_file_path($local["path"]);
                     $this->delete_index_entry($local["path"]);
                 }
@@ -6433,7 +6437,7 @@ class ImportClient
         }
 
         while ($local !== null) {
-            if ($this->in_scope($local["path"])) {
+            if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
                 $this->delete_local_file_path($local["path"]);
                 $this->delete_index_entry($local["path"]);
             }
@@ -8424,7 +8428,7 @@ class ImportClient
      * Build the remap rules from the raw remap pairs + preflight data.
      *
      * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
-     * Source arguments resolve against the remote site's component locations.
+     * Source arguments resolve against the remote site's WordPress path tokens.
      * Target arguments resolve under --fs-root and must stay within it.
      * Each rule is a full source path => full local target path (both absolute).
      *
@@ -8435,7 +8439,7 @@ class ImportClient
     {
         $fs_root = rtrim($this->get_filesystem_root_path(), "/");
 
-        $source_tokens = $this->wp_component_source_paths();
+        $source_tokens = $this->wp_source_path_tokens();
         $target_tokens = ["fs-root" => $fs_root];
 
         $rules = [];
@@ -8457,10 +8461,11 @@ class ImportClient
             }
         }
 
-        // Whole-tree remap of the wp-content components detached from content_dir,
-        // unless an explicit rule has already placed them somewhere else.
+        // When remapping wp-content, also remap plugins, mu-plugins, and uploads
+        // directories that live outside WP_CONTENT_DIR. Skip any directory that already
+        // has its own explicit --remap rule.
         if ($wp_content_target !== null) {
-            foreach ($this->detached_content_component_sources($source_tokens) as $name => $source) {
+            foreach ($this->content_directories_outside_wp_content($source_tokens) as $name => $source) {
                 if (!isset($rules[$source])) {
                     $rules[$source] = wp_join_unix_paths($wp_content_target, $name);
                 }
@@ -8471,46 +8476,49 @@ class ImportClient
     }
 
     /**
-     * The wp-content components (plugins, mu-plugins, uploads) whose real source
-     * dir is detached from content_dir — i.e. relocated outside it, so a
-     * scope/remap of "wp-content" wouldn't cover them via content_dir alone.
-     * Components with an unknown (null) source, or an unknown content_dir, are
-     * omitted — detachment can't be determined without both.
+     * Find plugins, mu-plugins, and uploads directories that WordPress reports
+     * outside WP_CONTENT_DIR.
      *
-     * @param array<string,string|null> $source_tokens From wp_component_source_paths().
-     * @return array<string,string> dir name => real source path, detached ones only.
+     * When wp-content is selected with --only or --remap, these directories are not
+     * covered by WP_CONTENT_DIR itself, so callers need to handle them separately.
+     * Unknown paths are omitted because both WP_CONTENT_DIR and the directory path
+     * are needed to decide whether the directory lives outside WP_CONTENT_DIR.
+     *
+     * @param array<string,string|null> $source_tokens From wp_source_path_tokens().
+     * @return array<string,string> Directory name => real source path, for
+     *                              directories outside WP_CONTENT_DIR only.
      */
-    private function detached_content_component_sources(array $source_tokens): array
+    private function content_directories_outside_wp_content(array $source_tokens): array
     {
         $content = $source_tokens["wp-content"];
         if ($content === null) {
             return [];
         }
 
-        $detached = [];
+        $directories = [];
         foreach (["wp-plugins" => "plugins", "wp-mu-plugins" => "mu-plugins", "wp-uploads" => "uploads"] as $token => $name) {
             $source = $source_tokens[$token];
             if ($source !== null && !path_is_within_root($source, $content)) {
-                $detached[$name] = $source;
+                $directories[$name] = $source;
             }
         }
 
-        return $detached;
+        return $directories;
     }
 
     /**
      * Resolve raw `--only` sources into a deduped list of real source absolute
-     * prefixes the pull is scoped to. Each source is a `:token:` template (e.g.
+     * prefixes selected for files-pull. Each source is a `:token:` template (e.g.
      * `:wp-content:`, `:wp-uploads:`) or a raw absolute path,
-     * resolved through the same source token table (wp_component_source_paths)
+     * resolved through the same source token table (wp_source_path_tokens)
      * as --remap.
      *
      * @param array<int,string> $only_raw Raw SOURCE values from the CLI.
      * @return array<int,string> Real source prefixes (deduped).
      */
-    private function resolve_scope(array $only_raw): array
+    private function resolve_pull_only_files_with_path_prefixes(array $only_raw): array
     {
-        $source_tokens = $this->wp_component_source_paths();
+        $source_tokens = $this->wp_source_path_tokens();
 
         $prefixes = [];
         foreach ($only_raw as $src) {
@@ -8521,24 +8529,24 @@ class ImportClient
             $resolved = $this->resolve_token_path($src, $source_tokens);
             $prefixes[$resolved] = true;
 
-            // Scoping content_dir also pulls in any detached component (e.g. a
-            // moved uploads dir) so it's enumerated under scope.
+            // Selecting content_dir with --only also pulls in any plugins, mu-plugins,
+            // or uploads directory outside WP_CONTENT_DIR so files-pull enumerates it too.
             if ($resolved === $source_tokens["wp-content"]) {
-                foreach ($this->detached_content_component_sources($source_tokens) as $source) {
+                foreach ($this->content_directories_outside_wp_content($source_tokens) as $source) {
                     $prefixes[$source] = true;
                 }
             }
         }
 
         // Drop any prefix already covered by a broader one (e.g. wp-content and wp-content/plugins)
-        // A scoped pull doesn't need to walk the same subtree twice.
+        // A files-pull --only run doesn't need to walk the same subtree twice.
         $sources = array_keys($prefixes);
         $minimal = [];
         foreach ($sources as $path) {
             $covered = false;
 
             foreach ($sources as $other) {
-                if ($other !== $path && self::path_remainder_under($path, $other) !== null) {
+                if ($other !== $path && path_is_within_root($path, $other)) {
                     $covered = true;
                     break;
                 }
@@ -8553,18 +8561,18 @@ class ImportClient
     }
 
     /**
-     * Whether $path is within the active --only scope. With no --only flag
-     * the pull is unscoped, so everything is in scope (returns true) — this
-     * keeps the diff's delete drains at their default behavior. When scoped,
-     * true only when $path falls under one of the scope prefixes.
+     * Whether $path is selected by the active --only file path prefixes. With no
+     * --only flag, every file path is selected (returns true) — this keeps
+     * the diff's delete drains at their default behavior. When --only is set,
+     * true only when $path falls under one of those file path prefixes.
      */
-    private function in_scope(string $path): bool
+    private function is_file_path_selected_by_pull_only_files(string $path): bool
     {
-        if (empty($this->scope)) {
+        if (empty($this->pull_only_files_with_path_prefixes)) {
             return true;
         }
 
-        foreach ($this->scope as $prefix) {
+        foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
             if (self::path_remainder_under($path, $prefix) !== null) {
                 return true;
             }
@@ -8574,15 +8582,16 @@ class ImportClient
     }
 
     /**
-     * The source site's real component locations from preflight data, as remap
-     * token name => absolute path (wp-content, wp-plugins, wp-mu-plugins,
-     * wp-uploads, abspath).
+     * The source site's real paths from preflight data, as remap/--only token
+     * name => absolute path (wp-content, wp-plugins, wp-mu-plugins, wp-uploads,
+     * abspath).
      *
-     * A wp-content component falls back to its conventional spot under
-     * content_dir when that is known. This is a pure data-gatherer: any entry
-     * may be null when preflight lacks it (no content_dir, abspath undetermined).
+     * Plugins, mu-plugins, and uploads fall back to their conventional locations
+     * under WP_CONTENT_DIR when WP_CONTENT_DIR is known. This is a pure
+     * data-gatherer: any entry may be null when preflight lacks it (no
+     * content_dir, abspath undetermined).
      */
-    private function wp_component_source_paths(): array
+    private function wp_source_path_tokens(): array
     {
         $preflight = $this->state["preflight"]["data"] ?? [];
         $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
@@ -8598,7 +8607,7 @@ class ImportClient
         $mu_plugins_dir = $this->clean_preflight_path( $paths["mu_plugins_dir"] ?? null);
         $uploads_dir = $this->clean_preflight_path( $paths["uploads"]["basedir"] ?? null);
 
-        // If preflight did not report a component path, use its conventional
+        // If preflight did not report a directory path, use its conventional
         // location under WP_CONTENT_DIR when WP_CONTENT_DIR is known.
         if ($content_dir !== null) {
             $plugins_dir = $plugins_dir ?? wp_join_unix_paths( $content_dir, "plugins" );
@@ -8618,11 +8627,12 @@ class ImportClient
     /**
      * Resolve a --remap/--only path argument into an absolute path.
      *
-     * Substitutes a known leading `:token:` (see the token tables in resolve_remap
-     * and resolve_scope) with its value, then trims trailing slashes. The
-     * result must be a valid absolute path with no `.`/`..` segments; a relative
-     * path or an unknown token (left unsubstituted) fails that check. Referencing
-     * a token whose value is unavailable in preflight is a distinct, clear error.
+     * Substitutes a known leading `:token:` (see the token tables in
+     * resolve_remap and resolve_pull_only_files_with_path_prefixes) with its
+     * value, then trims trailing slashes. The result must be a valid absolute
+     * path with no `.`/`..` segments; a relative path or an unknown token (left
+     * unsubstituted) fails that check. Referencing a token whose value is
+     * unavailable in preflight is a distinct, clear error.
      *
      * @param string $raw The raw argument.
      * @param array<string,string|null> $tokens Token name => value (null = unavailable).
@@ -8691,7 +8701,7 @@ class ImportClient
      * checks to prevent directory traversal attacks that could write files
      * outside the import root.
      *
-     * With --remap active, an in-scope source path is first routed to its
+     * With --remap active, a source path matched by a remap rule is first routed to its
      * target (e.g. "/var/www/html/wp-content/x" -> "<docroot>/wp-content/x");
      * paths under no remap rule are still written under --fs-root using their
      * remote absolute path, exactly as a plain pull.
@@ -8708,6 +8718,7 @@ class ImportClient
         }
         return $this->get_filesystem_root_path() . $path;
     }
+
 
     /**
      * Returns the remainder of $path underneath $prefix,
@@ -9531,11 +9542,11 @@ class ImportClient
      */
     private function get_export_directories(): array
     {
-        // --only is a *replace*: the export roots ARE the resolved scope
-        // prefixes, so core/abspath/document_root, remap sources, and the
-        // auto-prepend/append dirs below are not walked by default — only the scope is.
-        if (!empty($this->scope)) {
-            return $this->scope;
+        // With --only, files-pull should enumerate only the selected source path
+        // prefixes. Do not add the default roots, remap sources, document root, or
+        // auto-prepend/append directories below.
+        if (!empty($this->pull_only_files_with_path_prefixes)) {
+            return $this->pull_only_files_with_path_prefixes;
         }
 
         $dirs = $this->get_root_directories_from_preflight();
@@ -9555,9 +9566,9 @@ class ImportClient
             $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
         }
 
-        // Ensure every --remap source is enumerated — including a detached
-        // component (relocated uploads/plugins dir) that lives outside the
-        // WordPress roots and so wouldn't be discovered by traversal alone.
+        // Ensure every --remap source is enumerated — including plugins or
+        // uploads directories that live outside the WordPress roots and so
+        // wouldn't be discovered by traversal alone.
         $remap_index = 0;
         foreach (array_keys($this->remap_rules) as $source) {
             $extra_paths["remap_source_{$remap_index}"] = $source;
@@ -11723,7 +11734,7 @@ if (
             'target' => 'only',
             'placeholder' => 'SOURCE',
             'repeatable' => true,
-            'help' => 'Scope the pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
+            'help' => 'Restrict the files-pull command to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
                 'repeat for several. Default pulls everything',
             'commands' => ['files-pull'],
         ],

@@ -7,15 +7,15 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * --only scope resolution and enumeration (pure, preflight-injected):
- *   - resolve_scope(): :token: templates / absolute paths → real source
- *     prefixes (sharing --remap's source token table), with detached-component
- *     expansion for wp-content and covered-prefix collapse.
- *   - in_scope(): per-path membership (unscoped ⇒ everything in scope).
- *   - get_export_directories(): under scope, a *replace* of the export roots.
- * Orthogonal to --remap (scope = what gets pulled, not where it lands).
+ * --only file-prefix resolution and enumeration (pure, preflight-injected):
+ *   - resolve_pull_only_files_with_path_prefixes(): :token: templates / absolute paths → real source
+ *     prefixes (sharing --remap's WordPress path token table), with expansion for plugins, mu-plugins, and uploads
+ *     directories outside WP_CONTENT_DIR and covered-prefix collapse.
+ *   - is_file_path_selected_by_pull_only_files(): per-path membership (no --only ⇒ every file path).
+ *   - get_export_directories(): with --only, a *replace* of the export roots.
+ * Orthogonal to --remap (--only file prefixes decide what gets pulled, not where it lands).
  */
-class OnlyScopeTest extends TestCase
+class OnlyFilesPathPrefixTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
@@ -24,7 +24,7 @@ class OnlyScopeTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->tempDir = sys_get_temp_dir() . '/only-scope-' . uniqid();
+        $this->tempDir = sys_get_temp_dir() . '/only-files-prefix-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/srv/htdocs';
         mkdir($this->stateDir, 0755, true);
@@ -61,101 +61,102 @@ class OnlyScopeTest extends TestCase
         return $c;
     }
 
-    /** Preflight carrying only the wp paths_urls (for resolve_scope/in_scope). */
+    /** Preflight carrying only the wp paths_urls needed by the --only file-prefix helpers. */
     private function withPaths(array $pathsUrls): \ImportClient
     {
         return $this->client(array('database' => array('wp' => array('paths_urls' => $pathsUrls))));
     }
 
-    public function testResolveScopeAddsDetachedComponentsForWpContent(): void
+    public function testResolvePullOnlyFilesPrefixAddsDirectoriesOutsideWpContent(): void
     {
-        // Scoping :wp-content: yields content_dir plus any component detached
-        // from it (uploads here); a nested component is already covered.
+        // Selecting :wp-content: with --only yields WP_CONTENT_DIR plus any plugins,
+        // mu-plugins, or uploads directory outside it (uploads here); a nested
+        // directory is already covered.
         $c = $this->withPaths(array(
             'content_dir' => '/var/www/html/wp-content',
             'plugins_dir' => '/var/www/html/wp-content/plugins', // nested → not added
-            'uploads' => array('basedir' => '/mnt/uploads'),     // detached → added
+            'uploads' => array('basedir' => '/mnt/uploads'),     // outside WP_CONTENT_DIR → added
         ));
-        $scope = $this->call($c, 'resolve_scope', array(array(':wp-content:')));
-        sort($scope);
-        $this->assertSame(array('/mnt/uploads', '/var/www/html/wp-content'), $scope);
+        $pull_only_files_with_path_prefixes = $this->call($c, 'resolve_pull_only_files_with_path_prefixes', array(array(':wp-content:')));
+        sort($pull_only_files_with_path_prefixes);
+        $this->assertSame(array('/mnt/uploads', '/var/www/html/wp-content'), $pull_only_files_with_path_prefixes);
     }
 
-    public function testResolveScopeCollapsesNestedPrefixes(): void
+    public function testResolvePullOnlyFilesPrefixCollapsesNestedPrefixes(): void
     {
         // :wp-content:/plugins is nested under :wp-content: → dropped, so the
         // exporter never walks the subtree twice.
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
-        $scope = $this->call($c, 'resolve_scope', array(array(':wp-content:', ':wp-content:/plugins')));
-        $this->assertSame(array('/var/www/html/wp-content'), $scope);
+        $pull_only_files_with_path_prefixes = $this->call($c, 'resolve_pull_only_files_with_path_prefixes', array(array(':wp-content:', ':wp-content:/plugins')));
+        $this->assertSame(array('/var/www/html/wp-content'), $pull_only_files_with_path_prefixes);
     }
 
     public function testResolveMapsTokensToTheirRealRelocatedLocations(): void
     {
         // A token resolves to its real (possibly relocated) location: the moved
-        // plugins dir via :wp-plugins:. A component token narrower than
-        // wp-content does not expand detached components (no /detached/uploads
+        // plugins dir via :wp-plugins:. A token narrower than wp-content does
+        // not add sibling directories outside WP_CONTENT_DIR (no /external/uploads
         // pulled in).
         $c = $this->client(array('database' => array('wp' => array(
             'paths_urls' => array(
                 'content_dir' => '/srv/wp-content',
                 'plugins_dir' => '/custom/plugins',
                 'abspath' => '/var/www/html',
-                'uploads' => array('basedir' => '/detached/uploads'),
+                'uploads' => array('basedir' => '/external/uploads'),
             ),
         ))));
         $this->assertSame(
             array('/custom/plugins/woocommerce'),
-            $this->call($c, 'resolve_scope', array(array(':wp-plugins:/woocommerce')))
+            $this->call($c, 'resolve_pull_only_files_with_path_prefixes', array(array(':wp-plugins:/woocommerce')))
         );
     }
 
-    public function testResolveScopeAcceptsRawAbsolutePath(): void
+    public function testResolvePullOnlyFilesPrefixAcceptsRawAbsolutePath(): void
     {
         // Like --remap, a raw absolute source is taken literally (no tokens).
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
         $this->assertSame(
             array('/var/custom/data'),
-            $this->call($c, 'resolve_scope', array(array('/var/custom/data')))
+            $this->call($c, 'resolve_pull_only_files_with_path_prefixes', array(array('/var/custom/data')))
         );
     }
 
-    public function testResolveScopeRejectsBlankSource(): void
+    public function testResolvePullOnlyFilesPrefixRejectsBlankSource(): void
     {
-        // Strict input hygiene: a blank source (e.g. from a trailing comma in
-        // `--only=:wp-content:,`) is an error, not silently ignored.
+        // Strict input hygiene: a blank source (e.g. `--only ""`) is an error,
+        // not silently ignored.
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
         $this->expectException(\InvalidArgumentException::class);
-        $this->call($c, 'resolve_scope', array(array(':wp-content:', '')));
+        $this->call($c, 'resolve_pull_only_files_with_path_prefixes', array(array(':wp-content:', '')));
     }
 
-    public function testResolveScopeRejectsUnavailableToken(): void
+    public function testResolvePullOnlyFilesPrefixRejectsUnavailableToken(): void
     {
         // A token preflight didn't determine yields a clear, preflight-naming
         // error (shared with --remap's resolver).
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('preflight');
-        $this->call($c, 'resolve_scope', array(array(':abspath:/wp-admin')));
+        $this->call($c, 'resolve_pull_only_files_with_path_prefixes', array(array(':abspath:/wp-admin')));
     }
 
-    public function testInScopeIsUnscopedTrueAndOtherwiseSlashAware(): void
+    public function testPullOnlyFilesPrefixSelectionDefaultsToTrueAndIsSlashAware(): void
     {
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
-        // No --only: everything is in scope (keeps the diff deleting orphans).
-        $this->assertTrue($this->call($c, 'in_scope', array('/anything/at/all.php')));
+        // No --only: every file path is selected (keeps the diff deleting orphans).
+        $this->assertTrue($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/anything/at/all.php')));
 
-        $this->set($c, 'scope', array('/var/www/html/wp-content'));
-        $this->assertTrue($this->call($c, 'in_scope', array('/var/www/html/wp-content/themes/a.css')));
-        $this->assertFalse($this->call($c, 'in_scope', array('/var/www/html/wp-config.php')));
+        $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content'));
+        $this->assertTrue($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/var/www/html/wp-content/themes/a.css')));
+        $this->assertFalse($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/var/www/html/wp-config.php')));
         // Byte-order sibling must not match the prefix.
-        $this->assertFalse($this->call($c, 'in_scope', array('/var/www/html/wp-content.bak/x')));
+        $this->assertFalse($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/var/www/html/wp-content.bak/x')));
     }
 
-    public function testScopedEnumerationReplacesRootsAndIgnoresOutOfScopeRemap(): void
+    public function testPullOnlyFilesPrefixesReplaceRootsAndIgnoreUnselectedRemap(): void
     {
-        // Under scope, export roots ARE the scope: core/abspath/document_root
-        // are dropped, and an out-of-scope --remap source stays inert.
+        // With --only, export roots ARE the selected file prefixes: core/abspath/document_root
+        // are dropped, and an unselected --remap source stays inert.
         $c = $this->client(array(
             'wp_detect' => array('roots' => array(array('path' => '/var/www/html'))),
             'runtime' => array('document_root' => '/var/www/html'),
@@ -163,7 +164,7 @@ class OnlyScopeTest extends TestCase
                 'content_dir' => '/var/www/html/wp-content',
             ))),
         ));
-        $this->set($c, 'scope', array('/var/www/html/wp-content'));
+        $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content'));
         $this->set($c, 'remap_rules', array(
             '/var/www/html/wp-admin' => '/srv/htdocs/wp-admin',
         ));
