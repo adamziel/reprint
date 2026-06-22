@@ -3011,15 +3011,11 @@ class ImportClient
         $files_checkpoint = in_array($state["command"] ?? null, ["files-pull", "files-index"], true)
             ? $this->files_pull_checkpoint()
             : null;
-        $has_cursor =
-            !empty($state["cursor"] ?? null) ||
-            !empty($state["index"]["cursor"] ?? null) ||
-            !empty($state["fetch"]["cursor"] ?? null) ||
-            ($files_checkpoint !== null && (
-                !empty($files_checkpoint->index_cursor) ||
-                !empty($files_checkpoint->fetch->cursor) ||
-                !empty($files_checkpoint->fetch_skipped->cursor)
-            ));
+        $has_cursor = $files_checkpoint !== null && (
+            !empty($files_checkpoint->index_cursor) ||
+            !empty($files_checkpoint->fetch->cursor) ||
+            !empty($files_checkpoint->fetch_skipped->cursor)
+        );
         $cursor_info = $has_cursor ? "cursor=saved" : "cursor=none";
 
         $this->audit_log(
@@ -3049,12 +3045,19 @@ class ImportClient
         $files_checkpoint = in_array($command, ["files-pull", "files-index"], true)
             ? $this->files_pull_checkpoint()
             : null;
+        $db_pull_checkpoint = in_array($command, ["db-pull", "db-index"], true)
+            ? $this->load_db_pull_checkpoint()
+            : null;
         $status = $error !== null
             ? "error"
-            : ($files_checkpoint->status ?? $state["status"] ?? "in_progress");
+            : (
+                $files_checkpoint->status ??
+                $db_pull_checkpoint->status ??
+                $state["status"] ??
+                "in_progress"
+            );
 
-        // Derive phase from the state's stage field
-        $phase = $files_checkpoint->stage ?? $state["stage"] ?? null;
+        $phase = $files_checkpoint->stage ?? $db_pull_checkpoint->stage ?? null;
 
         $payload = [
             "step" => $this->pipeline_step,

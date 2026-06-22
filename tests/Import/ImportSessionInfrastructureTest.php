@@ -45,6 +45,8 @@ class ImportSessionInfrastructureTest extends TestCase
     {
         $state = ImportStateSchema::normalize([
             'command' => 'files-pull',
+            'cursor' => 'legacy-cursor',
+            'stage' => 'legacy-stage',
             'unknown' => 'ignored',
             'pull' => ['stage' => 'files-pull'],
             'db_index' => ['file' => '/tmp/db-tables.jsonl'],
@@ -56,6 +58,8 @@ class ImportSessionInfrastructureTest extends TestCase
         ]);
 
         $this->assertSame('files-pull', $state['command']);
+        $this->assertArrayNotHasKey('cursor', $state);
+        $this->assertArrayNotHasKey('stage', $state);
         $this->assertArrayNotHasKey('unknown', $state);
         $this->assertArrayNotHasKey('pull', $state);
         $this->assertArrayNotHasKey('db_index', $state);

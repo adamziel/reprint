@@ -382,8 +382,6 @@ class Pull
         $this->client->mutate_state(function (array $state) {
             $state['command'] = null;
             $state['status'] = null;
-            $state['cursor'] = null;
-            $state['stage'] = null;
             $state['sql_output'] = null;
             return $state;
         });

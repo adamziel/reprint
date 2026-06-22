@@ -75,8 +75,6 @@ class RuntimeFilesTest extends TestCase
         $defaults = [
             "command" => null,
             "status" => null,
-            "cursor" => null,
-            "stage" => null,
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,

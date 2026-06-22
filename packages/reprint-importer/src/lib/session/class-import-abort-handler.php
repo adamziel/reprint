@@ -58,7 +58,6 @@ final class ImportAbortHandler
                 $this->audit("RESTART | Clearing files-index state", true);
                 $state["command"] = "files-index";
                 $state["status"] = null;
-                $state["stage"] = null;
                 $this->delete_file(
                     $this->paths->files_pull_checkpoint_file(),
                     " | abort files-index",

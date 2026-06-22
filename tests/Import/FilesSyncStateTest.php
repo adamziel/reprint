@@ -116,8 +116,6 @@ class FilesSyncStateTest extends TestCase
         $defaults = [
             "command" => null,
             "status" => null,
-            "cursor" => null,
-            "stage" => null,
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,
@@ -126,14 +124,17 @@ class FilesSyncStateTest extends TestCase
             "fs_root_nonempty_behavior" => "preserve-local",
             "max_allowed_packet" => null,
         ];
+        $run_state = array_merge($defaults, $state);
+
+        if (($run_state["command"] ?? null) === "files-pull") {
+            $this->writeFilesPullCheckpoint($this->filesPullCheckpointFromState($run_state));
+        }
+
+        unset($run_state["cursor"], $run_state["stage"]);
         file_put_contents(
             $this->stateDir . '/.reprint/run.json',
-            json_encode(array_merge($defaults, $state), JSON_PRETTY_PRINT),
+            json_encode($run_state, JSON_PRETTY_PRINT),
         );
-
-        if (($state["command"] ?? null) === "files-pull") {
-            $this->writeFilesPullCheckpoint($this->filesPullCheckpointFromState($state));
-        }
     }
 
     private function filesPullCheckpointFromState(array $state): FilesPullCheckpoint

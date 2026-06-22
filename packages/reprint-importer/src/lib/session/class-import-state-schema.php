@@ -9,8 +9,6 @@ final class ImportStateSchema
         return [
             "command" => null,
             "status" => null,
-            "cursor" => null,
-            "stage" => null,
             "preflight" => null,
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,

@@ -64,8 +64,6 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $defaults = [
             'command' => null,
             'status' => null,
-            'cursor' => null,
-            'stage' => null,
             'preflight' => [
                 'http_code' => 200,
                 'data' => [
@@ -185,7 +183,6 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $this->writeState([
             'command' => 'files-pull',
             'status' => 'partial',
-            'stage' => 'fetch',
         ]);
 
         $client = $this->makeClient();

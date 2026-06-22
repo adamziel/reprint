@@ -70,7 +70,6 @@ class PullFilterFakeClient extends ImportClient
         $this->mutate_state(function (array $state) {
             $state["command"] = "files-pull";
             $state["status"] = "complete";
-            $state["stage"] = null;
             return $state;
         });
     }
@@ -81,7 +80,6 @@ class PullFilterFakeClient extends ImportClient
         $this->mutate_state(function (array $state) {
             $state["command"] = "db-pull";
             $state["status"] = "complete";
-            $state["stage"] = null;
             return $state;
         });
     }
@@ -91,7 +89,6 @@ class PullFilterFakeClient extends ImportClient
         $this->mutate_state(function (array $state) {
             $state["command"] = "db-apply";
             $state["status"] = "complete";
-            $state["stage"] = null;
             return $state;
         });
     }
