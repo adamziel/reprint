@@ -18,10 +18,11 @@ if ($argc < 2) {
 
 $log_file = $argv[1];
 
-$sock = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+$sock = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
 if (!$sock) {
-    fwrite(STDERR, "bind failed: {$errstr}\n");
-    exit(1);
+    fwrite(STDOUT, "SKIP bind failed: {$errstr}\n");
+    fflush(STDOUT);
+    exit(0);
 }
 
 $name = stream_socket_get_name($sock, false);

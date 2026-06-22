@@ -50,6 +50,9 @@ class CurlProxyFromEnvTest extends TestCase
             $stderr = stream_get_contents($this->proxyPipes[2]) ?: '';
             $this->fail("Proxy did not emit a port line. stderr: {$stderr}");
         }
+        if (str_starts_with($portLine, 'SKIP ')) {
+            $this->markTestSkipped(trim(substr($portLine, strlen('SKIP '))));
+        }
         $this->proxyPort = (int) trim($portLine);
         $this->assertGreaterThan(0, $this->proxyPort, 'Proxy port must be positive');
     }
