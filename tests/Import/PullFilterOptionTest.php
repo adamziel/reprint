@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Session\PreflightCheckpoint;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -36,8 +37,8 @@ class PullFilterFakeClient extends ImportClient
 
     public function run_preflight(): void
     {
-        $this->mutate_state(function (array $state) {
-            $state["preflight"] = [
+        $this->save_preflight_checkpoint(new PreflightCheckpoint(
+            [
                 "http_code" => 200,
                 "data" => [
                     "ok" => true,
@@ -50,7 +51,13 @@ class PullFilterFakeClient extends ImportClient
                         "phpversion" => "8.2",
                     ],
                 ],
-            ];
+            ],
+            null,
+            null,
+            "6.8",
+            "other",
+        ));
+        $this->mutate_state(function (array $state) {
             $state["status"] = "complete";
             return $state;
         });

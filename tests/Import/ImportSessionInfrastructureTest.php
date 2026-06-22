@@ -8,6 +8,7 @@ use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\Pull\PullCheckpoint;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
+use Reprint\Importer\Session\PreflightCheckpoint;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Sql\DbIndexCheckpoint;
 use Reprint\Importer\Sql\DbPullCheckpoint;
@@ -29,6 +30,7 @@ class ImportSessionInfrastructureTest extends TestCase
         $this->assertSame('/tmp/reprint-state/.reprint/db-apply/checkpoint.json', $paths->db_apply_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.reprint/files-pull/checkpoint.json', $paths->files_pull_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.reprint/pull/checkpoint.json', $paths->pull_checkpoint_file());
+        $this->assertSame('/tmp/reprint-state/.reprint/preflight/checkpoint.json', $paths->preflight_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.reprint/runtime/checkpoint.json', $paths->runtime_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.import-index.jsonl', $paths->index_file());
         $this->assertSame('/tmp/reprint-state/.import-index-updates.jsonl', $paths->index_updates_file());
@@ -49,6 +51,11 @@ class ImportSessionInfrastructureTest extends TestCase
             'stage' => 'legacy-stage',
             'unknown' => 'ignored',
             'pull' => ['stage' => 'files-pull'],
+            'preflight' => ['data' => ['ok' => true]],
+            'remote_protocol_version' => 1,
+            'remote_protocol_min_version' => 1,
+            'version' => '6.8',
+            'webhost' => 'wpcloud',
             'db_index' => ['file' => '/tmp/db-tables.jsonl'],
             'sql_bytes' => 123,
             'consecutive_timeouts' => 2,
@@ -68,6 +75,11 @@ class ImportSessionInfrastructureTest extends TestCase
         $this->assertArrayNotHasKey('diff', $state);
         $this->assertArrayNotHasKey('fetch', $state);
         $this->assertArrayNotHasKey('apply', $state);
+        $this->assertArrayNotHasKey('preflight', $state);
+        $this->assertArrayNotHasKey('remote_protocol_version', $state);
+        $this->assertArrayNotHasKey('remote_protocol_min_version', $state);
+        $this->assertArrayNotHasKey('version', $state);
+        $this->assertArrayNotHasKey('webhost', $state);
     }
 
     public function testPullCheckpointNormalizesOrchestrationState(): void
@@ -103,28 +115,36 @@ class ImportSessionInfrastructureTest extends TestCase
         );
     }
 
-    public function testStatePathCodecRoundTripsByteSensitivePaths(): void
+    public function testPreflightCheckpointPathCodecRoundTripsByteSensitivePaths(): void
     {
         $codec = new StatePathCodec();
-        $state = ImportStateSchema::default_state();
-        $state['preflight'] = [
-            'data' => [
-                'runtime' => ['document_root' => '/srv/htdocs'],
-                'filesystem' => [
-                    'directories' => [
-                        ['path' => '/srv/htdocs/wp-content'],
+        $checkpoint = new PreflightCheckpoint(
+            [
+                'data' => [
+                    'runtime' => ['document_root' => '/srv/htdocs'],
+                    'filesystem' => [
+                        'directories' => [
+                            ['path' => '/srv/htdocs/wp-content'],
+                        ],
                     ],
                 ],
             ],
-        ];
+            1,
+            1,
+            '6.8',
+            'other',
+        );
 
-        $encoded = $codec->encode_state_paths($state);
+        $encoded = $checkpoint->to_persisted_array([$codec, 'encode_preflight_data_paths']);
         $this->assertStringStartsWith('base64:', $encoded['preflight']['data']['runtime']['document_root']);
 
-        $decoded = $codec->decode_state_paths($encoded);
+        $decoded = PreflightCheckpoint::from_persisted_array(
+            $encoded,
+            [$codec, 'decode_preflight_data_paths'],
+        );
         $this->assertSame(
             '/srv/htdocs/wp-content',
-            $decoded['preflight']['data']['filesystem']['directories'][0]['path'],
+            $decoded->data()['filesystem']['directories'][0]['path'],
         );
     }
 

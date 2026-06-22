@@ -13,6 +13,7 @@ use Reprint\Importer\Command\PreflightAssertResult;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Output\CliImportOutput;
+use Reprint\Importer\Session\PreflightCheckpoint;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -207,12 +208,12 @@ class ImportCommandResultTest extends TestCase
     public function testPreflightAssertHandlesMalformedPreflightDataWithoutFormatting(): void
     {
         $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
-        $client->state = [
-            'preflight' => [
+        $client->save_preflight_checkpoint(new PreflightCheckpoint(
+            [
                 'http_code' => 500,
                 'data' => 'not-json',
             ],
-        ];
+        ));
 
         ob_start();
         $result = (new PreflightAssertCommand())->execute($client, []);

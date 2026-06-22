@@ -51,6 +51,11 @@ final class ImportPaths
         return $this->state_root() . "/pull/checkpoint.json";
     }
 
+    public function preflight_checkpoint_file(): string
+    {
+        return $this->state_root() . "/preflight/checkpoint.json";
+    }
+
     public function runtime_checkpoint_file(): string
     {
         return $this->state_root() . "/runtime/checkpoint.json";

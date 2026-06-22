@@ -432,8 +432,7 @@ class Pull
      */
     public function check_plugin_installed(): bool
     {
-        $state = $this->client->state;
-        $preflight = $state["preflight"] ?? null;
+        $preflight = $this->client->preflight_entry();
         $ok = ($preflight["http_code"] ?? 0) === 200 && !empty($preflight["data"]["ok"]);
         if ($ok) {
             return false;
@@ -483,8 +482,7 @@ class Pull
      */
     public function preflight_summary(): ?string
     {
-        $state = $this->client->state;
-        $data = $state["preflight"]["data"] ?? null;
+        $data = $this->client->preflight_data();
         if (!is_array($data)) {
             return null;
         }

@@ -14,38 +14,6 @@ final class StatePathCodec
         $this->warning_handler = $warning_handler;
     }
 
-    public function encode_state_paths(array $state): array
-    {
-        if (
-            isset($state["preflight"]) &&
-            is_array($state["preflight"]) &&
-            isset($state["preflight"]["data"]) &&
-            is_array($state["preflight"]["data"])
-        ) {
-            $state["preflight"]["data"] = $this->encode_preflight_data_paths(
-                $state["preflight"]["data"],
-            );
-        }
-
-        return $state;
-    }
-
-    public function decode_state_paths(array $state): array
-    {
-        if (
-            isset($state["preflight"]) &&
-            is_array($state["preflight"]) &&
-            isset($state["preflight"]["data"]) &&
-            is_array($state["preflight"]["data"])
-        ) {
-            $state["preflight"]["data"] = $this->decode_preflight_data_paths(
-                $state["preflight"]["data"],
-            );
-        }
-
-        return $state;
-    }
-
     /**
      * @param mixed $value
      * @return mixed

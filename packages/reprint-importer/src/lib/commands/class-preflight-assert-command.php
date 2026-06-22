@@ -13,7 +13,8 @@ final class PreflightAssertCommand extends ImportCommand
 
     public function execute(ImportClient $client, array $options): ?ImportCommandResult
     {
-        $entry = $client->state["preflight"] ?? null;
+        $checkpoint = $client->preflight_checkpoint();
+        $entry = $checkpoint->entry;
         $data = is_array($entry) && is_array($entry["data"] ?? null) ? $entry["data"] : null;
         $checks = [];
         $all_pass = true;
@@ -42,8 +43,8 @@ final class PreflightAssertCommand extends ImportCommand
             $all_pass = false;
         }
 
-        $remote_ver = $client->state["remote_protocol_version"] ?? null;
-        $remote_min = $client->state["remote_protocol_min_version"] ?? null;
+        $remote_ver = $checkpoint->remote_protocol_version;
+        $remote_min = $checkpoint->remote_protocol_min_version;
         if ($remote_ver === null) {
             $proto_ok = false;
             $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";

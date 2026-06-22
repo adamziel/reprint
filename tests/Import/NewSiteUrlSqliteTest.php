@@ -101,21 +101,59 @@ class NewSiteUrlSqliteTest extends TestCase
     }
 
     /**
-     * Write the import state file that db-apply expects.
+     * Write the import state and preflight checkpoint files that db-apply expects.
      */
     private function writeState(array $extra = []): void
     {
+        $preflight = array_replace_recursive(
+            [
+                'http_code' => 200,
+                'data' => [
+                    'ok' => true,
+                    'database' => [
+                        'wp' => [
+                            'table_prefix' => 'wp_',
+                            'paths_urls' => [
+                                'content_dir' => '/wp-content',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            is_array($extra['preflight'] ?? null) ? $extra['preflight'] : [],
+        );
+        $webhost = is_string($extra['webhost'] ?? null) ? $extra['webhost'] : 'other';
+        unset(
+            $extra['preflight'],
+            $extra['remote_protocol_version'],
+            $extra['remote_protocol_min_version'],
+            $extra['version'],
+            $extra['webhost'],
+        );
+
         $state = array_merge([
             'command' => null,
             'status' => null,
-            'apply' => [],
         ], $extra);
         if (!is_dir($this->tempDir . '/.reprint')) {
             mkdir($this->tempDir . '/.reprint', 0755, true);
         }
+        if (!is_dir($this->tempDir . '/.reprint/preflight')) {
+            mkdir($this->tempDir . '/.reprint/preflight', 0755, true);
+        }
         file_put_contents(
             $this->tempDir . '/.reprint/run.json',
             json_encode($state, JSON_PRETTY_PRINT),
+        );
+        file_put_contents(
+            $this->tempDir . '/.reprint/preflight/checkpoint.json',
+            json_encode([
+                'preflight' => $preflight,
+                'remote_protocol_version' => null,
+                'remote_protocol_min_version' => null,
+                'version' => null,
+                'webhost' => $webhost,
+            ], JSON_PRETTY_PRINT),
         );
     }
 

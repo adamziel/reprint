@@ -55,9 +55,9 @@ final class ImportAbortHandlerTest extends TestCase
         $this->assertFileDoesNotExist($paths->domains_file());
         $this->assertNull($next['command']);
         $this->assertNull($next['status']);
-        $this->assertSame($state['preflight'], $next['preflight']);
-        $this->assertSame('1.2.3', $next['version']);
-        $this->assertSame('wpcloud', $next['webhost']);
+        $this->assertArrayNotHasKey('preflight', $next);
+        $this->assertArrayNotHasKey('version', $next);
+        $this->assertArrayNotHasKey('webhost', $next);
         $this->assertFalse($next['follow_symlinks']);
         $this->assertSame('preserve-local', $next['fs_root_nonempty_behavior']);
         $this->assertSame(123, $next['max_allowed_packet']);

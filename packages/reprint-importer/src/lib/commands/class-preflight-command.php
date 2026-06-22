@@ -3,6 +3,7 @@
 namespace Reprint\Importer\Command;
 
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Session\PreflightCheckpoint;
 use function Reprint\Importer\Host\detect_host;
 
 final class PreflightCommand extends ImportCommand
@@ -50,26 +51,35 @@ final class PreflightCommand extends ImportCommand
                 : null,
         ];
 
-        $client->state["preflight"] = $entry;
-
-        $wp_version = $payload["database"]["wp"]["wp_version"] ?? null;
+        $wp_version = is_array($payload) ? ($payload["database"]["wp"]["wp_version"] ?? null) : null;
+        $remote_protocol_version = null;
+        $remote_protocol_min_version = null;
         if (is_string($wp_version) && $wp_version !== "") {
-            $client->state["version"] = $wp_version;
+            $exporter_version = $wp_version;
+        } else {
+            $exporter_version = null;
         }
 
-        if (isset($payload["protocol_version"])) {
-            $client->state["remote_protocol_version"] = (int) $payload["protocol_version"];
+        if (is_array($payload) && isset($payload["protocol_version"])) {
+            $remote_protocol_version = (int) $payload["protocol_version"];
         }
-        if (isset($payload["protocol_min_version"])) {
-            $client->state["remote_protocol_min_version"] = (int) $payload["protocol_min_version"];
+        if (is_array($payload) && isset($payload["protocol_min_version"])) {
+            $remote_protocol_min_version = (int) $payload["protocol_min_version"];
         }
 
         $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
         if ($detected_webhost === 'other' && is_link($client->fs_root . '/__wp__')) {
             $detected_webhost = 'wpcloud';
         }
-        $client->state["webhost"] = $detected_webhost;
         $client->audit_log("WEBHOST DETECTED | {$detected_webhost}", true);
+
+        $client->save_preflight_checkpoint(new PreflightCheckpoint(
+            $entry,
+            $remote_protocol_version,
+            $remote_protocol_min_version,
+            $exporter_version,
+            $detected_webhost,
+        ));
 
         $client->save_state($client->state);
 

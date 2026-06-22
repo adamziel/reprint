@@ -100,9 +100,6 @@ final class ImportAbortHandler
     private function reset_state(array $state): array
     {
         $next = ImportStateSchema::default_state();
-        $next["preflight"] = $state["preflight"] ?? null;
-        $next["version"] = $state["version"] ?? null;
-        $next["webhost"] = $state["webhost"] ?? null;
         $next["follow_symlinks"] = $state["follow_symlinks"] ?? false;
         $next["fs_root_nonempty_behavior"] = $state["fs_root_nonempty_behavior"] ?? "error";
         $next["max_allowed_packet"] = $state["max_allowed_packet"] ?? null;

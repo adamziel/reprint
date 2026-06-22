@@ -36,9 +36,11 @@ use Reprint\Importer\Session\ImportAbortHandler;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\JsonStateStore;
+use Reprint\Importer\Session\PreflightCheckpoint;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Session\VolatileFileTracker;
 use Reprint\Importer\Sql\DbApplyCheckpoint;
+use Reprint\Importer\Sql\DbApplySourceContext;
 use Reprint\Importer\Sql\DbPullCheckpoint;
 use Reprint\Importer\Sql\DbApplyWorkflow;
 use Reprint\Importer\Sql\DbPullWorkflow;
@@ -132,6 +134,7 @@ class ImportClient
     public $state;
 
     private ?PullCheckpoint $pull_checkpoint = null;
+    private ?PreflightCheckpoint $preflight_checkpoint = null;
     private ?FilesPullCheckpoint $files_pull_checkpoint = null;
 
     /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
@@ -904,7 +907,7 @@ class ImportClient
                 $this->audit_log($message);
             },
         ))->download(
-            $this->state["preflight"]["data"] ?? [],
+            $this->preflight_data() ?? [],
             $this->paths->runtime_files_dir(),
         );
     }
@@ -915,8 +918,7 @@ class ImportClient
      */
     public function require_preflight(): void
     {
-        $entry = $this->state["preflight"] ?? null;
-        if (!is_array($entry) || empty($entry["data"])) {
+        if ($this->preflight_data() === null) {
             throw new RuntimeException(
                 "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
             );
@@ -1757,6 +1759,45 @@ class ImportClient
         );
     }
 
+    public function preflight_checkpoint(): PreflightCheckpoint
+    {
+        if ($this->preflight_checkpoint instanceof PreflightCheckpoint) {
+            return $this->preflight_checkpoint;
+        }
+
+        $this->preflight_checkpoint = PreflightCheckpoint::from_persisted_array(
+            $this->json_state_store->load($this->paths->preflight_checkpoint_file()) ?? [],
+            [$this->state_path_codec, 'decode_preflight_data_paths'],
+        );
+
+        return $this->preflight_checkpoint;
+    }
+
+    public function save_preflight_checkpoint(PreflightCheckpoint $checkpoint): void
+    {
+        $this->output->tick_spinner();
+        $this->preflight_checkpoint = $checkpoint;
+        $this->json_state_store->save(
+            $this->paths->preflight_checkpoint_file(),
+            $checkpoint->to_persisted_array([$this->state_path_codec, 'encode_preflight_data_paths']),
+        );
+    }
+
+    public function preflight_entry(): ?array
+    {
+        return $this->preflight_checkpoint()->entry;
+    }
+
+    public function preflight_data(): ?array
+    {
+        return $this->preflight_checkpoint()->data();
+    }
+
+    public function detected_webhost(): string
+    {
+        return $this->preflight_checkpoint()->detected_webhost();
+    }
+
     public function pull_checkpoint(): PullCheckpoint
     {
         if ($this->pull_checkpoint instanceof PullCheckpoint) {
@@ -1847,17 +1888,15 @@ class ImportClient
      */
     public function run_apply_runtime(array $options): void
     {
-        // Load state to get preflight data and detected webhost.
-        $entry = $this->state["preflight"] ?? null;
-        if (!is_array($entry) || empty($entry["data"])) {
+        $preflight_data = $this->preflight_data();
+        if ($preflight_data === null) {
             throw new RuntimeException(
                 "apply-runtime requires a prior preflight run. " .
                 "Run 'preflight' first to capture the source site's environment."
             );
         }
 
-        $preflight_data = $entry["data"];
-        $webhost = $this->state["webhost"] ?? "other";
+        $webhost = $this->detected_webhost();
 
         $result = (new RuntimeConfigurationApplier())->apply(
             [
@@ -1964,7 +2003,7 @@ class ImportClient
 
         // Require preflight data so we know where WP components live
         $this->require_preflight();
-        $preflight = $this->state["preflight"]["data"] ?? [];
+        $preflight = $this->preflight_data() ?? [];
 
         $result = FlatDocumentRootBuilder::build(
             $this->fs_root,
@@ -1984,6 +2023,13 @@ class ImportClient
 
     public function run_db_apply(array $options): void
     {
+        $source = new DbApplySourceContext(
+            $this->preflight_checkpoint()->require_data(
+                "db-apply requires a prior preflight run. Run 'preflight' first.",
+            ),
+            $this->detected_webhost(),
+        );
+
         $checkpoint = (new DbApplyWorkflow(
             $this->state_dir,
             $this->remote_url,
@@ -2003,7 +2049,7 @@ class ImportClient
             },
         ))->run(
             $this->db_apply_checkpoint(),
-            $this->state,
+            $source,
             $options,
         );
         $this->record_command_status("db-apply", $checkpoint->status);
@@ -2413,7 +2459,8 @@ class ImportClient
      */
     private function get_max_request_bytes(): int
     {
-        $preflight = $this->state["preflight"]["data"]["limits"] ?? null;
+        $data = $this->preflight_data() ?? [];
+        $preflight = $data["limits"] ?? null;
         $max_request = null;
         if (is_array($preflight) && isset($preflight["max_request_bytes"])) {
             $max_request = (int) $preflight["max_request_bytes"];
@@ -2434,7 +2481,8 @@ class ImportClient
      */
     private function get_uploads_basedir(): ?string
     {
-        $paths_urls = $this->state["preflight"]["data"]["database"]["wp"]["paths_urls"] ?? null;
+        $data = $this->preflight_data() ?? [];
+        $paths_urls = $data["database"]["wp"]["paths_urls"] ?? null;
         if (!is_array($paths_urls)) {
             return null;
         }
@@ -2682,7 +2730,7 @@ class ImportClient
     private function get_root_directories_from_preflight(): array
     {
         return ExportDirectoryResolver::root_directories_from_preflight(
-            $this->state["preflight"]["data"] ?? [],
+            $this->preflight_data() ?? [],
             function (string $message): void {
                 $this->audit_log($message);
             },
@@ -2702,7 +2750,7 @@ class ImportClient
     private function get_export_directories(): array
     {
         return ExportDirectoryResolver::export_directories(
-            $this->state["preflight"]["data"] ?? [],
+            $this->preflight_data() ?? [],
             $this->extra_directory,
             function (string $message): void {
                 $this->audit_log($message);
@@ -2923,40 +2971,6 @@ class ImportClient
     }
 
     /**
-     * Encode state path fields as base64 to make JSON persistence byte-safe.
-     */
-    private function encode_state_paths(array $state): array
-    {
-        return $this->state_path_codec->encode_state_paths($state);
-    }
-
-    /**
-     * Decode base64-encoded path fields in state after loading.
-     *
-     * Supports legacy plain-string fields for backward compatibility.
-     */
-    private function decode_state_paths(array $state): array
-    {
-        return $this->state_path_codec->decode_state_paths($state);
-    }
-
-    /**
-     * Encode preflight path fields.
-     */
-    private function encode_preflight_data_paths(array $data): array
-    {
-        return $this->state_path_codec->encode_preflight_data_paths($data);
-    }
-
-    /**
-     * Decode preflight path fields.
-     */
-    private function decode_preflight_data_paths(array $data): array
-    {
-        return $this->state_path_codec->decode_preflight_data_paths($data);
-    }
-
-    /**
      * Load import state from disk.
      */
     private function load_state(): array
@@ -2971,8 +2985,9 @@ class ImportClient
             return $this->default_state();
         }
 
+        $this->migrate_preflight_checkpoint_from_state($state);
+
         $state = $this->normalize_state($state);
-        $state = $this->decode_state_paths($state);
 
         $state_cmd = $state["command"] ?? null;
         if (is_string($state_cmd)) {
@@ -2980,6 +2995,51 @@ class ImportClient
         }
 
         return $state;
+    }
+
+    /**
+     * @param array<string, mixed> $state
+     */
+    private function migrate_preflight_checkpoint_from_state(array $state): void
+    {
+        $legacy_keys = [
+            "preflight",
+            "remote_protocol_version",
+            "remote_protocol_min_version",
+            "version",
+            "webhost",
+        ];
+        $has_legacy_preflight_state = false;
+        foreach ($legacy_keys as $key) {
+            if (array_key_exists($key, $state)) {
+                $has_legacy_preflight_state = true;
+                break;
+            }
+        }
+        if (!$has_legacy_preflight_state) {
+            return;
+        }
+
+        $existing = $this->json_state_store->load($this->paths->preflight_checkpoint_file()) ?? [];
+        if ($existing !== []) {
+            return;
+        }
+
+        $checkpoint = PreflightCheckpoint::from_persisted_array(
+            $state,
+            [$this->state_path_codec, 'decode_preflight_data_paths'],
+        );
+        if (
+            $checkpoint->entry === null &&
+            $checkpoint->remote_protocol_version === null &&
+            $checkpoint->remote_protocol_min_version === null &&
+            $checkpoint->exporter_version === null &&
+            $checkpoint->webhost === null
+        ) {
+            return;
+        }
+
+        $this->save_preflight_checkpoint($checkpoint);
     }
 
     /**
@@ -3002,7 +3062,6 @@ class ImportClient
             ];
         }
         $state = $this->normalize_state($state);
-        $state = $this->encode_state_paths($state);
 
         $this->json_state_store->save($this->state_file, $state);
 

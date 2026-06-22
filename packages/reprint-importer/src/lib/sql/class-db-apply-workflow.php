@@ -51,12 +51,11 @@ final class DbApplyWorkflow
     }
 
     /**
-     * @param array<string, mixed> $session_state
      * @param array<string, mixed> $options
      */
     public function run(
         DbApplyCheckpoint $checkpoint,
-        array $session_state,
+        DbApplySourceContext $source,
         array $options
     ): DbApplyCheckpoint
     {
@@ -121,10 +120,10 @@ final class DbApplyWorkflow
             $url_mapping = $checkpoint->rewrite_url;
         }
 
-        $stmt_rewriter = $this->statement_rewriter($session_state, $url_mapping);
+        $stmt_rewriter = $this->statement_rewriter($source, $url_mapping);
         [$pdo, $connection_label] = $this->create_target_connection(
             $checkpoint,
-            $session_state,
+            $source,
             $options,
         );
         $sqlite_prepared_pdo = $this->configure_sqlite_import_hints($pdo, $options);
@@ -157,13 +156,13 @@ final class DbApplyWorkflow
             function (): bool {
                 return $this->output->is_quiet_lifecycle();
             },
-            function (PDO $pdo) use ($session_state): array {
-                return $this->deactivate_host_plugins($pdo, $session_state);
+            function (PDO $pdo) use ($source): array {
+                return $this->deactivate_host_plugins($pdo, $source);
             },
-            function (PDO $pdo, string $new_site_url) use ($session_state): array {
+            function (PDO $pdo, string $new_site_url) use ($source): array {
                 return $this->deactivate_path_incompatible_plugins(
                     $pdo,
-                    $session_state,
+                    $source,
                     $new_site_url,
                 );
             },
@@ -242,16 +241,18 @@ final class DbApplyWorkflow
     }
 
     /**
-     * @param array<string, mixed> $state
      * @param array<string, string> $url_mapping
      */
-    private function statement_rewriter(array $state, array $url_mapping): ?SqlStatementRewriter
+    private function statement_rewriter(
+        DbApplySourceContext $source,
+        array $url_mapping
+    ): ?SqlStatementRewriter
     {
         if (empty($url_mapping)) {
             return null;
         }
 
-        $table_prefix = $state["preflight"]["data"]["database"]["wp"]["table_prefix"] ?? 'wp_';
+        $table_prefix = $source->table_prefix();
         $this->audit(
             sprintf(
                 "URL MAPPING | %d mapping(s): %s",
@@ -272,13 +273,12 @@ final class DbApplyWorkflow
     }
 
     /**
-     * @param array<string, mixed> $state
      * @param array<string, mixed> $options
      * @return array{0: PDO, 1: string}
      */
     private function create_target_connection(
         DbApplyCheckpoint $checkpoint,
-        array $session_state,
+        DbApplySourceContext $source,
         array $options
     ): array
     {
@@ -290,20 +290,19 @@ final class DbApplyWorkflow
         }
 
         if ($target_engine === "sqlite") {
-            return $this->create_sqlite_target_connection($checkpoint, $session_state, $options);
+            return $this->create_sqlite_target_connection($checkpoint, $source, $options);
         }
 
         return $this->create_mysql_target_connection($checkpoint, $options);
     }
 
     /**
-     * @param array<string, mixed> $state
      * @param array<string, mixed> $options
      * @return array{0: PDO, 1: string}
      */
     private function create_sqlite_target_connection(
         DbApplyCheckpoint $checkpoint,
-        array $session_state,
+        DbApplySourceContext $source,
         array $options
     ): array
     {
@@ -311,10 +310,7 @@ final class DbApplyWorkflow
         $target_db = $options["target_db"] ?? "sqlite_database";
 
         if (!$target_path) {
-            $content_dir = rtrim(
-                $session_state["preflight"]["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
-                "/",
-            );
+            $content_dir = $source->content_dir();
             if (!$content_dir) {
                 throw new InvalidArgumentException(
                     "--target-sqlite-path option is required but was missing.",
@@ -412,20 +408,21 @@ final class DbApplyWorkflow
     }
 
     /**
-     * @param array<string, mixed> $state
      * @return string[]
      */
-    private function deactivate_host_plugins(PDO $pdo, array $state): array
+    private function deactivate_host_plugins(
+        PDO $pdo,
+        DbApplySourceContext $source
+    ): array
     {
-        $webhost = $state["webhost"] ?? "other";
-        $analyzer = \host_analyzer_for($webhost);
-        $preflight_data = $state["preflight"]["data"] ?? [];
+        $analyzer = \host_analyzer_for($source->webhost());
+        $preflight_data = $source->preflight_data();
         $manifest = $analyzer->analyze($preflight_data);
 
         return ActivePluginDeactivator::deactivate_for_removed_paths(
             $pdo,
             $manifest->paths_to_remove,
-            $this->table_prefix($state),
+            $source->table_prefix(),
             function (string $message): void {
                 $this->audit($message);
             },
@@ -433,36 +430,23 @@ final class DbApplyWorkflow
     }
 
     /**
-     * @param array<string, mixed> $state
      * @return string[]
      */
     private function deactivate_path_incompatible_plugins(
         PDO $pdo,
-        array $state,
+        DbApplySourceContext $source,
         string $new_site_url
     ): array {
         return ActivePluginDeactivator::deactivate_path_incompatible(
             $pdo,
             $new_site_url,
-            $this->table_prefix($state),
+            $source->table_prefix(),
             function (string $message): void {
                 $this->audit($message);
             },
         );
     }
 
-    /**
-     * @param array<string, mixed> $state
-     */
-    private function table_prefix(array $state): string
-    {
-        $preflight_data = $state["preflight"]["data"] ?? [];
-        return $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
-    }
-
-    /**
-     * @param array<string, mixed> $state
-     */
     private function save_state(DbApplyCheckpoint $checkpoint): void
     {
         ($this->save_state)($checkpoint);

@@ -4,6 +4,7 @@ require_once __DIR__ . '/../sqlite/functions.php';
 require_once __DIR__ . '/../url-rewrite/load.php';
 require_once __DIR__ . '/class-active-plugin-deactivator.php';
 require_once __DIR__ . '/class-db-apply-checkpoint.php';
+require_once __DIR__ . '/class-db-apply-source-context.php';
 require_once __DIR__ . '/class-db-apply-query-executor.php';
 require_once __DIR__ . '/class-db-index-checkpoint.php';
 require_once __DIR__ . '/class-db-pull-checkpoint.php';

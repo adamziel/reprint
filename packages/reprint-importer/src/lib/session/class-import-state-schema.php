@@ -9,11 +9,6 @@ final class ImportStateSchema
         return [
             "command" => null,
             "status" => null,
-            "preflight" => null,
-            "remote_protocol_version" => null,
-            "remote_protocol_min_version" => null,
-            "version" => null,
-            "webhost" => null,
             "follow_symlinks" => true,
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
