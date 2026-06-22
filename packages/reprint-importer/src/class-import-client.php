@@ -7,33 +7,32 @@ use InvalidArgumentException;
 use RuntimeException;
 use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
+use Reprint\Importer\Command\ImportRuntime;
 use Reprint\Importer\Command\PreflightCommand;
 use Reprint\Importer\FileSync\DownloadList;
-use Reprint\Importer\FileSync\FetchListBuilder;
-use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileFetchDownloader;
+use Reprint\Importer\FileSync\FileSyncTransferProgress;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\FilesSyncWorkflow;
+use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
 use Reprint\Importer\FileSync\Infrastructure\CliFileSyncEventSubscriber;
+use Reprint\Importer\FileSync\Infrastructure\FetchListBuilderGateway;
+use Reprint\Importer\FileSync\Infrastructure\FetchListFileFetchGateway;
+use Reprint\Importer\FileSync\Infrastructure\FileSyncSymlinkGateway;
+use Reprint\Importer\FileSync\Infrastructure\FilesPullCurlTimeoutPolicy;
+use Reprint\Importer\FileSync\Infrastructure\ImportPathFileSyncWorkspace;
+use Reprint\Importer\FileSync\Infrastructure\IndexStoreFileIndexGateway;
 use Reprint\Importer\FileSync\IntermediateSymlinkRecreator;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFetchBatchDownloader;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFetchListGateway;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFileFetchGateway;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFileIndexGateway;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFileSyncSettings;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFileSyncStreamClient;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFileSyncWorkspace;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFilesPullTimeoutPolicy;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFilesPullCheckpointStore;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientFilesSyncRunStore;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientRemoteFileIndexGateway;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientShutdownToken;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientSymlinkGateway;
-use Reprint\Importer\FileSync\Infrastructure\ImportClientVolatileFileReporter;
 use Reprint\Importer\FileSync\Infrastructure\ImportOutputSymlinkTargetObserver;
 use Reprint\Importer\FileSync\Infrastructure\ImportOutputProgressTicker;
-use Reprint\Importer\FileSync\RemoteIndexDownloader;
+use Reprint\Importer\FileSync\Infrastructure\JsonFilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Infrastructure\RemoteIndexDownloaderGateway;
+use Reprint\Importer\FileSync\Infrastructure\RunStateFilesSyncRunStore;
+use Reprint\Importer\FileSync\Infrastructure\ShutdownStateToken;
+use Reprint\Importer\FileSync\Infrastructure\SnapshotFileSyncSettings;
+use Reprint\Importer\FileSync\Infrastructure\TransportFileSyncStreamClient;
+use Reprint\Importer\FileSync\Infrastructure\VolatileFileSummaryReporter;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\FileSync\SymlinkTargetIndexer;
 use Reprint\Importer\Filesystem\FlatDocumentRootBuilder;
@@ -58,6 +57,7 @@ use Reprint\Importer\Session\ImportRunState;
 use Reprint\Importer\Session\JsonStateStore;
 use Reprint\Importer\Session\PreflightCheckpoint;
 use Reprint\Importer\Session\StatePathCodec;
+use Reprint\Importer\Session\ShutdownState;
 use Reprint\Importer\Session\VolatileFileTracker;
 use Reprint\Importer\Sql\DbApplyCheckpoint;
 use Reprint\Importer\Sql\DbApplySourceContext;
@@ -65,28 +65,29 @@ use Reprint\Importer\Sql\DbPullCheckpoint;
 use Reprint\Importer\Sql\DbPullConfiguration;
 use Reprint\Importer\Sql\DbApplyWorkflow;
 use Reprint\Importer\Sql\DbPullWorkflow;
+use Reprint\Importer\Sql\Port\SqlStreamClient;
 use Reprint\Importer\Sql\Infrastructure\ConfiguredSqlDumpDownloader;
-use Reprint\Importer\Sql\Infrastructure\ImportClientDbApplyCheckpointStore;
-use Reprint\Importer\Sql\Infrastructure\ImportClientDbApplyShutdownToken;
-use Reprint\Importer\Sql\Infrastructure\ImportClientDbPullCheckpointStore;
-use Reprint\Importer\Sql\Infrastructure\ImportClientDbPullTimeoutPolicy;
+use Reprint\Importer\Sql\Infrastructure\DbPullCurlTimeoutPolicy;
 use Reprint\Importer\Sql\Infrastructure\ImportOutputDbApplyObserver;
 use Reprint\Importer\Sql\Infrastructure\ImportOutputDbPullObserver;
-use Reprint\Importer\Sql\Infrastructure\ImportClientSqlShutdownToken;
-use Reprint\Importer\Sql\Infrastructure\ImportClientSqlStreamClient;
 use Reprint\Importer\Sql\Infrastructure\ImportOutputSqlStreamObserver;
+use Reprint\Importer\Sql\Infrastructure\JsonDbApplyCheckpointStore;
+use Reprint\Importer\Sql\Infrastructure\JsonDbPullCheckpointStore;
 use Reprint\Importer\Sql\Infrastructure\JsonlDbIndexTableSinkFactory;
 use Reprint\Importer\Sql\Infrastructure\JsonSqlDomainStore;
 use Reprint\Importer\Sql\Infrastructure\JsonSqlStatementStatsStore;
 use Reprint\Importer\Sql\Infrastructure\LocalSqlOutputSinkFactory;
 use Reprint\Importer\Sql\Infrastructure\RemoteDbIndexDownloader;
+use Reprint\Importer\Sql\Infrastructure\ShutdownStateDbApplyToken;
+use Reprint\Importer\Sql\Infrastructure\ShutdownStateSqlToken;
+use Reprint\Importer\Sql\Infrastructure\TransportSqlStreamClient;
 use Reprint\Importer\Sql\SqlDownloader;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TargetRuntime\RuntimeConfigurationApplier;
 use Reprint\Importer\TargetRuntime\RuntimeCheckpoint;
 use Reprint\Importer\Transport\ImportHttpSession;
 
-class ImportClient implements PullRuntime
+class ImportClient implements ImportRuntime, PullRuntime
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
@@ -170,8 +171,8 @@ class ImportClient implements PullRuntime
     private ?PreflightCheckpoint $preflight_checkpoint = null;
     private ?FilesPullCheckpoint $files_pull_checkpoint = null;
 
-    /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
-    private $shutdown_requested = false;
+    /** @var ShutdownState Process-level shutdown signal state shared with long-running workflows. */
+    private ShutdownState $shutdown;
 
     /**
      * @var bool When true, tell the server to follow symlinks that point outside
@@ -263,11 +264,8 @@ class ImportClient implements PullRuntime
     /** @var Pull Orchestrates the pull command pipeline. */
     private Pull $pull;
 
-    /** @var FilesSyncWorkflow Orchestrates files-pull and files-index. */
-    private FilesSyncWorkflow $files_sync;
-
-    /** @var int Cumulative count of index entries written (survives retries). */
-    private $index_entries_counted = 0;
+    /** @var FileSyncTransferProgress Current invocation counters for file sync progress and shutdown reports. */
+    private FileSyncTransferProgress $file_sync_progress;
 
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
@@ -315,38 +313,19 @@ class ImportClient implements PullRuntime
         $this->output = $output ?? new NullImportOutput();
         $this->paths = new ImportPaths($this->state_dir);
         $this->json_state_store = new JsonStateStore();
-        $this->state_path_codec = new StatePathCodec(function (string $message): void {
-            $this->audit_log($message, true);
-        });
         $this->state_file = $this->paths->state_file();
         $this->index_file = $this->paths->index_file();
         $this->remote_index_file = $this->paths->remote_index_file();
         $this->download_list_file = $this->paths->download_list_file();
         $this->skipped_download_list_file = $this->paths->skipped_download_list_file();
         $this->audit_log = $this->paths->audit_log();
+        $this->state_path_codec = new StatePathCodec($this->audit_logger());
         $this->volatile_files_file = $this->paths->volatile_files_file();
         $this->status_file = $this->paths->status_file();
+        $this->shutdown = new ShutdownState();
+        $this->file_sync_progress = new FileSyncTransferProgress();
 
         $this->pull = new Pull($this, $this->output->progress());
-        $file_sync_workspace = new ImportClientFileSyncWorkspace($this);
-        $this->files_sync = new FilesSyncWorkflow(
-            new ImportClientFilesSyncRunStore($this),
-            new ImportClientFilesPullCheckpointStore($this),
-            new ImportClientFileSyncSettings($this),
-            $file_sync_workspace,
-            new ImportClientFileIndexGateway($this, $file_sync_workspace),
-            new ImportClientRemoteFileIndexGateway($this),
-            new ImportClientFetchListGateway($this),
-            new ImportClientFileFetchGateway($this),
-            new ImportClientSymlinkGateway($this),
-            new ImportClientShutdownToken($this),
-            new ImportClientVolatileFileReporter($this),
-            new CliFileSyncEventSubscriber(
-                new FileAuditLogger($this->audit_log, $this->output),
-                $this->output,
-                new ImportOutputMachineEventEmitter($this->output),
-            ),
-        );
         $this->index_store = new IndexStore(
             $this->index_file,
             $this->paths->index_updates_file(),
@@ -652,7 +631,7 @@ class ImportClient implements PullRuntime
 
     public function index_entries_counted(): int
     {
-        return $this->index_entries_counted;
+        return $this->file_sync_progress->index_entries_counted();
     }
 
     public function set_file_sync_progress(
@@ -663,6 +642,11 @@ class ImportClient implements PullRuntime
         $this->files_imported = $files_imported;
         $this->download_list_done = $download_list_done;
         $this->download_list_total = $download_list_total;
+        $this->file_sync_progress->set_transfer_counts(
+            $files_imported,
+            $download_list_done,
+            $download_list_total,
+        );
     }
 
     /**
@@ -690,6 +674,155 @@ class ImportClient implements PullRuntime
         );
     }
 
+    private function file_sync_workspace(): ImportPathFileSyncWorkspace
+    {
+        return new ImportPathFileSyncWorkspace($this->paths, $this->fs_root);
+    }
+
+    private function files_pull_checkpoint_store(): JsonFilesPullCheckpointStore
+    {
+        return new JsonFilesPullCheckpointStore(
+            $this->json_state_store,
+            $this->paths,
+            $this->state_path_codec,
+            new ImportOutputProgressTicker($this->output),
+        );
+    }
+
+    protected function file_sync_stream_client(): FileSyncStreamClient
+    {
+        return new TransportFileSyncStreamClient($this->http_session());
+    }
+
+    private function file_sync_shutdown_token(): ShutdownStateToken
+    {
+        return new ShutdownStateToken($this->shutdown);
+    }
+
+    private function file_sync_timeout_policy(): FilesPullCurlTimeoutPolicy
+    {
+        return new FilesPullCurlTimeoutPolicy(
+            $this->audit_logger(),
+            self::MAX_CONSECUTIVE_TIMEOUTS,
+        );
+    }
+
+    private function file_index_gateway(
+        ImportPathFileSyncWorkspace $workspace
+    ): IndexStoreFileIndexGateway {
+        return new IndexStoreFileIndexGateway(
+            $this->index_store,
+            $this->index_sorter,
+            $workspace,
+            $this->file_sync_progress,
+        );
+    }
+
+    private function files_sync_workflow(): FilesSyncWorkflow
+    {
+        $audit = $this->audit_logger();
+        $workspace = $this->file_sync_workspace();
+        $checkpoints = $this->files_pull_checkpoint_store();
+        $shutdown = $this->file_sync_shutdown_token();
+        $stream = $this->file_sync_stream_client();
+        $timeout_policy = $this->file_sync_timeout_policy();
+        $local_applier = $this->file_sync_local_applier($checkpoints->get());
+        $index = $this->file_index_gateway($workspace);
+        $export_dirs = $this->get_export_directories();
+        $roots = $this->get_root_directories_from_preflight();
+        $remote_index = new RemoteIndexDownloaderGateway(
+            $stream,
+            $shutdown,
+            $checkpoints,
+            $local_applier,
+            $timeout_policy,
+            $workspace,
+            $audit,
+            $this->file_sync_progress,
+            [
+                "remote_index_file" => $this->remote_index_file,
+                "roots" => $roots,
+                "export_dirs" => $export_dirs,
+                "follow_symlinks" => $this->follow_symlinks,
+                "include_caches" => $this->include_caches,
+                "save_every" => self::SAVE_STATE_EVERY_N_CHUNKS,
+            ],
+        );
+
+        return new FilesSyncWorkflow(
+            new RunStateFilesSyncRunStore(
+                $this->run_state(),
+                $this->json_state_store,
+                $this->state_file,
+                $this->output,
+            ),
+            $checkpoints,
+            new SnapshotFileSyncSettings(
+                $this->filter,
+                $this->follow_symlinks,
+                $this->fs_root_nonempty_behavior,
+            ),
+            $workspace,
+            $index,
+            $remote_index,
+            new FetchListBuilderGateway(
+                $this->index_store,
+                $local_applier,
+                $checkpoints,
+                $shutdown,
+                new ImportOutputProgressTicker($this->output),
+                $audit,
+                $this->remote_index_file,
+                $this->index_file,
+                $this->download_list_file,
+                $this->skipped_download_list_file,
+                $this->filter,
+                $this->filter === "essential-files" ? $this->get_uploads_basedir() : null,
+            ),
+            new FetchListFileFetchGateway(
+                $stream,
+                $shutdown,
+                $checkpoints,
+                $local_applier,
+                $timeout_policy,
+                $index,
+                $audit,
+                $this->file_sync_progress,
+                $this->get_max_request_bytes(),
+                $export_dirs,
+                self::SAVE_STATE_EVERY_N_CHUNKS,
+            ),
+            new FileSyncSymlinkGateway(
+                $this->remote_index_file,
+                $remote_index,
+                $checkpoints,
+                $shutdown,
+                $audit,
+                new ImportOutputSymlinkTargetObserver(
+                    $this->output,
+                    new ImportOutputMachineEventEmitter($this->output),
+                ),
+                new IntermediateSymlinkRecreator(
+                    $this->local_filesystem(),
+                    $audit,
+                ),
+                $roots,
+            ),
+            $shutdown,
+            new VolatileFileSummaryReporter(
+                $this->volatile_file_tracker(),
+                $audit,
+                $this->output,
+                new ImportOutputMachineEventEmitter($this->output),
+            ),
+            new CliFileSyncEventSubscriber(
+                $audit,
+                $this->output,
+                new ImportOutputMachineEventEmitter($this->output),
+            ),
+        );
+    }
+
     private function file_sync_local_applier(?FilesPullCheckpoint $checkpoint = null): FileSyncLocalApplier
     {
         return new FileSyncLocalApplier(
@@ -701,9 +834,9 @@ class ImportClient implements PullRuntime
             $this->remote_index_file,
             $this->fs_root_nonempty_behavior,
             $this->follow_symlinks,
-            $this->files_imported,
-            $this->download_list_done,
-            $this->download_list_total,
+            $this->file_sync_progress->files_imported(),
+            $this->file_sync_progress->download_list_done(),
+            $this->file_sync_progress->download_list_total(),
             $checkpoint,
             new FileAuditLogger($this->audit_log, $this->output),
             new ImportOutputMachineEventEmitter($this->output),
@@ -1064,7 +1197,7 @@ class ImportClient implements PullRuntime
     public function download_runtime_files(): void
     {
         (new RuntimeFilesDownloader(
-            new ImportClientFileSyncStreamClient($this),
+            $this->file_sync_stream_client(),
             $this->audit_logger(),
         ))->download(
             $this->preflight_data() ?? [],
@@ -1120,7 +1253,7 @@ class ImportClient implements PullRuntime
      */
     public function run_files_sync(): void
     {
-        $this->files_sync->run_files_sync();
+        $this->files_sync_workflow()->run_files_sync();
     }
 
     /**
@@ -1133,7 +1266,7 @@ class ImportClient implements PullRuntime
      */
     public function run_files_index(): void
     {
-        $this->files_sync->run_files_index();
+        $this->files_sync_workflow()->run_files_index();
     }
 
     /**
@@ -1146,12 +1279,32 @@ class ImportClient implements PullRuntime
      */
     public function discover_symlink_targets(FilesPullCheckpoint $checkpoint): void
     {
+        $workspace = $this->file_sync_workspace();
+        $audit = $this->audit_logger();
+
         (new SymlinkTargetIndexer(
             $this->remote_index_file,
-            new ImportClientRemoteFileIndexGateway($this),
-            new ImportClientFilesPullCheckpointStore($this),
-            new ImportClientShutdownToken($this),
-            $this->audit_logger(),
+            new RemoteIndexDownloaderGateway(
+                $this->file_sync_stream_client(),
+                $this->file_sync_shutdown_token(),
+                $this->files_pull_checkpoint_store(),
+                $this->file_sync_local_applier($checkpoint),
+                $this->file_sync_timeout_policy(),
+                $workspace,
+                $audit,
+                $this->file_sync_progress,
+                [
+                    "remote_index_file" => $this->remote_index_file,
+                    "roots" => $this->get_root_directories_from_preflight(),
+                    "export_dirs" => $this->get_export_directories(),
+                    "follow_symlinks" => $this->follow_symlinks,
+                    "include_caches" => $this->include_caches,
+                    "save_every" => self::SAVE_STATE_EVERY_N_CHUNKS,
+                ],
+            ),
+            $this->files_pull_checkpoint_store(),
+            $this->file_sync_shutdown_token(),
+            $audit,
             new ImportOutputSymlinkTargetObserver(
                 $this->output,
                 new ImportOutputMachineEventEmitter($this->output),
@@ -1179,10 +1332,10 @@ class ImportClient implements PullRuntime
     private function db_pull_workflow(): DbPullWorkflow
     {
         $audit = $this->audit_logger();
-        $stream = new ImportClientSqlStreamClient($this);
-        $checkpoints = new ImportClientDbPullCheckpointStore($this);
-        $shutdown = new ImportClientSqlShutdownToken($this);
-        $timeouts = new ImportClientDbPullTimeoutPolicy($this);
+        $stream = $this->sql_stream_client();
+        $checkpoints = $this->db_pull_checkpoint_store();
+        $shutdown = $this->sql_shutdown_token();
+        $timeouts = $this->db_pull_timeout_policy();
         $config = new DbPullConfiguration(
             $this->state_dir,
             $this->audit_log,
@@ -1238,37 +1391,66 @@ class ImportClient implements PullRuntime
         );
     }
 
+    private function db_pull_checkpoint_store(): JsonDbPullCheckpointStore
+    {
+        return new JsonDbPullCheckpointStore(
+            $this->json_state_store,
+            $this->paths,
+            $this->state_path_codec,
+            $this->output,
+        );
+    }
+
+    private function db_apply_checkpoint_store(): JsonDbApplyCheckpointStore
+    {
+        return new JsonDbApplyCheckpointStore(
+            $this->json_state_store,
+            $this->paths,
+            $this->output,
+        );
+    }
+
+    protected function sql_stream_client(): SqlStreamClient
+    {
+        return new TransportSqlStreamClient($this->http_session());
+    }
+
+    private function sql_shutdown_token(): ShutdownStateSqlToken
+    {
+        return new ShutdownStateSqlToken($this->shutdown);
+    }
+
+    private function db_apply_shutdown_token(): ShutdownStateDbApplyToken
+    {
+        return new ShutdownStateDbApplyToken($this->shutdown);
+    }
+
+    private function db_pull_timeout_policy(): DbPullCurlTimeoutPolicy
+    {
+        return new DbPullCurlTimeoutPolicy(
+            $this->audit_logger(),
+            self::MAX_CONSECUTIVE_TIMEOUTS,
+        );
+    }
+
     public function load_db_pull_checkpoint(): DbPullCheckpoint
     {
-        return DbPullCheckpoint::from_persisted_array(
-            $this->json_state_store->load($this->paths->db_pull_checkpoint_file()) ?? [],
-            [$this->state_path_codec, 'decode_value'],
-        );
+        return $this->db_pull_checkpoint_store()->get();
     }
 
     public function save_db_pull_checkpoint(DbPullCheckpoint $checkpoint): void
     {
-        $this->output->tick_spinner();
-        $this->json_state_store->save(
-            $this->paths->db_pull_checkpoint_file(),
-            $checkpoint->to_persisted_array([$this->state_path_codec, 'encode_value']),
-        );
+        $this->db_pull_checkpoint_store()->save($checkpoint);
     }
 
     public function db_apply_checkpoint(): DbApplyCheckpoint
     {
-        return DbApplyCheckpoint::from_array(
-            $this->json_state_store->load($this->paths->db_apply_checkpoint_file()) ?? [],
-        );
+        return $this->db_apply_checkpoint_store()->get();
     }
 
     public function save_db_apply_checkpoint(DbApplyCheckpoint $checkpoint): void
     {
-        $this->output->tick_spinner();
-        $this->json_state_store->save(
-            $this->paths->db_apply_checkpoint_file(),
-            $checkpoint->to_array(),
-        );
+        $this->db_apply_checkpoint_store()->save($checkpoint);
     }
 
     public function runtime_checkpoint(): RuntimeCheckpoint
@@ -1358,27 +1540,12 @@ class ImportClient implements PullRuntime
 
     public function files_pull_checkpoint(): FilesPullCheckpoint
     {
-        if ($this->files_pull_checkpoint instanceof FilesPullCheckpoint) {
-            return $this->files_pull_checkpoint;
-        }
-
-        $data = $this->json_state_store->load($this->paths->files_pull_checkpoint_file()) ?? [];
-        $this->files_pull_checkpoint = FilesPullCheckpoint::from_persisted_array(
-            $data,
-            [$this->state_path_codec, 'decode_value'],
-        );
-
-        return $this->files_pull_checkpoint;
+        return $this->files_pull_checkpoint_store()->get();
     }
 
     public function save_files_pull_checkpoint(FilesPullCheckpoint $checkpoint): void
     {
-        $this->output->tick_spinner();
-        $this->files_pull_checkpoint = $checkpoint;
-        $this->json_state_store->save(
-            $this->paths->files_pull_checkpoint_file(),
-            $checkpoint->to_persisted_array([$this->state_path_codec, 'encode_value']),
-        );
+        $this->files_pull_checkpoint_store()->save($checkpoint);
         $this->write_status_file();
     }
 
@@ -1553,13 +1720,13 @@ class ImportClient implements PullRuntime
             $this->state_dir,
             $this->remote_url,
             $this->local_filesystem(),
-            new ImportClientDbApplyCheckpointStore($this),
+            $this->db_apply_checkpoint_store(),
             $this->audit_logger(),
             new ImportOutputDbApplyObserver(
                 $this->output,
                 new ImportOutputMachineEventEmitter($this->output),
             ),
-            new ImportClientDbApplyShutdownToken($this),
+            $this->db_apply_shutdown_token(),
             new JsonSqlStatementStatsStore($this->state_dir . "/.import-sql-stats.json"),
         ))->run(
             $this->db_apply_checkpoint(),
@@ -1677,16 +1844,17 @@ class ImportClient implements PullRuntime
         string $state_key = "fetch"
     ): bool {
         $local_applier = $this->file_sync_local_applier($checkpoint);
-        $workspace = new ImportClientFileSyncWorkspace($this);
+        $workspace = $this->file_sync_workspace();
+        $index = $this->file_index_gateway($workspace);
 
         $downloader = new FileFetchDownloader(
-            new ImportClientFileSyncStreamClient($this),
-            new ImportClientShutdownToken($this),
-            new ImportClientFilesPullCheckpointStore($this),
+            $this->file_sync_stream_client(),
+            $this->file_sync_shutdown_token(),
+            $this->files_pull_checkpoint_store(),
             $local_applier,
-            new ImportClientFilesPullTimeoutPolicy($this),
-            new ImportClientFileIndexGateway($this, $workspace),
-            new FileAuditLogger($this->audit_log, $this->output),
+            $this->file_sync_timeout_policy(),
+            $index,
+            $this->audit_logger(),
         );
 
         try {
@@ -1701,7 +1869,11 @@ class ImportClient implements PullRuntime
                 ],
             );
         } finally {
-            $this->files_imported = $local_applier->files_imported();
+            $this->set_file_sync_progress(
+                $local_applier->files_imported(),
+                $this->file_sync_progress->download_list_done(),
+                $this->file_sync_progress->download_list_total(),
+            );
         }
     }
 
@@ -1714,29 +1886,26 @@ class ImportClient implements PullRuntime
     ): bool
     {
         $local_applier = $this->file_sync_local_applier($checkpoint);
-        $workspace = new ImportClientFileSyncWorkspace($this);
+        $workspace = $this->file_sync_workspace();
 
-        return (new RemoteIndexDownloader(
-            new ImportClientFileSyncStreamClient($this),
-            new ImportClientShutdownToken($this),
-            new ImportClientFilesPullCheckpointStore($this),
+        return (new RemoteIndexDownloaderGateway(
+            $this->file_sync_stream_client(),
+            $this->file_sync_shutdown_token(),
+            $this->files_pull_checkpoint_store(),
             $local_applier,
-            new ImportClientFilesPullTimeoutPolicy($this),
+            $this->file_sync_timeout_policy(),
             $workspace,
-            new FileAuditLogger($this->audit_log, $this->output),
-        ))->download(
-            $checkpoint,
+            $this->audit_logger(),
+            $this->file_sync_progress,
             [
                 "remote_index_file" => $this->remote_index_file,
                 "roots" => $this->get_root_directories_from_preflight(),
                 "export_dirs" => $this->get_export_directories(),
-                "list_dir_override" => $list_dir_override,
                 "follow_symlinks" => $this->follow_symlinks,
                 "include_caches" => $this->include_caches,
                 "save_every" => self::SAVE_STATE_EVERY_N_CHUNKS,
             ],
-            $this->index_entries_counted,
-        );
+        ))->download($checkpoint, $list_dir_override);
     }
 
     /**
@@ -1746,17 +1915,13 @@ class ImportClient implements PullRuntime
     {
         $local_applier = $this->file_sync_local_applier($checkpoint);
 
-        $builder = new FetchListBuilder(
+        $builder = new FetchListBuilderGateway(
             $this->index_store,
             $local_applier,
-            new ImportClientFilesPullCheckpointStore($this),
-            new ImportClientShutdownToken($this),
+            $this->files_pull_checkpoint_store(),
+            $this->file_sync_shutdown_token(),
             new ImportOutputProgressTicker($this->output),
-            new FileAuditLogger($this->audit_log, $this->output),
-        );
-
-        return $builder->build(
-            $checkpoint,
+            $this->audit_logger(),
             $this->remote_index_file,
             $this->index_file,
             $this->download_list_file,
@@ -1764,6 +1929,8 @@ class ImportClient implements PullRuntime
             $this->filter,
             $this->filter === "essential-files" ? $this->get_uploads_basedir() : null,
         );
+
+        return $builder->build($checkpoint);
     }
 
     /**
@@ -1791,26 +1958,30 @@ class ImportClient implements PullRuntime
         string $list_file,
         string $state_key
     ): bool {
-        $executor = new FetchListExecutor(
-            $this->download_list_total,
-            $this->download_list_done,
-            $this->files_imported,
+        $workspace = $this->file_sync_workspace();
+        $local_applier = $this->file_sync_local_applier($checkpoint);
+        $gateway = new FetchListFileFetchGateway(
+            $this->file_sync_stream_client(),
+            $this->file_sync_shutdown_token(),
+            $this->files_pull_checkpoint_store(),
+            $local_applier,
+            $this->file_sync_timeout_policy(),
+            $this->file_index_gateway($workspace),
+            $this->audit_logger(),
+            $this->file_sync_progress,
             $this->get_max_request_bytes(),
-            new ImportClientFetchBatchDownloader($this, $checkpoint),
-            new ImportClientFilesPullCheckpointStore($this),
-            new FileAuditLogger($this->audit_log, $this->output),
+            $this->get_export_directories(),
+            self::SAVE_STATE_EVERY_N_CHUNKS,
         );
 
         try {
-            return $executor->run(
-                $list_file,
-                $state_key,
-                $checkpoint,
-            );
+            return $gateway->fetch_from_list($checkpoint, $list_file, $state_key);
         } finally {
-            $this->download_list_total = $executor->download_list_total();
-            $this->download_list_done = $executor->download_list_done();
-            $this->files_imported = $executor->files_imported();
+            $this->set_file_sync_progress(
+                $this->file_sync_progress->files_imported(),
+                $this->file_sync_progress->download_list_done(),
+                $this->file_sync_progress->download_list_total(),
+            );
         }
     }
 
@@ -1900,10 +2071,10 @@ class ImportClient implements PullRuntime
         $audit = $this->audit_logger();
 
         $checkpoint = (new SqlDownloader(
-            new ImportClientSqlStreamClient($this),
-            new ImportClientSqlShutdownToken($this),
-            new ImportClientDbPullCheckpointStore($this),
-            new ImportClientDbPullTimeoutPolicy($this),
+            $this->sql_stream_client(),
+            $this->sql_shutdown_token(),
+            $this->db_pull_checkpoint_store(),
+            $this->db_pull_timeout_policy(),
             new LocalSqlOutputSinkFactory($audit),
             new JsonSqlDomainStore($this->paths->domains_file()),
             new JsonSqlStatementStatsStore($this->state_dir . "/.import-sql-stats.json"),
@@ -1960,7 +2131,7 @@ class ImportClient implements PullRuntime
 
     public function shutdown_requested(): bool
     {
-        return $this->shutdown_requested;
+        return $this->shutdown->requested();
     }
 
     public function assert_can_retry_db_pull_timeout(
@@ -2084,6 +2255,11 @@ class ImportClient implements PullRuntime
      * browser strings.
      */
     public const USER_AGENTS = ImportHttpSession::USER_AGENTS;
+
+    public function user_agents(): array
+    {
+        return self::USER_AGENTS;
+    }
 
     /**
      * Fetch a JSON response for a lightweight request (non-streaming).
@@ -2243,7 +2419,7 @@ class ImportClient implements PullRuntime
         $this->json_state_store->save($this->state_file, $data);
 
         $indexed = $this->index_count();
-        $files_imported = $this->files_imported; // Completed in this run
+        $files_imported = $this->file_sync_progress->files_imported(); // Completed in this run
         $files_checkpoint = in_array($state->command, ["files-pull", "files-index"], true)
             ? $this->files_pull_checkpoint()
             : null;
@@ -2335,7 +2511,7 @@ class ImportClient implements PullRuntime
         }
         $already_shutting_down = true;
 
-        $this->shutdown_requested = true;
+        $this->shutdown->request();
         $this->output->clear_progress_line();
 
         // Flush index updates so progress is not lost on interrupt
@@ -2351,7 +2527,7 @@ class ImportClient implements PullRuntime
 
         // Log final progress before exit
         $indexed = $this->index_count();
-        $files_imported = $this->files_imported; // Files completed in this run
+        $files_imported = $this->file_sync_progress->files_imported(); // Files completed in this run
         $current_command = $this->state?->command ?? "unknown";
 
         $this->audit_log(

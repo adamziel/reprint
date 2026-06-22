@@ -2,7 +2,6 @@
 
 namespace Reprint\Importer\Command;
 
-use Reprint\Importer\ImportClient;
 
 final class FilesIndexCommand extends ImportCommand
 {
@@ -21,7 +20,7 @@ final class FilesIndexCommand extends ImportCommand
         return true;
     }
 
-    public function execute(ImportClient $client, array $options): ?ImportCommandResult
+    public function execute(ImportRuntime $client, array $options): ?ImportCommandResult
     {
         $client->run_files_index();
         return null;

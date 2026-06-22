@@ -2,16 +2,17 @@
 
 namespace Reprint\Importer\Session;
 
+use Reprint\Importer\Observability\AuditLogger;
+
 final class StatePathCodec
 {
     private const PREFIX = "base64:";
 
-    /** @var callable|null */
-    private $warning_handler;
+    private ?AuditLogger $audit;
 
-    public function __construct(?callable $warning_handler = null)
+    public function __construct(?AuditLogger $audit = null)
     {
-        $this->warning_handler = $warning_handler;
+        $this->audit = $audit;
     }
 
     /**
@@ -41,10 +42,10 @@ final class StatePathCodec
         $encoded = substr($value, strlen(self::PREFIX));
         $decoded = base64_decode($encoded, true);
         if ($decoded === false) {
-            if ($this->warning_handler !== null) {
-                call_user_func(
-                    $this->warning_handler,
+            if ($this->audit !== null) {
+                $this->audit->record(
                     "Warning: invalid base64-encoded state path; resetting field",
+                    true,
                 );
             }
             return null;

@@ -2,7 +2,6 @@
 
 namespace Reprint\Importer\Command;
 
-use Reprint\Importer\ImportClient;
 
 final class PreflightAssertCommand extends ImportCommand
 {
@@ -11,7 +10,7 @@ final class PreflightAssertCommand extends ImportCommand
         return true;
     }
 
-    public function execute(ImportClient $client, array $options): ?ImportCommandResult
+    public function execute(ImportRuntime $client, array $options): ?ImportCommandResult
     {
         $checkpoint = $client->preflight_checkpoint();
         $entry = $checkpoint->entry;

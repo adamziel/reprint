@@ -1,5 +1,6 @@
 <?php
 
+require_once __DIR__ . '/interface-import-runtime.php';
 require_once __DIR__ . '/interface-import-command-result.php';
 require_once __DIR__ . '/class-preflight-report-result.php';
 require_once __DIR__ . '/class-preflight-assert-result.php';

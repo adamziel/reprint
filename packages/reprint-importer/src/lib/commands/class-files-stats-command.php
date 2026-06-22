@@ -3,11 +3,10 @@
 namespace Reprint\Importer\Command;
 
 use Reprint\Importer\FileSync\DownloadList;
-use Reprint\Importer\ImportClient;
 
 final class FilesStatsCommand extends ImportCommand
 {
-    public function execute(ImportClient $client, array $options): ?ImportCommandResult
+    public function execute(ImportRuntime $client, array $options): ?ImportCommandResult
     {
         $remote_index = $client->remote_index_file();
         $download_list = $client->download_list_file();

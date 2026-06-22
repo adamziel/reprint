@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
+use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Pull\PullCheckpoint;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportRunState;
@@ -215,8 +216,23 @@ class ImportSessionInfrastructureTest extends TestCase
     public function testStatePathCodecReportsInvalidEncodedPath(): void
     {
         $warnings = [];
-        $codec = new StatePathCodec(function (string $message) use (&$warnings): void {
-            $warnings[] = $message;
+        $codec = new StatePathCodec(new class($warnings) implements AuditLogger {
+            private array $warnings;
+
+            public function __construct(array &$warnings)
+            {
+                $this->warnings = &$warnings;
+            }
+
+            public function record(string $message, bool $to_console = true): void
+            {
+                $this->warnings[] = $message;
+            }
+
+            public function path(): string
+            {
+                return '';
+            }
         });
 
         $this->assertNull($codec->decode_value('base64:not-valid!!'));

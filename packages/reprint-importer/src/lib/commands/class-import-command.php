@@ -2,7 +2,6 @@
 
 namespace Reprint\Importer\Command;
 
-use Reprint\Importer\ImportClient;
 
 abstract class ImportCommand
 {
@@ -21,10 +20,10 @@ abstract class ImportCommand
         return false;
     }
 
-    public function abort(ImportClient $client, string $command): void
+    public function abort(ImportRuntime $client, string $command): void
     {
         $client->abort_command($command);
     }
 
-    abstract public function execute(ImportClient $client, array $options): ?ImportCommandResult;
+    abstract public function execute(ImportRuntime $client, array $options): ?ImportCommandResult;
 }

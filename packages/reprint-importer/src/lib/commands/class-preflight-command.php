@@ -2,13 +2,12 @@
 
 namespace Reprint\Importer\Command;
 
-use Reprint\Importer\ImportClient;
 use Reprint\Importer\Session\PreflightCheckpoint;
 use function Reprint\Importer\Host\detect_host;
 
 final class PreflightCommand extends ImportCommand
 {
-    public function execute(ImportClient $client, array $options): ?ImportCommandResult
+    public function execute(ImportRuntime $client, array $options): ?ImportCommandResult
     {
         return new PreflightReportResult($this->fetch($client));
     }
@@ -18,7 +17,7 @@ final class PreflightCommand extends ImportCommand
      *
      * @return array<string, mixed>
      */
-    public function fetch(ImportClient $client): array
+    public function fetch(ImportRuntime $client): array
     {
         $url = $client->build_url("preflight", null, []);
         $client->audit_log("PREFLIGHT REQUEST | {$url}", false);
@@ -27,7 +26,7 @@ final class PreflightCommand extends ImportCommand
         // certain UAs, so we cycle through candidates and remember the winner.
         $result = null;
         $payload = null;
-        foreach (ImportClient::USER_AGENTS as $ua) {
+        foreach ($client->user_agents() as $ua) {
             $client->set_request_user_agent($ua);
             $result = $client->fetch_json($url);
             $payload = $result["json"] ?? null;
@@ -101,7 +100,7 @@ final class PreflightCommand extends ImportCommand
     /**
      * @param array<string, mixed> $paths
      */
-    private function log_non_standard_layout(ImportClient $client, array $paths): void
+    private function log_non_standard_layout(ImportRuntime $client, array $paths): void
     {
         $abspath = rtrim($paths["abspath"] ?? "", "/");
         $content_dir = rtrim($paths["content_dir"] ?? "", "/");

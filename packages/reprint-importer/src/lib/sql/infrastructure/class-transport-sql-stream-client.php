@@ -2,17 +2,17 @@
 
 namespace Reprint\Importer\Sql\Infrastructure;
 
-use Reprint\Importer\ImportClient;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Sql\Port\SqlStreamClient;
+use Reprint\Importer\Transport\ImportHttpSession;
 
-final class ImportClientSqlStreamClient implements SqlStreamClient
+final class TransportSqlStreamClient implements SqlStreamClient
 {
-    private ImportClient $client;
+    private ImportHttpSession $session;
 
-    public function __construct(ImportClient $client)
+    public function __construct(ImportHttpSession $session)
     {
-        $this->client = $client;
+        $this->session = $session;
     }
 
     /**
@@ -20,7 +20,7 @@ final class ImportClientSqlStreamClient implements SqlStreamClient
      */
     public function build_url(string $endpoint, ?string $cursor, array $params): string
     {
-        return $this->client->build_url($endpoint, $cursor, $params);
+        return $this->session->build_url($endpoint, $cursor, $params);
     }
 
     /**
@@ -28,7 +28,7 @@ final class ImportClientSqlStreamClient implements SqlStreamClient
      */
     public function tuned_params(string $endpoint): array
     {
-        return $this->client->get_tuned_params($endpoint);
+        return $this->session->tuned_params($endpoint);
     }
 
     /**
@@ -41,7 +41,7 @@ final class ImportClientSqlStreamClient implements SqlStreamClient
         ?array $post_data,
         string $phase
     ): void {
-        $this->client->fetch_export_streaming($url, $cursor, $context, $post_data, $phase);
+        $this->session->fetch_streaming($url, $cursor, $context, $post_data, $phase);
     }
 
     /**
@@ -52,6 +52,6 @@ final class ImportClientSqlStreamClient implements SqlStreamClient
         float $wall_time,
         array $response_stats
     ): void {
-        $this->client->finalize_stream_request($endpoint, $wall_time, $response_stats);
+        $this->session->finalize_tuned_request($endpoint, $wall_time, $response_stats);
     }
 }

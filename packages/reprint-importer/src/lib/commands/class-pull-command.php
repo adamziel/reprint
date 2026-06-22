@@ -2,7 +2,6 @@
 
 namespace Reprint\Importer\Command;
 
-use Reprint\Importer\ImportClient;
 
 final class PullCommand extends ImportCommand
 {
@@ -11,12 +10,12 @@ final class PullCommand extends ImportCommand
         return true;
     }
 
-    public function abort(ImportClient $client, string $command): void
+    public function abort(ImportRuntime $client, string $command): void
     {
         $client->abort_pull();
     }
 
-    public function execute(ImportClient $client, array $options): ?ImportCommandResult
+    public function execute(ImportRuntime $client, array $options): ?ImportCommandResult
     {
         $client->run_pull($options);
         return null;

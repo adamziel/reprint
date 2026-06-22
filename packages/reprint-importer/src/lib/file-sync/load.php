@@ -5,6 +5,7 @@ require_once __DIR__ . '/class-download-list.php';
 require_once __DIR__ . '/class-fetch-checkpoint.php';
 require_once __DIR__ . '/port/load.php';
 require_once __DIR__ . '/class-file-sync-event.php';
+require_once __DIR__ . '/class-file-sync-transfer-progress.php';
 require_once __DIR__ . '/class-file-fetch-downloader.php';
 require_once __DIR__ . '/class-file-chunk-applier.php';
 require_once __DIR__ . '/class-fetch-list-builder.php';

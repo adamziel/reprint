@@ -3,14 +3,13 @@
 namespace Reprint\Importer\Command;
 
 use RuntimeException;
-use Reprint\Importer\ImportClient;
 use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
 use Reprint\Importer\Sql\SqlDomainScanner;
 use Reprint\Importer\UrlRewrite\DomainCollector;
 
 final class DbDomainsCommand extends ImportCommand
 {
-    public function execute(ImportClient $client, array $options): ?ImportCommandResult
+    public function execute(ImportRuntime $client, array $options): ?ImportCommandResult
     {
         $paths = $client->paths();
         $domains_file = $paths->domains_file();

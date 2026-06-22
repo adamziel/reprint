@@ -4,45 +4,47 @@ namespace Reprint\Importer\FileSync\Infrastructure;
 
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\Port\FileSyncWorkspace;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Session\ImportPaths;
 
-final class ImportClientFileSyncWorkspace implements FileSyncWorkspace
+final class ImportPathFileSyncWorkspace implements FileSyncWorkspace
 {
-    private ImportClient $client;
+    private ImportPaths $paths;
+    private string $fs_root;
 
-    public function __construct(ImportClient $client)
+    public function __construct(ImportPaths $paths, string $fs_root)
     {
-        $this->client = $client;
+        $this->paths = $paths;
+        $this->fs_root = $fs_root;
     }
 
     public function fs_root(): string
     {
-        return $this->client->fs_root();
+        return $this->fs_root;
     }
 
     public function index_file(): string
     {
-        return $this->client->paths()->index_file();
+        return $this->paths->index_file();
     }
 
     public function remote_index_file(): string
     {
-        return $this->client->paths()->remote_index_file();
+        return $this->paths->remote_index_file();
     }
 
     public function download_list_file(): string
     {
-        return $this->client->paths()->download_list_file();
+        return $this->paths->download_list_file();
     }
 
     public function skipped_download_list_file(): string
     {
-        return $this->client->paths()->skipped_download_list_file();
+        return $this->paths->skipped_download_list_file();
     }
 
     public function audit_log_file(): string
     {
-        return $this->client->paths()->audit_log();
+        return $this->paths->audit_log();
     }
 
     public function file_has_entries(string $file): bool
@@ -52,12 +54,11 @@ final class ImportClientFileSyncWorkspace implements FileSyncWorkspace
 
     public function is_fs_root_empty(): bool
     {
-        $root = $this->fs_root();
-        if (!is_dir($root)) {
+        if (!is_dir($this->fs_root)) {
             return true;
         }
 
-        $entries = scandir($root);
+        $entries = scandir($this->fs_root);
         if ($entries === false) {
             return true;
         }

@@ -2,24 +2,34 @@
 
 namespace Reprint\Importer\FileSync\Infrastructure;
 
+use Reprint\Importer\FileSync\FileSyncTransferProgress;
 use Reprint\Importer\FileSync\Port\FileIndexGateway;
 use Reprint\Importer\FileSync\Port\FileSyncWorkspace;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Index\IndexFileSorter;
+use Reprint\Importer\Index\IndexStore;
 
-final class ImportClientFileIndexGateway implements FileIndexGateway
+final class IndexStoreFileIndexGateway implements FileIndexGateway
 {
-    private ImportClient $client;
+    private IndexStore $index_store;
+    private IndexFileSorter $sorter;
     private FileSyncWorkspace $workspace;
+    private FileSyncTransferProgress $progress;
 
-    public function __construct(ImportClient $client, FileSyncWorkspace $workspace)
-    {
-        $this->client = $client;
+    public function __construct(
+        IndexStore $index_store,
+        IndexFileSorter $sorter,
+        FileSyncWorkspace $workspace,
+        FileSyncTransferProgress $progress
+    ) {
+        $this->index_store = $index_store;
+        $this->sorter = $sorter;
         $this->workspace = $workspace;
+        $this->progress = $progress;
     }
 
     public function recover_updates(): void
     {
-        $this->client->recover_index_updates();
+        $this->index_store->recover();
     }
 
     public function local_index_has_entries(): bool
@@ -29,7 +39,7 @@ final class ImportClientFileIndexGateway implements FileIndexGateway
 
     public function count_local_index(): int
     {
-        return $this->client->index_count();
+        return $this->index_store->count();
     }
 
     public function count_remote_index(): int
@@ -44,21 +54,21 @@ final class ImportClientFileIndexGateway implements FileIndexGateway
 
     public function sort_remote_index(): void
     {
-        $this->client->sort_index_file($this->workspace->remote_index_file());
+        $this->sorter->sort($this->workspace->remote_index_file());
     }
 
     public function index_entries_counted(): int
     {
-        return $this->client->index_entries_counted();
+        return $this->progress->index_entries_counted();
     }
 
     public function reset_transfer_progress(): void
     {
-        $this->client->set_file_sync_progress(0, null, null);
+        $this->progress->reset_transfer_counts();
     }
 
     public function finalize_updates(): void
     {
-        $this->client->finalize_index_updates();
+        $this->index_store->finalize_updates();
     }
 }

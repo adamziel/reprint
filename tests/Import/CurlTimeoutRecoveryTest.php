@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\ImportClient;
@@ -11,6 +12,7 @@ use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Sql\DbPullCheckpoint;
+use Reprint\Importer\Sql\Port\SqlStreamClient;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -636,18 +638,36 @@ class CurlTimeoutRecoveryTest extends TestCase
  * simulating a cURL timeout without making real HTTP requests.
  * The cursor is NOT advanced — simulates a complete stall.
  */
+abstract class CurlTimeoutRecoveryTestStreamClient implements FileSyncStreamClient, SqlStreamClient
+{
+    public function build_url(string $endpoint, ?string $cursor, array $params): string
+    {
+        return 'http://fake.url/?endpoint=' . rawurlencode($endpoint);
+    }
+
+    public function tuned_params(string $endpoint): array
+    {
+        return [];
+    }
+
+    public function finalize_request(
+        string $endpoint,
+        float $wall_time,
+        array $response_stats
+    ): void {
+    }
+}
+
 class TimeoutTestClient extends ImportClient
 {
-    protected function fetch_streaming(
-        string $url,
-        ?string $cursor,
-        StreamingContext $context,
-        ?array $post_data = null,
-        ?string $endpoint = null
-    ): void {
-        throw new CurlTimeoutException(
-            "cURL error: Operation timed out after 300001 milliseconds with 0 bytes received"
-        );
+    protected function file_sync_stream_client(): FileSyncStreamClient
+    {
+        return new TimeoutTestStreamClient();
+    }
+
+    protected function sql_stream_client(): SqlStreamClient
+    {
+        return new TimeoutTestStreamClient();
     }
 }
 
@@ -658,12 +678,25 @@ class TimeoutTestClient extends ImportClient
  */
 class InterruptedAfterStreamedPartCloseClient extends ImportClient
 {
-    protected function fetch_streaming(
+    protected function file_sync_stream_client(): FileSyncStreamClient
+    {
+        return new InterruptedAfterStreamedPartCloseStreamClient();
+    }
+
+    protected function sql_stream_client(): SqlStreamClient
+    {
+        return new TimeoutTestStreamClient();
+    }
+}
+
+class InterruptedAfterStreamedPartCloseStreamClient extends CurlTimeoutRecoveryTestStreamClient
+{
+    public function fetch_streaming(
         string $url,
         ?string $cursor,
         StreamingContext $context,
-        ?array $post_data = null,
-        ?string $endpoint = null
+        ?array $post_data,
+        string $phase
     ): void {
         $headers = [
             "x-chunk-type" => "file",
@@ -700,12 +733,40 @@ class InterruptedAfterStreamedPartCloseClient extends ImportClient
  */
 class SuccessTestClient extends ImportClient
 {
-    protected function fetch_streaming(
+    protected function file_sync_stream_client(): FileSyncStreamClient
+    {
+        return new SuccessTestStreamClient();
+    }
+
+    protected function sql_stream_client(): SqlStreamClient
+    {
+        return new SuccessTestStreamClient();
+    }
+}
+
+class TimeoutTestStreamClient extends CurlTimeoutRecoveryTestStreamClient
+{
+    public function fetch_streaming(
         string $url,
         ?string $cursor,
         StreamingContext $context,
-        ?array $post_data = null,
-        ?string $endpoint = null
+        ?array $post_data,
+        string $phase
+    ): void {
+        throw new CurlTimeoutException(
+            "cURL error: Operation timed out after 300001 milliseconds with 0 bytes received"
+        );
+    }
+}
+
+class SuccessTestStreamClient extends CurlTimeoutRecoveryTestStreamClient
+{
+    public function fetch_streaming(
+        string $url,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data,
+        string $phase
     ): void {
         // Signal completion
         $context->saw_completion = true;

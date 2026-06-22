@@ -2,7 +2,6 @@
 
 namespace Reprint\Importer\Command;
 
-use Reprint\Importer\ImportClient;
 
 final class DbApplyCommand extends ImportCommand
 {
@@ -16,7 +15,7 @@ final class DbApplyCommand extends ImportCommand
         return true;
     }
 
-    public function execute(ImportClient $client, array $options): ?ImportCommandResult
+    public function execute(ImportRuntime $client, array $options): ?ImportCommandResult
     {
         $client->run_db_apply($options);
         return null;
