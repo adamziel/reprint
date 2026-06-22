@@ -30,7 +30,8 @@ final class FilesStatsCommand extends ImportCommand
 
         $pending_count = 0;
         $pending_bytes = 0;
-        $fetch_offset = $client->state["fetch"]["offset"] ?? 0;
+        $checkpoint = $client->files_pull_checkpoint();
+        $fetch_offset = $checkpoint->fetch->offset;
         if (is_file($download_list)) {
             $handle = fopen($download_list, "r");
             if ($handle) {
@@ -51,7 +52,7 @@ final class FilesStatsCommand extends ImportCommand
 
         $skipped_pending_count = 0;
         $skipped_pending_bytes = 0;
-        $skipped_offset = $client->state["fetch_skipped"]["offset"] ?? 0;
+        $skipped_offset = $checkpoint->fetch_skipped->offset;
         $skipped_list = $client->skipped_download_list_file();
         if (is_file($skipped_list)) {
             $handle = fopen($skipped_list, "r");

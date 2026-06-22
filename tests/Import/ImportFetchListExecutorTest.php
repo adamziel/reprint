@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\DownloadList;
+use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FetchListExecutor;
 use RuntimeException;
 
@@ -27,7 +28,7 @@ final class ImportFetchListExecutorTest extends TestCase
     protected function tearDown(): void
     {
         foreach ($this->saved_states as $state) {
-            $batch_file = $state['batch_file'] ?? null;
+            $batch_file = $state instanceof FetchCheckpoint ? $state->batch_file : null;
             if (is_string($batch_file) && is_file($batch_file)) {
                 @unlink($batch_file);
             }
@@ -50,15 +51,15 @@ final class ImportFetchListExecutorTest extends TestCase
             },
         );
 
-        $complete = $executor->run($list, 'fetch', [], $this->default_fetch_state());
+        $complete = $executor->run($list, 'fetch', FetchCheckpoint::fresh());
 
         $this->assertTrue($complete);
         $this->assertSame(['/a.txt', '/b.txt'], $downloaded);
         $this->assertSame(2, $executor->download_list_total());
         $this->assertSame(2, $executor->download_list_done());
         $this->assertSame(0, $executor->files_imported());
-        $this->assertGreaterThan(0, $this->saved_states['fetch']['offset']);
-        $this->assertNull($this->saved_states['fetch']['batch_file']);
+        $this->assertGreaterThan(0, $this->saved_states['fetch']->offset);
+        $this->assertNull($this->saved_states['fetch']->batch_file);
         $this->assertNotEmpty($this->audit);
     }
 
@@ -67,12 +68,12 @@ final class ImportFetchListExecutorTest extends TestCase
         $list = $this->write_list(['/a.txt']);
         $executor = $this->make_executor(fn(): bool => false);
 
-        $complete = $executor->run($list, 'fetch', [], $this->default_fetch_state());
+        $complete = $executor->run($list, 'fetch', FetchCheckpoint::fresh());
 
         $this->assertFalse($complete);
         $this->assertSame(1, $executor->download_list_total());
         $this->assertSame(0, $executor->download_list_done());
-        $this->assertNotNull($this->saved_states['fetch']['batch_file']);
+        $this->assertNotNull($this->saved_states['fetch']->batch_file);
     }
 
     public function testCountersAreAvailableAfterDownloadException(): void
@@ -83,7 +84,7 @@ final class ImportFetchListExecutorTest extends TestCase
         });
 
         try {
-            $executor->run($list, 'fetch', [], $this->default_fetch_state());
+            $executor->run($list, 'fetch', FetchCheckpoint::fresh());
             $this->fail('Expected RuntimeException');
         } catch (RuntimeException $e) {
             $this->assertSame('network failed', $e->getMessage());
@@ -101,24 +102,13 @@ final class ImportFetchListExecutorTest extends TestCase
             7,
             4 * 1024 * 1024,
             $download_batch,
-            function (string $state_key, array $fetch_state): void {
-                $this->saved_states[$state_key] = $fetch_state;
+            function (string $state_key, FetchCheckpoint $fetch_checkpoint): void {
+                $this->saved_states[$state_key] = clone $fetch_checkpoint;
             },
             function (string $message): void {
                 $this->audit[] = $message;
             },
         );
-    }
-
-    private function default_fetch_state(): array
-    {
-        return [
-            'offset' => 0,
-            'next_offset' => 0,
-            'batch_file' => null,
-            'batch_entries' => 0,
-            'cursor' => null,
-        ];
     }
 
     private function write_list(array $paths): string

@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Index\IndexStore;
@@ -35,8 +36,7 @@ class FileBodyStreamingTest extends TestCase
 
     public function testFilePartBodiesAreWrittenIncrementally(): void
     {
-        $state = [];
-        $applier = $this->makeApplier($state);
+        $applier = $this->makeApplier();
         $context = new StreamingContext();
         $bodyLengths = [];
         $context->on_chunk = function (array $chunk) use ($applier, $context, &$bodyLengths): void {
@@ -102,8 +102,7 @@ class FileBodyStreamingTest extends TestCase
         $halfwayPoint = (int) (strlen($body) / 2);
         $firstHalf = substr($body, 0, $halfwayPoint);
         $secondHalf = substr($body, $halfwayPoint);
-        $state = [];
-        $applier = $this->makeApplier($state);
+        $applier = $this->makeApplier();
 
         // Pass 1: stream the first half. The remote-side cursor would still
         // point at the start of this part because the server never finished
@@ -200,7 +199,7 @@ class FileBodyStreamingTest extends TestCase
             'Final file must be byte-identical to source after mid-file resume.');
     }
 
-    private function makeApplier(array &$state): FileSyncLocalApplier
+    private function makeApplier(): FileSyncLocalApplier
     {
         return new FileSyncLocalApplier(
             new LocalImportFilesystem(
@@ -222,7 +221,7 @@ class FileBodyStreamingTest extends TestCase
             0,
             null,
             null,
-            $state,
+            FilesPullCheckpoint::fresh(),
             function (string $message, bool $to_console = true): void {
             },
             function (array $progress, bool $force = false): void {

@@ -10,10 +10,12 @@ use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightCommand;
 use Reprint\Importer\FileSync\DownloadList;
+use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileFetchDownloader;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\IntermediateSymlinkRecreator;
 use Reprint\Importer\FileSync\RemoteIndexDownloader;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
@@ -122,10 +124,12 @@ class ImportClient
 
     /**
      * @var array Session-level run state loaded from / saved to $state_file.
-     * Workflow-specific progress belongs in .reprint/*/checkpoint.json.
+     * Workflow-specific progress belongs in per-workflow checkpoint files.
      * @var array|null
      */
     public $state;
+
+    private ?FilesPullCheckpoint $files_pull_checkpoint = null;
 
     /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
     private $shutdown_requested = false;
@@ -514,7 +518,7 @@ class ImportClient
         );
     }
 
-    private function file_sync_local_applier(): FileSyncLocalApplier
+    private function file_sync_local_applier(?FilesPullCheckpoint $checkpoint = null): FileSyncLocalApplier
     {
         return new FileSyncLocalApplier(
             $this->local_filesystem(),
@@ -528,7 +532,7 @@ class ImportClient
             $this->files_imported,
             $this->download_list_done,
             $this->download_list_total,
-            $this->state,
+            $checkpoint,
             function (string $message, bool $to_console = true): void {
                 $this->audit_log($message, $to_console);
             },
@@ -851,6 +855,9 @@ class ImportClient
             $command,
             $this->sql_output_mode,
         );
+        if ($command === "files-pull" || $command === "files-index") {
+            $this->files_pull_checkpoint = null;
+        }
         $this->save_state($this->state);
 
         $this->output->show_lifecycle_line("State cleared for {$command}.\n");
@@ -1070,10 +1077,11 @@ class ImportClient
      */
     public function run_files_sync(): void
     {
+        $checkpoint = $this->files_pull_checkpoint();
         $state_command = $this->state["command"] ?? null;
         $current_status =
             $state_command === "files-pull"
-                ? $this->state["status"] ?? null
+                ? $checkpoint->status ?? $this->state["status"] ?? null
                 : null;
         $has_progress =
             $state_command === "files-pull" &&
@@ -1083,7 +1091,7 @@ class ImportClient
         $this->recover_index_updates();
 
         if ($current_status === "complete") {
-            $this->handle_completed_files_sync();
+            $this->handle_completed_files_sync($checkpoint);
             return;
         }
 
@@ -1097,30 +1105,31 @@ class ImportClient
         $is_delta = $this->has_local_file_index();
 
         if ($has_progress) {
-            $this->report_files_sync_resume();
+            $this->report_files_sync_resume($checkpoint);
         } else {
-            $this->start_files_sync($is_delta);
+            $this->start_files_sync($checkpoint, $is_delta);
         }
 
-        $this->state["command"] = "files-pull";
-        $this->state["status"] = "in_progress";
-        $this->save_state($this->state);
+        $checkpoint->status = "in_progress";
+        $this->save_files_pull_checkpoint($checkpoint);
+        $this->record_command_status("files-pull", "in_progress");
 
-        $this->run_files_sync_pipeline();
+        $this->run_files_sync_pipeline($checkpoint);
 
-        if (($this->state["status"] ?? null) === "partial") {
+        if ($checkpoint->status === "partial") {
+            $this->record_command_status("files-pull", "partial");
             return;
         }
 
-        $this->complete_files_sync($is_delta);
+        $this->complete_files_sync($checkpoint, $is_delta);
     }
 
-    private function handle_completed_files_sync(): void
+    private function handle_completed_files_sync(FilesPullCheckpoint $checkpoint): void
     {
         $has_skipped = $this->has_skipped_download_list();
 
         if ($this->filter === "skipped-earlier") {
-            $this->start_skipped_files_fetch($has_skipped);
+            $this->start_skipped_files_fetch($checkpoint, $has_skipped);
             return;
         }
 
@@ -1134,7 +1143,10 @@ class ImportClient
             filesize($this->skipped_download_list_file) > 0;
     }
 
-    private function start_skipped_files_fetch(bool $has_skipped): void
+    private function start_skipped_files_fetch(
+        FilesPullCheckpoint $checkpoint,
+        bool $has_skipped
+    ): void
     {
         if (!$has_skipped) {
             throw new RuntimeException(
@@ -1155,10 +1167,21 @@ class ImportClient
             "stage" => "fetch-skipped",
             "message" => "Downloading previously skipped files",
         ], true);
-        $this->state["status"] = "in_progress";
-        $this->state["stage"] = "fetch-skipped";
-        $this->save_state($this->state);
-        $this->run_files_sync_pipeline();
+        $checkpoint->status = "in_progress";
+        $checkpoint->stage = "fetch-skipped";
+        $this->save_files_pull_checkpoint($checkpoint);
+        $this->record_command_status("files-pull", "in_progress");
+
+        $this->run_files_sync_pipeline($checkpoint);
+        if ($checkpoint->status === "partial") {
+            $this->record_command_status("files-pull", "partial");
+            return;
+        }
+
+        $checkpoint->status = "complete";
+        $checkpoint->stage = null;
+        $this->save_files_pull_checkpoint($checkpoint);
+        $this->record_command_status("files-pull", "complete");
     }
 
     private function report_files_sync_already_complete(bool $has_skipped): void
@@ -1205,10 +1228,10 @@ class ImportClient
         )) === 0;
     }
 
-    private function report_files_sync_resume(): void
+    private function report_files_sync_resume(FilesPullCheckpoint $checkpoint): void
     {
         $index_size = $this->index_count();
-        $stage = $this->state["stage"] ?? "index";
+        $stage = $checkpoint->stage ?? "index";
 
         $this->audit_log(
             sprintf(
@@ -1232,7 +1255,7 @@ class ImportClient
         ], true);
     }
 
-    private function start_files_sync(bool $is_delta): void
+    private function start_files_sync(FilesPullCheckpoint $checkpoint, bool $is_delta): void
     {
         $is_empty = $this->is_fs_root_empty();
         if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
@@ -1242,14 +1265,9 @@ class ImportClient
             );
         }
 
-        $this->state["command"] = "files-pull";
-        $this->state["status"] = "in_progress";
-        $this->state["stage"] = "index";
-        $this->state["diff"] = $this->default_state()["diff"];
-        $this->state["index"] = $this->default_state()["index"];
-        $this->state["fetch"] = $this->default_state()["fetch"];
-        $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
-        $this->save_state($this->state);
+        $checkpoint->reset_for_files_pull();
+        $this->save_files_pull_checkpoint($checkpoint);
+        $this->record_command_status("files-pull", "in_progress");
 
         if ($is_delta) {
             $this->report_files_sync_delta_start();
@@ -1297,10 +1315,15 @@ class ImportClient
         ], true);
     }
 
-    private function complete_files_sync(bool $is_delta): void
+    private function complete_files_sync(
+        FilesPullCheckpoint $checkpoint,
+        bool $is_delta
+    ): void
     {
-        $this->state["status"] = "complete";
-        $this->save_state($this->state);
+        $checkpoint->status = "complete";
+        $checkpoint->stage = null;
+        $this->save_files_pull_checkpoint($checkpoint);
+        $this->record_command_status("files-pull", "complete");
 
         $this->output->clear_progress_line();
         $index_size = $this->index_count();
@@ -1326,27 +1349,27 @@ class ImportClient
         $this->report_volatile_files();
     }
 
-    private function run_files_sync_pipeline(): void
+    private function run_files_sync_pipeline(FilesPullCheckpoint $checkpoint): void
     {
-        $stage = $this->state["stage"] ?? "index";
+        $stage = $checkpoint->stage ?? "index";
 
         if ($stage === "index") {
-            if (!$this->download_remote_index()) {
-                $this->mark_files_sync_partial();
+            if (!$this->download_remote_index($checkpoint)) {
+                $this->mark_files_sync_partial($checkpoint);
                 return;
             }
 
             if ($this->follow_symlinks) {
-                $this->discover_symlink_targets();
+                $this->discover_symlink_targets($checkpoint);
                 if ($this->shutdown_requested) {
-                    $this->mark_files_sync_partial();
+                    $this->mark_files_sync_partial($checkpoint);
                     return;
                 }
             }
 
             $this->sort_index_file($this->remote_index_file);
-            $this->state["stage"] = "diff";
-            $this->state["diff"] = $this->default_state()["diff"];
+            $checkpoint->stage = "diff";
+            $checkpoint->reset_diff();
             $this->delete_file_if_exists(
                 $this->download_list_file,
                 "clearing before diff stage",
@@ -1355,13 +1378,13 @@ class ImportClient
                 $this->skipped_download_list_file,
                 "clearing before diff stage",
             );
-            $this->save_state($this->state);
+            $this->save_files_pull_checkpoint($checkpoint);
             $stage = "diff";
         }
 
         if ($stage === "diff") {
-            if (!$this->diff_indexes_and_build_fetch_list()) {
-                $this->mark_files_sync_partial();
+            if (!$this->diff_indexes_and_build_fetch_list($checkpoint)) {
+                $this->mark_files_sync_partial($checkpoint);
                 return;
             }
 
@@ -1376,8 +1399,8 @@ class ImportClient
                 $stage = null;
             }
 
-            $this->state["stage"] = $stage;
-            $this->save_state($this->state);
+            $checkpoint->stage = $stage;
+            $this->save_files_pull_checkpoint($checkpoint);
 
             if ($has_downloads) {
                 $this->show_download_progress_start(
@@ -1401,27 +1424,31 @@ class ImportClient
         }
 
         if ($stage === "fetch") {
-            if (!$this->download_files_from_list($this->download_list_file, "fetch")) {
-                $this->mark_files_sync_partial();
+            if (!$this->download_files_from_list(
+                $checkpoint,
+                $this->download_list_file,
+                "fetch",
+            )) {
+                $this->mark_files_sync_partial($checkpoint);
                 return;
             }
 
-            $this->state["fetch"] = $this->default_state()["fetch"];
+            $checkpoint->fetch->reset();
             $this->delete_file_if_exists($this->download_list_file, "fetch complete");
 
             $has_skipped = $this->file_has_entries($this->skipped_download_list_file);
 
             if ($has_skipped && $this->filter === "essential-files") {
-                $this->state["stage"] = null;
-                $this->save_state($this->state);
+                $checkpoint->stage = null;
+                $this->save_files_pull_checkpoint($checkpoint);
                 $this->audit_log(
                     "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_download_list_file} - run with --filter=skipped-earlier to download them",
                     true,
                 );
                 $stage = null;
             } elseif ($has_skipped) {
-                $this->state["stage"] = "fetch-skipped";
-                $this->save_state($this->state);
+                $checkpoint->stage = "fetch-skipped";
+                $this->save_files_pull_checkpoint($checkpoint);
                 $stage = "fetch-skipped";
                 $this->audit_log(
                     "ESSENTIAL FILES COMPLETE | transitioning to skipped files",
@@ -1429,24 +1456,25 @@ class ImportClient
                 );
                 $this->write_status_file();
             } else {
-                $this->state["stage"] = null;
-                $this->save_state($this->state);
+                $checkpoint->stage = null;
+                $this->save_files_pull_checkpoint($checkpoint);
                 $stage = null;
             }
         }
 
         if ($stage === "fetch-skipped") {
             if (!$this->download_files_from_list(
+                $checkpoint,
                 $this->skipped_download_list_file,
                 "fetch_skipped",
             )) {
-                $this->mark_files_sync_partial();
+                $this->mark_files_sync_partial($checkpoint);
                 return;
             }
 
-            $this->state["stage"] = null;
-            $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
-            $this->save_state($this->state);
+            $checkpoint->stage = null;
+            $checkpoint->fetch_skipped->reset();
+            $this->save_files_pull_checkpoint($checkpoint);
 
             $this->delete_file_if_exists(
                 $this->skipped_download_list_file,
@@ -1464,10 +1492,10 @@ class ImportClient
         }
     }
 
-    private function mark_files_sync_partial(): void
+    private function mark_files_sync_partial(FilesPullCheckpoint $checkpoint): void
     {
-        $this->state["status"] = "partial";
-        $this->save_state($this->state);
+        $checkpoint->status = "partial";
+        $this->save_files_pull_checkpoint($checkpoint);
     }
 
     private function file_has_entries(string $file): bool
@@ -1520,6 +1548,7 @@ class ImportClient
      */
     public function run_files_index(): void
     {
+        $checkpoint = $this->files_pull_checkpoint();
         $state_command = $this->state["command"] ?? null;
         $current_status =
             $state_command === "files-index"
@@ -1533,10 +1562,9 @@ class ImportClient
         }
 
         if ($current_status === null) {
-            $this->state["command"] = "files-index";
-            $this->state["status"] = "in_progress";
-            $this->state["stage"] = "index";
-            $this->save_state($this->state);
+            $checkpoint->reset_for_files_pull();
+            $this->save_files_pull_checkpoint($checkpoint);
+            $this->record_command_status("files-index", "in_progress");
             $this->audit_log("START files-index", true);
             $this->output->show_lifecycle_line("Starting files-index\n");
             $this->output_progress([
@@ -1546,7 +1574,7 @@ class ImportClient
                 "message" => "Starting files-index",
             ], true);
         } else {
-            $cursor = $this->state["index"]["cursor"] ?? null;
+            $cursor = $checkpoint->index_cursor;
             $this->audit_log(
                 sprintf(
                     "RESUME files-index | cursor=%s",
@@ -1563,24 +1591,24 @@ class ImportClient
             ], true);
         }
 
-        $this->state["command"] = "files-index";
-        $this->save_state($this->state);
+        $this->record_command_status("files-index", "in_progress");
 
         $attempts = 0;
-        $last_cursor = $this->state["index"]["cursor"] ?? null;
+        $last_cursor = $checkpoint->index_cursor;
         while (true) {
-            $complete = $this->download_remote_index();
+            $complete = $this->download_remote_index($checkpoint);
             if ($complete) {
                 break;
             }
 
             if ($this->shutdown_requested) {
-                $this->state["status"] = "partial";
-                $this->save_state($this->state);
+                $checkpoint->status = "partial";
+                $this->save_files_pull_checkpoint($checkpoint);
+                $this->record_command_status("files-index", "partial");
                 return;
             }
 
-            $current_cursor = $this->state["index"]["cursor"] ?? null;
+            $current_cursor = $checkpoint->index_cursor;
             if ($current_cursor === $last_cursor) {
                 throw new RuntimeException(
                     "files-index made no progress (cursor unchanged)",
@@ -1600,13 +1628,14 @@ class ImportClient
         // index them as additional directories.  Repeats until no new targets
         // are found, with cycle detection via realpath.
         if ($this->follow_symlinks) {
-            $this->discover_symlink_targets();
+            $this->discover_symlink_targets($checkpoint);
         }
 
         $this->sort_index_file($this->remote_index_file);
-        $this->state["status"] = "complete";
-        $this->state["stage"] = null;
-        $this->save_state($this->state);
+        $checkpoint->status = "complete";
+        $checkpoint->stage = null;
+        $this->save_files_pull_checkpoint($checkpoint);
+        $this->record_command_status("files-index", "complete");
 
         $count = 0;
         if (file_exists($this->remote_index_file)) {
@@ -1645,15 +1674,15 @@ class ImportClient
      * resolves relative targets to absolute paths, and indexes each target
      * directory. Repeats until the queue is drained, with cycle detection.
      */
-    private function discover_symlink_targets(): void
+    private function discover_symlink_targets(FilesPullCheckpoint $checkpoint): void
     {
         (new SymlinkTargetIndexer(
             $this->remote_index_file,
-            function (string $directory): bool {
-                return $this->download_remote_index($directory);
+            function (string $directory) use ($checkpoint): bool {
+                return $this->download_remote_index($checkpoint, $directory);
             },
-            function (array $state): void {
-                $this->save_state($state);
+            function (FilesPullCheckpoint $checkpoint): void {
+                $this->save_files_pull_checkpoint($checkpoint);
             },
             function (): bool {
                 return $this->shutdown_requested;
@@ -1667,7 +1696,7 @@ class ImportClient
             function (array $progress): void {
                 $this->output_progress($progress, true);
             },
-        ))->discover($this->state, $this->get_root_directories_from_preflight());
+        ))->discover($checkpoint, $this->get_root_directories_from_preflight());
     }
 
     /**
@@ -1729,6 +1758,32 @@ class ImportClient
             $this->paths->db_apply_checkpoint_file(),
             $checkpoint->to_array(),
         );
+    }
+
+    public function files_pull_checkpoint(): FilesPullCheckpoint
+    {
+        if ($this->files_pull_checkpoint instanceof FilesPullCheckpoint) {
+            return $this->files_pull_checkpoint;
+        }
+
+        $data = $this->json_state_store->load($this->paths->files_pull_checkpoint_file()) ?? [];
+        $this->files_pull_checkpoint = FilesPullCheckpoint::from_persisted_array(
+            $data,
+            [$this->state_path_codec, 'decode_value'],
+        );
+
+        return $this->files_pull_checkpoint;
+    }
+
+    public function save_files_pull_checkpoint(FilesPullCheckpoint $checkpoint): void
+    {
+        $this->output->tick_spinner();
+        $this->files_pull_checkpoint = $checkpoint;
+        $this->json_state_store->save(
+            $this->paths->files_pull_checkpoint_file(),
+            $checkpoint->to_persisted_array([$this->state_path_codec, 'encode_value']),
+        );
+        $this->write_status_file();
     }
 
     private function record_command_status(string $command, ?string $status): void
@@ -2028,11 +2083,12 @@ class ImportClient
      * @param string|null $cursor Cursor for resumption within the current batch
      */
     private function download_file_fetch(
+        FilesPullCheckpoint $checkpoint,
         ?array $post_data,
         ?string $cursor,
         string $state_key = "fetch"
     ): bool {
-        $local_applier = $this->file_sync_local_applier();
+        $local_applier = $this->file_sync_local_applier($checkpoint);
 
         return (new FileFetchDownloader(
             function (string $endpoint, ?string $cursor, array $params): string {
@@ -2053,8 +2109,8 @@ class ImportClient
             function (): bool {
                 return $this->shutdown_requested;
             },
-            function (array $state): void {
-                $this->save_state($state);
+            function (FilesPullCheckpoint $checkpoint): void {
+                $this->save_files_pull_checkpoint($checkpoint);
             },
             function (array $chunk, StreamingContext $context) use ($local_applier): void {
                 $local_applier->handle_metadata_chunk($chunk, $context);
@@ -2086,8 +2142,9 @@ class ImportClient
                 string $phase,
                 ?string $cursor_before,
                 ?string $cursor_after
-            ): void {
-                $this->assert_can_retry_consecutive_timeout(
+            ) use ($checkpoint): void {
+                $this->assert_can_retry_files_pull_timeout(
+                    $checkpoint,
                     $phase,
                     $cursor_before,
                     $cursor_after,
@@ -2103,7 +2160,7 @@ class ImportClient
                 $this->audit_log($message, $to_console);
             },
         ))->download(
-            $this->state,
+            $checkpoint,
             [
                 "post_data" => $post_data,
                 "cursor" => $cursor,
@@ -2117,9 +2174,12 @@ class ImportClient
     /**
      * Download the remote index stream and write to disk.
      */
-    private function download_remote_index(?string $list_dir_override = null): bool
+    private function download_remote_index(
+        FilesPullCheckpoint $checkpoint,
+        ?string $list_dir_override = null
+    ): bool
     {
-        $local_applier = $this->file_sync_local_applier();
+        $local_applier = $this->file_sync_local_applier($checkpoint);
 
         return (new RemoteIndexDownloader(
             function (string $endpoint, ?string $cursor, array $params): string {
@@ -2140,8 +2200,8 @@ class ImportClient
             function (): bool {
                 return $this->shutdown_requested;
             },
-            function (array $state): void {
-                $this->save_state($state);
+            function (FilesPullCheckpoint $checkpoint): void {
+                $this->save_files_pull_checkpoint($checkpoint);
             },
             function (array $chunk, StreamingContext $context) use ($local_applier): void {
                 $local_applier->handle_metadata_chunk($chunk, $context);
@@ -2163,8 +2223,9 @@ class ImportClient
                 string $phase,
                 ?string $cursor_before,
                 ?string $cursor_after
-            ): void {
-                $this->assert_can_retry_consecutive_timeout(
+            ) use ($checkpoint): void {
+                $this->assert_can_retry_files_pull_timeout(
+                    $checkpoint,
                     $phase,
                     $cursor_before,
                     $cursor_after,
@@ -2180,7 +2241,7 @@ class ImportClient
                 $this->audit_log($message, $to_console);
             },
         ))->download(
-            $this->state,
+            $checkpoint,
             [
                 "remote_index_file" => $this->remote_index_file,
                 "roots" => $this->get_root_directories_from_preflight(),
@@ -2210,9 +2271,9 @@ class ImportClient
     /**
      * Diff local index against remote index and build download list.
      */
-    private function diff_indexes_and_build_fetch_list(): bool
+    private function diff_indexes_and_build_fetch_list(FilesPullCheckpoint $checkpoint): bool
     {
-        $local_applier = $this->file_sync_local_applier();
+        $local_applier = $this->file_sync_local_applier($checkpoint);
 
         $builder = new FetchListBuilder(
             $this->index_store,
@@ -2225,9 +2286,9 @@ class ImportClient
             function (string $path) use ($local_applier): void {
                 $local_applier->emit_skip_progress($path);
             },
-            function (array $diff): void {
-                $this->state["diff"] = $diff;
-                $this->save_state($this->state);
+            function (array $diff) use ($checkpoint): void {
+                $checkpoint->set_diff_state($diff);
+                $this->save_files_pull_checkpoint($checkpoint);
             },
             function (): bool {
                 return $this->shutdown_requested;
@@ -2245,7 +2306,7 @@ class ImportClient
             $this->index_file,
             $this->download_list_file,
             $this->skipped_download_list_file,
-            $this->state["diff"] ?? [],
+            $checkpoint->diff_state(),
             $this->filter,
             $this->filter === "essential-files" ? $this->get_uploads_basedir() : null,
         );
@@ -2272,16 +2333,17 @@ class ImportClient
      *                          (e.g. "fetch" or "fetch_skipped").
      */
     private function download_files_from_list(
+        FilesPullCheckpoint $checkpoint,
         string $list_file,
         string $state_key
     ): bool {
-        $fetch_state = $this->state[$state_key] ?? $this->default_state()[$state_key];
+        $fetch_checkpoint = $checkpoint->fetch_checkpoint($state_key);
         $executor = new FetchListExecutor(
             $this->download_list_total,
             $this->download_list_done,
             $this->files_imported,
             $this->get_max_request_bytes(),
-            function (string $batch_file, $cursor, string $state_key): bool {
+            function (string $batch_file, $cursor, string $state_key) use ($checkpoint): bool {
                 $post_data = [
                     "file_list" => new CURLFile(
                         $batch_file,
@@ -2290,11 +2352,16 @@ class ImportClient
                     ),
                 ];
 
-                return $this->download_file_fetch($post_data, $cursor, $state_key);
+                return $this->download_file_fetch(
+                    $checkpoint,
+                    $post_data,
+                    $cursor,
+                    $state_key,
+                );
             },
-            function (string $state_key, array $fetch_state): void {
-                $this->state[$state_key] = $fetch_state;
-                $this->save_state($this->state);
+            function (string $state_key, FetchCheckpoint $fetch_checkpoint) use ($checkpoint): void {
+                $checkpoint->{$state_key} = $fetch_checkpoint;
+                $this->save_files_pull_checkpoint($checkpoint);
             },
             function (string $message): void {
                 $this->audit_log($message);
@@ -2305,8 +2372,7 @@ class ImportClient
             return $executor->run(
                 $list_file,
                 $state_key,
-                $fetch_state,
-                $this->default_state()[$state_key],
+                $fetch_checkpoint,
             );
         } finally {
             $this->download_list_total = $executor->download_list_total();
@@ -2525,6 +2591,35 @@ class ImportClient
 
     public function assert_can_retry_db_pull_timeout(
         DbPullCheckpoint $checkpoint,
+        string $phase,
+        ?string $cursor_before,
+        ?string $cursor_after
+    ): void {
+        if ($cursor_after !== null && $cursor_after !== $cursor_before) {
+            $checkpoint->consecutive_timeouts = 0;
+        } else {
+            $checkpoint->consecutive_timeouts++;
+        }
+
+        $count = $checkpoint->consecutive_timeouts;
+        $this->audit_log(
+            "CURL TIMEOUT | {$phase} | consecutive_timeouts={$count}/" .
+                self::MAX_CONSECUTIVE_TIMEOUTS .
+                " | cursor_moved=" .
+                ($cursor_after !== $cursor_before ? "yes" : "no"),
+            true,
+        );
+
+        if ($count >= self::MAX_CONSECUTIVE_TIMEOUTS) {
+            throw new RuntimeException(
+                "Remote server appears unreachable: {$count} consecutive " .
+                "cURL timeouts with no progress during {$phase}. Giving up.",
+            );
+        }
+    }
+
+    public function assert_can_retry_files_pull_timeout(
+        FilesPullCheckpoint $checkpoint,
         string $phase,
         ?string $cursor_before,
         ?string $cursor_after
@@ -2942,10 +3037,18 @@ class ImportClient
 
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run
+        $files_checkpoint = in_array($state["command"] ?? null, ["files-pull", "files-index"], true)
+            ? $this->files_pull_checkpoint()
+            : null;
         $has_cursor =
             !empty($state["cursor"] ?? null) ||
             !empty($state["index"]["cursor"] ?? null) ||
-            !empty($state["fetch"]["cursor"] ?? null);
+            !empty($state["fetch"]["cursor"] ?? null) ||
+            ($files_checkpoint !== null && (
+                !empty($files_checkpoint->index_cursor) ||
+                !empty($files_checkpoint->fetch->cursor) ||
+                !empty($files_checkpoint->fetch_skipped->cursor)
+            ));
         $cursor_info = $has_cursor ? "cursor=saved" : "cursor=none";
 
         $this->audit_log(
@@ -2972,10 +3075,15 @@ class ImportClient
     {
         $state = $this->state ?? [];
         $command = $state["command"] ?? null;
-        $status = $error !== null ? "error" : ($state["status"] ?? "in_progress");
+        $files_checkpoint = in_array($command, ["files-pull", "files-index"], true)
+            ? $this->files_pull_checkpoint()
+            : null;
+        $status = $error !== null
+            ? "error"
+            : ($files_checkpoint->status ?? $state["status"] ?? "in_progress");
 
         // Derive phase from the state's stage field
-        $phase = $state["stage"] ?? null;
+        $phase = $files_checkpoint->stage ?? $state["stage"] ?? null;
 
         $payload = [
             "step" => $this->pipeline_step,

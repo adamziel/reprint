@@ -3,10 +3,13 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FetchCheckpoint;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Sql\DbPullCheckpoint;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -89,6 +92,55 @@ class CurlTimeoutRecoveryTest extends TestCase
             $this->stateDir . '/.reprint/run.json',
             json_encode(array_merge($defaults, $state), JSON_PRETTY_PRINT),
         );
+
+        if (($state["command"] ?? null) === "files-pull") {
+            $this->writeFilesPullCheckpoint($this->filesPullCheckpointFromState($state));
+        }
+    }
+
+    private function filesPullCheckpointFromState(array $state): FilesPullCheckpoint
+    {
+        $diff = is_array($state["diff"] ?? null)
+            ? $state["diff"]
+            : ["remote_offset" => 0, "local_after" => null];
+
+        return new FilesPullCheckpoint(
+            isset($state["status"]) && is_string($state["status"]) ? $state["status"] : null,
+            isset($state["stage"]) && is_string($state["stage"]) ? $state["stage"] : null,
+            isset($state["index"]["cursor"]) && is_string($state["index"]["cursor"])
+                ? $state["index"]["cursor"]
+                : null,
+            (int) ($diff["remote_offset"] ?? 0),
+            isset($diff["local_after"]) && is_string($diff["local_after"])
+                ? $diff["local_after"]
+                : null,
+            FetchCheckpoint::from_array(is_array($state["fetch"] ?? null) ? $state["fetch"] : []),
+            FetchCheckpoint::from_array(
+                is_array($state["fetch_skipped"] ?? null) ? $state["fetch_skipped"] : [],
+            ),
+            isset($state["current_file"]) && is_string($state["current_file"])
+                ? $state["current_file"]
+                : null,
+            isset($state["current_file_bytes"]) ? (int) $state["current_file_bytes"] : null,
+            (int) ($state["consecutive_timeouts"] ?? 0),
+        );
+    }
+
+    private function writeFilesPullCheckpoint(FilesPullCheckpoint $checkpoint): void
+    {
+        $dir = $this->stateDir . '/.reprint/files-pull';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        $codec = new StatePathCodec();
+        file_put_contents(
+            $dir . '/checkpoint.json',
+            json_encode(
+                $checkpoint->to_persisted_array([$codec, 'encode_value']),
+                JSON_PRETTY_PRINT,
+            ),
+        );
     }
 
     private function writeDbPullCheckpoint(array $checkpoint): void
@@ -113,6 +165,18 @@ class CurlTimeoutRecoveryTest extends TestCase
     {
         $contents = file_get_contents($this->stateDir . '/.reprint/db-pull/checkpoint.json');
         return json_decode($contents, true);
+    }
+
+    private function readFilesPullCheckpoint(): FilesPullCheckpoint
+    {
+        $contents = file_get_contents($this->stateDir . '/.reprint/files-pull/checkpoint.json');
+        $data = json_decode($contents, true);
+        $codec = new StatePathCodec();
+
+        return FilesPullCheckpoint::from_persisted_array(
+            is_array($data) ? $data : [],
+            [$codec, 'decode_value'],
+        );
     }
 
     public static function fileCursorForBytes(int $bytes): string
@@ -235,6 +299,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $downloadFilesFetch = $reflection->getMethod('download_file_fetch');
         $result = $downloadFilesFetch->invoke(
             $client,
+            $client->files_pull_checkpoint(),
             null,
             base64_encode('{"path":"/photo.jpg","offset":4096}'),
             "fetch",
@@ -245,10 +310,10 @@ class CurlTimeoutRecoveryTest extends TestCase
             "download_file_fetch should return false (not complete) on timeout"
         );
 
-        $state = $this->readState();
+        $checkpoint = $this->readFilesPullCheckpoint();
         $this->assertEquals(
             "partial",
-            $state["status"],
+            $checkpoint->status,
             "After cURL timeout during file fetch, status should be 'partial'"
         );
     }
@@ -282,6 +347,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         try {
             $downloadFilesFetch->invoke(
                 $client,
+                $client->files_pull_checkpoint(),
                 null,
                 self::fileCursorForBytes(256),
                 "fetch",
@@ -296,10 +362,10 @@ class CurlTimeoutRecoveryTest extends TestCase
             );
         }
 
-        $state = $this->readState();
-        $savedBytes = $state["current_file_bytes"] ?? null;
+        $checkpoint = $this->readFilesPullCheckpoint();
+        $savedBytes = $checkpoint->current_file_bytes;
         $savedCursorBytes = self::fileCursorBytes(
-            $state["fetch"]["cursor"] ?? null,
+            $checkpoint->fetch->cursor,
         );
 
         $this->assertNotNull(
@@ -342,21 +408,21 @@ class CurlTimeoutRecoveryTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
 
         $downloadIndex = $reflection->getMethod('download_remote_index');
-        $result = $downloadIndex->invoke($client);
+        $result = $downloadIndex->invoke($client, $client->files_pull_checkpoint());
 
         $this->assertFalse(
             $result,
             "download_remote_index should return false on timeout"
         );
 
-        $state = $this->readState();
+        $checkpoint = $this->readFilesPullCheckpoint();
         $this->assertEquals(
             "partial",
-            $state["status"],
+            $checkpoint->status,
             "After cURL timeout during index download, status should be 'partial'"
         );
         $this->assertNotNull(
-            $state["index"]["cursor"] ?? null,
+            $checkpoint->index_cursor,
             "Index cursor should be preserved for resumption"
         );
     }
@@ -619,12 +685,12 @@ class CurlTimeoutRecoveryTest extends TestCase
         );
 
         $downloadIndex = $reflection->getMethod('download_remote_index');
-        $downloadIndex->invoke($client);
+        $downloadIndex->invoke($client, $client->files_pull_checkpoint());
 
-        $state = $this->readState();
+        $checkpoint = $this->readFilesPullCheckpoint();
         $this->assertEquals(
             0,
-            $state["consecutive_timeouts"],
+            $checkpoint->consecutive_timeouts,
             "Successful request should reset consecutive_timeouts to 0"
         );
     }

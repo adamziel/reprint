@@ -27,27 +27,6 @@ final class ImportStateSchema
                 "bytes" => 0,
                 "updated_at" => null,
             ],
-            "diff" => [
-                "remote_offset" => 0,
-                "local_after" => null,
-            ],
-            "index" => [
-                "cursor" => null,
-            ],
-            "fetch" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-            ],
-            "fetch_skipped" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-            ],
-            "current_file" => null,
-            "current_file_bytes" => null,
             "sql_bytes" => null,
             "apply" => [
                 "statements_executed" => 0,
@@ -86,7 +65,7 @@ final class ImportStateSchema
         $state = array_intersect_key($state, $defaults);
         $state = array_merge($defaults, $state);
 
-        foreach (["diff", "index", "fetch", "fetch_skipped", "tuning", "db_index", "apply", "pull"] as $key) {
+        foreach (["tuning", "db_index", "apply", "pull"] as $key) {
             $value = $state[$key] ?? [];
             if (!is_array($value)) {
                 $value = [];

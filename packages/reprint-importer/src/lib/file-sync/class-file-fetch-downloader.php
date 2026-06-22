@@ -94,7 +94,6 @@ final class FileFetchDownloader
     /**
      * Download file content for a prepared file list.
      *
-     * @param array<string, mixed> $state
      * @param array{
      *     post_data:?array,
      *     cursor:?string,
@@ -103,14 +102,15 @@ final class FileFetchDownloader
      *     save_every:int
      * } $config
      */
-    public function download(array &$state, array $config): bool
+    public function download(FilesPullCheckpoint $checkpoint, array $config): bool
     {
         $state_key = $config["state_key"];
         $cursor = $config["cursor"] ?? null;
-        $cursor = $cursor ?? ($state[$state_key]["cursor"] ?? null);
+        $fetch_checkpoint = $checkpoint->fetch_checkpoint($state_key);
+        $cursor = $cursor ?? $fetch_checkpoint->cursor;
 
-        $tracked_file = $state["current_file"] ?? null;
-        $tracked_bytes = $state["current_file_bytes"] ?? null;
+        $tracked_file = $checkpoint->current_file;
+        $tracked_bytes = $checkpoint->current_file_bytes;
         if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
             $actual_size = filesize($tracked_file);
             if ($actual_size > $tracked_bytes) {
@@ -169,8 +169,8 @@ final class FileFetchDownloader
             $context,
             $config["save_every"],
             $this->should_stop,
-            function (string $state_key, ?string $cursor, StreamingContext $context) use (&$state): void {
-                $this->save_file_fetch_checkpoint($state, $state_key, $cursor, $context);
+            function (string $state_key, ?string $cursor, StreamingContext $context) use ($checkpoint): void {
+                $this->save_file_fetch_checkpoint($checkpoint, $state_key, $cursor, $context);
             },
             $this->handle_metadata,
             $this->handle_file,
@@ -198,17 +198,17 @@ final class FileFetchDownloader
         } catch (CurlTimeoutException $e) {
             $cursor = $response_handler->cursor();
             ($this->assert_can_retry_timeout)("file_fetch", $cursor_before, $cursor);
-            $state[$state_key]["cursor"] = $cursor;
+            $fetch_checkpoint->cursor = $cursor;
             ($this->finalize_index_updates)();
-            $this->track_current_file_if_active($state, $context);
-            $state["status"] = "partial";
-            ($this->save_state)($state);
+            $this->track_current_file_if_active($checkpoint, $context);
+            $checkpoint->status = "partial";
+            ($this->save_state)($checkpoint);
             return false;
         }
 
         $cursor = $response_handler->cursor();
         $complete = $response_handler->complete();
-        $state["consecutive_timeouts"] = 0;
+        $checkpoint->consecutive_timeouts = 0;
         $wall_time = microtime(true) - $request_start;
 
         ($this->finalize_request)(
@@ -216,53 +216,50 @@ final class FileFetchDownloader
             $wall_time,
             $context->response_stats ?? [],
         );
-        $state[$state_key]["cursor"] = $cursor;
+        $fetch_checkpoint->cursor = $cursor;
         ($this->finalize_index_updates)();
-        $this->track_current_file($state, $context);
-        ($this->save_state)($state);
+        $this->track_current_file($checkpoint, $context);
+        ($this->save_state)($checkpoint);
 
         return $complete;
     }
 
-    /**
-     * @param array<string, mixed> $state
-     */
     private function save_file_fetch_checkpoint(
-        array &$state,
+        FilesPullCheckpoint $checkpoint,
         string $state_key,
         ?string $cursor,
         StreamingContext $context
     ): void {
-        $state[$state_key]["cursor"] = $cursor;
-        $this->track_current_file($state, $context);
-        ($this->save_state)($state);
+        $checkpoint->fetch_checkpoint($state_key)->cursor = $cursor;
+        $this->track_current_file($checkpoint, $context);
+        ($this->save_state)($checkpoint);
     }
 
-    /**
-     * @param array<string, mixed> $state
-     */
-    private function track_current_file(array &$state, StreamingContext $context): void
+    private function track_current_file(
+        FilesPullCheckpoint $checkpoint,
+        StreamingContext $context
+    ): void
     {
         if ($context->file_handle && $context->file_path) {
             fflush($context->file_handle);
-            $state["current_file"] = $context->file_path;
-            $state["current_file_bytes"] = $context->file_bytes_written;
+            $checkpoint->current_file = $context->file_path;
+            $checkpoint->current_file_bytes = $context->file_bytes_written;
             return;
         }
 
-        $state["current_file"] = null;
-        $state["current_file_bytes"] = null;
+        $checkpoint->current_file = null;
+        $checkpoint->current_file_bytes = null;
     }
 
-    /**
-     * @param array<string, mixed> $state
-     */
-    private function track_current_file_if_active(array &$state, StreamingContext $context): void
+    private function track_current_file_if_active(
+        FilesPullCheckpoint $checkpoint,
+        StreamingContext $context
+    ): void
     {
         if ($context->file_handle && $context->file_path) {
             fflush($context->file_handle);
-            $state["current_file"] = $context->file_path;
-            $state["current_file_bytes"] = $context->file_bytes_written;
+            $checkpoint->current_file = $context->file_path;
+            $checkpoint->current_file_bytes = $context->file_bytes_written;
         }
     }
 }

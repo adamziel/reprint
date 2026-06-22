@@ -3,6 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FetchCheckpoint;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
@@ -46,9 +48,8 @@ class ImportSessionInfrastructureTest extends TestCase
 
         $this->assertSame('files-pull', $state['command']);
         $this->assertArrayNotHasKey('unknown', $state);
-        $this->assertSame(['remote_offset' => 0, 'local_after' => null], $state['diff']);
-        $this->assertSame(42, $state['fetch']['offset']);
-        $this->assertArrayNotHasKey('extra', $state['fetch']);
+        $this->assertArrayNotHasKey('diff', $state);
+        $this->assertArrayNotHasKey('fetch', $state);
         $this->assertSame('sqlite', $state['apply']['target_engine']);
         $this->assertSame(0, $state['apply']['statements_executed']);
     }
@@ -57,9 +58,6 @@ class ImportSessionInfrastructureTest extends TestCase
     {
         $codec = new StatePathCodec();
         $state = ImportStateSchema::default_state();
-        $state['diff']['local_after'] = "/var/www/\0site";
-        $state['fetch']['batch_file'] = '/tmp/batch.json';
-        $state['current_file'] = '/tmp/current';
         $state['db_index']['file'] = '/tmp/db-tables.jsonl';
         $state['preflight'] = [
             'data' => [
@@ -73,18 +71,49 @@ class ImportSessionInfrastructureTest extends TestCase
         ];
 
         $encoded = $codec->encode_state_paths($state);
-        $this->assertStringStartsWith('base64:', $encoded['diff']['local_after']);
         $this->assertStringStartsWith('base64:', $encoded['preflight']['data']['runtime']['document_root']);
 
         $decoded = $codec->decode_state_paths($encoded);
-        $this->assertSame($state['diff']['local_after'], $decoded['diff']['local_after']);
-        $this->assertSame($state['fetch']['batch_file'], $decoded['fetch']['batch_file']);
-        $this->assertSame($state['current_file'], $decoded['current_file']);
         $this->assertSame($state['db_index']['file'], $decoded['db_index']['file']);
         $this->assertSame(
             '/srv/htdocs/wp-content',
             $decoded['preflight']['data']['filesystem']['directories'][0]['path'],
         );
+    }
+
+    public function testFilesPullCheckpointPathCodecRoundTripsByteSensitivePaths(): void
+    {
+        $codec = new StatePathCodec();
+        $checkpoint = new FilesPullCheckpoint(
+            "in_progress",
+            "fetch",
+            null,
+            0,
+            "/var/www/\0site",
+            new FetchCheckpoint(0, 0, '/tmp/batch.json'),
+            new FetchCheckpoint(0, 0, '/tmp/skipped-batch.json'),
+            '/tmp/current',
+        );
+
+        $encoded = $checkpoint->to_persisted_array([$codec, 'encode_value']);
+        $this->assertStringStartsWith('base64:', $encoded["diff"]["local_after"]);
+        $this->assertStringStartsWith('base64:', $encoded["fetch"]["batch_file"]);
+        $this->assertStringStartsWith('base64:', $encoded["fetch_skipped"]["batch_file"]);
+        $this->assertStringStartsWith('base64:', $encoded["current_file"]);
+
+        $decoded = FilesPullCheckpoint::from_persisted_array(
+            $encoded,
+            [$codec, 'decode_value'],
+        );
+        $this->assertSame($checkpoint->status, $decoded->status);
+        $this->assertSame($checkpoint->stage, $decoded->stage);
+        $this->assertSame($checkpoint->diff_local_after, $decoded->diff_local_after);
+        $this->assertSame($checkpoint->fetch->batch_file, $decoded->fetch->batch_file);
+        $this->assertSame(
+            $checkpoint->fetch_skipped->batch_file,
+            $decoded->fetch_skipped->batch_file,
+        );
+        $this->assertSame($checkpoint->current_file, $decoded->current_file);
     }
 
     public function testStatePathCodecReportsInvalidEncodedPath(): void

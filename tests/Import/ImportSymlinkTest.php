@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Index\IndexStore;
@@ -61,11 +62,10 @@ class ImportSymlinkTest extends TestCase
 
     private function handleSymlinkChunk(array $chunk): void
     {
-        $state = [];
-        $this->makeApplier($state)->handle_symlink_chunk($chunk);
+        $this->makeApplier()->handle_symlink_chunk($chunk);
     }
 
-    private function makeApplier(array &$state): FileSyncLocalApplier
+    private function makeApplier(): FileSyncLocalApplier
     {
         return new FileSyncLocalApplier(
             new LocalImportFilesystem(
@@ -87,7 +87,7 @@ class ImportSymlinkTest extends TestCase
             0,
             null,
             null,
-            $state,
+            FilesPullCheckpoint::fresh(),
             function (string $message, bool $to_console = true): void {
             },
             function (array $progress, bool $force = false): void {

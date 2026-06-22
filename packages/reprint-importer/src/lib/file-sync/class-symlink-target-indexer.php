@@ -47,10 +47,9 @@ final class SymlinkTargetIndexer
     /**
      * Recursively discover and index directories referenced by symlinks.
      *
-     * @param array<string, mixed> $state
      * @param array<int, string>   $roots
      */
-    public function discover(array &$state, array $roots): void
+    public function discover(FilesPullCheckpoint $checkpoint, array $roots): void
     {
         $visited = [];
         foreach ($roots as $root) {
@@ -86,10 +85,10 @@ final class SymlinkTargetIndexer
                 "message" => "Following symlink target: {$dir}",
             ]);
 
-            $state["index"]["cursor"] = null;
-            $this->save_state($state);
+            $checkpoint->index_cursor = null;
+            $this->save_state($checkpoint);
 
-            $this->index_target_directory($state, $dir);
+            $this->index_target_directory($checkpoint, $dir);
             if ($this->should_stop()) {
                 return;
             }
@@ -103,9 +102,11 @@ final class SymlinkTargetIndexer
     }
 
     /**
-     * @param array<string, mixed> $state
      */
-    private function index_target_directory(array &$state, string $dir): void
+    private function index_target_directory(
+        FilesPullCheckpoint $checkpoint,
+        string $dir
+    ): void
     {
         $attempts = 0;
         $last_cursor = null;
@@ -129,7 +130,7 @@ final class SymlinkTargetIndexer
                 return;
             }
 
-            $current_cursor = $state["index"]["cursor"] ?? null;
+            $current_cursor = $checkpoint->index_cursor;
             if ($current_cursor === $last_cursor) {
                 throw new RuntimeException(
                     "files-index (symlink follow) made no progress (cursor unchanged)",
@@ -251,11 +252,10 @@ final class SymlinkTargetIndexer
     }
 
     /**
-     * @param array<string, mixed> $state
      */
-    private function save_state(array $state): void
+    private function save_state(FilesPullCheckpoint $checkpoint): void
     {
-        ($this->save_state)($state);
+        ($this->save_state)($checkpoint);
     }
 
     private function should_stop(): bool

@@ -16,15 +16,6 @@ final class StatePathCodec
 
     public function encode_state_paths(array $state): array
     {
-        $state["diff"]["local_after"] = $this->encode_value(
-            $state["diff"]["local_after"] ?? null,
-        );
-        $state["fetch"]["batch_file"] = $this->encode_value(
-            $state["fetch"]["batch_file"] ?? null,
-        );
-        $state["current_file"] = $this->encode_value(
-            $state["current_file"] ?? null,
-        );
         $state["db_index"]["file"] = $this->encode_value(
             $state["db_index"]["file"] ?? null,
         );
@@ -45,15 +36,6 @@ final class StatePathCodec
 
     public function decode_state_paths(array $state): array
     {
-        $state["diff"]["local_after"] = $this->decode_value(
-            $state["diff"]["local_after"] ?? null,
-        );
-        $state["fetch"]["batch_file"] = $this->decode_value(
-            $state["fetch"]["batch_file"] ?? null,
-        );
-        $state["current_file"] = $this->decode_value(
-            $state["current_file"] ?? null,
-        );
         $state["db_index"]["file"] = $this->decode_value(
             $state["db_index"]["file"] ?? null,
         );
@@ -182,4 +164,5 @@ final class StatePathCodec
 
         return $data;
     }
+
 }

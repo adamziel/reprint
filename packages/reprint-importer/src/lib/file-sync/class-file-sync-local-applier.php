@@ -28,9 +28,7 @@ final class FileSyncLocalApplier
     private ?int $download_list_done;
     private ?int $download_list_total;
     private ?IndexPathPrefixMatcher $remote_index_prefix_matcher = null;
-
-    /** @var array<string, mixed> */
-    private $state;
+    private ?FilesPullCheckpoint $checkpoint;
 
     /** @var callable */
     private $audit;
@@ -39,7 +37,6 @@ final class FileSyncLocalApplier
     private $output_progress;
 
     /**
-     * @param array<string, mixed> $state
      */
     public function __construct(
         LocalImportFilesystem $filesystem,
@@ -53,7 +50,7 @@ final class FileSyncLocalApplier
         int $files_imported,
         ?int $download_list_done,
         ?int $download_list_total,
-        array &$state,
+        ?FilesPullCheckpoint $checkpoint,
         callable $audit,
         callable $output_progress
     ) {
@@ -68,7 +65,7 @@ final class FileSyncLocalApplier
         $this->files_imported = $files_imported;
         $this->download_list_done = $download_list_done;
         $this->download_list_total = $download_list_total;
-        $this->state =& $state;
+        $this->checkpoint = $checkpoint;
         $this->audit = $audit;
         $this->output_progress = $output_progress;
     }
@@ -183,8 +180,10 @@ final class FileSyncLocalApplier
                 $this->volatile_file_tracker->clear($path);
             },
             function (?string $path, ?int $bytes): void {
-                $this->state["current_file"] = $path;
-                $this->state["current_file_bytes"] = $bytes;
+                if ($this->checkpoint !== null) {
+                    $this->checkpoint->current_file = $path;
+                    $this->checkpoint->current_file_bytes = $bytes;
+                }
             },
         );
 

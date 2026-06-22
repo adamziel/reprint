@@ -47,11 +47,11 @@ final class ImportAbortHandler
                 $this->delete_file($this->paths->download_list_file());
                 $this->delete_file($this->paths->skipped_download_list_file());
                 $this->delete_file($this->paths->volatile_files_file());
+                $this->delete_file(
+                    $this->paths->files_pull_checkpoint_file(),
+                    " | abort files-pull",
+                );
 
-                $defaults = ImportStateSchema::default_state();
-                $state["index"] = $defaults["index"];
-                $state["fetch"] = $defaults["fetch"];
-                $state["fetch_skipped"] = $defaults["fetch_skipped"];
                 return $state;
 
             case "files-index":
@@ -59,7 +59,10 @@ final class ImportAbortHandler
                 $state["command"] = "files-index";
                 $state["status"] = null;
                 $state["stage"] = null;
-                $state["index"] = ImportStateSchema::default_state()["index"];
+                $this->delete_file(
+                    $this->paths->files_pull_checkpoint_file(),
+                    " | abort files-index",
+                );
                 $this->delete_file($this->paths->remote_index_file());
                 return $state;
 

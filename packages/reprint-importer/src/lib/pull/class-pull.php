@@ -360,12 +360,7 @@ class Pull
             $state['stage'] = null;
             $state['consecutive_timeouts'] = 0;
             $state['sql_bytes'] = null;
-            $state['current_file'] = null;
-            $state['current_file_bytes'] = null;
             $state['db_index'] = $defaults['db_index'];
-            $state['diff'] = $defaults['diff'];
-            $state['fetch'] = $defaults['fetch'];
-            $state['fetch_skipped'] = $defaults['fetch_skipped'];
             $state['apply'] = $defaults['apply'];
             $state['sql_output'] = null;
             return $state;
@@ -377,6 +372,7 @@ class Pull
             $state_dir . "/.import-remote-index.jsonl",
             $state_dir . "/.import-download-list.jsonl",
             $state_dir . "/.import-download-list-skipped.jsonl",
+            $state_dir . "/.reprint/files-pull/checkpoint.json",
         ] as $path) {
             if (file_exists($path)) {
                 @unlink($path);

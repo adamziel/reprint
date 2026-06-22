@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\SymlinkTargetIndexer;
 use RuntimeException;
 
@@ -44,12 +45,13 @@ final class SymlinkTargetIndexerTest extends TestCase
         $this->append_link('/srv/root/covered', '/srv/root/already-covered');
         $this->append_link('/srv/root/intermediate', '/srv/intermediate', true);
 
-        $state = ['index' => ['cursor' => 'existing-cursor']];
+        $checkpoint = FilesPullCheckpoint::fresh();
+        $checkpoint->index_cursor = 'existing-cursor';
 
-        $this->make_indexer()->discover($state, ['/srv/root']);
+        $this->make_indexer()->discover($checkpoint, ['/srv/root']);
 
         $this->assertSame(['/srv/external'], $this->downloaded);
-        $this->assertNull($state['index']['cursor']);
+        $this->assertNull($checkpoint->index_cursor);
         $this->assertNotEmpty($this->saved_states);
         $this->assertSame('symlink_follow', $this->progress[0]['type']);
         $this->assertStringContainsString('/srv/external', $this->lifecycle[0]);
@@ -58,11 +60,11 @@ final class SymlinkTargetIndexerTest extends TestCase
     public function testServerRejectedTargetIsSkipped(): void
     {
         $this->append_link('/srv/root/rejected', '/srv/rejected');
-        $state = ['index' => ['cursor' => null]];
+        $checkpoint = FilesPullCheckpoint::fresh();
 
         $this->make_indexer([
             '/srv/rejected' => new RuntimeException('dir_outside_root'),
-        ])->discover($state, ['/srv/root']);
+        ])->discover($checkpoint, ['/srv/root']);
 
         $this->assertSame(['/srv/rejected'], $this->downloaded);
         $this->assertSame('symlink_follow_rejected', $this->progress[1]['type']);
@@ -86,8 +88,8 @@ final class SymlinkTargetIndexerTest extends TestCase
                 }
                 return true;
             },
-            function (array $state): void {
-                $this->saved_states[] = $state;
+            function (FilesPullCheckpoint $checkpoint): void {
+                $this->saved_states[] = clone $checkpoint;
             },
             fn(): bool => false,
             function (string $message, bool $to_console): void {

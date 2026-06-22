@@ -3,12 +3,15 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FetchCheckpoint;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Session\VolatileFileTracker;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -75,7 +78,7 @@ class FilesSyncStateTest extends TestCase
         );
     }
 
-    private function makeLocalApplier(array &$state): FileSyncLocalApplier
+    private function makeLocalApplier(FilesPullCheckpoint $checkpoint): FileSyncLocalApplier
     {
         return new FileSyncLocalApplier(
             new LocalImportFilesystem(
@@ -97,7 +100,7 @@ class FilesSyncStateTest extends TestCase
             0,
             null,
             null,
-            $state,
+            $checkpoint,
             function (string $message, bool $to_console = true): void {
             },
             function (array $progress, bool $force = false): void {
@@ -126,6 +129,55 @@ class FilesSyncStateTest extends TestCase
         file_put_contents(
             $this->stateDir . '/.reprint/run.json',
             json_encode(array_merge($defaults, $state), JSON_PRETTY_PRINT),
+        );
+
+        if (($state["command"] ?? null) === "files-pull") {
+            $this->writeFilesPullCheckpoint($this->filesPullCheckpointFromState($state));
+        }
+    }
+
+    private function filesPullCheckpointFromState(array $state): FilesPullCheckpoint
+    {
+        $diff = is_array($state["diff"] ?? null)
+            ? $state["diff"]
+            : ["remote_offset" => 0, "local_after" => null];
+
+        return new FilesPullCheckpoint(
+            isset($state["status"]) && is_string($state["status"]) ? $state["status"] : null,
+            isset($state["stage"]) && is_string($state["stage"]) ? $state["stage"] : null,
+            isset($state["index"]["cursor"]) && is_string($state["index"]["cursor"])
+                ? $state["index"]["cursor"]
+                : null,
+            (int) ($diff["remote_offset"] ?? 0),
+            isset($diff["local_after"]) && is_string($diff["local_after"])
+                ? $diff["local_after"]
+                : null,
+            FetchCheckpoint::from_array(is_array($state["fetch"] ?? null) ? $state["fetch"] : []),
+            FetchCheckpoint::from_array(
+                is_array($state["fetch_skipped"] ?? null) ? $state["fetch_skipped"] : [],
+            ),
+            isset($state["current_file"]) && is_string($state["current_file"])
+                ? $state["current_file"]
+                : null,
+            isset($state["current_file_bytes"]) ? (int) $state["current_file_bytes"] : null,
+            (int) ($state["consecutive_timeouts"] ?? 0),
+        );
+    }
+
+    private function writeFilesPullCheckpoint(FilesPullCheckpoint $checkpoint): void
+    {
+        $dir = $this->stateDir . '/.reprint/files-pull';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        $codec = new StatePathCodec();
+        file_put_contents(
+            $dir . '/checkpoint.json',
+            json_encode(
+                $checkpoint->to_persisted_array([$codec, 'encode_value']),
+                JSON_PRETTY_PRINT,
+            ),
         );
     }
 
@@ -309,7 +361,7 @@ class FilesSyncStateTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
 
         $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
-        $diffMethod->invoke($client);
+        $diffMethod->invoke($client, $client->files_pull_checkpoint());
 
         $downloads = $this->readDownloadList();
         $this->assertContains(
@@ -347,7 +399,7 @@ class FilesSyncStateTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
 
         $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
-        $diffMethod->invoke($client);
+        $diffMethod->invoke($client, $client->files_pull_checkpoint());
 
         $downloads = $this->readDownloadList();
         $this->assertNotContains(
@@ -381,8 +433,7 @@ class FilesSyncStateTest extends TestCase
         ]);
 
         // Send a file chunk with new content
-        $state = [];
-        $applier = $this->makeLocalApplier($state);
+        $applier = $this->makeLocalApplier(FilesPullCheckpoint::fresh());
         $context = new StreamingContext();
         $chunk = [
             'headers' => [

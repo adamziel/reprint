@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\RemoteIndexDownloader;
 use Reprint\Importer\Protocol\StreamingContext;
 
@@ -30,13 +31,9 @@ final class RemoteIndexDownloaderTest extends TestCase
 
     public function testDownloadsRemoteIndexAndPersistsState(): void
     {
-        $state = [
-            'index' => [
-                'cursor' => null,
-            ],
-        ];
+        $checkpoint = FilesPullCheckpoint::fresh();
         $entries_counted = 0;
-        $saved_states = [];
+        $saved_checkpoints = [];
         $finalized = [];
         $progress_counts = [];
 
@@ -87,8 +84,8 @@ final class RemoteIndexDownloaderTest extends TestCase
             },
             fn(string $endpoint): array => [],
             fn(): bool => false,
-            function (array $state) use (&$saved_states): void {
-                $saved_states[] = $state;
+            function (FilesPullCheckpoint $checkpoint) use (&$saved_checkpoints): void {
+                $saved_checkpoints[] = clone $checkpoint;
             },
             function (): void {
             },
@@ -112,7 +109,7 @@ final class RemoteIndexDownloaderTest extends TestCase
         );
 
         $complete = $downloader->download(
-            $state,
+            $checkpoint,
             [
                 'remote_index_file' => $this->remote_index_file,
                 'roots' => ['/srv/htdocs'],
@@ -136,10 +133,10 @@ final class RemoteIndexDownloaderTest extends TestCase
             ]) . "\n",
             file_get_contents($this->remote_index_file),
         );
-        $this->assertNull($state['index']['cursor']);
-        $this->assertSame(0, $state['consecutive_timeouts']);
+        $this->assertNull($checkpoint->index_cursor);
+        $this->assertSame(0, $checkpoint->consecutive_timeouts);
         $this->assertSame([1], $progress_counts);
-        $this->assertNotEmpty($saved_states);
+        $this->assertNotEmpty($saved_checkpoints);
         $this->assertSame('file_index', $finalized[0]['endpoint']);
         $this->assertSame('complete', $finalized[0]['stats']['status']);
     }

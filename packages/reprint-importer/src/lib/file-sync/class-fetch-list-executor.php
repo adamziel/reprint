@@ -54,8 +54,7 @@ final class FetchListExecutor
     public function run(
         string $list_file,
         string $state_key,
-        array $fetch_state,
-        array $default_fetch_state
+        FetchCheckpoint $fetch_checkpoint
     ): bool {
         if (!file_exists($list_file)) {
             return true;
@@ -66,19 +65,18 @@ final class FetchListExecutor
         }
 
         if ($this->download_list_total === null) {
-            $offset = (int) ($fetch_state["offset"] ?? 0);
+            $offset = $fetch_checkpoint->offset;
             $this->download_list_total = DownloadList::count_lines($list_file);
             $this->download_list_done = $offset > 0
                 ? DownloadList::count_lines($list_file, $offset)
                 : 0;
         }
 
-        $fetch_state = array_merge($default_fetch_state, $fetch_state);
-        $batch_file = $fetch_state["batch_file"] ?? null;
-        $batch_offset = (int) ($fetch_state["offset"] ?? 0);
-        $next_offset = (int) ($fetch_state["next_offset"] ?? 0);
-        $cursor = $fetch_state["cursor"] ?? null;
-        $batch_entries = (int) ($fetch_state["batch_entries"] ?? 0);
+        $batch_file = $fetch_checkpoint->batch_file;
+        $batch_offset = $fetch_checkpoint->offset;
+        $next_offset = $fetch_checkpoint->next_offset;
+        $cursor = $fetch_checkpoint->cursor;
+        $batch_entries = $fetch_checkpoint->batch_entries;
 
         if ($batch_file === null || !file_exists($batch_file)) {
             $batch = DownloadList::prepare_batch(
@@ -94,13 +92,12 @@ final class FetchListExecutor
             $next_offset = $batch["next_offset"];
             $batch_entries = $batch["entries"];
             $cursor = null;
-            $this->save_fetch_state($state_key, [
-                "offset" => $batch_offset,
-                "next_offset" => $next_offset,
-                "batch_file" => $batch_file,
-                "batch_entries" => $batch_entries,
-                "cursor" => null,
-            ]);
+            $fetch_checkpoint->offset = $batch_offset;
+            $fetch_checkpoint->next_offset = $next_offset;
+            $fetch_checkpoint->batch_file = $batch_file;
+            $fetch_checkpoint->batch_entries = $batch_entries;
+            $fetch_checkpoint->cursor = null;
+            $this->save_fetch_checkpoint($state_key, $fetch_checkpoint);
         }
 
         $complete = $this->download_batch($batch_file, $cursor, $state_key);
@@ -118,12 +115,12 @@ final class FetchListExecutor
         }
         $this->files_imported = 0;
 
-        $this->save_fetch_state($state_key, [
-            "offset" => $next_offset,
-            "next_offset" => $next_offset,
-            "batch_file" => null,
-            "cursor" => null,
-        ]);
+        $fetch_checkpoint->offset = $next_offset;
+        $fetch_checkpoint->next_offset = $next_offset;
+        $fetch_checkpoint->batch_file = null;
+        $fetch_checkpoint->batch_entries = 0;
+        $fetch_checkpoint->cursor = null;
+        $this->save_fetch_checkpoint($state_key, $fetch_checkpoint);
 
         return $next_offset >= filesize($list_file);
     }
@@ -133,9 +130,12 @@ final class FetchListExecutor
         return (bool) ($this->download_batch)($batch_file, $cursor, $state_key);
     }
 
-    private function save_fetch_state(string $state_key, array $fetch_state): void
+    private function save_fetch_checkpoint(
+        string $state_key,
+        FetchCheckpoint $fetch_checkpoint
+    ): void
     {
-        ($this->save_fetch_state)($state_key, $fetch_state);
+        ($this->save_fetch_state)($state_key, $fetch_checkpoint);
     }
 
     private function audit(string $message): void

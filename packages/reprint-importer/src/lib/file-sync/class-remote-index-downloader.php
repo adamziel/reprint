@@ -80,7 +80,6 @@ final class RemoteIndexDownloader
     /**
      * Download the remote file index stream and append/write it to disk.
      *
-     * @param array<string, mixed> $state
      * @param array{
      *     remote_index_file:string,
      *     roots:array<int, string>,
@@ -91,10 +90,13 @@ final class RemoteIndexDownloader
      *     save_every:int
      * } $config
      */
-    public function download(array &$state, array $config, int &$entries_counted): bool
+    public function download(
+        FilesPullCheckpoint $checkpoint,
+        array $config,
+        int &$entries_counted
+    ): bool
     {
-        $index_state = $state["index"] ?? [];
-        $cursor = $index_state["cursor"] ?? null;
+        $cursor = $checkpoint->index_cursor;
 
         $roots = $config["roots"];
         if (empty($roots)) {
@@ -153,11 +155,9 @@ final class RemoteIndexDownloader
                 $entries_counted,
                 $config["save_every"],
                 $this->should_stop,
-                function (?string $cursor) use (&$state): void {
-                    $state["index"] = [
-                        "cursor" => $cursor,
-                    ];
-                    ($this->save_state)($state);
+                function (?string $cursor) use ($checkpoint): void {
+                    $checkpoint->index_cursor = $cursor;
+                    ($this->save_state)($checkpoint);
                 },
                 $this->handle_metadata,
                 $this->handle_error,
@@ -178,16 +178,16 @@ final class RemoteIndexDownloader
                 fclose($handle);
                 $handle = null;
 
-                $state["index"] = ["cursor" => $cursor];
-                $state["status"] = "partial";
-                ($this->save_state)($state);
+                $checkpoint->index_cursor = $cursor;
+                $checkpoint->status = "partial";
+                ($this->save_state)($checkpoint);
                 return false;
             }
 
             $cursor = $response_handler->cursor();
             $complete = $response_handler->complete();
             $entries_counted = $response_handler->entries_counted();
-            $state["consecutive_timeouts"] = 0;
+            $checkpoint->consecutive_timeouts = 0;
             $wall_time = microtime(true) - $request_start;
             ($this->finalize_request)(
                 "file_index",
@@ -198,10 +198,8 @@ final class RemoteIndexDownloader
             fclose($handle);
             $handle = null;
 
-            $state["index"] = [
-                "cursor" => $complete ? null : $cursor,
-            ];
-            ($this->save_state)($state);
+            $checkpoint->index_cursor = $complete ? null : $cursor;
+            ($this->save_state)($checkpoint);
 
             return $complete;
         } finally {

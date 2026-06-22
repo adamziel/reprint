@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\FileFetchDownloader;
 use Reprint\Importer\Protocol\StreamingContext;
 
@@ -12,12 +13,8 @@ final class FileFetchDownloaderTest extends TestCase
 {
     public function testDownloadsFileFetchAndPersistsState(): void
     {
-        $state = [
-            'fetch' => [
-                'cursor' => null,
-            ],
-        ];
-        $saved_states = [];
+        $checkpoint = FilesPullCheckpoint::fresh();
+        $saved_checkpoints = [];
         $finalized = [];
         $completion_progress = [];
 
@@ -53,8 +50,8 @@ final class FileFetchDownloaderTest extends TestCase
             },
             fn(string $endpoint): array => [],
             fn(): bool => false,
-            function (array $state) use (&$saved_states): void {
-                $saved_states[] = $state;
+            function (FilesPullCheckpoint $checkpoint) use (&$saved_checkpoints): void {
+                $saved_checkpoints[] = clone $checkpoint;
             },
             function (): void {
             },
@@ -83,7 +80,7 @@ final class FileFetchDownloaderTest extends TestCase
         );
 
         $complete = $downloader->download(
-            $state,
+            $checkpoint,
             [
                 'post_data' => ['file_list' => 'batch'],
                 'cursor' => null,
@@ -94,11 +91,11 @@ final class FileFetchDownloaderTest extends TestCase
         );
 
         $this->assertTrue($complete);
-        $this->assertSame('done-cursor', $state['fetch']['cursor']);
-        $this->assertSame(0, $state['consecutive_timeouts']);
-        $this->assertNull($state['current_file']);
-        $this->assertNull($state['current_file_bytes']);
-        $this->assertNotEmpty($saved_states);
+        $this->assertSame('done-cursor', $checkpoint->fetch->cursor);
+        $this->assertSame(0, $checkpoint->consecutive_timeouts);
+        $this->assertNull($checkpoint->current_file);
+        $this->assertNull($checkpoint->current_file_bytes);
+        $this->assertNotEmpty($saved_checkpoints);
         $this->assertSame('file_fetch', $finalized[0]['endpoint']);
         $this->assertSame('complete', $finalized[0]['stats']['status']);
         $this->assertSame(2, $completion_progress[0]['files_completed']);
