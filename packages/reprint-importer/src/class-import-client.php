@@ -34,7 +34,7 @@ use Reprint\Importer\Pull\PullCheckpoint;
 use Reprint\Importer\Session\ExportDirectoryResolver;
 use Reprint\Importer\Session\ImportAbortHandler;
 use Reprint\Importer\Session\ImportPaths;
-use Reprint\Importer\Session\ImportStateSchema;
+use Reprint\Importer\Session\ImportRunState;
 use Reprint\Importer\Session\JsonStateStore;
 use Reprint\Importer\Session\PreflightCheckpoint;
 use Reprint\Importer\Session\StatePathCodec;
@@ -127,11 +127,10 @@ class ImportClient
     private $download_list_done = null;
 
     /**
-     * @var array Session-level run state loaded from / saved to $state_file.
+     * @var ImportRunState|null Session-level run state loaded from / saved to $state_file.
      * Workflow-specific progress belongs in per-workflow checkpoint files.
-     * @var array|null
      */
-    public $state;
+    public ?ImportRunState $state = null;
 
     private ?PullCheckpoint $pull_checkpoint = null;
     private ?PreflightCheckpoint $preflight_checkpoint = null;
@@ -449,8 +448,18 @@ class ImportClient
      */
     public function mutate_state(callable $mutator): void
     {
-        $this->state = $mutator($this->state);
-        $this->save_state($this->state);
+        $state = $this->run_state();
+        $mutator($state);
+        $this->save_state($state);
+    }
+
+    public function run_state(): ImportRunState
+    {
+        if (!$this->state instanceof ImportRunState) {
+            $this->state = $this->load_state();
+        }
+
+        return $this->state;
     }
 
     /** True when the skipped-download list exists and still has entries. */
@@ -639,22 +648,20 @@ class ImportClient
     private function apply_follow_symlinks_option(ImportRunRequest $request): void
     {
         if ($request->has("follow_symlinks")) {
-            $this->state["follow_symlinks"] = $this->follow_symlinks;
+            $this->state->follow_symlinks = $this->follow_symlinks;
             return;
         }
 
-        if (isset($this->state["follow_symlinks"])) {
-            $this->follow_symlinks = $this->state["follow_symlinks"];
-        }
+        $this->follow_symlinks = $this->state->follow_symlinks;
     }
 
     private function apply_fs_root_behavior_option(ImportRunRequest $request): void
     {
         if ($request->has("fs_root_nonempty_behavior")) {
             $this->fs_root_nonempty_behavior = $request->value("fs_root_nonempty_behavior");
-            $this->state["fs_root_nonempty_behavior"] = $this->fs_root_nonempty_behavior;
+            $this->state->fs_root_nonempty_behavior = $this->fs_root_nonempty_behavior;
         } else {
-            $this->fs_root_nonempty_behavior = $this->state["fs_root_nonempty_behavior"] ?? 'error';
+            $this->fs_root_nonempty_behavior = $this->state->fs_root_nonempty_behavior;
         }
 
         $this->local_filesystem = null;
@@ -663,15 +670,13 @@ class ImportClient
     private function apply_filter_option(ImportRunRequest $request): void
     {
         if (!$request->has("filter")) {
-            if (isset($this->state["filter"])) {
-                $this->filter = $this->state["filter"];
-            }
+            $this->filter = $this->state->filter;
             return;
         }
 
         $next = $request->value("filter");
-        $prev = $this->state["filter"] ?? null;
-        $status = $this->state["status"] ?? null;
+        $prev = $this->state->filter;
+        $status = $this->state->status;
         $is_mid_flight = $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
         if ($is_mid_flight) {
             throw new RuntimeException(
@@ -681,19 +686,19 @@ class ImportClient
         }
 
         $this->filter = $next;
-        $this->state["filter"] = $this->filter;
+        $this->state->filter = $this->filter;
     }
 
     private function apply_max_allowed_packet_option(ImportRunRequest $request): void
     {
         if ($request->has("max_allowed_packet")) {
             $this->max_allowed_packet = (int) $request->value("max_allowed_packet");
-            $this->state["max_allowed_packet"] = $this->max_allowed_packet;
+            $this->state->max_allowed_packet = $this->max_allowed_packet;
             return;
         }
 
-        if (isset($this->state["max_allowed_packet"])) {
-            $this->max_allowed_packet = (int) $this->state["max_allowed_packet"];
+        if ($this->state->max_allowed_packet !== null) {
+            $this->max_allowed_packet = $this->state->max_allowed_packet;
         }
     }
 
@@ -701,9 +706,9 @@ class ImportClient
     {
         if ($request->has("sql_output")) {
             $this->sql_output_mode = $request->value("sql_output");
-            $this->state["sql_output"] = $this->sql_output_mode;
-        } elseif (isset($this->state["sql_output"])) {
-            $this->sql_output_mode = $this->state["sql_output"];
+            $this->state->sql_output = $this->sql_output_mode;
+        } elseif ($this->state->sql_output !== null) {
+            $this->sql_output_mode = $this->state->sql_output;
         }
 
         if ($this->sql_output_mode === "stdout") {
@@ -715,30 +720,30 @@ class ImportClient
     {
         if ($request->has("mysql_host")) {
             $this->mysql_host = $request->value("mysql_host");
-            $this->state["mysql_host"] = $this->mysql_host;
-        } elseif (isset($this->state["mysql_host"])) {
-            $this->mysql_host = $this->state["mysql_host"];
+            $this->state->mysql_host = $this->mysql_host;
+        } elseif ($this->state->mysql_host !== null) {
+            $this->mysql_host = $this->state->mysql_host;
         }
 
         if ($request->has("mysql_port")) {
             $this->mysql_port = (int) $request->value("mysql_port");
-            $this->state["mysql_port"] = $this->mysql_port;
-        } elseif (isset($this->state["mysql_port"])) {
-            $this->mysql_port = (int) $this->state["mysql_port"];
+            $this->state->mysql_port = $this->mysql_port;
+        } elseif ($this->state->mysql_port !== null) {
+            $this->mysql_port = $this->state->mysql_port;
         }
 
         if ($request->has("mysql_user")) {
             $this->mysql_user = $request->value("mysql_user");
-            $this->state["mysql_user"] = $this->mysql_user;
-        } elseif (isset($this->state["mysql_user"])) {
-            $this->mysql_user = $this->state["mysql_user"];
+            $this->state->mysql_user = $this->mysql_user;
+        } elseif ($this->state->mysql_user !== null) {
+            $this->mysql_user = $this->state->mysql_user;
         }
 
         if ($request->has("mysql_database")) {
             $this->mysql_database = $request->value("mysql_database");
-            $this->state["mysql_database"] = $this->mysql_database;
-        } elseif (isset($this->state["mysql_database"])) {
-            $this->mysql_database = $this->state["mysql_database"];
+            $this->state->mysql_database = $this->mysql_database;
+        } elseif ($this->state->mysql_database !== null) {
+            $this->mysql_database = $this->state->mysql_database;
         }
     }
 
@@ -795,7 +800,7 @@ class ImportClient
 
     public function finish_command_status(string $command): void
     {
-        $final_status = $this->state["status"] ?? "complete";
+        $final_status = $this->state?->status ?? "complete";
         $this->output_progress(["status" => $final_status, "message" => "{$command} {$final_status}"]);
 
         // Exit code 2 signals "partial progress, call me again" so
@@ -853,20 +858,17 @@ class ImportClient
      */
     private function initialize_tuner(array $options): void
     {
-        $config = $this->state["tuning"]["config"] ?? [];
-        $state = $this->state["tuning"]["state"] ?? [];
+        $config = $this->state->tuning_config();
+        $state = $this->state->tuning_state();
         $cli_config = $options["tuning_config"] ?? [];
 
         $config = array_merge($config, $cli_config);
 
         $this->tuner = new AdaptiveTuner($config, $state);
-        $this->state["tuning"] = [
-            "config" => $this->tuner->get_config(),
-            "state" => $this->tuner->get_state(),
-        ];
+        $this->state->set_tuning($this->tuner->get_config(), $this->tuner->get_state());
 
         $this->audit_log(
-            "TUNER CONFIG | " . json_encode($this->state["tuning"]["config"]),
+            "TUNER CONFIG | " . json_encode($this->state->tuning_config()),
             false,
         );
     }
@@ -1059,11 +1061,12 @@ class ImportClient
      */
     public function run_files_sync(): void
     {
+        $state = $this->run_state();
         $checkpoint = $this->files_pull_checkpoint();
-        $state_command = $this->state["command"] ?? null;
+        $state_command = $state->command;
         $current_status =
             $state_command === "files-pull"
-                ? $checkpoint->status ?? $this->state["status"] ?? null
+                ? $checkpoint->status ?? $state->status
                 : null;
         $has_progress =
             $state_command === "files-pull" &&
@@ -1530,11 +1533,12 @@ class ImportClient
      */
     public function run_files_index(): void
     {
+        $state = $this->run_state();
         $checkpoint = $this->files_pull_checkpoint();
-        $state_command = $this->state["command"] ?? null;
+        $state_command = $state->command;
         $current_status =
             $state_command === "files-index"
-                ? $this->state["status"] ?? null
+                ? $state->status
                 : null;
 
         if ($current_status === "complete") {
@@ -1856,9 +1860,9 @@ class ImportClient
 
     private function record_command_status(string $command, ?string $status): void
     {
-        $this->state["command"] = $command;
-        $this->state["status"] = $status;
-        $this->save_state($this->state);
+        $state = $this->run_state();
+        $state->set_command_status($command, $status);
+        $this->save_state($state);
     }
 
     /**
@@ -1963,11 +1967,12 @@ class ImportClient
             return true;
         }
 
-        if (($this->state["command"] ?? null) !== "files-pull") {
+        $state = $this->run_state();
+        if ($state->command !== "files-pull") {
             return false;
         }
 
-        $status = $this->state["status"] ?? null;
+        $status = $state->status;
         return $status !== null && $status !== "complete";
     }
 
@@ -2064,11 +2069,12 @@ class ImportClient
     {
         $tables_file = $this->state_dir . "/db-tables.jsonl";
         $checkpoint = $this->load_db_pull_checkpoint();
+        $state = $this->run_state();
 
         $has_cursor =
-            $this->state["command"] === "db-index" &&
+            $state->command === "db-index" &&
             $checkpoint->cursor !== null;
-        $current_status = $this->state["command"] === "db-index"
+        $current_status = $state->command === "db-index"
             ? $checkpoint->status
             : null;
         $tables_exists = file_exists($tables_file);
@@ -2860,7 +2866,7 @@ class ImportClient
         return [
             ...HttpRequestBuilder::base_headers(
                 "application/json",
-                $this->state["user_agent"] ?? null,
+                $this->state?->user_agent,
             ),
             ...$this->hmac_headers($body),
         ];
@@ -2873,7 +2879,7 @@ class ImportClient
         $headers = [
             ...HttpRequestBuilder::base_headers(
                 "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                $this->state["user_agent"] ?? null,
+                $this->state?->user_agent,
             ),
             "Upgrade-Insecure-Requests: 1",
             "Sec-Fetch-Dest: document",
@@ -2957,23 +2963,15 @@ class ImportClient
         ]);
     }
 
-    public function default_state(): array
+    public function default_state(): ImportRunState
     {
-        return ImportStateSchema::default_state();
-    }
-
-    /**
-     * Normalize state array to the compact schema.
-     */
-    private function normalize_state(array $state): array
-    {
-        return ImportStateSchema::normalize($state);
+        return ImportRunState::fresh();
     }
 
     /**
      * Load import state from disk.
      */
-    private function load_state(): array
+    private function load_state(): ImportRunState
     {
         try {
             $state = $this->json_state_store->load($this->state_file);
@@ -2987,14 +2985,14 @@ class ImportClient
 
         $this->migrate_preflight_checkpoint_from_state($state);
 
-        $state = $this->normalize_state($state);
+        $run_state = ImportRunState::from_array($state);
 
-        $state_cmd = $state["command"] ?? null;
+        $state_cmd = $run_state->command;
         if (is_string($state_cmd)) {
-            $state["command"] = ImportCommands::normalize_name($state_cmd);
+            $run_state->command = ImportCommands::normalize_name($state_cmd);
         }
 
-        return $state;
+        return $run_state;
     }
 
     /**
@@ -3048,7 +3046,7 @@ class ImportClient
      * Uses atomic write (temp file + rename) to prevent corruption if
      * the process is killed mid-write.
      */
-    public function save_state(array $state): void
+    public function save_state(ImportRunState $state): void
     {
         // Keep the spinner alive between curl requests. save_state is
         // called frequently during streaming operations, so this fills
@@ -3056,18 +3054,16 @@ class ImportClient
         $this->output->tick_spinner();
 
         if ($this->tuner instanceof AdaptiveTuner) {
-            $state["tuning"] = [
-                "config" => $this->tuner->get_config(),
-                "state" => $this->tuner->get_state(),
-            ];
+            $state->set_tuning($this->tuner->get_config(), $this->tuner->get_state());
         }
-        $state = $this->normalize_state($state);
+        $this->state = $state;
+        $data = $state->to_array();
 
-        $this->json_state_store->save($this->state_file, $state);
+        $this->json_state_store->save($this->state_file, $data);
 
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run
-        $files_checkpoint = in_array($state["command"] ?? null, ["files-pull", "files-index"], true)
+        $files_checkpoint = in_array($state->command, ["files-pull", "files-index"], true)
             ? $this->files_pull_checkpoint()
             : null;
         $has_cursor = $files_checkpoint !== null && (
@@ -3099,8 +3095,7 @@ class ImportClient
      */
     public function write_status_file(?string $error = null): void
     {
-        $state = $this->state ?? [];
-        $command = $state["command"] ?? null;
+        $command = $this->state?->command;
         $files_checkpoint = in_array($command, ["files-pull", "files-index"], true)
             ? $this->files_pull_checkpoint()
             : null;
@@ -3112,7 +3107,7 @@ class ImportClient
             : (
                 $files_checkpoint->status ??
                 $db_pull_checkpoint->status ??
-                $state["status"] ??
+                $this->state?->status ??
                 "in_progress"
             );
 
@@ -3176,7 +3171,7 @@ class ImportClient
         // Log final progress before exit
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Files completed in this run
-        $current_command = $this->state["command"] ?? "unknown";
+        $current_command = $this->state?->command ?? "unknown";
 
         $this->audit_log(
             sprintf(
@@ -3202,7 +3197,9 @@ class ImportClient
 
         // Save current state (with timeout protection)
         try {
-            $this->save_state($this->state);
+            if ($this->state instanceof ImportRunState) {
+                $this->save_state($this->state);
+            }
             $this->output->show_lifecycle_line("✓ State saved successfully\n");
             $this->output_progress([
                 "type" => "state_saved",
@@ -3238,7 +3235,9 @@ class ImportClient
     {
         if (!$this->output->emit_event($data, $force)) {
             // Broken pipe — save state and exit cleanly.
-            $this->save_state($this->state);
+            if ($this->state instanceof ImportRunState) {
+                $this->save_state($this->state);
+            }
             exit(0);
         }
     }

@@ -43,10 +43,6 @@ class ImportCommandResultTest extends TestCase
     public function testFilesStatsCommandReturnsStructuredResultWithoutFormatting(): void
     {
         $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
-        $client->state = [
-            'fetch' => ['offset' => 0],
-            'fetch_skipped' => ['offset' => 0],
-        ];
 
         file_put_contents(
             $this->stateDir . '/.import-remote-index.jsonl',

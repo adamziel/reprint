@@ -28,7 +28,7 @@ final class PreflightCommand extends ImportCommand
         $result = null;
         $payload = null;
         foreach (ImportClient::USER_AGENTS as $ua) {
-            $client->state["user_agent"] = $ua;
+            $client->run_state()->user_agent = $ua;
             $result = $client->fetch_json($url);
             $payload = $result["json"] ?? null;
             if ($payload !== null) {
@@ -81,7 +81,7 @@ final class PreflightCommand extends ImportCommand
             $detected_webhost,
         ));
 
-        $client->save_state($client->state);
+        $client->save_state($client->run_state());
 
         $client->audit_log(
             "PREFLIGHT RESULT | " . json_encode($entry),

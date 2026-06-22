@@ -6,6 +6,7 @@ use InvalidArgumentException;
 use RuntimeException;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Pull\Command\PullStageCommands;
+use Reprint\Importer\Session\ImportRunState;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 
@@ -218,9 +219,8 @@ class Pull
         $checkpoint = $this->checkpoint();
         $checkpoint->stage = 'complete';
         $this->client->save_pull_checkpoint($checkpoint);
-        $this->client->mutate_state(function (array $state) {
-            $state['status'] = 'complete';
-            return $state;
+        $this->client->mutate_state(function (ImportRunState $state): void {
+            $state->status = 'complete';
         });
     }
 
@@ -315,7 +315,7 @@ class Pull
         }
 
         if (!isset($options['filter'])) {
-            $options['filter'] = $this->client->state['filter'] ?? 'none';
+            $options['filter'] = $this->client->run_state()->filter;
         }
         if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
             throw new InvalidArgumentException(
@@ -379,11 +379,10 @@ class Pull
     private function prepare_repull(): void
     {
         $state_dir = $this->client->state_dir;
-        $this->client->mutate_state(function (array $state) {
-            $state['command'] = null;
-            $state['status'] = null;
-            $state['sql_output'] = null;
-            return $state;
+        $this->client->mutate_state(function (ImportRunState $state): void {
+            $state->command = null;
+            $state->status = null;
+            $state->sql_output = null;
         });
 
         foreach ([
@@ -413,13 +412,12 @@ class Pull
     {
         for ($attempt = 0; $attempt < 1000; $attempt++) {
             $handler();
-            $state = $this->client->state;
-            if (($state['status'] ?? null) !== 'partial') {
+            $state = $this->client->run_state();
+            if ($state->status !== 'partial') {
                 break;
             }
-            $this->client->mutate_state(function (array $state) {
-                $state['status'] = 'in_progress';
-                return $state;
+            $this->client->mutate_state(function (ImportRunState $state): void {
+                $state->status = 'in_progress';
             });
             $this->client->exit_code = 0;
             $this->progress->tick_spinner();
@@ -522,9 +520,8 @@ class Pull
         // server (Ctrl-C) doesn't leave the pipeline mid-flight.
         $checkpoint = $this->checkpoint();
         $checkpoint->stage = 'start';
-        $this->client->mutate_state(function (array $state) {
-            $state['status'] = 'complete';
-            return $state;
+        $this->client->mutate_state(function (ImportRunState $state): void {
+            $state->status = 'complete';
         });
         $this->client->save_pull_checkpoint($checkpoint);
 

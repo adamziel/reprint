@@ -7,7 +7,7 @@ use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\Pull\PullCheckpoint;
 use Reprint\Importer\Session\ImportPaths;
-use Reprint\Importer\Session\ImportStateSchema;
+use Reprint\Importer\Session\ImportRunState;
 use Reprint\Importer\Session\PreflightCheckpoint;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Sql\DbIndexCheckpoint;
@@ -43,10 +43,14 @@ class ImportSessionInfrastructureTest extends TestCase
         $this->assertSame('/tmp/reprint-state/db.sql', $paths->sql_file());
     }
 
-    public function testStateSchemaNormalizesNestedState(): void
+    public function testImportRunStateNormalizesPersistedState(): void
     {
-        $state = ImportStateSchema::normalize([
+        $run_state = ImportRunState::from_array([
             'command' => 'files-pull',
+            'status' => 'partial',
+            'filter' => 'essential-files',
+            'follow_symlinks' => false,
+            'max_allowed_packet' => 123,
             'cursor' => 'legacy-cursor',
             'stage' => 'legacy-stage',
             'unknown' => 'ignored',
@@ -63,8 +67,13 @@ class ImportSessionInfrastructureTest extends TestCase
             'fetch' => ['offset' => 42, 'extra' => 'ignored'],
             'apply' => ['target_engine' => 'sqlite'],
         ]);
+        $state = $run_state->to_array();
 
         $this->assertSame('files-pull', $state['command']);
+        $this->assertSame('partial', $state['status']);
+        $this->assertSame('essential-files', $state['filter']);
+        $this->assertFalse($state['follow_symlinks']);
+        $this->assertSame(123, $state['max_allowed_packet']);
         $this->assertArrayNotHasKey('cursor', $state);
         $this->assertArrayNotHasKey('stage', $state);
         $this->assertArrayNotHasKey('unknown', $state);

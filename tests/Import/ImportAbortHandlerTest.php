@@ -6,6 +6,7 @@ use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Session\ImportAbortHandler;
 use Reprint\Importer\Session\ImportPaths;
+use Reprint\Importer\Session\ImportRunState;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -37,31 +38,24 @@ final class ImportAbortHandlerTest extends TestCase
         mkdir(dirname($paths->pull_checkpoint_file()), 0755, true);
         file_put_contents($paths->pull_checkpoint_file(), '{"stage":"db-pull"}');
 
-        $state = [
+        $state = ImportRunState::from_array([
             'command' => 'db-pull',
             'status' => 'complete',
-            'preflight' => ['data' => ['ok' => true]],
-            'version' => '1.2.3',
-            'webhost' => 'wpcloud',
             'follow_symlinks' => false,
             'fs_root_nonempty_behavior' => 'preserve-local',
             'max_allowed_packet' => 123,
-        ];
+        ]);
 
         $next = $this->make_handler($paths)->abort($state, 'db-pull', 'file');
 
         $this->assertFileDoesNotExist($paths->sql_file());
         $this->assertFileDoesNotExist($paths->table_stats_file());
         $this->assertFileDoesNotExist($paths->domains_file());
-        $this->assertNull($next['command']);
-        $this->assertNull($next['status']);
-        $this->assertArrayNotHasKey('preflight', $next);
-        $this->assertArrayNotHasKey('version', $next);
-        $this->assertArrayNotHasKey('webhost', $next);
-        $this->assertFalse($next['follow_symlinks']);
-        $this->assertSame('preserve-local', $next['fs_root_nonempty_behavior']);
-        $this->assertSame(123, $next['max_allowed_packet']);
-        $this->assertArrayNotHasKey('pull', $next);
+        $this->assertNull($next->command);
+        $this->assertNull($next->status);
+        $this->assertFalse($next->follow_symlinks);
+        $this->assertSame('preserve-local', $next->fs_root_nonempty_behavior);
+        $this->assertSame(123, $next->max_allowed_packet);
         $this->assertFileExists($paths->pull_checkpoint_file());
         $this->assertStringContainsString(
             'abort db-pull',

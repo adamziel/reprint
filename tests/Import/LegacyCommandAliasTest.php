@@ -121,7 +121,7 @@ class LegacyCommandAliasTest extends TestCase
 
         $this->assertEquals(
             $new_name,
-            $state["command"],
+            $state->command,
             "State with command '{$old_name}' should be migrated to '{$new_name}'",
         );
     }

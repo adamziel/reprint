@@ -22,15 +22,11 @@ final class ImportAbortHandler
         $this->audit = $audit;
     }
 
-    /**
-     * @param array<string, mixed> $state
-     * @return array<string, mixed>
-     */
     public function abort(
-        array $state,
+        ImportRunState $state,
         string $command,
         string $sql_output_mode
-    ): array {
+    ): ImportRunState {
         switch ($command) {
             case "files-pull":
                 $this->audit(
@@ -56,8 +52,7 @@ final class ImportAbortHandler
 
             case "files-index":
                 $this->audit("RESTART | Clearing files-index state", true);
-                $state["command"] = "files-index";
-                $state["status"] = null;
+                $state->set_command_status("files-index", null);
                 $this->delete_file(
                     $this->paths->files_pull_checkpoint_file(),
                     " | abort files-index",
@@ -93,18 +88,9 @@ final class ImportAbortHandler
         return $state;
     }
 
-    /**
-     * @param array<string, mixed> $state
-     * @return array<string, mixed>
-     */
-    private function reset_state(array $state): array
+    private function reset_state(ImportRunState $state): ImportRunState
     {
-        $next = ImportStateSchema::default_state();
-        $next["follow_symlinks"] = $state["follow_symlinks"] ?? false;
-        $next["fs_root_nonempty_behavior"] = $state["fs_root_nonempty_behavior"] ?? "error";
-        $next["max_allowed_packet"] = $state["max_allowed_packet"] ?? null;
-
-        return $next;
+        return $state->reset_for_restart();
     }
 
     private function delete_file(string $path, string $reason = ""): void

@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Session\ImportRunState;
 use Reprint\Importer\Session\PreflightCheckpoint;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -57,9 +58,8 @@ class PullFilterFakeClient extends ImportClient
             "6.8",
             "other",
         ));
-        $this->mutate_state(function (array $state) {
-            $state["status"] = "complete";
-            return $state;
+        $this->mutate_state(function (ImportRunState $state): void {
+            $state->status = "complete";
         });
     }
 
@@ -74,29 +74,23 @@ class PullFilterFakeClient extends ImportClient
             @unlink($this->state_dir . '/.import-download-list-skipped.jsonl');
         }
 
-        $this->mutate_state(function (array $state) {
-            $state["command"] = "files-pull";
-            $state["status"] = "complete";
-            return $state;
+        $this->mutate_state(function (ImportRunState $state): void {
+            $state->set_command_status("files-pull", "complete");
         });
     }
 
     public function run_db_sync(): void
     {
         file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
-        $this->mutate_state(function (array $state) {
-            $state["command"] = "db-pull";
-            $state["status"] = "complete";
-            return $state;
+        $this->mutate_state(function (ImportRunState $state): void {
+            $state->set_command_status("db-pull", "complete");
         });
     }
 
     public function run_db_apply(array $options): void
     {
-        $this->mutate_state(function (array $state) {
-            $state["command"] = "db-apply";
-            $state["status"] = "complete";
-            return $state;
+        $this->mutate_state(function (ImportRunState $state): void {
+            $state->set_command_status("db-apply", "complete");
         });
     }
 }
