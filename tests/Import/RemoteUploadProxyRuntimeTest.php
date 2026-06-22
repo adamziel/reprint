@@ -23,6 +23,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $this->outputDir = $this->tempDir . '/runtime';
 
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint', 0755, true);
         mkdir($this->fsRoot, 0755, true);
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
     }
@@ -95,7 +96,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         ];
 
         file_put_contents(
-            $this->stateDir . '/.import-state.json',
+            $this->stateDir . '/.reprint/run.json',
             json_encode(array_replace_recursive($defaults, $state), JSON_PRETTY_PRINT),
         );
     }

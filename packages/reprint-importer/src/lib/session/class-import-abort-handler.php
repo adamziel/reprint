@@ -67,6 +67,7 @@ final class ImportAbortHandler
                 $this->audit("RESTART | Clearing db-pull state", true);
                 $state = $this->reset_state($state);
 
+                $this->delete_file($this->paths->db_pull_checkpoint_file(), " | abort db-pull");
                 if ($sql_output_mode === "file") {
                     $this->delete_file($this->paths->sql_file(), " | abort db-pull");
                 }
@@ -77,11 +78,13 @@ final class ImportAbortHandler
             case "db-index":
                 $this->audit("RESTART | Clearing db-index state", true);
                 $state = $this->reset_state($state);
+                $this->delete_file($this->paths->db_pull_checkpoint_file(), " | abort db-index");
                 $this->delete_file($this->paths->table_stats_file(), " | abort db-index");
                 return $state;
 
             case "db-apply":
                 $this->audit("RESTART | Clearing db-apply state", true);
+                $this->delete_file($this->paths->db_apply_checkpoint_file(), " | abort db-apply");
                 return $this->reset_state($state);
         }
 

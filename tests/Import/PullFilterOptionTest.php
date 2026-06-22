@@ -152,7 +152,7 @@ class PullFilterOptionTest extends TestCase
     private function readState(): array
     {
         return json_decode(
-            file_get_contents($this->stateDir . '/.import-state.json'),
+            file_get_contents($this->stateDir . '/.reprint/run.json'),
             true,
         );
     }
@@ -178,7 +178,7 @@ class PullFilterOptionTest extends TestCase
             ob_end_clean();
         }
 
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/.reprint/run.json');
     }
 
     public function testPullWithEssentialFilesPersistsDeferredFilesState(): void

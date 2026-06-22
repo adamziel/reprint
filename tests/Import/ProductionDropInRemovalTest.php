@@ -29,6 +29,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->outputDir = $this->tempDir . '/runtime';
 
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint', 0755, true);
         mkdir($this->fsRoot, 0755, true);
         mkdir($this->outputDir, 0755, true);
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
@@ -117,7 +118,7 @@ class ProductionDropInRemovalTest extends TestCase
         ];
 
         file_put_contents(
-            $this->stateDir . '/.import-state.json',
+            $this->stateDir . '/.reprint/run.json',
             json_encode(array_replace_recursive($defaults, $state), JSON_PRETTY_PRINT),
         );
     }
@@ -314,7 +315,7 @@ class ProductionDropInRemovalTest extends TestCase
 
         // Re-read the state file to verify paths_removed was persisted.
         $state = json_decode(
-            file_get_contents($this->stateDir . '/.import-state.json'),
+            file_get_contents($this->stateDir . '/.reprint/run.json'),
             true,
         );
 
@@ -482,7 +483,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->runApplyRuntime($client);
 
         $state = json_decode(
-            file_get_contents($this->stateDir . '/.import-state.json'),
+            file_get_contents($this->stateDir . '/.reprint/run.json'),
             true,
         );
 

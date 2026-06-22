@@ -24,6 +24,7 @@ class FlatDocrootWpConfigTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint', 0755, true);
         mkdir($this->fsRoot, 0755, true);
     }
 
@@ -141,7 +142,7 @@ class FlatDocrootWpConfigTest extends TestCase
     private function writeState(array $state): void
     {
         file_put_contents(
-            $this->stateDir . '/.import-state.json',
+            $this->stateDir . '/.reprint/run.json',
             json_encode($state, JSON_PRETTY_PRINT),
         );
     }

@@ -6,7 +6,6 @@ use InvalidArgumentException;
 use PDO;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Output\ImportOutput;
-use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\UrlRewrite\NewSiteUrlResolver;
 use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
 use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
@@ -52,10 +51,14 @@ final class DbApplyWorkflow
     }
 
     /**
-     * @param array<string, mixed> $state
+     * @param array<string, mixed> $session_state
      * @param array<string, mixed> $options
      */
-    public function run(array &$state, array $options): void
+    public function run(
+        DbApplyCheckpoint $checkpoint,
+        array $session_state,
+        array $options
+    ): DbApplyCheckpoint
     {
         $sql_file = $this->state_dir . "/db.sql";
         if (!file_exists($sql_file)) {
@@ -68,10 +71,7 @@ final class DbApplyWorkflow
         $url_mapping = $this->url_mapping($options);
         $this->show_discovered_domains($url_mapping);
 
-        $state_command = $state["command"] ?? null;
-        $current_status = $state_command === "db-apply"
-            ? ($state["status"] ?? null)
-            : null;
+        $current_status = $checkpoint->status;
 
         if ($current_status === "complete") {
             throw new RuntimeException(
@@ -79,10 +79,8 @@ final class DbApplyWorkflow
             );
         }
 
-        $default_state = ImportStateSchema::default_state();
-        $apply_state = $state["apply"] ?? $default_state["apply"];
-        $statements_executed = (int) ($apply_state["statements_executed"] ?? 0);
-        $bytes_read = (int) ($apply_state["bytes_read"] ?? 0);
+        $statements_executed = $checkpoint->statements_executed;
+        $bytes_read = $checkpoint->bytes_read;
         $is_resume = $current_status === "in_progress" && $statements_executed > 0;
 
         if ($is_resume) {
@@ -104,13 +102,8 @@ final class DbApplyWorkflow
                 "message" => "Resuming db-apply (executed: {$statements_executed} statements)",
             ], true);
         } else {
-            $state["command"] = "db-apply";
-            $state["status"] = "in_progress";
-            $state["apply"] = $default_state["apply"];
-            if (!empty($url_mapping)) {
-                $state["apply"]["rewrite_url"] = $url_mapping;
-            }
-            $this->save_state($state);
+            $checkpoint->reset(!empty($url_mapping) ? $url_mapping : null);
+            $this->save_state($checkpoint);
             $statements_executed = 0;
             $bytes_read = 0;
 
@@ -124,24 +117,27 @@ final class DbApplyWorkflow
             ], true);
         }
 
-        if (empty($url_mapping) && !empty($apply_state["rewrite_url"])) {
-            $url_mapping = $apply_state["rewrite_url"];
+        if (empty($url_mapping) && !empty($checkpoint->rewrite_url)) {
+            $url_mapping = $checkpoint->rewrite_url;
         }
 
-        $stmt_rewriter = $this->statement_rewriter($state, $url_mapping);
-        [$pdo, $connection_label] = $this->create_target_connection($state, $options);
+        $stmt_rewriter = $this->statement_rewriter($session_state, $url_mapping);
+        [$pdo, $connection_label] = $this->create_target_connection(
+            $checkpoint,
+            $session_state,
+            $options,
+        );
         $sqlite_prepared_pdo = $this->configure_sqlite_import_hints($pdo, $options);
         $query_executor = new DbApplyQueryExecutor($pdo, $stmt_rewriter, $sqlite_prepared_pdo);
 
         $this->audit("CONNECTED | {$connection_label}", false);
 
-        (new SqlDumpApplier(
+        return (new SqlDumpApplier(
             function (): bool {
                 return $this->should_stop();
             },
-            function (array $next_state) use (&$state): void {
-                $state = $next_state;
-                $this->save_state($state);
+            function (DbApplyCheckpoint $checkpoint): void {
+                $this->save_state($checkpoint);
             },
             function (string $message, bool $to_console): void {
                 $this->audit($message, $to_console);
@@ -161,23 +157,21 @@ final class DbApplyWorkflow
             function (): bool {
                 return $this->output->is_quiet_lifecycle();
             },
-            function (PDO $pdo) use (&$state): array {
-                return $this->deactivate_host_plugins($pdo, $state);
+            function (PDO $pdo) use ($session_state): array {
+                return $this->deactivate_host_plugins($pdo, $session_state);
             },
-            function (PDO $pdo, string $new_site_url) use (&$state): array {
+            function (PDO $pdo, string $new_site_url) use ($session_state): array {
                 return $this->deactivate_path_incompatible_plugins(
                     $pdo,
-                    $state,
+                    $session_state,
                     $new_site_url,
                 );
             },
         ))->apply(
-            $state,
+            $checkpoint,
             [
                 "sql_file" => $sql_file,
                 "state_dir" => $this->state_dir,
-                "statements_executed" => $statements_executed,
-                "bytes_read" => $bytes_read,
                 "new_site_url" => (string) ($options["new_site_url"] ?? ""),
             ],
             $query_executor,
@@ -282,7 +276,11 @@ final class DbApplyWorkflow
      * @param array<string, mixed> $options
      * @return array{0: PDO, 1: string}
      */
-    private function create_target_connection(array &$state, array $options): array
+    private function create_target_connection(
+        DbApplyCheckpoint $checkpoint,
+        array $session_state,
+        array $options
+    ): array
     {
         $target_engine = strtolower((string) ($options["target_engine"] ?? "mysql"));
         if (!in_array($target_engine, ["mysql", "sqlite"], true)) {
@@ -292,10 +290,10 @@ final class DbApplyWorkflow
         }
 
         if ($target_engine === "sqlite") {
-            return $this->create_sqlite_target_connection($state, $options);
+            return $this->create_sqlite_target_connection($checkpoint, $session_state, $options);
         }
 
-        return $this->create_mysql_target_connection($state, $options);
+        return $this->create_mysql_target_connection($checkpoint, $options);
     }
 
     /**
@@ -303,14 +301,18 @@ final class DbApplyWorkflow
      * @param array<string, mixed> $options
      * @return array{0: PDO, 1: string}
      */
-    private function create_sqlite_target_connection(array &$state, array $options): array
+    private function create_sqlite_target_connection(
+        DbApplyCheckpoint $checkpoint,
+        array $session_state,
+        array $options
+    ): array
     {
         $target_path = $options["target_sqlite_path"] ?? null;
         $target_db = $options["target_db"] ?? "sqlite_database";
 
         if (!$target_path) {
             $content_dir = rtrim(
-                $state["preflight"]["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
+                $session_state["preflight"]["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
                 "/",
             );
             if (!$content_dir) {
@@ -323,9 +325,9 @@ final class DbApplyWorkflow
             $this->output->show_lifecycle_line("SQLite path: {$target_path}\n");
         }
 
-        $state["apply"]["target_engine"] = "sqlite";
-        $state["apply"]["target_db"] = $target_db;
-        $state["apply"]["target_sqlite_path"] = $target_path;
+        $checkpoint->target_engine = "sqlite";
+        $checkpoint->target_db = $target_db;
+        $checkpoint->target_sqlite_path = $target_path;
 
         return [
             TargetDatabaseConnectionFactory::sqlite($target_path, $target_db),
@@ -342,7 +344,10 @@ final class DbApplyWorkflow
      * @param array<string, mixed> $options
      * @return array{0: PDO, 1: string}
      */
-    private function create_mysql_target_connection(array &$state, array $options): array
+    private function create_mysql_target_connection(
+        DbApplyCheckpoint $checkpoint,
+        array $options
+    ): array
     {
         $target_host = $options["target_host"] ?? "127.0.0.1";
         $target_port = (int) ($options["target_port"] ?? 3306);
@@ -356,12 +361,12 @@ final class DbApplyWorkflow
             );
         }
 
-        $state["apply"]["target_engine"] = "mysql";
-        $state["apply"]["target_db"] = $target_db;
-        $state["apply"]["target_host"] = $target_host;
-        $state["apply"]["target_port"] = $target_port;
-        $state["apply"]["target_user"] = $target_user;
-        $state["apply"]["target_pass"] = $target_pass;
+        $checkpoint->target_engine = "mysql";
+        $checkpoint->target_db = $target_db;
+        $checkpoint->target_host = $target_host;
+        $checkpoint->target_port = $target_port;
+        $checkpoint->target_user = $target_user;
+        $checkpoint->target_pass = $target_pass;
 
         return [
             TargetDatabaseConnectionFactory::mysql(
@@ -458,9 +463,9 @@ final class DbApplyWorkflow
     /**
      * @param array<string, mixed> $state
      */
-    private function save_state(array $state): void
+    private function save_state(DbApplyCheckpoint $checkpoint): void
     {
-        ($this->save_state)($state);
+        ($this->save_state)($checkpoint);
     }
 
     private function audit(string $message, bool $to_console = true): void

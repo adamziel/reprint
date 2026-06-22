@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PDO;
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Sql\DbApplyCheckpoint;
 use Reprint\Importer\Sql\DbApplyQueryExecutor;
 use Reprint\Importer\Sql\SqlDumpApplier;
 
@@ -43,21 +44,16 @@ final class SqlDumpApplierTest extends TestCase
             json_encode(['statements_total' => 2]) . "\n",
         );
 
-        $state = [
-            'status' => 'in_progress',
-            'apply' => [
-                'statements_executed' => 0,
-                'bytes_read' => 0,
-            ],
-        ];
-        $saved_states = [];
+        $checkpoint = DbApplyCheckpoint::fresh();
+        $checkpoint->status = 'in_progress';
+        $saved_checkpoints = [];
         $progress = [];
         $pdo = new PDO('sqlite::memory:');
 
         $applier = new SqlDumpApplier(
             fn(): bool => false,
-            function (array $state) use (&$saved_states): void {
-                $saved_states[] = $state;
+            function (DbApplyCheckpoint $checkpoint) use (&$saved_checkpoints): void {
+                $saved_checkpoints[] = clone $checkpoint;
             },
             function (): void {
             },
@@ -75,27 +71,25 @@ final class SqlDumpApplierTest extends TestCase
             fn(PDO $pdo, string $new_site_url): array => [],
         );
 
-        $applier->apply(
-            $state,
+        $checkpoint = $applier->apply(
+            $checkpoint,
             [
                 'sql_file' => $this->sql_file,
                 'state_dir' => $this->state_dir,
-                'statements_executed' => 0,
-                'bytes_read' => 0,
                 'new_site_url' => '',
             ],
             new DbApplyQueryExecutor($pdo),
             $pdo,
         );
 
-        $this->assertSame('complete', $state['status']);
-        $this->assertSame(2, $state['apply']['statements_executed']);
-        $this->assertGreaterThan(0, $state['apply']['bytes_read']);
+        $this->assertSame('complete', $checkpoint->status);
+        $this->assertSame(2, $checkpoint->statements_executed);
+        $this->assertGreaterThan(0, $checkpoint->bytes_read);
         $this->assertSame(
             'https://example.test',
             $pdo->query("SELECT option_value FROM wp_options WHERE option_name = 'siteurl'")->fetchColumn(),
         );
-        $this->assertNotEmpty($saved_states);
+        $this->assertNotEmpty($saved_checkpoints);
         $this->assertSame('complete', $progress[array_key_last($progress)][0]['status']);
     }
 }

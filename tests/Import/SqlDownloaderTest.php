@@ -4,6 +4,8 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Sql\DbIndexCheckpoint;
+use Reprint\Importer\Sql\DbPullCheckpoint;
 use Reprint\Importer\Sql\SqlDownloader;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -30,13 +32,9 @@ final class SqlDownloaderTest extends TestCase
 
     public function testDownloadsSqlToFileAndPersistsState(): void
     {
-        $state = [
-            'cursor' => null,
-            'db_index' => [
-                'bytes' => 100,
-            ],
-        ];
-        $saved_states = [];
+        $checkpoint = DbPullCheckpoint::fresh();
+        $checkpoint->db_index = new DbIndexCheckpoint(null, 0, 0, 100);
+        $saved_checkpoints = [];
         $finalized = [];
         $progress_bytes = [];
         $completion_progress = [];
@@ -80,8 +78,8 @@ final class SqlDownloaderTest extends TestCase
             },
             fn(string $endpoint): array => ['chunk_rows' => 100],
             fn(): bool => false,
-            function (array $state) use (&$saved_states): void {
-                $saved_states[] = $state;
+            function (DbPullCheckpoint $checkpoint) use (&$saved_checkpoints): void {
+                $saved_checkpoints[] = clone $checkpoint;
             },
             function (int $sql_bytes_written) use (&$progress_bytes): void {
                 $progress_bytes[] = $sql_bytes_written;
@@ -105,7 +103,7 @@ final class SqlDownloaderTest extends TestCase
         );
 
         $downloader->download(
-            $state,
+            $checkpoint,
             [
                 'mode' => 'file',
                 'state_dir' => $this->state_dir,
@@ -115,11 +113,11 @@ final class SqlDownloaderTest extends TestCase
         );
 
         $this->assertSame($sql, file_get_contents($this->state_dir . '/db.sql'));
-        $this->assertSame('done-cursor', $state['cursor']);
-        $this->assertNull($state['sql_bytes']);
-        $this->assertSame(0, $state['consecutive_timeouts']);
+        $this->assertSame('done-cursor', $checkpoint->cursor);
+        $this->assertNull($checkpoint->sql_bytes);
+        $this->assertSame(0, $checkpoint->consecutive_timeouts);
         $this->assertSame([strlen($sql)], $progress_bytes);
-        $this->assertNotEmpty($saved_states);
+        $this->assertNotEmpty($saved_checkpoints);
         $this->assertSame('sql_chunk', $finalized[0]['endpoint']);
         $this->assertSame('complete', $finalized[0]['stats']['status']);
         $this->assertSame('complete', $completion_progress[0]['status']);

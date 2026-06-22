@@ -22,8 +22,7 @@ final class DbApplyStageCommand extends PullStageCommand
             $pull->client()->run_db_apply($options);
         });
 
-        $state = $pull->client()->state;
-        $statements = (int) ($state["apply"]["statements_executed"] ?? 0);
+        $statements = $pull->client()->db_apply_checkpoint()->statements_executed;
         $summary = $statements > 0 ? number_format($statements) . " statements" : null;
         $pull->print_done($this->name(), $summary);
     }

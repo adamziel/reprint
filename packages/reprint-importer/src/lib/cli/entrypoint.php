@@ -624,7 +624,7 @@ if (
         echo "  2  Partial progress — run the same command again to continue\n";
         echo "  1  Error\n";
         echo "\n";
-        echo "State is stored in --state-dir/.import-state.json. Interrupted\n";
+        echo "State is stored in --state-dir/.reprint/run.json. Interrupted\n";
         echo "commands automatically resume. Use --abort to abort the current\n";
         echo "sync and exit — downloaded files are preserved.\n";
     }
@@ -923,7 +923,8 @@ if (
                 "  .import-remote-index.jsonl              Remote index snapshot\n" .
                 "  .import-download-list.jsonl             Files pending download\n" .
                 "  .import-download-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
-                "  .import-state.json                      Resumable state\n" .
+                "  .reprint/run.json                       Run state\n" .
+                "  .reprint/*/checkpoint.json              Workflow checkpoints\n" .
                 "  .import-audit.log                       Audit log\n",
         ],
         "files-index" => [

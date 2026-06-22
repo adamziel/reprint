@@ -32,10 +32,12 @@ use Reprint\Importer\Session\ExportDirectoryResolver;
 use Reprint\Importer\Session\ImportAbortHandler;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
+use Reprint\Importer\Session\JsonStateStore;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Session\VolatileFileTracker;
+use Reprint\Importer\Sql\DbApplyCheckpoint;
+use Reprint\Importer\Sql\DbPullCheckpoint;
 use Reprint\Importer\Sql\DbApplyWorkflow;
-use Reprint\Importer\Sql\DbIndexDownloader;
 use Reprint\Importer\Sql\DbPullWorkflow;
 use Reprint\Importer\Sql\SqlDownloader;
 use Reprint\Importer\Support\ByteFormatter;
@@ -59,7 +61,7 @@ class ImportClient
     /** @var string Export server URL. */
     public $remote_url;
 
-    /** @var string Directory for import state files (.import-state.json, db.sql, etc.). */
+    /** @var string Directory for import state files (.reprint/run.json, db.sql, etc.). */
     public $state_dir;
 
     /** @var string Directory where downloaded site files are written (no filesystem-root/ wrapper). */
@@ -71,7 +73,10 @@ class ImportClient
     /** @var StatePathCodec Encodes byte-sensitive state paths for JSON persistence. */
     private StatePathCodec $state_path_codec;
 
-    /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
+    /** @var JsonStateStore Persists run state and workflow checkpoints. */
+    private JsonStateStore $json_state_store;
+
+    /** @var string Path to .reprint/run.json — persists session-level run state. */
     private $state_file;
 
     /**
@@ -116,9 +121,8 @@ class ImportClient
     private $download_list_done = null;
 
     /**
-     * @var array Persistent import state loaded from / saved to $state_file.
-     * Keys: command, status, cursor, stage, preflight, version, follow_symlinks,
-     * max_allowed_packet, db_index, file_index.
+     * @var array Session-level run state loaded from / saved to $state_file.
+     * Workflow-specific progress belongs in .reprint/*/checkpoint.json.
      * @var array|null
      */
     public $state;
@@ -270,6 +274,7 @@ class ImportClient
         $this->fs_root = rtrim($fs_root, "/");
         $this->output = $output ?? new NullImportOutput();
         $this->paths = new ImportPaths($this->state_dir);
+        $this->json_state_store = new JsonStateStore();
         $this->state_path_codec = new StatePathCodec(function (string $message): void {
             $this->audit_log($message, true);
         });
@@ -1676,31 +1681,61 @@ class ImportClient
      */
     public function run_db_sync(): void
     {
-        (new DbPullWorkflow(
+        $checkpoint = $this->db_pull_workflow()->run(
+            $this->load_db_pull_checkpoint(),
+        );
+        $this->record_command_status("db-pull", $checkpoint->status);
+    }
+
+    private function db_pull_workflow(): DbPullWorkflow
+    {
+        return new DbPullWorkflow(
+            $this,
             $this->state_dir,
             $this->audit_log,
             $this->sql_output_mode,
             $this->mysql_database,
             $this->output,
-            function (array $state): void {
-                $this->state = $state;
-                $this->save_state($this->state);
-            },
-            function (string $message, bool $to_console = true): void {
-                $this->audit_log($message, $to_console);
-            },
-            function (array $progress, bool $force = false): void {
-                $this->output_progress($progress, $force);
-            },
-            function (array &$state): void {
-                $this->download_db_index();
-                $state = $this->state;
-            },
-            function (array &$state): void {
-                $this->download_sql();
-                $state = $this->state;
-            },
-        ))->run($this->state);
+        );
+    }
+
+    private function load_db_pull_checkpoint(): DbPullCheckpoint
+    {
+        return DbPullCheckpoint::from_array(
+            $this->json_state_store->load($this->paths->db_pull_checkpoint_file()) ?? [],
+        );
+    }
+
+    public function save_db_pull_checkpoint(DbPullCheckpoint $checkpoint): void
+    {
+        $this->output->tick_spinner();
+        $this->json_state_store->save(
+            $this->paths->db_pull_checkpoint_file(),
+            $checkpoint->to_array(),
+        );
+    }
+
+    public function db_apply_checkpoint(): DbApplyCheckpoint
+    {
+        return DbApplyCheckpoint::from_array(
+            $this->json_state_store->load($this->paths->db_apply_checkpoint_file()) ?? [],
+        );
+    }
+
+    public function save_db_apply_checkpoint(DbApplyCheckpoint $checkpoint): void
+    {
+        $this->output->tick_spinner();
+        $this->json_state_store->save(
+            $this->paths->db_apply_checkpoint_file(),
+            $checkpoint->to_array(),
+        );
+    }
+
+    private function record_command_status(string $command, ?string $status): void
+    {
+        $this->state["command"] = $command;
+        $this->state["status"] = $status;
+        $this->save_state($this->state);
     }
 
     /**
@@ -1867,14 +1902,13 @@ class ImportClient
 
     public function run_db_apply(array $options): void
     {
-        (new DbApplyWorkflow(
+        $checkpoint = (new DbApplyWorkflow(
             $this->state_dir,
             $this->remote_url,
             $this->local_filesystem(),
             $this->output,
-            function (array $state): void {
-                $this->state = $state;
-                $this->save_state($this->state);
+            function (DbApplyCheckpoint $checkpoint): void {
+                $this->save_db_apply_checkpoint($checkpoint);
             },
             function (string $message, bool $to_console = true): void {
                 $this->audit_log($message, $to_console);
@@ -1886,9 +1920,11 @@ class ImportClient
                 return $this->shutdown_requested;
             },
         ))->run(
+            $this->db_apply_checkpoint(),
             $this->state,
             $options,
         );
+        $this->record_command_status("db-apply", $checkpoint->status);
     }
 
     /**
@@ -1898,16 +1934,15 @@ class ImportClient
      */
     public function run_db_index(): void
     {
-        $state_command = $this->state["command"] ?? null;
         $tables_file = $this->state_dir . "/db-tables.jsonl";
+        $checkpoint = $this->load_db_pull_checkpoint();
 
         $has_cursor =
-            $state_command === "db-index" &&
-            !empty($this->state["cursor"] ?? null);
-        $current_status =
-            $state_command === "db-index"
-                ? $this->state["status"] ?? null
-                : null;
+            $this->state["command"] === "db-index" &&
+            $checkpoint->cursor !== null;
+        $current_status = $this->state["command"] === "db-index"
+            ? $checkpoint->status
+            : null;
         $tables_exists = file_exists($tables_file);
 
         if ($current_status === "complete") {
@@ -1923,13 +1958,11 @@ class ImportClient
         }
 
         if (!$has_cursor) {
-            $this->state["command"] = "db-index";
-            $this->state["status"] = "in_progress";
-            $this->state["cursor"] = null;
-            $this->state["stage"] = null;
-            $this->state["diff"] = $this->default_state()["diff"];
-            $this->state["db_index"] = $this->default_state()["db_index"];
-            $this->save_state($this->state);
+            $checkpoint = DbPullCheckpoint::fresh();
+            $checkpoint->status = "in_progress";
+            $checkpoint->stage = "db-index";
+            $this->save_db_pull_checkpoint($checkpoint);
+            $this->record_command_status("db-index", "in_progress");
 
             $this->audit_log("START db-index", true);
             $this->output->show_lifecycle_line("Starting db-index\n");
@@ -1943,7 +1976,7 @@ class ImportClient
             $this->audit_log(
                 sprintf(
                     "RESUME db-index | cursor=%s",
-                    substr($this->state["cursor"], 0, 20) . "...",
+                    substr((string) $checkpoint->cursor, 0, 20) . "...",
                 ),
                 true,
             );
@@ -1956,15 +1989,19 @@ class ImportClient
             ], true);
         }
 
-        $this->state["command"] = "db-index";
-        $this->save_state($this->state);
+        $this->record_command_status("db-index", $checkpoint->status);
 
-        $this->download_db_index();
+        $checkpoint = $this->db_pull_workflow()->download_db_index($checkpoint, $tables_file);
+        if ($checkpoint->status === "partial") {
+            $this->record_command_status("db-index", "partial");
+            return;
+        }
 
-        $this->state["status"] = "complete";
-        $this->save_state($this->state);
+        $checkpoint->status = "complete";
+        $this->save_db_pull_checkpoint($checkpoint);
+        $this->record_command_status("db-index", "complete");
 
-        $tables = (int) ($this->state["db_index"]["tables"] ?? 0);
+        $tables = $checkpoint->db_index->tables;
         $this->audit_log(
             sprintf("db-index complete: %d tables", $tables),
             true,
@@ -2351,11 +2388,11 @@ class ImportClient
     /**
      * Download SQL from remote.
      */
-    private function download_sql(): void
+    private function download_sql(DbPullCheckpoint $checkpoint): DbPullCheckpoint
     {
         $local_applier = $this->file_sync_local_applier();
 
-        (new SqlDownloader(
+        $checkpoint = (new SqlDownloader(
             function (string $endpoint, ?string $cursor, array $params): string {
                 return $this->build_url($endpoint, $cursor, $params);
             },
@@ -2374,11 +2411,11 @@ class ImportClient
             function (): bool {
                 return $this->shutdown_requested;
             },
-            function (array $state): void {
-                $this->save_state($state);
+            function (DbPullCheckpoint $checkpoint): void {
+                $this->save_db_pull_checkpoint($checkpoint);
             },
-            function (int $sql_bytes_written): void {
-                $db_bytes_est = (int) ($this->state["db_index"]["bytes"] ?? 0);
+            function (int $sql_bytes_written) use ($checkpoint): void {
+                $db_bytes_est = $checkpoint->db_index->bytes;
                 $est_is_useful = $db_bytes_est > $sql_bytes_written;
                 $sql_fraction = $est_is_useful
                     ? $sql_bytes_written / $db_bytes_est
@@ -2403,15 +2440,16 @@ class ImportClient
                 $this->output_progress($progress, true);
             },
             function (): void {
-                $this->save_state($this->state);
+                $this->save_db_pull_checkpoint($checkpoint);
                 exit(0);
             },
             function (
                 string $phase,
                 ?string $cursor_before,
                 ?string $cursor_after
-            ): void {
-                $this->assert_can_retry_consecutive_timeout(
+            ) use ($checkpoint): void {
+                $this->assert_can_retry_db_pull_timeout(
+                    $checkpoint,
                     $phase,
                     $cursor_before,
                     $cursor_after,
@@ -2424,7 +2462,7 @@ class ImportClient
                 $this->audit_log($message, $to_console);
             },
         ))->download(
-            $this->state,
+            $checkpoint,
             [
                 "mode" => $this->sql_output_mode,
                 "state_dir" => $this->state_dir,
@@ -2437,66 +2475,8 @@ class ImportClient
                 "save_every" => self::SAVE_STATE_EVERY_N_CHUNKS,
             ],
         );
-    }
 
-    /**
-     * Download table stats from the db_index endpoint.
-     */
-    private function download_db_index(): void
-    {
-        $tables_file = $this->state_dir . "/db-tables.jsonl";
-        $local_applier = $this->file_sync_local_applier();
-
-        (new DbIndexDownloader(
-            function (string $endpoint, ?string $cursor, array $params): string {
-                return $this->build_url($endpoint, $cursor, $params);
-            },
-            function (
-                string $url,
-                ?string $cursor,
-                StreamingContext $context,
-                ?array $post_data,
-                string $phase
-            ): void {
-                $this->fetch_streaming($url, $cursor, $context, $post_data, $phase);
-            },
-            function (): bool {
-                return $this->shutdown_requested;
-            },
-            function (array $chunk, string $phase) use ($local_applier): void {
-                $local_applier->handle_progress($chunk, $phase);
-            },
-            function (
-                array $chunk,
-                string $phase,
-                StreamingContext $context
-            ) use ($local_applier): void {
-                $local_applier->handle_error_chunk($chunk, $phase, $context);
-            },
-            function (array $progress): void {
-                $this->output_progress($progress, true);
-            },
-            function (
-                string $phase,
-                ?string $cursor_before,
-                ?string $cursor_after
-            ): void {
-                $this->assert_can_retry_consecutive_timeout(
-                    $phase,
-                    $cursor_before,
-                    $cursor_after,
-                );
-            },
-            function (string $endpoint, float $wall_time, array $stats): void {
-                $this->finalize_tuned_request($endpoint, $wall_time, $stats);
-            },
-            function (array $state): void {
-                $this->save_state($state);
-            },
-            function (string $message, bool $to_console): void {
-                $this->audit_log($message, $to_console);
-            },
-        ))->download($this->state, $tables_file);
+        return $checkpoint;
     }
 
     /**
@@ -2508,6 +2488,81 @@ class ImportClient
         array $params = []
     ): string {
         return HttpRequestBuilder::url($this->remote_url, $endpoint, $cursor, $params);
+    }
+
+    public function stream_export_endpoint(
+        string $endpoint,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data = null,
+        array $params = []
+    ): void {
+        $this->fetch_streaming(
+            $this->build_url($endpoint, $cursor, $params),
+            $cursor,
+            $context,
+            $post_data,
+            $endpoint,
+        );
+    }
+
+    public function shutdown_requested(): bool
+    {
+        return $this->shutdown_requested;
+    }
+
+    public function assert_can_retry_stream_timeout(
+        string $phase,
+        ?string $cursor_before,
+        ?string $cursor_after
+    ): void {
+        $this->assert_can_retry_consecutive_timeout(
+            $phase,
+            $cursor_before,
+            $cursor_after,
+        );
+    }
+
+    public function assert_can_retry_db_pull_timeout(
+        DbPullCheckpoint $checkpoint,
+        string $phase,
+        ?string $cursor_before,
+        ?string $cursor_after
+    ): void {
+        if ($cursor_after !== null && $cursor_after !== $cursor_before) {
+            $checkpoint->consecutive_timeouts = 0;
+        } else {
+            $checkpoint->consecutive_timeouts++;
+        }
+
+        $count = $checkpoint->consecutive_timeouts;
+        $this->audit_log(
+            "CURL TIMEOUT | {$phase} | consecutive_timeouts={$count}/" .
+                self::MAX_CONSECUTIVE_TIMEOUTS .
+                " | cursor_moved=" .
+                ($cursor_after !== $cursor_before ? "yes" : "no"),
+            true,
+        );
+
+        if ($count >= self::MAX_CONSECUTIVE_TIMEOUTS) {
+            throw new RuntimeException(
+                "Remote server appears unreachable: {$count} consecutive " .
+                "cURL timeouts with no progress during {$phase}. Giving up.",
+            );
+        }
+    }
+
+    public function finalize_stream_request(
+        string $endpoint,
+        float $wall_time,
+        array $response_stats
+    ): void {
+        $this->finalize_tuned_request($endpoint, $wall_time, $response_stats);
+    }
+
+    public function download_sql_stage(DbPullCheckpoint $checkpoint): DbPullCheckpoint
+    {
+        return $this->download_sql($checkpoint);
     }
 
     /**
@@ -2840,23 +2895,13 @@ class ImportClient
      */
     private function load_state(): array
     {
-        if (!file_exists($this->state_file)) {
+        try {
+            $state = $this->json_state_store->load($this->state_file);
+        } catch (RuntimeException $e) {
+            $this->audit_log($e->getMessage(), true);
             return $this->default_state();
         }
-
-        $contents = file_get_contents($this->state_file);
-        if ($contents === false) {
-            return $this->default_state();
-        }
-
-        $state = json_decode($contents, true);
-        if (!is_array($state)) {
-            $this->audit_log(
-                "Warning: corrupt state file detected, renaming and starting fresh",
-                true,
-            );
-            $corrupt_name = $this->state_file . ".corrupt." . time();
-            @rename($this->state_file, $corrupt_name);
+        if ($state === null) {
             return $this->default_state();
         }
 
@@ -2893,19 +2938,7 @@ class ImportClient
         $state = $this->normalize_state($state);
         $state = $this->encode_state_paths($state);
 
-        // Write to temp file first, then atomic rename
-        $json = json_encode($state, JSON_PRETTY_PRINT);
-        if ($json === false) {
-            throw new RuntimeException("Failed to encode state: " . json_last_error_msg());
-        }
-        $tmp_file = $this->state_file . '.tmp';
-        $bytes = file_put_contents($tmp_file, $json);
-        if ($bytes === false) {
-            throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");
-        }
-        if (!rename($tmp_file, $this->state_file)) {
-            throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->state_file}");
-        }
+        $this->json_state_store->save($this->state_file, $state);
 
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run

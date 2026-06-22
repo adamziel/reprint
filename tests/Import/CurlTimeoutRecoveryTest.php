@@ -7,6 +7,7 @@ use Reprint\Importer\ImportClient;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Sql\DbPullCheckpoint;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -80,15 +81,37 @@ class CurlTimeoutRecoveryTest extends TestCase
             "fs_root_nonempty_behavior" => "preserve-local",
             "max_allowed_packet" => null,
         ];
+        $dir = $this->stateDir . '/.reprint';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
         file_put_contents(
-            $this->stateDir . '/.import-state.json',
+            $this->stateDir . '/.reprint/run.json',
             json_encode(array_merge($defaults, $state), JSON_PRETTY_PRINT),
+        );
+    }
+
+    private function writeDbPullCheckpoint(array $checkpoint): void
+    {
+        $dir = $this->stateDir . '/.reprint/db-pull';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+        file_put_contents(
+            $dir . '/checkpoint.json',
+            json_encode($checkpoint, JSON_PRETTY_PRINT),
         );
     }
 
     private function readState(): array
     {
-        $contents = file_get_contents($this->stateDir . '/.import-state.json');
+        $contents = file_get_contents($this->stateDir . '/.reprint/run.json');
+        return json_decode($contents, true);
+    }
+
+    private function readDbPullCheckpoint(): array
+    {
+        $contents = file_get_contents($this->stateDir . '/.reprint/db-pull/checkpoint.json');
         return json_decode($contents, true);
     }
 
@@ -150,9 +173,14 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->writeState([
             "command" => "db-pull",
             "status" => "in_progress",
+        ]);
+        $this->writeDbPullCheckpoint([
+            "status" => "in_progress",
             "stage" => "sql",
             "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
             "sql_bytes" => 1024,
+            "sql_statements_counted" => 0,
+            "consecutive_timeouts" => 0,
         ]);
 
         $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
@@ -164,20 +192,22 @@ class CurlTimeoutRecoveryTest extends TestCase
         $modeProp->setValue($client, 'file');
 
         $downloadSql = $reflection->getMethod('download_sql');
-        $downloadSql->invoke($client);
+        $checkpoint = $downloadSql->invoke(
+            $client,
+            DbPullCheckpoint::from_array($this->readDbPullCheckpoint()),
+        );
 
-        $state = $this->readState();
         $this->assertEquals(
             "partial",
-            $state["status"],
+            $checkpoint->status,
             "After cURL timeout, status should be 'partial' not an exception"
         );
         $this->assertNotNull(
-            $state["cursor"],
+            $checkpoint->cursor,
             "Cursor should be preserved for resumption"
         );
         $this->assertNotNull(
-            $state["sql_bytes"],
+            $checkpoint->sql_bytes,
             "sql_bytes should be saved for crash recovery"
         );
     }
@@ -340,6 +370,9 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->writeState([
             "command" => "db-pull",
             "status" => "in_progress",
+        ]);
+        $this->writeDbPullCheckpoint([
+            "status" => "in_progress",
             "stage" => "db-index",
             "cursor" => base64_encode('{"table_offset":5}'),
             "db_index" => [
@@ -349,12 +382,15 @@ class CurlTimeoutRecoveryTest extends TestCase
                 "bytes" => 256,
                 "updated_at" => time(),
             ],
+            "sql_bytes" => null,
+            "sql_statements_counted" => 0,
+            "consecutive_timeouts" => 0,
         ]);
 
         [$client, $reflection] = $this->prepareClient();
 
-        $downloadDbIndex = $reflection->getMethod('download_db_index');
-        $downloadDbIndex->invoke($client);
+        $runDbSync = $reflection->getMethod('run_db_sync');
+        $runDbSync->invoke($client);
 
         $state = $this->readState();
         $this->assertEquals(
@@ -373,6 +409,9 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->writeState([
             "command" => "db-pull",
             "status" => "in_progress",
+        ]);
+        $this->writeDbPullCheckpoint([
+            "status" => "in_progress",
             "stage" => "sql",
             "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
             "sql_bytes" => 0,
@@ -383,6 +422,8 @@ class CurlTimeoutRecoveryTest extends TestCase
                 "bytes" => 100,
                 "updated_at" => time(),
             ],
+            "sql_statements_counted" => 0,
+            "consecutive_timeouts" => 0,
         ]);
 
         [$client, $reflection] = $this->prepareClient();
@@ -488,10 +529,14 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->writeState([
             "command" => "db-pull",
             "status" => "in_progress",
+        ]);
+        $this->writeDbPullCheckpoint([
+            "status" => "in_progress",
             "stage" => "sql",
             "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
             "sql_bytes" => 1024,
             "consecutive_timeouts" => 2,
+            "sql_statements_counted" => 0,
         ]);
 
         $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
@@ -506,7 +551,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->expectExceptionMessage('consecutive');
 
         $downloadSql = $reflection->getMethod('download_sql');
-        $downloadSql->invoke($client);
+        $downloadSql->invoke($client, DbPullCheckpoint::from_array($this->readDbPullCheckpoint()));
     }
 
     public function testFirstTimeoutIncrementsCounterInState()
@@ -514,10 +559,14 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->writeState([
             "command" => "db-pull",
             "status" => "in_progress",
+        ]);
+        $this->writeDbPullCheckpoint([
+            "status" => "in_progress",
             "stage" => "sql",
             "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
             "sql_bytes" => 1024,
             "consecutive_timeouts" => 0,
+            "sql_statements_counted" => 0,
         ]);
 
         $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
@@ -529,13 +578,15 @@ class CurlTimeoutRecoveryTest extends TestCase
         $modeProp->setValue($client, 'file');
 
         $downloadSql = $reflection->getMethod('download_sql');
-        $downloadSql->invoke($client);
+        $checkpoint = $downloadSql->invoke(
+            $client,
+            DbPullCheckpoint::from_array($this->readDbPullCheckpoint()),
+        );
 
-        $state = $this->readState();
-        $this->assertEquals("partial", $state["status"]);
+        $this->assertEquals("partial", $checkpoint->status);
         $this->assertEquals(
             1,
-            $state["consecutive_timeouts"],
+            $checkpoint->consecutive_timeouts,
             "First no-progress timeout should increment counter to 1"
         );
     }

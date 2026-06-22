@@ -2,87 +2,56 @@
 
 namespace Reprint\Importer\Sql;
 
+use Reprint\Importer\ImportClient;
 use Reprint\Importer\Output\ImportOutput;
-use Reprint\Importer\Session\ImportStateSchema;
+use Reprint\Importer\Protocol\CurlTimeoutException;
+use Reprint\Importer\Protocol\StreamingContext;
 use RuntimeException;
 
 final class DbPullWorkflow
 {
+    private ImportClient $client;
     private string $state_dir;
     private string $audit_log;
     private string $sql_output_mode;
     private ?string $mysql_database;
     private ImportOutput $output;
 
-    /** @var callable */
-    private $save_state;
-
-    /** @var callable */
-    private $audit;
-
-    /** @var callable */
-    private $output_progress;
-
-    /** @var callable */
-    private $download_db_index;
-
-    /** @var callable */
-    private $download_sql;
-
     public function __construct(
+        ImportClient $client,
         string $state_dir,
         string $audit_log,
         string $sql_output_mode,
         ?string $mysql_database,
-        ImportOutput $output,
-        callable $save_state,
-        callable $audit,
-        callable $output_progress,
-        callable $download_db_index,
-        callable $download_sql
+        ImportOutput $output
     ) {
+        $this->client = $client;
         $this->state_dir = $state_dir;
         $this->audit_log = $audit_log;
         $this->sql_output_mode = $sql_output_mode;
         $this->mysql_database = $mysql_database;
         $this->output = $output;
-        $this->save_state = $save_state;
-        $this->audit = $audit;
-        $this->output_progress = $output_progress;
-        $this->download_db_index = $download_db_index;
-        $this->download_sql = $download_sql;
     }
 
-    /**
-     * @param array<string, mixed> $state
-     */
-    public function run(array &$state): void
+    public function run(DbPullCheckpoint $checkpoint): DbPullCheckpoint
     {
-        $state_command = $state["command"] ?? null;
         $sql_file = $this->state_dir . "/db.sql";
-
-        $has_progress =
-            $state_command === "db-pull" &&
-            ($state["status"] ?? null) === "in_progress";
-        $current_status =
-            $state_command === "db-pull"
-                ? $state["status"] ?? null
-                : null;
+        $current_status = $checkpoint->status;
+        $has_progress = $current_status === "in_progress";
 
         if ($current_status === "complete") {
             $this->assert_can_start_completed_sync($sql_file);
         }
 
         if ($has_progress) {
-            $this->report_resume($state);
+            $this->report_resume($checkpoint);
         } else {
-            $this->start_fresh($state);
+            $this->start_fresh($checkpoint);
         }
 
-        $state["command"] = "db-pull";
-        $this->save_state($state);
+        $this->save_checkpoint($checkpoint);
 
-        $stage = $state["stage"] ?? "db-index";
+        $stage = $checkpoint->stage;
         if ($stage === "db-index") {
             $this->output_progress([
                 "status" => "starting",
@@ -90,19 +59,19 @@ final class DbPullWorkflow
                 "message" => "Downloading table metadata",
             ]);
 
-            $this->download_db_index($state);
-            if (($state["status"] ?? null) === "partial") {
-                return;
+            $checkpoint = $this->download_db_index($checkpoint);
+            if ($checkpoint->status === "partial") {
+                return $checkpoint;
             }
 
-            $tables = (int) ($state["db_index"]["tables"] ?? 0);
+            $tables = $checkpoint->db_index->tables;
             $this->audit(
                 sprintf("db-pull db-index stage complete: %d tables", $tables),
             );
 
-            $state["stage"] = "sql";
-            $state["cursor"] = null;
-            $this->save_state($state);
+            $checkpoint->stage = "sql";
+            $checkpoint->cursor = null;
+            $this->save_checkpoint($checkpoint);
         }
 
         $this->output_progress([
@@ -111,13 +80,13 @@ final class DbPullWorkflow
             "message" => "Downloading SQL dump",
         ]);
 
-        $this->download_sql($state);
-        if (($state["status"] ?? null) === "partial") {
-            return;
+        $checkpoint = $this->client->download_sql_stage($checkpoint);
+        if ($checkpoint->status === "partial") {
+            return $checkpoint;
         }
 
-        $state["status"] = "complete";
-        $this->save_state($state);
+        $checkpoint->status = "complete";
+        $this->save_checkpoint($checkpoint);
 
         $this->audit("db-pull complete", true);
 
@@ -143,6 +112,129 @@ final class DbPullWorkflow
             $complete["sql_file"] = $sql_file;
         }
         $this->output_progress($complete, true);
+
+        return $checkpoint;
+    }
+
+    public function download_db_index(
+        DbPullCheckpoint $checkpoint,
+        ?string $tables_file = null
+    ): DbPullCheckpoint
+    {
+        $tables_file = $tables_file ?? $this->state_dir . "/db-tables.jsonl";
+        $cursor = $checkpoint->cursor;
+        $complete = false;
+
+        $tables_written = $checkpoint->db_index->tables;
+        $rows_estimated = $checkpoint->db_index->rows_estimated;
+        $bytes_written = $checkpoint->db_index->bytes;
+
+        if ($bytes_written > 0 && file_exists($tables_file)) {
+            $actual_size = filesize($tables_file);
+            if ($actual_size > $bytes_written) {
+                $this->audit(
+                    sprintf(
+                        "CRASH RECOVERY | Truncating db-tables.jsonl from %d to %d bytes",
+                        $actual_size,
+                        $bytes_written,
+                    ),
+                    true,
+                );
+                $truncate_handle = fopen($tables_file, "r+");
+                if ($truncate_handle) {
+                    ftruncate($truncate_handle, $bytes_written);
+                    fclose($truncate_handle);
+                }
+            }
+        }
+
+        $handle = fopen($tables_file, $cursor ? "a" : "w");
+        if (!$handle) {
+            throw new RuntimeException("Cannot open table stats file: {$tables_file}");
+        }
+
+        try {
+            while (!$complete) {
+                if ($this->client->shutdown_requested()) {
+                    throw new RuntimeException("Shutdown requested");
+                }
+
+                $context = new StreamingContext();
+                $response_handler = new DbIndexResponseHandler(
+                    $handle,
+                    $cursor,
+                    $context,
+                    $tables_written,
+                    $rows_estimated,
+                    $bytes_written,
+                );
+                $context->on_chunk = [$response_handler, "handle"];
+
+                $cursor_before = $cursor;
+                $request_start = microtime(true);
+                try {
+                    $this->client->stream_export_endpoint(
+                        "db_index",
+                        $cursor,
+                        $context,
+                        null,
+                        ["tables_per_batch" => 1000],
+                    );
+                } catch (CurlTimeoutException $e) {
+                    $cursor = $response_handler->cursor();
+                    $complete = $response_handler->complete();
+                    $tables_written = $response_handler->tables_written();
+                    $rows_estimated = $response_handler->rows_estimated();
+                    $bytes_written = $response_handler->bytes_written();
+
+                    $this->client->assert_can_retry_db_pull_timeout(
+                        $checkpoint,
+                        "db_index",
+                        $cursor_before,
+                        $cursor,
+                    );
+                    fflush($handle);
+                    $checkpoint->cursor = $cursor;
+                    $checkpoint->db_index = $this->state_entry(
+                        $tables_file,
+                        $tables_written,
+                        $rows_estimated,
+                        $bytes_written,
+                    );
+                    $checkpoint->status = "partial";
+                    $this->save_checkpoint($checkpoint);
+                    return $checkpoint;
+                }
+
+                $cursor = $response_handler->cursor();
+                $complete = $response_handler->complete();
+                $tables_written = $response_handler->tables_written();
+                $rows_estimated = $response_handler->rows_estimated();
+                $bytes_written = $response_handler->bytes_written();
+
+                $checkpoint->consecutive_timeouts = 0;
+                $wall_time = microtime(true) - $request_start;
+                $this->client->finalize_stream_request(
+                    "db_index",
+                    $wall_time,
+                    $context->response_stats ?? [],
+                );
+
+                fflush($handle);
+                $checkpoint->cursor = $cursor;
+                $checkpoint->db_index = $this->state_entry(
+                    $tables_file,
+                    $tables_written,
+                    $rows_estimated,
+                    $bytes_written,
+                );
+                $this->save_checkpoint($checkpoint);
+            }
+        } finally {
+            fclose($handle);
+        }
+
+        return $checkpoint;
     }
 
     private function assert_can_start_completed_sync(string $sql_file): void
@@ -164,18 +256,15 @@ final class DbPullWorkflow
         );
     }
 
-    /**
-     * @param array<string, mixed> $state
-     */
-    private function report_resume(array $state): void
+    private function report_resume(DbPullCheckpoint $checkpoint): void
     {
-        $stage = $state["stage"] ?? "db-index";
+        $stage = $checkpoint->stage;
         $this->audit(
             sprintf(
                 "RESUME db-pull | stage=%s | cursor=%s",
                 $stage,
-                !empty($state["cursor"])
-                    ? substr($state["cursor"], 0, 20) . "..."
+                $checkpoint->cursor !== null
+                    ? substr($checkpoint->cursor, 0, 20) . "..."
                     : "none",
             ),
             true,
@@ -191,19 +280,10 @@ final class DbPullWorkflow
         ], true);
     }
 
-    /**
-     * @param array<string, mixed> $state
-     */
-    private function start_fresh(array &$state): void
+    private function start_fresh(DbPullCheckpoint $checkpoint): void
     {
-        $default_state = ImportStateSchema::default_state();
-        $state["command"] = "db-pull";
-        $state["status"] = "in_progress";
-        $state["cursor"] = null;
-        $state["stage"] = "db-index";
-        $state["diff"] = $default_state["diff"];
-        $state["db_index"] = $default_state["db_index"];
-        $this->save_state($state);
+        $checkpoint->reset();
+        $this->save_checkpoint($checkpoint);
 
         $this->audit("START db-pull", true);
 
@@ -216,17 +296,14 @@ final class DbPullWorkflow
         ], true);
     }
 
-    /**
-     * @param array<string, mixed> $state
-     */
-    private function save_state(array $state): void
+    private function save_checkpoint(DbPullCheckpoint $checkpoint): void
     {
-        ($this->save_state)($state);
+        $this->client->save_db_pull_checkpoint($checkpoint);
     }
 
     private function audit(string $message, bool $to_console = true): void
     {
-        ($this->audit)($message, $to_console);
+        $this->client->audit_log($message, $to_console);
     }
 
     /**
@@ -234,22 +311,21 @@ final class DbPullWorkflow
      */
     private function output_progress(array $progress, bool $force = false): void
     {
-        ($this->output_progress)($progress, $force);
+        $this->client->output_progress($progress, $force);
     }
 
-    /**
-     * @param array<string, mixed> $state
-     */
-    private function download_db_index(array &$state): void
-    {
-        ($this->download_db_index)($state);
-    }
-
-    /**
-     * @param array<string, mixed> $state
-     */
-    private function download_sql(array &$state): void
-    {
-        ($this->download_sql)($state);
+    private function state_entry(
+        string $tables_file,
+        int $tables_written,
+        int $rows_estimated,
+        int $bytes_written
+    ): DbIndexCheckpoint {
+        return new DbIndexCheckpoint(
+            $tables_file,
+            $tables_written,
+            $rows_estimated,
+            $bytes_written,
+            time(),
+        );
     }
 }

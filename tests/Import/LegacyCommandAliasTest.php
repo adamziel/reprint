@@ -24,6 +24,7 @@ class LegacyCommandAliasTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->fs_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint', 0755, true);
         mkdir($this->fs_root, 0755, true);
     }
 
@@ -67,7 +68,7 @@ class LegacyCommandAliasTest extends TestCase
 
         // Write a preflight so commands that require it don't bail early.
         file_put_contents(
-            $this->stateDir . '/.import-state.json',
+            $this->stateDir . '/.reprint/run.json',
             json_encode([
                 "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             ]),
@@ -109,7 +110,7 @@ class LegacyCommandAliasTest extends TestCase
     public function testStateMigrationFromLegacyCommandName(string $old_name, string $new_name): void
     {
         file_put_contents(
-            $this->stateDir . '/.import-state.json',
+            $this->stateDir . '/.reprint/run.json',
             json_encode(["command" => $old_name, "status" => "in_progress"]),
         );
 

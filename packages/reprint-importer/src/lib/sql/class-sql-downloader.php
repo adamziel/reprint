@@ -83,7 +83,6 @@ final class SqlDownloader
     /**
      * Download SQL from the remote exporter.
      *
-     * @param array<string, mixed> $state
      * @param array{
      *     mode:string,
      *     state_dir:string,
@@ -96,9 +95,9 @@ final class SqlDownloader
      *     save_every:int
      * } $config
      */
-    public function download(array &$state, array $config): void
+    public function download(DbPullCheckpoint $checkpoint, array $config): DbPullCheckpoint
     {
-        $cursor = $state["cursor"] ?? null;
+        $cursor = $checkpoint->cursor;
         $complete = false;
         $mode = $config["mode"];
         $state_dir = $config["state_dir"];
@@ -112,7 +111,7 @@ final class SqlDownloader
         if ($mode === "file") {
             $sql_file = $state_dir . "/db.sql";
 
-            $tracked_bytes = $state["sql_bytes"] ?? null;
+            $tracked_bytes = $checkpoint->sql_bytes;
             if ($tracked_bytes !== null && file_exists($sql_file)) {
                 $actual_size = filesize($sql_file);
                 if ($actual_size > $tracked_bytes) {
@@ -139,9 +138,9 @@ final class SqlDownloader
                 throw new RuntimeException("Cannot open SQL file: {$sql_file}");
             }
         } elseif ($mode === "stdout") {
-            $sql_bytes_written = $state["sql_bytes"] ?? 0;
+            $sql_bytes_written = $checkpoint->sql_bytes ?? 0;
         } elseif ($mode === "mysql") {
-            $sql_bytes_written = $state["sql_bytes"] ?? 0;
+            $sql_bytes_written = $checkpoint->sql_bytes ?? 0;
 
             $host = $config["mysql_host"] ?? "127.0.0.1";
             $user = $config["mysql_user"] ?? "root";
@@ -189,7 +188,7 @@ final class SqlDownloader
         $domain_scanner = new SqlDomainScanner($this->audit);
         $domains_file = $state_dir . "/.import-domains.json";
         $sql_stats_file = $state_dir . "/.import-sql-stats.json";
-        $sql_statements_counted = (int) ($state["sql_statements_counted"] ?? 0);
+        $sql_statements_counted = $checkpoint->sql_statements_counted;
 
         $parsed_url = parse_url($config["remote_url"]);
         if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
@@ -267,11 +266,11 @@ final class SqlDownloader
                         ?string $cursor,
                         int $sql_bytes_written,
                         int $sql_statements_counted
-                    ) use (&$state): void {
-                        $state["cursor"] = $cursor;
-                        $state["sql_bytes"] = $sql_bytes_written;
-                        $state["sql_statements_counted"] = $sql_statements_counted;
-                        ($this->save_state)($state);
+                    ) use ($checkpoint): void {
+                        $checkpoint->cursor = $cursor;
+                        $checkpoint->sql_bytes = $sql_bytes_written;
+                        $checkpoint->sql_statements_counted = $sql_statements_counted;
+                        ($this->save_state)($checkpoint);
                     },
                     function (array $domains) use ($domains_file): void {
                         file_put_contents(
@@ -298,11 +297,11 @@ final class SqlDownloader
                     if ($sql_handle) {
                         fflush($sql_handle);
                     }
-                    $state["cursor"] = $cursor;
-                    $state["sql_bytes"] = $sql_bytes_written;
-                    $state["sql_statements_counted"] = $sql_statements_counted;
-                    $state["status"] = "partial";
-                    ($this->save_state)($state);
+                    $checkpoint->cursor = $cursor;
+                    $checkpoint->sql_bytes = $sql_bytes_written;
+                    $checkpoint->sql_statements_counted = $sql_statements_counted;
+                    $checkpoint->status = "partial";
+                    ($this->save_state)($checkpoint);
                     $sql_buffer = "";
                     $curl_timed_out = true;
                     break;
@@ -330,11 +329,11 @@ final class SqlDownloader
                         if ($sql_handle) {
                             fflush($sql_handle);
                         }
-                        $state["cursor"] = $cursor;
-                        $state["sql_bytes"] = $sql_bytes_written;
-                        $state["sql_statements_counted"] = $sql_statements_counted;
-                        $state["status"] = "partial";
-                        ($this->save_state)($state);
+                        $checkpoint->cursor = $cursor;
+                        $checkpoint->sql_bytes = $sql_bytes_written;
+                        $checkpoint->sql_statements_counted = $sql_statements_counted;
+                        $checkpoint->status = "partial";
+                        ($this->save_state)($checkpoint);
                         $curl_timed_out = true;
                         break;
                     }
@@ -342,7 +341,7 @@ final class SqlDownloader
                 }
                 $sync_sql_response_state($response_handler);
 
-                $state["consecutive_timeouts"] = 0;
+                $checkpoint->consecutive_timeouts = 0;
                 $wall_time = microtime(true) - $request_start;
                 ($this->finalize_request)(
                     "sql_chunk",
@@ -354,9 +353,10 @@ final class SqlDownloader
                     fflush($sql_handle);
                 }
 
-                $state["cursor"] = $cursor;
-                $state["sql_bytes"] = $complete ? null : $sql_bytes_written;
-                ($this->save_state)($state);
+                $checkpoint->cursor = $cursor;
+                $checkpoint->sql_bytes = $complete ? null : $sql_bytes_written;
+                $checkpoint->sql_statements_counted = $sql_statements_counted;
+                ($this->save_state)($checkpoint);
             }
 
             $query_stream->mark_input_complete();
@@ -440,5 +440,7 @@ final class SqlDownloader
                 " bytes) - incomplete export?"
             );
         }
+
+        return $checkpoint;
     }
 }

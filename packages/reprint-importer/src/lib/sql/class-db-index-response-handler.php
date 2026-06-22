@@ -17,29 +17,13 @@ final class DbIndexResponseHandler
     private int $bytes_written;
     private bool $complete = false;
 
-    /** @var callable */
-    private $should_stop;
-
-    /** @var callable */
-    private $handle_progress;
-
-    /** @var callable */
-    private $handle_error;
-
-    /** @var callable */
-    private $handle_completion_progress;
-
     public function __construct(
         $handle,
         ?string $cursor,
         StreamingContext $context,
         int $tables_written,
         int $rows_estimated,
-        int $bytes_written,
-        callable $should_stop,
-        callable $handle_progress,
-        callable $handle_error,
-        callable $handle_completion_progress
+        int $bytes_written
     ) {
         $this->handle = $handle;
         $this->cursor = $cursor;
@@ -47,10 +31,6 @@ final class DbIndexResponseHandler
         $this->tables_written = $tables_written;
         $this->rows_estimated = $rows_estimated;
         $this->bytes_written = $bytes_written;
-        $this->should_stop = $should_stop;
-        $this->handle_progress = $handle_progress;
-        $this->handle_error = $handle_error;
-        $this->handle_completion_progress = $handle_completion_progress;
     }
 
     public function cursor(): ?string
@@ -80,10 +60,6 @@ final class DbIndexResponseHandler
 
     public function handle(array $chunk): void
     {
-        if ($this->should_stop()) {
-            throw new RuntimeException("Shutdown requested");
-        }
-
         if (function_exists("pcntl_signal_dispatch")) {
             pcntl_signal_dispatch();
         }
@@ -97,11 +73,11 @@ final class DbIndexResponseHandler
         if ($chunk_type === "table_stats") {
             $this->handle_table_stats($chunk);
         } elseif ($chunk_type === "progress") {
-            $this->handle_progress($chunk, "db-index");
+            return;
         } elseif ($chunk_type === "completion") {
             $this->handle_completion($chunk);
         } elseif ($chunk_type === "error") {
-            $this->handle_error($chunk, "sql", $this->context);
+            $this->handle_error($chunk);
         }
     }
 
@@ -159,33 +135,18 @@ final class DbIndexResponseHandler
                     ? (int) $headers["x-memory-limit"]
                     : null,
         ];
-        $this->handle_completion_progress([
-            "phase" => "db-index",
-            "status" => $headers["x-status"] ?? "unknown",
-            "tables_processed" => (int) ($headers["x-tables-processed"] ?? 0),
-        ]);
     }
 
-    private function should_stop(): bool
+    private function handle_error(array $chunk): void
     {
-        return (bool) ($this->should_stop)();
-    }
+        $body = $chunk["body"] ?? "";
+        $data = json_decode($body, true);
+        if (is_array($data) && isset($data["message"])) {
+            throw new RuntimeException((string) $data["message"]);
+        }
 
-    private function handle_progress(array $chunk, string $phase): void
-    {
-        ($this->handle_progress)($chunk, $phase);
-    }
-
-    private function handle_error(
-        array $chunk,
-        string $phase,
-        StreamingContext $context
-    ): void {
-        ($this->handle_error)($chunk, $phase, $context);
-    }
-
-    private function handle_completion_progress(array $progress): void
-    {
-        ($this->handle_completion_progress)($progress);
+        throw new RuntimeException(
+            "Remote db-index error: " . substr((string) $body, 0, 500),
+        );
     }
 }

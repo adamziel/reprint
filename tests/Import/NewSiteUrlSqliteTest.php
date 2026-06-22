@@ -110,8 +110,11 @@ class NewSiteUrlSqliteTest extends TestCase
             'status' => null,
             'apply' => [],
         ], $extra);
+        if (!is_dir($this->tempDir . '/.reprint')) {
+            mkdir($this->tempDir . '/.reprint', 0755, true);
+        }
         file_put_contents(
-            $this->tempDir . '/.import-state.json',
+            $this->tempDir . '/.reprint/run.json',
             json_encode($state, JSON_PRETTY_PRINT),
         );
     }
@@ -397,9 +400,13 @@ class NewSiteUrlSqliteTest extends TestCase
             'target_db' => 'wp_test',
         ]);
 
-        $state = json_decode(file_get_contents($this->tempDir . '/.import-state.json'), true);
+        $state = json_decode(file_get_contents($this->tempDir . '/.reprint/run.json'), true);
+        $checkpoint = json_decode(
+            file_get_contents($this->tempDir . '/.reprint/db-apply/checkpoint.json'),
+            true,
+        );
         $this->assertSame('complete', $state['status']);
-        $this->assertSame(3, $state['apply']['statements_executed']);
-        $this->assertSame(strlen($sql), $state['apply']['bytes_read']);
+        $this->assertSame(3, $checkpoint['statements_executed']);
+        $this->assertSame(strlen($sql), $checkpoint['bytes_read']);
     }
 }

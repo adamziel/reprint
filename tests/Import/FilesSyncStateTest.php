@@ -34,6 +34,7 @@ class FilesSyncStateTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->fs_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint', 0755, true);
         mkdir($this->fs_root, 0755, true);
     }
 
@@ -123,7 +124,7 @@ class FilesSyncStateTest extends TestCase
             "max_allowed_packet" => null,
         ];
         file_put_contents(
-            $this->stateDir . '/.import-state.json',
+            $this->stateDir . '/.reprint/run.json',
             json_encode(array_merge($defaults, $state), JSON_PRETTY_PRINT),
         );
     }
@@ -133,7 +134,7 @@ class FilesSyncStateTest extends TestCase
      */
     private function readState(): array
     {
-        $contents = file_get_contents($this->stateDir . '/.import-state.json');
+        $contents = file_get_contents($this->stateDir . '/.reprint/run.json');
         return json_decode($contents, true);
     }
 

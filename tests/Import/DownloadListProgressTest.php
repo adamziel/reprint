@@ -28,6 +28,7 @@ class DownloadListProgressTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->fs_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint', 0755, true);
         mkdir($this->fs_root, 0755, true);
     }
 
@@ -100,7 +101,7 @@ class DownloadListProgressTest extends TestCase
             "fetch_skipped" => ["offset" => 0, "next_offset" => 0, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
         ];
         file_put_contents(
-            $this->stateDir . '/.import-state.json',
+            $this->stateDir . '/.reprint/run.json',
             json_encode(array_merge($defaults, $state), JSON_PRETTY_PRINT),
         );
     }

@@ -28,9 +28,10 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         mkdir($this->fsRoot, 0755, true);
         mkdir($this->outputDir, 0755, true);
         mkdir($stateDir, 0755, true);
+        mkdir($stateDir . '/.reprint', 0755, true);
 
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
-        $this->stateFile = $stateDir . '/.import-state.json';
+        $this->stateFile = $stateDir . '/.reprint/run.json';
         $this->skippedFile = $stateDir . '/.import-download-list-skipped.jsonl';
         file_put_contents($this->stateFile, "{\"command\":\"files-pull\",\"status\":\"partial\"}\n");
         file_put_contents($this->skippedFile, "{\"path\":\"/wp-content/uploads/test.jpg\"}\n");
@@ -93,7 +94,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $startSh = file_get_contents($this->outputDir . '/start.sh');
 
         $this->assertStringContainsString(
-            "/tmp/reprint/.import-state.json",
+            "/tmp/reprint/.reprint/run.json",
             $runtime,
         );
         $this->assertStringContainsString(
@@ -102,7 +103,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         );
         $this->assertStringNotContainsString($this->stateFile, $runtime);
         $this->assertStringContainsString(
-            "--mount='" . $this->stateFile . ":/tmp/reprint/.import-state.json'",
+            "--mount='" . $this->stateFile . ":/tmp/reprint/.reprint/run.json'",
             $startSh,
         );
         $this->assertStringContainsString(
@@ -118,7 +119,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $mount_targets = array_column($startJson['mounts'], 'target');
         $this->assertContains($this->stateFile, $mount_sources);
         $this->assertContains($this->skippedFile, $mount_sources);
-        $this->assertContains('/tmp/reprint/.import-state.json', $mount_targets);
+        $this->assertContains('/tmp/reprint/.reprint/run.json', $mount_targets);
         $this->assertContains('/tmp/reprint/.import-download-list-skipped.jsonl', $mount_targets);
     }
 }

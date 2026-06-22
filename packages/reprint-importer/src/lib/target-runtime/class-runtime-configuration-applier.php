@@ -350,7 +350,7 @@ final class RuntimeConfigurationApplier
         $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL'] = $base_url;
         $resolved_state_dir = realpath($state_dir) ?: $state_dir;
         $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE'] =
-            rtrim($resolved_state_dir, '/') . '/.import-state.json';
+            rtrim($resolved_state_dir, '/') . '/.reprint/run.json';
         $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'] =
             rtrim($resolved_state_dir, '/') . '/.import-download-list-skipped.jsonl';
         $manifest->routes[] = [

@@ -18,7 +18,37 @@ final class ImportPaths
 
     public function state_file(): string
     {
-        return $this->state_dir . "/.import-state.json";
+        return $this->run_state_file();
+    }
+
+    public function state_root(): string
+    {
+        return $this->state_dir . "/.reprint";
+    }
+
+    public function run_state_file(): string
+    {
+        return $this->state_root() . "/run.json";
+    }
+
+    public function db_pull_checkpoint_file(): string
+    {
+        return $this->state_root() . "/db-pull/checkpoint.json";
+    }
+
+    public function db_apply_checkpoint_file(): string
+    {
+        return $this->state_root() . "/db-apply/checkpoint.json";
+    }
+
+    public function files_pull_checkpoint_file(): string
+    {
+        return $this->state_root() . "/files-pull/checkpoint.json";
+    }
+
+    public function runtime_checkpoint_file(): string
+    {
+        return $this->state_root() . "/runtime/checkpoint.json";
     }
 
     public function index_file(): string

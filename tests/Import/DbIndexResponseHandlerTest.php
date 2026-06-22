@@ -5,23 +5,18 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Sql\DbIndexResponseHandler;
+use RuntimeException;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
 final class DbIndexResponseHandlerTest extends TestCase
 {
     private string $tables_file;
-    private array $progress = [];
-    private array $errors = [];
-    private array $completion_progress = [];
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tables_file = tempnam(sys_get_temp_dir(), 'db-index-response-handler-');
-        $this->progress = [];
-        $this->errors = [];
-        $this->completion_progress = [];
     }
 
     protected function tearDown(): void
@@ -93,14 +88,9 @@ final class DbIndexResponseHandlerTest extends TestCase
             'memory_used' => 1024,
             'memory_limit' => 2048,
         ], $context->response_stats);
-        $this->assertSame([
-            'phase' => 'db-index',
-            'status' => 'complete',
-            'tables_processed' => 4,
-        ], $this->completion_progress[0]);
     }
 
-    public function testProgressAndErrorAreDelegatedWithExistingPhases(): void
+    public function testProgressChunksAreIgnored(): void
     {
         $handle = fopen($this->tables_file, 'w+');
         $context = new StreamingContext();
@@ -111,20 +101,27 @@ final class DbIndexResponseHandlerTest extends TestCase
             'body' => '',
         ];
         $handler->handle($progress_chunk);
-
-        $error_chunk = [
-            'headers' => ['x-chunk-type' => 'error'],
-            'body' => 'failed',
-        ];
-        $handler->handle($error_chunk);
         fclose($handle);
 
-        $this->assertSame([
-            ['chunk' => $progress_chunk, 'phase' => 'db-index'],
-        ], $this->progress);
-        $this->assertSame([
-            ['chunk' => $error_chunk, 'phase' => 'sql', 'context' => $context],
-        ], $this->errors);
+        $this->assertNull($handler->cursor());
+        $this->assertFalse($handler->complete());
+    }
+
+    public function testErrorChunkThrowsRemoteMessage(): void
+    {
+        $handle = fopen($this->tables_file, 'w+');
+        $context = new StreamingContext();
+        $handler = $this->make_handler($handle, null, $context);
+        $error_chunk = [
+            'headers' => ['x-chunk-type' => 'error'],
+            'body' => json_encode(['message' => 'remote failed']),
+        ];
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('remote failed');
+
+        $handler->handle($error_chunk);
+        fclose($handle);
     }
 
     private function make_handler(
@@ -142,16 +139,6 @@ final class DbIndexResponseHandlerTest extends TestCase
             $tables_written,
             $rows_estimated,
             $bytes_written,
-            fn(): bool => false,
-            function (array $chunk, string $phase): void {
-                $this->progress[] = compact('chunk', 'phase');
-            },
-            function (array $chunk, string $phase, StreamingContext $context): void {
-                $this->errors[] = compact('chunk', 'phase', 'context');
-            },
-            function (array $progress): void {
-                $this->completion_progress[] = $progress;
-            },
         );
     }
 }

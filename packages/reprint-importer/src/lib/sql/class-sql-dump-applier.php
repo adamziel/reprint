@@ -66,24 +66,21 @@ final class SqlDumpApplier
     /**
      * Apply a local SQL dump to the target database.
      *
-     * @param array<string, mixed> $state
      * @param array{
      *     sql_file:string,
      *     state_dir:string,
-     *     statements_executed:int,
-     *     bytes_read:int,
      *     new_site_url:string
      * } $config
      */
     public function apply(
-        array &$state,
+        DbApplyCheckpoint $checkpoint,
         array $config,
         DbApplyQueryExecutor $query_executor,
         PDO $pdo
-    ): void {
+    ): DbApplyCheckpoint {
         $sql_file = $config["sql_file"];
-        $statements_executed = $config["statements_executed"];
-        $bytes_read = $config["bytes_read"];
+        $statements_executed = $checkpoint->statements_executed;
+        $bytes_read = $checkpoint->bytes_read;
 
         $query_stream = new WP_MySQL_FastQueryStream();
         $stmt_count = 0;
@@ -171,9 +168,9 @@ final class SqlDumpApplier
                     $stmts_since_save++;
 
                     if ($stmts_since_save >= $save_every) {
-                        $state["apply"]["statements_executed"] = $statements_executed;
-                        $state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                        ($this->save_state)($state);
+                        $checkpoint->statements_executed = $statements_executed;
+                        $checkpoint->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                        ($this->save_state)($checkpoint);
                         $stmts_since_save = 0;
 
                         $this->show_apply_progress(
@@ -205,10 +202,10 @@ final class SqlDumpApplier
             }
 
             if (($this->should_stop)()) {
-                $state["apply"]["statements_executed"] = $statements_executed;
-                $state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                $state["status"] = "partial";
-                ($this->save_state)($state);
+                $checkpoint->statements_executed = $statements_executed;
+                $checkpoint->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                $checkpoint->status = "partial";
+                ($this->save_state)($checkpoint);
                 ($this->audit)(
                     sprintf(
                         "PARTIAL db-apply | %d statements executed",
@@ -223,7 +220,7 @@ final class SqlDumpApplier
                     "statements_total" => $statements_total,
                     "message" => "db-apply partial: {$statements_executed} statements executed",
                 ], true);
-                return;
+                return $checkpoint;
             }
 
             foreach ((array) ($this->deactivate_host_plugins)($pdo) as $basename) {
@@ -239,10 +236,10 @@ final class SqlDumpApplier
                 ($this->audit)("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)", true);
             }
 
-            $state["apply"]["statements_executed"] = $statements_executed;
-            $state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-            $state["status"] = "complete";
-            ($this->save_state)($state);
+            $checkpoint->statements_executed = $statements_executed;
+            $checkpoint->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+            $checkpoint->status = "complete";
+            ($this->save_state)($checkpoint);
 
             ($this->audit)(
                 sprintf(
@@ -267,6 +264,8 @@ final class SqlDumpApplier
         } finally {
             fclose($sql_handle);
         }
+
+        return $checkpoint;
     }
 
     private function load_statements_total(string $state_dir): ?int

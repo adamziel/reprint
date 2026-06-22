@@ -16,7 +16,13 @@ class ImportSessionInfrastructureTest extends TestCase
         $paths = new ImportPaths('/tmp/reprint-state/');
 
         $this->assertSame('/tmp/reprint-state', $paths->state_dir());
-        $this->assertSame('/tmp/reprint-state/.import-state.json', $paths->state_file());
+        $this->assertSame('/tmp/reprint-state/.reprint', $paths->state_root());
+        $this->assertSame('/tmp/reprint-state/.reprint/run.json', $paths->state_file());
+        $this->assertSame('/tmp/reprint-state/.reprint/run.json', $paths->run_state_file());
+        $this->assertSame('/tmp/reprint-state/.reprint/db-pull/checkpoint.json', $paths->db_pull_checkpoint_file());
+        $this->assertSame('/tmp/reprint-state/.reprint/db-apply/checkpoint.json', $paths->db_apply_checkpoint_file());
+        $this->assertSame('/tmp/reprint-state/.reprint/files-pull/checkpoint.json', $paths->files_pull_checkpoint_file());
+        $this->assertSame('/tmp/reprint-state/.reprint/runtime/checkpoint.json', $paths->runtime_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.import-index.jsonl', $paths->index_file());
         $this->assertSame('/tmp/reprint-state/.import-index-updates.jsonl', $paths->index_updates_file());
         $this->assertSame('/tmp/reprint-state/.import-remote-index.jsonl', $paths->remote_index_file());
