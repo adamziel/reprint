@@ -53,6 +53,30 @@ final class DbPullCheckpoint
         );
     }
 
+    public static function from_persisted_array(
+        array $data,
+        callable $decode_path
+    ): self {
+        $checkpoint = self::from_array($data);
+        $checkpoint->db_index->file = self::map_nullable_string(
+            $checkpoint->db_index->file,
+            $decode_path,
+        );
+
+        return $checkpoint;
+    }
+
+    public function to_persisted_array(callable $encode_path): array
+    {
+        $data = $this->to_array();
+        $data["db_index"]["file"] = self::map_nullable_string(
+            $this->db_index->file,
+            $encode_path,
+        );
+
+        return $data;
+    }
+
     public function reset(): void
     {
         $this->status = "in_progress";
@@ -75,5 +99,15 @@ final class DbPullCheckpoint
             "sql_statements_counted" => $this->sql_statements_counted,
             "consecutive_timeouts" => $this->consecutive_timeouts,
         ];
+    }
+
+    /**
+     * @param mixed $value
+     */
+    private static function map_nullable_string($value, callable $map): ?string
+    {
+        $mapped = call_user_func($map, $value);
+
+        return is_string($mapped) ? $mapped : null;
     }
 }

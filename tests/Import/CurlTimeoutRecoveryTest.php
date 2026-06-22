@@ -519,73 +519,6 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->assertInstanceOf(\RuntimeException::class, $e);
     }
 
-    // ---------------------------------------------------------------
-    // Consecutive timeout counter
-    // ---------------------------------------------------------------
-
-    /**
-     * assert_can_retry_consecutive_timeout increments the counter when cursor didn't
-     * move. After MAX_CONSECUTIVE_TIMEOUTS it throws RuntimeException.
-     */
-    public function testTrackConsecutiveTimeoutIncrementsOnNoProgress()
-    {
-        $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
-            "consecutive_timeouts" => 0,
-        ]);
-
-        [$client, $reflection] = $this->prepareClient();
-        $state = $reflection->getProperty('state');
-
-        $method = $reflection->getMethod('assert_can_retry_consecutive_timeout');
-
-        // First call — no progress (same cursor before and after)
-        $method->invoke($client, "sql_chunk", "abc", "abc");
-        $this->assertEquals(1, $state->getValue($client)["consecutive_timeouts"]);
-
-        // Second call — still no progress
-        $method->invoke($client, "sql_chunk", "abc", "abc");
-        $this->assertEquals(2, $state->getValue($client)["consecutive_timeouts"]);
-    }
-
-    public function testTrackConsecutiveTimeoutResetsOnProgress()
-    {
-        $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
-            "consecutive_timeouts" => 2,
-        ]);
-
-        [$client, $reflection] = $this->prepareClient();
-        $state = $reflection->getProperty('state');
-
-        $method = $reflection->getMethod('assert_can_retry_consecutive_timeout');
-
-        // Cursor advanced — should reset to 0
-        $method->invoke($client, "sql_chunk", "abc", "def");
-        $this->assertEquals(0, $state->getValue($client)["consecutive_timeouts"]);
-    }
-
-    public function testTrackConsecutiveTimeoutThrowsAtMax()
-    {
-        $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
-            "consecutive_timeouts" => 2,
-        ]);
-
-        [$client, $reflection] = $this->prepareClient();
-
-        $method = $reflection->getMethod('assert_can_retry_consecutive_timeout');
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('consecutive');
-
-        // 3rd no-progress timeout should throw
-        $method->invoke($client, "sql_chunk", "abc", "abc");
-    }
-
     /**
      * End-to-end: download_sql with counter already at MAX-1 and no
      * cursor progress should throw RuntimeException.
@@ -620,7 +553,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $downloadSql->invoke($client, DbPullCheckpoint::from_array($this->readDbPullCheckpoint()));
     }
 
-    public function testFirstTimeoutIncrementsCounterInState()
+    public function testFirstTimeoutIncrementsDbPullCheckpointCounter()
     {
         $this->writeState([
             "command" => "db-pull",

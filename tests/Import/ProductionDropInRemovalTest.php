@@ -148,6 +148,14 @@ class ProductionDropInRemovalTest extends TestCase
         $this->setPrivate($client, 'state', $state);
     }
 
+    private function readRuntimeCheckpoint(): array
+    {
+        return json_decode(
+            file_get_contents($this->stateDir . '/.reprint/runtime/checkpoint.json'),
+            true,
+        );
+    }
+
     private function runApplyRuntime(ImportClient $client): void
     {
         ob_start();
@@ -304,7 +312,7 @@ class ProductionDropInRemovalTest extends TestCase
         );
     }
 
-    public function testApplyRuntimePersistsPathsRemovedToState(): void
+    public function testApplyRuntimePersistsPathsRemovedToRuntimeCheckpoint(): void
     {
         $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
         $this->createProductionDropIns();
@@ -313,17 +321,12 @@ class ProductionDropInRemovalTest extends TestCase
         $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
-        // Re-read the state file to verify paths_removed was persisted.
-        $state = json_decode(
-            file_get_contents($this->stateDir . '/.reprint/run.json'),
-            true,
-        );
+        $checkpoint = $this->readRuntimeCheckpoint();
 
-        $this->assertArrayHasKey('remote_paths_removed_from_local_site', $state['apply']);
-        $this->assertContains('wp-content/object-cache.php', $state['apply']['remote_paths_removed_from_local_site']);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh', $state['apply']['remote_paths_removed_from_local_site']);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh-dev', $state['apply']['remote_paths_removed_from_local_site']);
-        $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $state['apply']['remote_paths_removed_from_local_site']);
+        $this->assertContains('wp-content/object-cache.php', $checkpoint['remote_paths_removed_from_local_site']);
+        $this->assertContains('wp-content/mu-plugins/wpcomsh', $checkpoint['remote_paths_removed_from_local_site']);
+        $this->assertContains('wp-content/mu-plugins/wpcomsh-dev', $checkpoint['remote_paths_removed_from_local_site']);
+        $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $checkpoint['remote_paths_removed_from_local_site']);
     }
 
     public function testNonWpcloudHostDoesNotRemoveAnything(): void
@@ -473,7 +476,7 @@ class ProductionDropInRemovalTest extends TestCase
         );
     }
 
-    public function testSitegroundPersistsPathsRemovedToState(): void
+    public function testSitegroundPersistsPathsRemovedToRuntimeCheckpoint(): void
     {
         $this->writeSitegroundState();
         $this->createSitegroundPlugins();
@@ -482,18 +485,15 @@ class ProductionDropInRemovalTest extends TestCase
         $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
-        $state = json_decode(
-            file_get_contents($this->stateDir . '/.reprint/run.json'),
-            true,
-        );
+        $checkpoint = $this->readRuntimeCheckpoint();
 
         $this->assertContains(
             'wp-content/plugins/sg-cachepress',
-            $state['apply']['remote_paths_removed_from_local_site'],
+            $checkpoint['remote_paths_removed_from_local_site'],
         );
         $this->assertContains(
             'wp-content/plugins/sg-security',
-            $state['apply']['remote_paths_removed_from_local_site'],
+            $checkpoint['remote_paths_removed_from_local_site'],
         );
     }
 

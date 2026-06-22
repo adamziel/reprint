@@ -9,6 +9,9 @@ use Reprint\Importer\Pull\PullCheckpoint;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
+use Reprint\Importer\Sql\DbIndexCheckpoint;
+use Reprint\Importer\Sql\DbPullCheckpoint;
+use Reprint\Importer\TargetRuntime\RuntimeCheckpoint;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -44,6 +47,9 @@ class ImportSessionInfrastructureTest extends TestCase
             'command' => 'files-pull',
             'unknown' => 'ignored',
             'pull' => ['stage' => 'files-pull'],
+            'db_index' => ['file' => '/tmp/db-tables.jsonl'],
+            'sql_bytes' => 123,
+            'consecutive_timeouts' => 2,
             'diff' => 'invalid',
             'fetch' => ['offset' => 42, 'extra' => 'ignored'],
             'apply' => ['target_engine' => 'sqlite'],
@@ -52,10 +58,12 @@ class ImportSessionInfrastructureTest extends TestCase
         $this->assertSame('files-pull', $state['command']);
         $this->assertArrayNotHasKey('unknown', $state);
         $this->assertArrayNotHasKey('pull', $state);
+        $this->assertArrayNotHasKey('db_index', $state);
+        $this->assertArrayNotHasKey('sql_bytes', $state);
+        $this->assertArrayNotHasKey('consecutive_timeouts', $state);
         $this->assertArrayNotHasKey('diff', $state);
         $this->assertArrayNotHasKey('fetch', $state);
-        $this->assertSame('sqlite', $state['apply']['target_engine']);
-        $this->assertSame(0, $state['apply']['statements_executed']);
+        $this->assertArrayNotHasKey('apply', $state);
     }
 
     public function testPullCheckpointNormalizesOrchestrationState(): void
@@ -77,11 +85,24 @@ class ImportSessionInfrastructureTest extends TestCase
         $this->assertFalse($checkpoint->skipped_pending);
     }
 
+    public function testRuntimeCheckpointNormalizesRuntimeState(): void
+    {
+        $checkpoint = RuntimeCheckpoint::from_array([
+            'remote_paths_removed_from_local_site' => [
+                'wp-content/object-cache.php',
+            ],
+        ]);
+
+        $this->assertSame(
+            ['wp-content/object-cache.php'],
+            $checkpoint->remote_paths_removed_from_local_site,
+        );
+    }
+
     public function testStatePathCodecRoundTripsByteSensitivePaths(): void
     {
         $codec = new StatePathCodec();
         $state = ImportStateSchema::default_state();
-        $state['db_index']['file'] = '/tmp/db-tables.jsonl';
         $state['preflight'] = [
             'data' => [
                 'runtime' => ['document_root' => '/srv/htdocs'],
@@ -97,7 +118,6 @@ class ImportSessionInfrastructureTest extends TestCase
         $this->assertStringStartsWith('base64:', $encoded['preflight']['data']['runtime']['document_root']);
 
         $decoded = $codec->decode_state_paths($encoded);
-        $this->assertSame($state['db_index']['file'], $decoded['db_index']['file']);
         $this->assertSame(
             '/srv/htdocs/wp-content',
             $decoded['preflight']['data']['filesystem']['directories'][0]['path'],
@@ -137,6 +157,26 @@ class ImportSessionInfrastructureTest extends TestCase
             $decoded->fetch_skipped->batch_file,
         );
         $this->assertSame($checkpoint->current_file, $decoded->current_file);
+    }
+
+    public function testDbPullCheckpointPathCodecRoundTripsByteSensitivePaths(): void
+    {
+        $codec = new StatePathCodec();
+        $checkpoint = new DbPullCheckpoint(
+            "in_progress",
+            "sql",
+            null,
+            new DbIndexCheckpoint("/tmp/db-tables-\0stats.jsonl"),
+        );
+
+        $encoded = $checkpoint->to_persisted_array([$codec, 'encode_value']);
+        $this->assertStringStartsWith('base64:', $encoded["db_index"]["file"]);
+
+        $decoded = DbPullCheckpoint::from_persisted_array(
+            $encoded,
+            [$codec, 'decode_value'],
+        );
+        $this->assertSame($checkpoint->db_index->file, $decoded->db_index->file);
     }
 
     public function testStatePathCodecReportsInvalidEncodedPath(): void

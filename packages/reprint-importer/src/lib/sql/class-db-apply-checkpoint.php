@@ -15,7 +15,6 @@ final class DbApplyCheckpoint
     public ?string $target_user;
     public ?string $target_pass;
     public ?string $target_sqlite_path;
-    public array $remote_paths_removed_from_local_site;
 
     public function __construct(
         ?string $status = null,
@@ -28,8 +27,7 @@ final class DbApplyCheckpoint
         ?int $target_port = null,
         ?string $target_user = null,
         ?string $target_pass = null,
-        ?string $target_sqlite_path = null,
-        array $remote_paths_removed_from_local_site = []
+        ?string $target_sqlite_path = null
     ) {
         $this->status = $status;
         $this->statements_executed = $statements_executed;
@@ -42,7 +40,6 @@ final class DbApplyCheckpoint
         $this->target_user = $target_user;
         $this->target_pass = $target_pass;
         $this->target_sqlite_path = $target_sqlite_path;
-        $this->remote_paths_removed_from_local_site = $remote_paths_removed_from_local_site;
     }
 
     public static function fresh(): self
@@ -64,9 +61,6 @@ final class DbApplyCheckpoint
             isset($data["target_user"]) && is_string($data["target_user"]) ? $data["target_user"] : null,
             isset($data["target_pass"]) && is_string($data["target_pass"]) ? $data["target_pass"] : null,
             isset($data["target_sqlite_path"]) && is_string($data["target_sqlite_path"]) ? $data["target_sqlite_path"] : null,
-            is_array($data["remote_paths_removed_from_local_site"] ?? null)
-                ? array_values($data["remote_paths_removed_from_local_site"])
-                : [],
         );
     }
 
@@ -83,7 +77,6 @@ final class DbApplyCheckpoint
         $this->target_user = null;
         $this->target_pass = null;
         $this->target_sqlite_path = null;
-        $this->remote_paths_removed_from_local_site = [];
     }
 
     public function to_array(): array
@@ -100,7 +93,6 @@ final class DbApplyCheckpoint
             "target_user" => $this->target_user,
             "target_pass" => $this->target_pass,
             "target_sqlite_path" => $this->target_sqlite_path,
-            "remote_paths_removed_from_local_site" => $this->remote_paths_removed_from_local_site,
         ];
     }
 }

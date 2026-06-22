@@ -45,6 +45,7 @@ use Reprint\Importer\Sql\DbPullWorkflow;
 use Reprint\Importer\Sql\SqlDownloader;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TargetRuntime\RuntimeConfigurationApplier;
+use Reprint\Importer\TargetRuntime\RuntimeCheckpoint;
 use Reprint\Importer\Transport\ImportHttpTransport;
 use Reprint\Importer\Transport\HttpRequestBuilder;
 use Reprint\Importer\Tuning\AdaptiveTuner;
@@ -1709,8 +1710,9 @@ class ImportClient
 
     private function load_db_pull_checkpoint(): DbPullCheckpoint
     {
-        return DbPullCheckpoint::from_array(
+        return DbPullCheckpoint::from_persisted_array(
             $this->json_state_store->load($this->paths->db_pull_checkpoint_file()) ?? [],
+            [$this->state_path_codec, 'decode_value'],
         );
     }
 
@@ -1719,7 +1721,7 @@ class ImportClient
         $this->output->tick_spinner();
         $this->json_state_store->save(
             $this->paths->db_pull_checkpoint_file(),
-            $checkpoint->to_array(),
+            $checkpoint->to_persisted_array([$this->state_path_codec, 'encode_value']),
         );
     }
 
@@ -1735,6 +1737,22 @@ class ImportClient
         $this->output->tick_spinner();
         $this->json_state_store->save(
             $this->paths->db_apply_checkpoint_file(),
+            $checkpoint->to_array(),
+        );
+    }
+
+    public function runtime_checkpoint(): RuntimeCheckpoint
+    {
+        return RuntimeCheckpoint::from_array(
+            $this->json_state_store->load($this->paths->runtime_checkpoint_file()) ?? [],
+        );
+    }
+
+    public function save_runtime_checkpoint(RuntimeCheckpoint $checkpoint): void
+    {
+        $this->output->tick_spinner();
+        $this->json_state_store->save(
+            $this->paths->runtime_checkpoint_file(),
             $checkpoint->to_array(),
         );
     }
@@ -1849,7 +1867,7 @@ class ImportClient
                 "flat_document_root" => $options["flat_document_root"] ?? null,
                 "preflight_data" => $preflight_data,
                 "webhost" => $webhost,
-                "apply_state" => $this->state["apply"] ?? [],
+                "apply_state" => $this->db_apply_checkpoint()->to_array(),
                 "host" => $options["host"] ?? null,
                 "port" => $options["port"] ?? null,
                 "enable_remote_upload_proxy" => $this->should_enable_remote_upload_proxy(),
@@ -1860,9 +1878,9 @@ class ImportClient
             },
         );
 
-        // Persist which paths were removed so callers can inspect state.
-        $this->state["apply"]["remote_paths_removed_from_local_site"] = $result["paths_removed"];
-        $this->save_state($this->state);
+        $checkpoint = $this->runtime_checkpoint();
+        $checkpoint->remote_paths_removed_from_local_site = $result["paths_removed"];
+        $this->save_runtime_checkpoint($checkpoint);
 
         // Output the summary and manifest as structured JSON for callers,
         // and print the human-readable summary to stderr.
@@ -2586,18 +2604,6 @@ class ImportClient
         return $this->shutdown_requested;
     }
 
-    public function assert_can_retry_stream_timeout(
-        string $phase,
-        ?string $cursor_before,
-        ?string $cursor_after
-    ): void {
-        $this->assert_can_retry_consecutive_timeout(
-            $phase,
-            $cursor_before,
-            $cursor_after,
-        );
-    }
-
     public function assert_can_retry_db_pull_timeout(
         DbPullCheckpoint $checkpoint,
         string $phase,
@@ -2733,50 +2739,6 @@ class ImportClient
         &$current_chunk
     ): callable {
         return $this->http_transport()->make_chunk_handler($context, $current_chunk);
-    }
-
-    /**
-     * Track consecutive cURL timeouts and decide whether to retry or give up.
-     *
-     * Compares the cursor before and after the request. If the cursor advanced
-     * (we got some data before stalling), the counter resets — the stall was
-     * transient and resuming makes sense. If the cursor didn't move, the
-     * counter increments. After MAX_CONSECUTIVE_TIMEOUTS with no progress,
-     * throws a RuntimeException so the runner sees exit code 1 and stops.
-     *
-     * @param string $phase   Human-readable phase name for logs (e.g. "sql_chunk")
-     * @param ?string $cursor_before Cursor value at the start of the request
-     * @param ?string $cursor_after  Cursor value when the timeout fired
-     */
-    protected function assert_can_retry_consecutive_timeout(
-        string $phase,
-        ?string $cursor_before,
-        ?string $cursor_after
-    ): void {
-        if ($cursor_after !== null && $cursor_after !== $cursor_before) {
-            // Progress was made — reset the counter.
-            $this->state["consecutive_timeouts"] = 0;
-        } else {
-            $this->state["consecutive_timeouts"] =
-                ($this->state["consecutive_timeouts"] ?? 0) + 1;
-        }
-
-        $count = $this->state["consecutive_timeouts"];
-
-        $this->audit_log(
-            "CURL TIMEOUT | {$phase} | consecutive_timeouts={$count}/" .
-                self::MAX_CONSECUTIVE_TIMEOUTS .
-                " | cursor_moved=" .
-                ($cursor_after !== $cursor_before ? "yes" : "no"),
-            true,
-        );
-
-        if ($count >= self::MAX_CONSECUTIVE_TIMEOUTS) {
-            throw new RuntimeException(
-                "Remote server appears unreachable: {$count} consecutive " .
-                "cURL timeouts with no progress during {$phase}. Giving up.",
-            );
-        }
     }
 
     /**

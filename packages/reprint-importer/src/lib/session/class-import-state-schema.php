@@ -20,33 +20,11 @@ final class ImportStateSchema
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "max_allowed_packet" => null,
-            "db_index" => [
-                "file" => null,
-                "tables" => 0,
-                "rows_estimated" => 0,
-                "bytes" => 0,
-                "updated_at" => null,
-            ],
-            "sql_bytes" => null,
-            "apply" => [
-                "statements_executed" => 0,
-                "bytes_read" => 0,
-                "rewrite_url" => null,
-                "target_engine" => null,
-                "target_db" => null,
-                "target_host" => null,
-                "target_port" => null,
-                "target_user" => null,
-                "target_pass" => null,
-                "target_sqlite_path" => null,
-                "remote_paths_removed_from_local_site" => [],
-            ],
             "sql_output" => null,
             "mysql_host" => null,
             "mysql_port" => null,
             "mysql_user" => null,
             "mysql_database" => null,
-            "consecutive_timeouts" => 0,
             "tuning" => [
                 "config" => [],
                 "state" => [],
@@ -60,7 +38,7 @@ final class ImportStateSchema
         $state = array_intersect_key($state, $defaults);
         $state = array_merge($defaults, $state);
 
-        foreach (["tuning", "db_index", "apply"] as $key) {
+        foreach (["tuning"] as $key) {
             $value = $state[$key] ?? [];
             if (!is_array($value)) {
                 $value = [];

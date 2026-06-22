@@ -379,16 +379,11 @@ class Pull
     private function prepare_repull(): void
     {
         $state_dir = $this->client->state_dir;
-        $defaults = $this->client->default_state();
-        $this->client->mutate_state(function (array $state) use ($defaults) {
+        $this->client->mutate_state(function (array $state) {
             $state['command'] = null;
             $state['status'] = null;
             $state['cursor'] = null;
             $state['stage'] = null;
-            $state['consecutive_timeouts'] = 0;
-            $state['sql_bytes'] = null;
-            $state['db_index'] = $defaults['db_index'];
-            $state['apply'] = $defaults['apply'];
             $state['sql_output'] = null;
             return $state;
         });

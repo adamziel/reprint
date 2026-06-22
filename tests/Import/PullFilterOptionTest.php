@@ -92,7 +92,6 @@ class PullFilterFakeClient extends ImportClient
             $state["command"] = "db-apply";
             $state["status"] = "complete";
             $state["stage"] = null;
-            $state["apply"]["statements_executed"] = 42;
             return $state;
         });
     }

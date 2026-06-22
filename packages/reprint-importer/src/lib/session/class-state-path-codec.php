@@ -16,10 +16,6 @@ final class StatePathCodec
 
     public function encode_state_paths(array $state): array
     {
-        $state["db_index"]["file"] = $this->encode_value(
-            $state["db_index"]["file"] ?? null,
-        );
-
         if (
             isset($state["preflight"]) &&
             is_array($state["preflight"]) &&
@@ -36,10 +32,6 @@ final class StatePathCodec
 
     public function decode_state_paths(array $state): array
     {
-        $state["db_index"]["file"] = $this->decode_value(
-            $state["db_index"]["file"] ?? null,
-        );
-
         if (
             isset($state["preflight"]) &&
             is_array($state["preflight"]) &&
