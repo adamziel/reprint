@@ -48,9 +48,7 @@ use Reprint\Importer\Sql\SqlDownloader;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TargetRuntime\RuntimeConfigurationApplier;
 use Reprint\Importer\TargetRuntime\RuntimeCheckpoint;
-use Reprint\Importer\Transport\ImportHttpTransport;
-use Reprint\Importer\Transport\HttpRequestBuilder;
-use Reprint\Importer\Tuning\AdaptiveTuner;
+use Reprint\Importer\Transport\ImportHttpSession;
 
 class ImportClient
 {
@@ -196,12 +194,6 @@ class ImportClient
     /** @var string|null Extra remote directory to include in the export (--extra-directory). */
     private $extra_directory = null;
 
-    /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
-    private $tuner = null;
-
-    /** @var \Reprint\Exporter\Site_Export_HMAC_Client|null Signs requests when HMAC auth is configured. */
-    private $hmac_client = null;
-
     /**
      * @var int|null MySQL max_allowed_packet value for the import database connection.
      * Passed to the server so it can split SQL statements to fit within this limit.
@@ -226,8 +218,8 @@ class ImportClient
     /** @var bool|null Async signal setting that was active before this run. */
     private ?bool $previous_async_signals = null;
 
-    /** @var ImportHttpTransport|null HTTP and streaming multipart transport. */
-    private ?ImportHttpTransport $http_transport = null;
+    /** @var ImportHttpSession|null HTTP request/session policy for exporter calls. */
+    private ?ImportHttpSession $http_session = null;
 
     /** @var LocalImportFilesystem|null Filesystem operations scoped to the import root. */
     private ?LocalImportFilesystem $local_filesystem = null;
@@ -395,15 +387,24 @@ class ImportClient
         $this->signal_handlers_installed = false;
     }
 
-    private function http_transport(): ImportHttpTransport
+    private function http_session(): ImportHttpSession
     {
-        if ($this->http_transport instanceof ImportHttpTransport) {
-            return $this->http_transport;
+        if ($this->http_session instanceof ImportHttpSession) {
+            return $this->http_session;
         }
 
-        $this->http_transport = new ImportHttpTransport($this->output);
+        $this->http_session = new ImportHttpSession(
+            $this->remote_url,
+            $this->output,
+            function (string $message, bool $to_console = true): void {
+                $this->audit_log($message, $to_console);
+            },
+            function (array $event): void {
+                $this->output_progress($event);
+            },
+        );
 
-        return $this->http_transport;
+        return $this->http_session;
     }
 
     /**
@@ -454,6 +455,7 @@ class ImportClient
     public function set_request_user_agent(string $user_agent): void
     {
         $this->run_state()->user_agent = $user_agent;
+        $this->http_session()->set_user_agent($user_agent);
     }
 
     public function paths(): ImportPaths
@@ -463,17 +465,13 @@ class ImportClient
 
     public function remote_host(): string
     {
-        return parse_url($this->remote_url, PHP_URL_HOST) ?? $this->remote_url;
+        return $this->http_session()->remote_host();
     }
 
     public function ensure_site_export_api_url(): void
     {
-        if (strpos($this->remote_url, 'site-export-api') !== false) {
-            return;
-        }
-
-        $separator = strpos($this->remote_url, '?') === false ? '?' : '&';
-        $this->remote_url .= $separator . 'site-export-api';
+        $this->http_session()->ensure_site_export_api_url();
+        $this->remote_url = $this->http_session()->remote_url();
     }
 
     public function default_runtime_output_dir(): string
@@ -503,7 +501,9 @@ class ImportClient
 
     public function last_error_code(): ?string
     {
-        return $this->last_error_code;
+        return $this->http_session instanceof ImportHttpSession
+            ? ($this->http_session->last_error_code() ?? $this->last_error_code)
+            : $this->last_error_code;
     }
 
     public function current_filter(): string
@@ -670,8 +670,7 @@ class ImportClient
 
             $this->prepare_request_state($request);
 
-            $this->initialize_tuner($options);
-            $this->initialize_hmac_client($request);
+            $this->initialize_http_session($request, $options);
 
             if ($request->abort()) {
                 if (!$command_runner->supports_abort()) {
@@ -844,10 +843,28 @@ class ImportClient
         );
     }
 
-    private function initialize_hmac_client(ImportRunRequest $request): void
-    {
+    private function initialize_http_session(
+        ImportRunRequest $request,
+        array $options
+    ): void {
+        $session = $this->http_session();
+
+        $config = $this->state->tuning_config();
+        $state = $this->state->tuning_state();
+        $cli_config = $options["tuning_config"] ?? [];
+        $config = array_merge($config, $cli_config);
+
+        $session->configure_tuner($config, $state, $this->max_allowed_packet);
+        $this->state->set_tuning($session->tuning_config(), $session->tuning_state());
+
+        $this->audit_log(
+            "TUNER CONFIG | " . json_encode($this->state->tuning_config()),
+            false,
+        );
+
         $secret = $request->value("secret");
         if (empty($secret)) {
+            $session->set_hmac_secret(null);
             return;
         }
 
@@ -857,7 +874,7 @@ class ImportClient
             );
         }
 
-        $this->hmac_client = new \Reprint\Exporter\Site_Export_HMAC_Client($secret);
+        $session->set_hmac_secret($secret);
     }
 
     public function run_pull(array $options): void
@@ -931,26 +948,6 @@ class ImportClient
     }
 
     /**
-     * Initialize adaptive tuning from CLI options and persisted state.
-     */
-    private function initialize_tuner(array $options): void
-    {
-        $config = $this->state->tuning_config();
-        $state = $this->state->tuning_state();
-        $cli_config = $options["tuning_config"] ?? [];
-
-        $config = array_merge($config, $cli_config);
-
-        $this->tuner = new AdaptiveTuner($config, $state);
-        $this->state->set_tuning($this->tuner->get_config(), $this->tuner->get_state());
-
-        $this->audit_log(
-            "TUNER CONFIG | " . json_encode($this->state->tuning_config()),
-            false,
-        );
-    }
-
-    /**
      * Run a cheap preflight check to record exporter environment details.
      */
     public function run_preflight(): void
@@ -1009,47 +1006,7 @@ class ImportClient
      */
     private function get_tuned_params(string $endpoint): array
     {
-        if (!$this->tuner instanceof AdaptiveTuner) {
-            return [];
-        }
-        $params = $this->tuner->get_request_params($endpoint);
-        // Tell the server about the client's max_allowed_packet so it can
-        // cap SQL statements to a size the client can actually import.
-        if ($endpoint === "sql_chunk" && $this->max_allowed_packet !== null) {
-            $params["max_allowed_packet"] = $this->max_allowed_packet;
-        }
-        if (!empty($params)) {
-            $this->audit_log(
-                "TUNER REQUEST | endpoint={$endpoint} | params=" .
-                    json_encode($params),
-                false,
-            );
-        }
-        return $params;
-    }
-
-    private function handle_tuner_error(string $endpoint, array $error): void
-    {
-        if (!$this->tuner instanceof AdaptiveTuner) {
-            return;
-        }
-
-        $decision = $this->tuner->record_error($endpoint, $error);
-        $log = [
-            "TUNER ERROR",
-            "endpoint={$endpoint}",
-            "decision={$decision["decision"]}",
-            "http_code=" . (int) ($decision["http_code"] ?? 0),
-            "timeout=" . (!empty($decision["timeout"]) ? "yes" : "no"),
-            "curl_errno=" . (int) ($decision["curl_errno"] ?? 0),
-            "error_backoff_remaining=" .
-                (int) ($decision["error_backoff_remaining"] ?? 0),
-        ];
-        if (!empty($decision["size_key"])) {
-            $log[] =
-                $decision["size_key"] . "=" . (int) ($decision["size_value"] ?? 0);
-        }
-        $this->audit_log(implode(" | ", $log), false);
+        return $this->http_session()->tuned_params($endpoint);
     }
 
     /**
@@ -1060,70 +1017,11 @@ class ImportClient
         float $wall_time,
         array $response_stats
     ): void {
-        if (!$this->tuner instanceof AdaptiveTuner) {
-            return;
-        }
-
-        $decision = $this->tuner->record_result($endpoint, [
-            "wall_time" => $wall_time,
-            "server_time" => $response_stats["server_time"] ?? null,
-            "status" => $response_stats["status"] ?? null,
-            "bytes_processed" => $response_stats["bytes_processed"] ?? null,
-            "entries_processed" => $response_stats["entries_processed"] ?? null,
-            "sql_bytes" => $response_stats["sql_bytes"] ?? null,
-            "ttfb" => $response_stats["ttfb"] ?? null,
-            "total_time" => $response_stats["total_time"] ?? null,
-            "memory_used" => $response_stats["memory_used"] ?? null,
-            "memory_limit" => $response_stats["memory_limit"] ?? null,
-        ]);
-
-        $log = [
-            "TUNER RESULT",
-            "endpoint={$endpoint}",
-            "decision={$decision["decision"]}",
-            "status=" . ($decision["status"] ?? "unknown"),
-            "elapsed=" . sprintf("%.3f", $decision["elapsed"] ?? 0) . "s",
-            "server_time=" .
-                sprintf("%.3f", (float) ($decision["server_time"] ?? 0)) .
-                "s",
-            "wall_time=" .
-                sprintf("%.3f", (float) ($decision["wall_time"] ?? 0)) .
-                "s",
-        ];
-
-        if (isset($decision["work_done"]) && $decision["work_done"] !== null) {
-            $log[] = "work=" . (int) $decision["work_done"];
-        }
-        if (isset($decision["throughput"]) && $decision["throughput"] !== null) {
-            $log[] =
-                "throughput=" . sprintf("%.2f", $decision["throughput"]);
-        }
-        if (isset($decision["throughput_ema"]) && $decision["throughput_ema"] !== null) {
-            $log[] = "ema=" . sprintf("%.2f", $decision["throughput_ema"]);
-        }
-        if (isset($decision["throughput_ratio"]) && $decision["throughput_ratio"] !== null) {
-            $log[] =
-                "ratio=" . sprintf("%.2f", (float) $decision["throughput_ratio"]);
-        }
-        if (!empty($decision["size_key"])) {
-            $log[] =
-                $decision["size_key"] . "=" . (int) ($decision["size_value"] ?? 0);
-        }
-        if (isset($decision["error_backoff_remaining"])) {
-            $log[] =
-                "error_backoff=" . (int) $decision["error_backoff_remaining"];
-        }
-        $log[] = "duty=" . sprintf("%.2f", $decision["duty"] ?? 0);
-        $log[] =
-            "sleep=" .
-            sprintf("%.2f", $decision["sleep_seconds"] ?? 0) .
-            "s";
-        $this->audit_log(implode(" | ", $log), false);
-
-        $sleep = (float) ($decision["sleep_seconds"] ?? 0);
-        if ($sleep > 0) {
-            usleep((int) round($sleep * 1_000_000));
-        }
+        $this->http_session()->finalize_tuned_request(
+            $endpoint,
+            $wall_time,
+            $response_stats,
+        );
     }
 
     /**
@@ -2704,7 +2602,7 @@ class ImportClient
         ?string $cursor,
         array $params = []
     ): string {
-        return HttpRequestBuilder::url($this->remote_url, $endpoint, $cursor, $params);
+        return $this->http_session()->build_url($endpoint, $cursor, $params);
     }
 
     public function stream_export_endpoint(
@@ -2848,40 +2746,15 @@ class ImportClient
      * start with an honest non-browser identity and fall back to common
      * browser strings.
      */
-    public const USER_AGENTS = HttpRequestBuilder::USER_AGENTS;
-
-    /**
-     * Build the multipart chunk handler callback shared by both parser
-     * creation sites inside fetch_streaming.
-     *
-     * File parts are forwarded as body data arrives so large files are written
-     * to disk incrementally. Non-file parts are still accumulated until
-     * complete because they are small metadata/progress JSON payloads.
-     */
-    private function make_chunk_handler(
-        StreamingContext $context,
-        &$current_chunk
-    ): callable {
-        return $this->http_transport()->make_chunk_handler($context, $current_chunk);
-    }
+    public const USER_AGENTS = ImportHttpSession::USER_AGENTS;
 
     /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
     public function fetch_json(string $url): array
     {
-        $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
-
-        $result = $this->http_transport()->fetch_json(
-            $url,
-            $this->json_request_headers(''),
-            $this->has_hmac_secret(),
-        );
-
-        if (!empty($result["error_code"])) {
-            $this->last_error_code = $result["error_code"];
-        }
-
+        $result = $this->http_session()->fetch_json($url);
+        $this->sync_http_session_error_code();
         return $result;
     }
 
@@ -2895,142 +2768,27 @@ class ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        $body_for_signing = ImportHttpTransport::body_for_signing($post_data);
-        $transport = $this->http_transport();
-
-        $this->audit_log(
-            $this->streaming_request_log_message($url, $post_data),
-            false,
-        );
-        $this->output_progress(["debug" => "Waiting for server response..."]);
-
         try {
-            $transport->fetch_streaming(
+            $this->http_session()->fetch_streaming(
                 $url,
+                $cursor,
                 $context,
-                $this->streaming_request_headers($cursor, $body_for_signing),
                 $post_data,
-                $this->has_hmac_secret(),
+                $endpoint,
             );
-        } catch (RuntimeException $e) {
-            $this->sync_transport_error_state($transport);
-            if ($endpoint !== null) {
-                $this->handle_transport_tuner_error($endpoint, $transport);
-            }
-
-            $http_code = $transport->last_http_code();
-            if ($http_code !== null && $http_code !== 200) {
-                $this->audit_log(
-                    "HTTP error {$http_code} | error_body length: " .
-                        (int) ($transport->last_error_body_length() ?? 0),
-                    true,
-                );
-            }
-
-            throw $e;
+        } finally {
+            $this->sync_http_session_error_code();
         }
     }
 
-    private function json_request_headers(string $body): array
+    private function sync_http_session_error_code(): void
     {
-        return [
-            ...HttpRequestBuilder::base_headers(
-                "application/json",
-                $this->state?->user_agent,
-            ),
-            ...$this->hmac_headers($body),
-        ];
-    }
-
-    private function streaming_request_headers(
-        ?string $cursor,
-        string $body
-    ): array {
-        $headers = [
-            ...HttpRequestBuilder::base_headers(
-                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                $this->state?->user_agent,
-            ),
-            "Upgrade-Insecure-Requests: 1",
-            "Sec-Fetch-Dest: document",
-            "Sec-Fetch-Mode: navigate",
-            "Sec-Fetch-Site: none",
-            "Sec-Fetch-User: ?1",
-        ];
-
-        if ($cursor) {
-            $headers[] = "X-Export-Cursor: {$cursor}";
-        }
-
-        return [
-            ...$headers,
-            ...$this->hmac_headers($body),
-        ];
-    }
-
-    private function hmac_headers(string $body): array
-    {
-        if ($this->hmac_client === null) {
-            return [];
-        }
-
-        return $this->hmac_client->get_curl_headers($body);
-    }
-
-    private function has_hmac_secret(): bool
-    {
-        return $this->hmac_client !== null;
-    }
-
-    private function streaming_request_log_message(
-        string $url,
-        ?array $post_data
-    ): string {
-        $log_parts = ["HTTP_REQUEST", $post_data ? "POST" : "GET", $url];
-        if ($post_data && isset($post_data["file_list"])) {
-            $file_list_part = $post_data["file_list"];
-            if ($file_list_part instanceof CURLFile) {
-                $upload_path = $file_list_part->getFilename();
-                $upload_size = is_string($upload_path)
-                    ? filesize($upload_path)
-                    : false;
-                $upload_size = $upload_size === false ? 0 : $upload_size;
-                $log_parts[] = "file_list_file=" . $upload_size . "b";
-            } else {
-                $log_parts[] =
-                    "file_list=" . strlen((string) $file_list_part) . "b";
-            }
-        }
-
-        return implode(" | ", $log_parts);
-    }
-
-    private function sync_transport_error_state(ImportHttpTransport $transport): void
-    {
-        if ($transport->last_error_code() !== null) {
-            $this->last_error_code = $transport->last_error_code();
-        }
-    }
-
-    private function handle_transport_tuner_error(
-        string $endpoint,
-        ImportHttpTransport $transport
-    ): void {
-        $http_code = $transport->last_http_code();
-        $curl_errno = $transport->last_curl_errno();
-
         if (
-            $curl_errno === null &&
-            ($http_code === null || $http_code === 200)
+            $this->http_session instanceof ImportHttpSession &&
+            $this->http_session->last_error_code() !== null
         ) {
-            return;
+            $this->last_error_code = $this->http_session->last_error_code();
         }
-
-        $this->handle_tuner_error($endpoint, [
-            "http_code" => $http_code ?? 0,
-            "timeout" => $transport->last_curl_timed_out(),
-            "curl_errno" => $curl_errno ?? 0,
-        ]);
     }
 
     private function default_state(): ImportRunState
@@ -3123,8 +2881,14 @@ class ImportClient
         // the gaps where curl's progress callback doesn't fire.
         $this->output->tick_spinner();
 
-        if ($this->tuner instanceof AdaptiveTuner) {
-            $state->set_tuning($this->tuner->get_config(), $this->tuner->get_state());
+        if (
+            $this->http_session instanceof ImportHttpSession &&
+            $this->http_session->has_tuner()
+        ) {
+            $state->set_tuning(
+                $this->http_session->tuning_config(),
+                $this->http_session->tuning_state(),
+            );
         }
         $this->state = $state;
         $data = $state->to_array();
