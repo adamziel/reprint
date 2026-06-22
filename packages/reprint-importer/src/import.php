@@ -1,7 +1,7 @@
 #!/usr/bin/env php
 <?php
 /**
- * Import client for export.php.
+ * Importer for export.php.
  *
  * Downloads SQL and files from a remote export.php script, with support for:
  * - Resumable downloads using cursors
@@ -47,7 +47,7 @@ require_once __DIR__ . '/lib/class-external-merge-sort.php';
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
-// Small reusable helpers with no ImportClient dependency.
+// Small reusable helpers with no Importer dependency.
 require_once __DIR__ . '/lib/support/load.php';
 require_once __DIR__ . '/lib/observability/load.php';
 require_once __DIR__ . '/lib/filesystem/load.php';
@@ -99,8 +99,8 @@ register_shutdown_function(function () {
     fwrite(STDERR, $json . "\n");
 });
 
-// Import client implementation.
-require_once __DIR__ . '/class-import-client.php';
+// Importer implementation.
+require_once __DIR__ . '/class-importer.php';
 
 // Load CLI entry point last so reusable classes can be included without running CLI code.
 if (!defined('REPRINT_IMPORTER_SOURCE_ENTRY')) {

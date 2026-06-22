@@ -3,12 +3,12 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Importer;
 use Reprint\Importer\Session\PreflightCheckpoint;
 
 require_once __DIR__ . '/../../importer/import.php';
 
-class PullFilterFakeClient extends ImportClient
+class PullFilterFakeClient extends Importer
 {
     private bool $create_skipped_list;
 

@@ -231,7 +231,7 @@ class Pull
     {
         // --runtime and --start-runtime values are validated at CLI parse
         // time from VALID_TARGET_RUNTIMES. Re-check here for programmatic
-        // callers (e.g. ImportClient::run invoked directly) that bypass
+        // callers (e.g. Importer::run invoked directly) that bypass
         // the CLI parser.
         foreach (['runtime', 'start_runtime'] as $key) {
             if (!empty($options[$key]) && !in_array($options[$key], VALID_TARGET_RUNTIMES, true)) {

@@ -7,7 +7,7 @@ use Reprint\Importer\Command\FilesStatsResult;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightAssertResult;
 use Reprint\Importer\Command\PreflightReportResult;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Importer;
 
 final class CliCommandResultRenderer
 {
@@ -27,7 +27,7 @@ final class CliCommandResultRenderer
         $this->renderers[$result_class] = $renderer;
     }
 
-    public function render(ImportClient $client, ?ImportCommandResult $result): void
+    public function render(Importer $client, ?ImportCommandResult $result): void
     {
         if ($result === null) {
             return;
@@ -42,7 +42,7 @@ final class CliCommandResultRenderer
     }
 
     private function render_preflight_report(
-        ImportClient $client,
+        Importer $client,
         PreflightReportResult $result
     ): void {
         $entry = $result->entry();
@@ -59,7 +59,7 @@ final class CliCommandResultRenderer
     }
 
     private function render_preflight_assert(
-        ImportClient $client,
+        Importer $client,
         PreflightAssertResult $result
     ): void {
         foreach ($result->checks() as $check) {
@@ -86,7 +86,7 @@ final class CliCommandResultRenderer
     }
 
     private function render_db_domains(
-        ImportClient $client,
+        Importer $client,
         DbDomainsResult $result
     ): void {
         foreach ($result->domains() as $domain) {
@@ -95,7 +95,7 @@ final class CliCommandResultRenderer
     }
 
     private function render_files_stats(
-        ImportClient $client,
+        Importer $client,
         FilesStatsResult $result
     ): void {
         $json = json_encode($result->stats(), JSON_PRETTY_PRINT);

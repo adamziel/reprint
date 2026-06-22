@@ -3,7 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Importer;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -64,7 +64,7 @@ class LegacyCommandAliasTest extends TestCase
      */
     public function testLegacyCommandNameIsAccepted(string $legacy_name, string $canonical_name): void
     {
-        $client = new ImportClient('http://fake.invalid', $this->stateDir, $this->fs_root);
+        $client = new Importer('http://fake.invalid', $this->stateDir, $this->fs_root);
 
         // Write a preflight so commands that require it don't bail early.
         file_put_contents(
@@ -114,7 +114,7 @@ class LegacyCommandAliasTest extends TestCase
             json_encode(["command" => $old_name, "status" => "in_progress"]),
         );
 
-        $client = new ImportClient('http://fake.invalid', $this->stateDir, $this->fs_root);
+        $client = new Importer('http://fake.invalid', $this->stateDir, $this->fs_root);
         $reflection = new \ReflectionClass($client);
         $loadState = $reflection->getMethod('load_state');
         $state = $loadState->invoke($client);

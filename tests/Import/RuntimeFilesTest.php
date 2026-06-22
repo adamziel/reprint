@@ -5,7 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Importer;
 use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Protocol\StreamingContext;
 
@@ -67,9 +67,9 @@ class RuntimeFilesTest extends TestCase
         rmdir($dir);
     }
 
-    private function makeClient(): ImportClient
+    private function makeClient(): Importer
     {
-        return new ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
+        return new Importer('http://fake.url', $this->stateDir, $this->fs_root);
     }
 
     private function writeState(array $state): void
@@ -91,21 +91,21 @@ class RuntimeFilesTest extends TestCase
         );
     }
 
-    private function callPrivate(ImportClient $client, string $method, array $args = [])
+    private function callPrivate(Importer $client, string $method, array $args = [])
     {
         $reflection = new \ReflectionClass($client);
         $m = $reflection->getMethod($method);
         return $m->invoke($client, ...$args);
     }
 
-    private function setPrivate(ImportClient $client, string $property, $value): void
+    private function setPrivate(Importer $client, string $property, $value): void
     {
         $reflection = new \ReflectionClass($client);
         $p = $reflection->getProperty($property);
         $p->setValue($client, $value);
     }
 
-    private function loadClientState(ImportClient $client): void
+    private function loadClientState(Importer $client): void
     {
         $state = $this->callPrivate($client, 'load_state');
         $this->setPrivate($client, 'state', $state);

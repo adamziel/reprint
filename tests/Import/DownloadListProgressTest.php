@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Importer;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Session\StatePathCodec;
 
@@ -62,9 +62,9 @@ class DownloadListProgressTest extends TestCase
         rmdir($dir);
     }
 
-    private function makeClient(): ImportClient
+    private function makeClient(): Importer
     {
-        return new ImportClient(
+        return new Importer(
             'http://fake.url',
             $this->stateDir,
             $this->fs_root,
@@ -174,7 +174,7 @@ class DownloadListProgressTest extends TestCase
         return [$client, $reflection];
     }
 
-    private function readCounters(ImportClient $client, \ReflectionClass $reflection): array
+    private function readCounters(Importer $client, \ReflectionClass $reflection): array
     {
         return [
             'total' => $reflection->getProperty('download_list_total')->getValue($client),

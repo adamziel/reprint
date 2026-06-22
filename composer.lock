@@ -409,7 +409,7 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-importer",
-                "reference": "164663e79053d3016d284b932ac635e8b56c4fdb"
+                "reference": "3c6a447d8b092655ea6c298b3fe2d3797a96bff9"
             },
             "require": {
                 "ext-pdo": "*",
@@ -425,7 +425,7 @@
             "type": "library",
             "autoload": {
                 "classmap": [
-                    "src/class-import-client.php",
+                    "src/class-importer.php",
                     "src/lib"
                 ]
             },

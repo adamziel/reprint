@@ -5,7 +5,6 @@ namespace Reprint\Importer;
 use Exception;
 use InvalidArgumentException;
 use RuntimeException;
-use Reprint\Importer\Command\ImportCommands;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\ImportRuntime;
 use Reprint\Importer\Command\PreflightCommand;
@@ -56,6 +55,8 @@ use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportRunState;
 use Reprint\Importer\Session\JsonStateStore;
 use Reprint\Importer\Session\PreflightCheckpoint;
+use Reprint\Importer\Session\RuntimeLifecycle;
+use Reprint\Importer\Session\RunStateRepository;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Session\ShutdownState;
 use Reprint\Importer\Session\VolatileFileTracker;
@@ -87,7 +88,7 @@ use Reprint\Importer\TargetRuntime\RuntimeConfigurationApplier;
 use Reprint\Importer\TargetRuntime\RuntimeCheckpoint;
 use Reprint\Importer\Transport\ImportHttpSession;
 
-class ImportClient implements ImportRuntime, PullRuntime
+class Importer implements ImportRuntime, PullRuntime
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
@@ -243,17 +244,11 @@ class ImportClient implements ImportRuntime, PullRuntime
     /** @var ImportOutput Reports progress, status, and human-readable output. */
     private ImportOutput $output;
 
-    /** @var bool Whether per-run runtime resources have been prepared. */
-    private bool $runtime_prepared = false;
+    /** @var RuntimeLifecycle Prepares runtime directories and process signal handlers. */
+    private RuntimeLifecycle $runtime_lifecycle;
 
-    /** @var bool Whether this instance installed process signal handlers. */
-    private bool $signal_handlers_installed = false;
-
-    /** @var array<int, mixed> Signal handlers that were installed before this run. */
-    private array $previous_signal_handlers = [];
-
-    /** @var bool|null Async signal setting that was active before this run. */
-    private ?bool $previous_async_signals = null;
+    /** @var RunStateRepository Owns loading, normalization, migration, and persistence of session run state. */
+    private RunStateRepository $run_state_repository;
 
     /** @var ImportHttpSession|null HTTP request/session policy for exporter calls. */
     private ?ImportHttpSession $http_session = null;
@@ -324,6 +319,17 @@ class ImportClient implements ImportRuntime, PullRuntime
         $this->status_file = $this->paths->status_file();
         $this->shutdown = new ShutdownState();
         $this->file_sync_progress = new FileSyncTransferProgress();
+        $this->run_state_repository = new RunStateRepository(
+            $this->json_state_store,
+            $this->paths,
+            $this->state_path_codec,
+            $this->audit_logger(),
+        );
+        $this->runtime_lifecycle = new RuntimeLifecycle(
+            $this->state_dir,
+            $this->fs_root,
+            [$this, "handle_shutdown"],
+        );
 
         $this->pull = new Pull($this, $this->output->progress());
         $this->index_store = new IndexStore(
@@ -345,83 +351,12 @@ class ImportClient implements ImportRuntime, PullRuntime
 
     private function prepare_runtime(): void
     {
-        if ($this->runtime_prepared) {
-            return;
-        }
-
-        $this->ensure_runtime_directories();
-        $this->install_signal_handlers();
-        $this->runtime_prepared = true;
+        $this->runtime_lifecycle->prepare();
     }
 
     private function cleanup_runtime(): void
     {
-        if (!$this->runtime_prepared) {
-            return;
-        }
-
-        $this->restore_signal_handlers();
-        $this->runtime_prepared = false;
-    }
-
-    private function ensure_runtime_directories(): void
-    {
-        if (!is_dir($this->state_dir)) {
-            if (!mkdir($this->state_dir, 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->state_dir}");
-            }
-        }
-        if (!is_dir($this->fs_root)) {
-            if (!mkdir($this->fs_root, 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->fs_root}");
-            }
-        }
-    }
-
-    private function install_signal_handlers(): void
-    {
-        if (!function_exists("pcntl_signal")) {
-            return;
-        }
-
-        $signals = [SIGINT, SIGTERM];
-        if (function_exists("pcntl_signal_get_handler")) {
-            foreach ($signals as $signal) {
-                $this->previous_signal_handlers[$signal] = pcntl_signal_get_handler($signal);
-            }
-        }
-
-        if (function_exists("pcntl_async_signals")) {
-            $this->previous_async_signals = pcntl_async_signals();
-            pcntl_async_signals(true);
-        }
-
-        pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
-        pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
-        $this->signal_handlers_installed = true;
-    }
-
-    private function restore_signal_handlers(): void
-    {
-        if (!$this->signal_handlers_installed || !function_exists("pcntl_signal")) {
-            return;
-        }
-
-        foreach ([SIGINT, SIGTERM] as $signal) {
-            if (array_key_exists($signal, $this->previous_signal_handlers)) {
-                pcntl_signal($signal, $this->previous_signal_handlers[$signal]);
-            } else {
-                pcntl_signal($signal, SIG_DFL);
-            }
-        }
-
-        if ($this->previous_async_signals !== null && function_exists("pcntl_async_signals")) {
-            pcntl_async_signals($this->previous_async_signals);
-        }
-
-        $this->previous_signal_handlers = [];
-        $this->previous_async_signals = null;
-        $this->signal_handlers_installed = false;
+        $this->runtime_lifecycle->cleanup();
     }
 
     private function http_session(): ImportHttpSession
@@ -2316,7 +2251,7 @@ class ImportClient implements ImportRuntime, PullRuntime
 
     private function default_state(): ImportRunState
     {
-        return ImportRunState::fresh();
+        return $this->run_state_repository->fresh();
     }
 
     /**
@@ -2324,71 +2259,7 @@ class ImportClient implements ImportRuntime, PullRuntime
      */
     private function load_state(): ImportRunState
     {
-        try {
-            $state = $this->json_state_store->load($this->state_file);
-        } catch (RuntimeException $e) {
-            $this->audit_log($e->getMessage(), true);
-            return $this->default_state();
-        }
-        if ($state === null) {
-            return $this->default_state();
-        }
-
-        $this->migrate_preflight_checkpoint_from_state($state);
-
-        $run_state = ImportRunState::from_array($state);
-
-        $state_cmd = $run_state->command;
-        if (is_string($state_cmd)) {
-            $run_state->command = ImportCommands::normalize_name($state_cmd);
-        }
-
-        return $run_state;
-    }
-
-    /**
-     * @param array<string, mixed> $state
-     */
-    private function migrate_preflight_checkpoint_from_state(array $state): void
-    {
-        $legacy_keys = [
-            "preflight",
-            "remote_protocol_version",
-            "remote_protocol_min_version",
-            "version",
-            "webhost",
-        ];
-        $has_legacy_preflight_state = false;
-        foreach ($legacy_keys as $key) {
-            if (array_key_exists($key, $state)) {
-                $has_legacy_preflight_state = true;
-                break;
-            }
-        }
-        if (!$has_legacy_preflight_state) {
-            return;
-        }
-
-        $existing = $this->json_state_store->load($this->paths->preflight_checkpoint_file()) ?? [];
-        if ($existing !== []) {
-            return;
-        }
-
-        $checkpoint = PreflightCheckpoint::from_persisted_array(
-            $state,
-            [$this->state_path_codec, 'decode_preflight_data_paths'],
-        );
-        if (
-            $checkpoint->entry === null &&
-            $checkpoint->remote_protocol_version === null &&
-            $checkpoint->remote_protocol_min_version === null &&
-            $checkpoint->exporter_version === null &&
-            $checkpoint->webhost === null
-        ) {
-            return;
-        }
-
-        $this->save_preflight_checkpoint($checkpoint);
+        return $this->run_state_repository->load();
     }
 
     /**
@@ -2414,9 +2285,8 @@ class ImportClient implements ImportRuntime, PullRuntime
             );
         }
         $this->state = $state;
-        $data = $state->to_array();
 
-        $this->json_state_store->save($this->state_file, $data);
+        $this->run_state_repository->save($state);
 
         $indexed = $this->index_count();
         $files_imported = $this->file_sync_progress->files_imported(); // Completed in this run

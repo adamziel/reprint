@@ -3,7 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Importer;
 use Reprint\Importer\Sql\TargetDatabaseConnectionFactory;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -181,8 +181,8 @@ class NewSiteUrlSqliteTest extends TestCase
         file_put_contents($this->tempDir . '/db.sql', $this->buildSqlDump($oldUrl));
         $this->writeState();
 
-        // Run db-apply via ImportClient
-        $client = new ImportClient(
+        // Run db-apply via Importer
+        $client = new Importer(
             $exportUrl,
             $this->tempDir,
             $this->tempDir . '/fs-root',
@@ -241,7 +241,7 @@ class NewSiteUrlSqliteTest extends TestCase
         file_put_contents($this->tempDir . '/db.sql', $this->buildSqlDump($httpsUrl));
         $this->writeState();
 
-        $client = new ImportClient(
+        $client = new Importer(
             $exportUrl,
             $this->tempDir,
             $this->tempDir . '/fs-root',
@@ -313,7 +313,7 @@ class NewSiteUrlSqliteTest extends TestCase
             ],
         ]);
 
-        $client = new ImportClient(
+        $client = new Importer(
             $exportUrl,
             $this->tempDir,
             $this->tempDir . '/fs-root',
@@ -373,7 +373,7 @@ class NewSiteUrlSqliteTest extends TestCase
         file_put_contents($this->tempDir . '/db.sql', implode("\n", $stmts) . "\n");
         $this->writeState();
 
-        $client = new ImportClient(
+        $client = new Importer(
             'https://old-site.example.com/?reprint-api',
             $this->tempDir,
             $this->tempDir . '/fs-root',
@@ -422,7 +422,7 @@ class NewSiteUrlSqliteTest extends TestCase
         file_put_contents($this->tempDir . '/db.sql', $sql);
         $this->writeState();
 
-        $client = new ImportClient(
+        $client = new Importer(
             'https://old-site.example.com/?reprint-api',
             $this->tempDir,
             $this->tempDir . '/fs-root',

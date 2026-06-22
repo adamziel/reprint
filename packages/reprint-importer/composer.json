@@ -13,7 +13,7 @@
     },
     "autoload": {
         "classmap": [
-            "src/class-import-client.php",
+            "src/class-importer.php",
             "src/lib"
         ]
     },

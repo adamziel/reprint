@@ -9,7 +9,7 @@ use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Observability\NullAuditLogger;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Importer;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Observability\NullMachineEventEmitter;
 use Reprint\Importer\Protocol\StreamingContext;
@@ -70,9 +70,9 @@ class FilesSyncStateTest extends TestCase
         rmdir($dir);
     }
 
-    private function makeClient(): ImportClient
+    private function makeClient(): Importer
     {
-        return new ImportClient(
+        return new Importer(
             'http://fake.url',
             $this->stateDir,
             $this->fs_root,

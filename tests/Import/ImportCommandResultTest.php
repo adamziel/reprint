@@ -10,7 +10,7 @@ use Reprint\Importer\Command\FilesStatsResult;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightAssertCommand;
 use Reprint\Importer\Command\PreflightAssertResult;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Importer;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Output\CliImportOutput;
 use Reprint\Importer\Session\PreflightCheckpoint;
@@ -42,7 +42,7 @@ class ImportCommandResultTest extends TestCase
 
     public function testFilesStatsCommandReturnsStructuredResultWithoutFormatting(): void
     {
-        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new Importer('http://example.invalid', $this->stateDir, $this->fsRoot);
 
         file_put_contents(
             $this->stateDir . '/.import-remote-index.jsonl',
@@ -74,7 +74,7 @@ class ImportCommandResultTest extends TestCase
 
     public function testDbDomainsCommandReturnsCachedDomainsWithoutFormatting(): void
     {
-        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new Importer('http://example.invalid', $this->stateDir, $this->fsRoot);
         $domains = ['https://example.com', 'https://www.example.com'];
         file_put_contents(
             $this->stateDir . '/.import-domains.json',
@@ -92,9 +92,9 @@ class ImportCommandResultTest extends TestCase
         $this->assertSame($domains, $result->domains());
     }
 
-    public function testImportClientRunReturnsCommandResultWithoutFormatting(): void
+    public function testImporterRunReturnsCommandResultWithoutFormatting(): void
     {
-        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new Importer('http://example.invalid', $this->stateDir, $this->fsRoot);
 
         ob_start();
         $result = $client->run(['command' => 'files-stats']);
@@ -105,22 +105,22 @@ class ImportCommandResultTest extends TestCase
         $this->assertSame('files-stats', $result->type());
     }
 
-    public function testImportClientConstructorDoesNotCreateRuntimeDirectories(): void
+    public function testImporterConstructorDoesNotCreateRuntimeDirectories(): void
     {
         $stateDir = $this->tempDir . '/lazy-state';
         $fsRoot = $this->tempDir . '/lazy-fs-root';
 
-        new ImportClient('http://example.invalid', $stateDir, $fsRoot);
+        new Importer('http://example.invalid', $stateDir, $fsRoot);
 
         $this->assertDirectoryDoesNotExist($stateDir);
         $this->assertDirectoryDoesNotExist($fsRoot);
     }
 
-    public function testImportClientRunCreatesRuntimeDirectoriesWhenNeeded(): void
+    public function testImporterRunCreatesRuntimeDirectoriesWhenNeeded(): void
     {
         $stateDir = $this->tempDir . '/runtime-state';
         $fsRoot = $this->tempDir . '/runtime-fs-root';
-        $client = new ImportClient('http://example.invalid', $stateDir, $fsRoot);
+        $client = new Importer('http://example.invalid', $stateDir, $fsRoot);
 
         $result = $client->run(['command' => 'files-stats']);
 
@@ -129,7 +129,7 @@ class ImportCommandResultTest extends TestCase
         $this->assertDirectoryExists($fsRoot);
     }
 
-    public function testImportClientRunRestoresSignalHandlers(): void
+    public function testImporterRunRestoresSignalHandlers(): void
     {
         if (!function_exists('pcntl_signal') || !function_exists('pcntl_signal_get_handler')) {
             $this->markTestSkipped('pcntl signal handler inspection is unavailable.');
@@ -146,7 +146,7 @@ class ImportCommandResultTest extends TestCase
         pcntl_signal(SIGTERM, $termHandler);
 
         try {
-            $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+            $client = new Importer('http://example.invalid', $this->stateDir, $this->fsRoot);
             $client->run(['command' => 'files-stats']);
 
             $this->assertSame($intHandler, pcntl_signal_get_handler(SIGINT));
@@ -157,10 +157,10 @@ class ImportCommandResultTest extends TestCase
         }
     }
 
-    public function testImportClientCanReportThroughBufferedOutput(): void
+    public function testImporterCanReportThroughBufferedOutput(): void
     {
         $output = new BufferedImportOutput();
-        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot, $output);
+        $client = new Importer('http://example.invalid', $this->stateDir, $this->fsRoot, $output);
 
         ob_start();
         $client->output_progress(['status' => 'starting', 'message' => 'Starting import'], true);
@@ -172,9 +172,9 @@ class ImportCommandResultTest extends TestCase
         ], $output->events());
     }
 
-    public function testImportClientDefaultOutputIsSilent(): void
+    public function testImporterDefaultOutputIsSilent(): void
     {
-        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new Importer('http://example.invalid', $this->stateDir, $this->fsRoot);
 
         ob_start();
         $client->output_progress(['status' => 'starting', 'message' => 'Starting import'], true);
@@ -203,7 +203,7 @@ class ImportCommandResultTest extends TestCase
 
     public function testPreflightAssertHandlesMalformedPreflightDataWithoutFormatting(): void
     {
-        $client = new ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new Importer('http://example.invalid', $this->stateDir, $this->fsRoot);
         $client->save_preflight_checkpoint(new PreflightCheckpoint(
             [
                 'http_code' => 500,

@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Importer;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;
@@ -222,7 +222,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             $this->fs_root,
             new BufferedImportOutput(),
         );
-        $reflection = new \ReflectionClass(ImportClient::class);
+        $reflection = new \ReflectionClass(Importer::class);
 
         $stateProperty = $reflection->getProperty('state');
         $loadState = $reflection->getMethod('load_state');
@@ -658,7 +658,7 @@ abstract class CurlTimeoutRecoveryTestStreamClient implements FileSyncStreamClie
     }
 }
 
-class TimeoutTestClient extends ImportClient
+class TimeoutTestClient extends Importer
 {
     protected function file_sync_stream_client(): FileSyncStreamClient
     {
@@ -676,7 +676,7 @@ class TimeoutTestClient extends ImportClient
  * file part-complete checkpoint. This is a hard crash, so download_file_fetch()
  * must not get a chance to do its normal final save.
  */
-class InterruptedAfterStreamedPartCloseClient extends ImportClient
+class InterruptedAfterStreamedPartCloseClient extends Importer
 {
     protected function file_sync_stream_client(): FileSyncStreamClient
     {
@@ -731,7 +731,7 @@ class InterruptedAfterStreamedPartCloseStreamClient extends CurlTimeoutRecoveryT
  * Test double that completes successfully without throwing,
  * simulating a normal request that finishes.
  */
-class SuccessTestClient extends ImportClient
+class SuccessTestClient extends Importer
 {
     protected function file_sync_stream_client(): FileSyncStreamClient
     {
