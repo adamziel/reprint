@@ -108,10 +108,6 @@ final class ImportAbortHandler
         $next["fs_root_nonempty_behavior"] = $state["fs_root_nonempty_behavior"] ?? "error";
         $next["max_allowed_packet"] = $state["max_allowed_packet"] ?? null;
 
-        if (isset($state["pull"])) {
-            $next["pull"] = $state["pull"];
-        }
-
         return $next;
     }
 

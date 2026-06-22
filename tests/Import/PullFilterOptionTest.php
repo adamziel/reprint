@@ -157,6 +157,14 @@ class PullFilterOptionTest extends TestCase
         );
     }
 
+    private function readPullCheckpoint(): array
+    {
+        return json_decode(
+            file_get_contents($this->stateDir . '/.reprint/pull/checkpoint.json'),
+            true,
+        );
+    }
+
     public function testPullRejectsSkippedEarlierFilterBeforePersistingIt(): void
     {
         $client = $this->makeClient(false);
@@ -194,9 +202,11 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame('complete', $state["pull"]["stage"]);
-        $this->assertSame('essential-files', $state["pull"]["files_filter"]);
-        $this->assertTrue($state["pull"]["skipped_pending"]);
+        $checkpoint = $this->readPullCheckpoint();
+        $this->assertArrayNotHasKey('pull', $state);
+        $this->assertSame('complete', $checkpoint["stage"]);
+        $this->assertSame('essential-files', $checkpoint["files_filter"]);
+        $this->assertTrue($checkpoint["skipped_pending"]);
         $this->assertSame('essential-files', $state["filter"]);
         $this->assertFileExists($this->stateDir . '/.import-download-list-skipped.jsonl');
     }
@@ -213,9 +223,11 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame('complete', $state["pull"]["stage"]);
-        $this->assertSame('none', $state["pull"]["files_filter"]);
-        $this->assertFalse($state["pull"]["skipped_pending"]);
+        $checkpoint = $this->readPullCheckpoint();
+        $this->assertArrayNotHasKey('pull', $state);
+        $this->assertSame('complete', $checkpoint["stage"]);
+        $this->assertSame('none', $checkpoint["files_filter"]);
+        $this->assertFalse($checkpoint["skipped_pending"]);
         $this->assertSame('none', $state["filter"]);
         $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
     }

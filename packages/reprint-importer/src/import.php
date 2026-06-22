@@ -66,6 +66,7 @@ require_once __DIR__ . '/lib/input/load.php';
 require_once __DIR__ . '/lib/output/load.php';
 
 // Pull command — orchestrates the lower-level commands into a pipeline
+require_once __DIR__ . '/lib/pull/class-pull-checkpoint.php';
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
 // Load reusable importer modules.

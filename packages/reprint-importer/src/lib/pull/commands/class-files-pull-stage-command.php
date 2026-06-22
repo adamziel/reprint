@@ -25,7 +25,7 @@ final class FilesPullStageCommand extends PullStageCommand
         $skipped_pending =
             $options['filter'] === 'essential-files' &&
             $pull->client()->has_skipped_files_pending();
-        $pull->client()->set_pull_files_state($options['filter'], $skipped_pending);
+        $pull->record_files_state($options['filter'], $skipped_pending);
         $count = $pull->client()->index_count();
         $summary = $count > 0 ? number_format($count) . " files" : null;
         if ($skipped_pending) {

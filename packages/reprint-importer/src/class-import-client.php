@@ -30,6 +30,7 @@ use Reprint\Importer\Output\ImportOutput;
 use Reprint\Importer\Output\NullImportOutput;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Pull\Pull;
+use Reprint\Importer\Pull\PullCheckpoint;
 use Reprint\Importer\Session\ExportDirectoryResolver;
 use Reprint\Importer\Session\ImportAbortHandler;
 use Reprint\Importer\Session\ImportPaths;
@@ -129,6 +130,7 @@ class ImportClient
      */
     public $state;
 
+    private ?PullCheckpoint $pull_checkpoint = null;
     private ?FilesPullCheckpoint $files_pull_checkpoint = null;
 
     /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
@@ -444,29 +446,6 @@ class ImportClient
     public function mutate_state(callable $mutator): void
     {
         $this->state = $mutator($this->state);
-        $this->save_state($this->state);
-    }
-
-    /** Mark a pull pipeline stage as completed in state. */
-    public function mark_pull_stage_complete(string $stage): void
-    {
-        $this->state['pull']['stage'] = $stage;
-        $this->save_state($this->state);
-    }
-
-    /** Mark the pull pipeline as fully complete in state. */
-    public function mark_pull_complete(): void
-    {
-        $this->state['pull']['stage'] = 'complete';
-        $this->state['status'] = 'complete';
-        $this->save_state($this->state);
-    }
-
-    /** Record the pull's file filter and whether deferred files remain. */
-    public function set_pull_files_state(string $filter, bool $skipped_pending): void
-    {
-        $this->state['pull']['files_filter'] = $filter;
-        $this->state['pull']['skipped_pending'] = $skipped_pending;
         $this->save_state($this->state);
     }
 
@@ -1758,6 +1737,36 @@ class ImportClient
             $this->paths->db_apply_checkpoint_file(),
             $checkpoint->to_array(),
         );
+    }
+
+    public function pull_checkpoint(): PullCheckpoint
+    {
+        if ($this->pull_checkpoint instanceof PullCheckpoint) {
+            return $this->pull_checkpoint;
+        }
+
+        $this->pull_checkpoint = PullCheckpoint::from_array(
+            $this->json_state_store->load($this->paths->pull_checkpoint_file()) ?? [],
+        );
+
+        return $this->pull_checkpoint;
+    }
+
+    public function save_pull_checkpoint(PullCheckpoint $checkpoint): void
+    {
+        $this->output->tick_spinner();
+        $this->pull_checkpoint = $checkpoint;
+        $this->json_state_store->save(
+            $this->paths->pull_checkpoint_file(),
+            $checkpoint->to_array(),
+        );
+        $this->write_status_file();
+    }
+
+    public function delete_pull_checkpoint(): void
+    {
+        $this->pull_checkpoint = null;
+        $this->json_state_store->delete($this->paths->pull_checkpoint_file());
     }
 
     public function files_pull_checkpoint(): FilesPullCheckpoint

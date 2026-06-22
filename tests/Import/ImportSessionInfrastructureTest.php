@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
+use Reprint\Importer\Pull\PullCheckpoint;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportStateSchema;
 use Reprint\Importer\Session\StatePathCodec;
@@ -24,6 +25,7 @@ class ImportSessionInfrastructureTest extends TestCase
         $this->assertSame('/tmp/reprint-state/.reprint/db-pull/checkpoint.json', $paths->db_pull_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.reprint/db-apply/checkpoint.json', $paths->db_apply_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.reprint/files-pull/checkpoint.json', $paths->files_pull_checkpoint_file());
+        $this->assertSame('/tmp/reprint-state/.reprint/pull/checkpoint.json', $paths->pull_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.reprint/runtime/checkpoint.json', $paths->runtime_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.import-index.jsonl', $paths->index_file());
         $this->assertSame('/tmp/reprint-state/.import-index-updates.jsonl', $paths->index_updates_file());
@@ -41,6 +43,7 @@ class ImportSessionInfrastructureTest extends TestCase
         $state = ImportStateSchema::normalize([
             'command' => 'files-pull',
             'unknown' => 'ignored',
+            'pull' => ['stage' => 'files-pull'],
             'diff' => 'invalid',
             'fetch' => ['offset' => 42, 'extra' => 'ignored'],
             'apply' => ['target_engine' => 'sqlite'],
@@ -48,10 +51,30 @@ class ImportSessionInfrastructureTest extends TestCase
 
         $this->assertSame('files-pull', $state['command']);
         $this->assertArrayNotHasKey('unknown', $state);
+        $this->assertArrayNotHasKey('pull', $state);
         $this->assertArrayNotHasKey('diff', $state);
         $this->assertArrayNotHasKey('fetch', $state);
         $this->assertSame('sqlite', $state['apply']['target_engine']);
         $this->assertSame(0, $state['apply']['statements_executed']);
+    }
+
+    public function testPullCheckpointNormalizesOrchestrationState(): void
+    {
+        $checkpoint = PullCheckpoint::from_array([
+            'stage' => 'files-pull',
+            'files_filter' => 'essential-files',
+            'skipped_pending' => true,
+        ]);
+
+        $this->assertSame('files-pull', $checkpoint->stage);
+        $this->assertSame('essential-files', $checkpoint->files_filter);
+        $this->assertTrue($checkpoint->skipped_pending);
+
+        $checkpoint->reset();
+
+        $this->assertNull($checkpoint->stage);
+        $this->assertNull($checkpoint->files_filter);
+        $this->assertFalse($checkpoint->skipped_pending);
     }
 
     public function testStatePathCodecRoundTripsByteSensitivePaths(): void

@@ -51,11 +51,6 @@ final class ImportStateSchema
                 "config" => [],
                 "state" => [],
             ],
-            "pull" => [
-                "stage" => null,
-                "files_filter" => null,
-                "skipped_pending" => false,
-            ],
         ];
     }
 
@@ -65,7 +60,7 @@ final class ImportStateSchema
         $state = array_intersect_key($state, $defaults);
         $state = array_merge($defaults, $state);
 
-        foreach (["tuning", "db_index", "apply", "pull"] as $key) {
+        foreach (["tuning", "db_index", "apply"] as $key) {
             $value = $state[$key] ?? [];
             if (!is_array($value)) {
                 $value = [];

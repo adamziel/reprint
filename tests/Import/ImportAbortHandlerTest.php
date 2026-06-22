@@ -34,6 +34,8 @@ final class ImportAbortHandlerTest extends TestCase
         file_put_contents($paths->sql_file(), 'sql');
         file_put_contents($paths->table_stats_file(), '{}');
         file_put_contents($paths->domains_file(), '[]');
+        mkdir(dirname($paths->pull_checkpoint_file()), 0755, true);
+        file_put_contents($paths->pull_checkpoint_file(), '{"stage":"db-pull"}');
 
         $state = [
             'command' => 'db-pull',
@@ -44,7 +46,6 @@ final class ImportAbortHandlerTest extends TestCase
             'follow_symlinks' => false,
             'fs_root_nonempty_behavior' => 'preserve-local',
             'max_allowed_packet' => 123,
-            'pull' => ['stage' => 'db-pull'],
         ];
 
         $next = $this->make_handler($paths)->abort($state, 'db-pull', 'file');
@@ -60,7 +61,8 @@ final class ImportAbortHandlerTest extends TestCase
         $this->assertFalse($next['follow_symlinks']);
         $this->assertSame('preserve-local', $next['fs_root_nonempty_behavior']);
         $this->assertSame(123, $next['max_allowed_packet']);
-        $this->assertSame($state['pull'], $next['pull']);
+        $this->assertArrayNotHasKey('pull', $next);
+        $this->assertFileExists($paths->pull_checkpoint_file());
         $this->assertStringContainsString(
             'abort db-pull',
             implode("\n", array_column($this->audit, 0)),

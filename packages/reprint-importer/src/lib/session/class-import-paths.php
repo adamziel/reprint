@@ -46,6 +46,11 @@ final class ImportPaths
         return $this->state_root() . "/files-pull/checkpoint.json";
     }
 
+    public function pull_checkpoint_file(): string
+    {
+        return $this->state_root() . "/pull/checkpoint.json";
+    }
+
     public function runtime_checkpoint_file(): string
     {
         return $this->state_root() . "/runtime/checkpoint.json";

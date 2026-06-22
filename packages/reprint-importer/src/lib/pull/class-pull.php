@@ -97,8 +97,7 @@ class Pull
 
         $stages = $this->stages($options);
         $total = count($stages);
-        $state = $this->client->state;
-        $completed_stage = $state['pull']['stage'] ?? null;
+        $completed_stage = $this->checkpoint()->stage;
 
         // If the prior pull completed, prepare for a delta re-pull.
         if ($completed_stage === 'complete') {
@@ -149,13 +148,13 @@ class Pull
                 throw $e;
             }
 
-            $this->client->mark_pull_stage_complete($stage);
+            $this->mark_stage_complete($stage);
         }
 
         // The 'start' stage handles its own completion (it needs to save
         // state before blocking on the server process).
         if (!in_array('start', $stages, true)) {
-            $this->client->mark_pull_complete();
+            $this->mark_complete();
             $this->print_summary();
         }
 
@@ -192,6 +191,37 @@ class Pull
         }
 
         $command->execute($this, $options);
+    }
+
+    public function record_files_state(string $filter, bool $skipped_pending): void
+    {
+        $checkpoint = $this->checkpoint();
+        $checkpoint->files_filter = $filter;
+        $checkpoint->skipped_pending = $skipped_pending;
+        $this->client->save_pull_checkpoint($checkpoint);
+    }
+
+    private function checkpoint(): PullCheckpoint
+    {
+        return $this->client->pull_checkpoint();
+    }
+
+    private function mark_stage_complete(string $stage): void
+    {
+        $checkpoint = $this->checkpoint();
+        $checkpoint->stage = $stage;
+        $this->client->save_pull_checkpoint($checkpoint);
+    }
+
+    private function mark_complete(): void
+    {
+        $checkpoint = $this->checkpoint();
+        $checkpoint->stage = 'complete';
+        $this->client->save_pull_checkpoint($checkpoint);
+        $this->client->mutate_state(function (array $state) {
+            $state['status'] = 'complete';
+            return $state;
+        });
     }
 
     /**
@@ -351,9 +381,6 @@ class Pull
         $state_dir = $this->client->state_dir;
         $defaults = $this->client->default_state();
         $this->client->mutate_state(function (array $state) use ($defaults) {
-            $state['pull']['stage'] = null;
-            $state['pull']['files_filter'] = null;
-            $state['pull']['skipped_pending'] = false;
             $state['command'] = null;
             $state['status'] = null;
             $state['cursor'] = null;
@@ -379,6 +406,7 @@ class Pull
             }
         }
 
+        $this->client->delete_pull_checkpoint();
         $this->client->audit_log("PULL | prepared for delta re-pull", true);
     }
 
@@ -501,11 +529,13 @@ class Pull
 
         // Mark pull complete BEFORE the server blocks so killing the
         // server (Ctrl-C) doesn't leave the pipeline mid-flight.
+        $checkpoint = $this->checkpoint();
+        $checkpoint->stage = 'start';
         $this->client->mutate_state(function (array $state) {
-            $state['pull']['stage'] = 'start';
             $state['status'] = 'complete';
             return $state;
         });
+        $this->client->save_pull_checkpoint($checkpoint);
 
         $green = "\033[32m";
         $bold = "\033[1m";
@@ -571,7 +601,7 @@ class Pull
         $this->progress->print_line(
             "\n{$green}{$bold}Done.{$r} {$dim}Files in {$fs_root}{$r}\n"
         );
-        if (!empty($this->client->state['pull']['skipped_pending'])) {
+        if ($this->checkpoint()->skipped_pending) {
             $this->progress->print_line(
                 "{$dim}Deferred files remain. The skipped download list was preserved on disk for a follow-up sync.{$r}\n"
             );
