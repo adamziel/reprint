@@ -6,7 +6,6 @@ use InvalidArgumentException;
 use RuntimeException;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Pull\Command\PullStageCommands;
-use Reprint\Importer\Session\ImportRunState;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 
@@ -219,9 +218,7 @@ class Pull
         $checkpoint = $this->checkpoint();
         $checkpoint->stage = 'complete';
         $this->client->save_pull_checkpoint($checkpoint);
-        $this->client->mutate_state(function (ImportRunState $state): void {
-            $state->status = 'complete';
-        });
+        $this->client->set_run_status('complete');
     }
 
     /**
@@ -315,7 +312,7 @@ class Pull
         }
 
         if (!isset($options['filter'])) {
-            $options['filter'] = $this->client->run_state()->filter;
+            $options['filter'] = $this->client->current_filter();
         }
         if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
             throw new InvalidArgumentException(
@@ -379,11 +376,7 @@ class Pull
     private function prepare_repull(): void
     {
         $state_dir = $this->client->state_dir;
-        $this->client->mutate_state(function (ImportRunState $state): void {
-            $state->command = null;
-            $state->status = null;
-            $state->sql_output = null;
-        });
+        $this->client->prepare_repull_run_state();
 
         foreach ([
             $state_dir . "/db.sql",
@@ -403,22 +396,18 @@ class Pull
     }
 
     /**
-     * Sub-commands return with state["status"]="partial" when a server
-     * timeout drops the connection. This loop retries automatically,
-     * resetting the status to "in_progress" so the handler enters its
-     * resume path (it specifically checks for that value).
+     * Sub-commands return with run status "partial" when a server timeout
+     * drops the connection. This loop retries automatically, resetting the
+     * status to "in_progress" so the handler enters its resume path.
      */
     public function run_until_complete(callable $handler): void
     {
         for ($attempt = 0; $attempt < 1000; $attempt++) {
             $handler();
-            $state = $this->client->run_state();
-            if ($state->status !== 'partial') {
+            if ($this->client->current_run_status() !== 'partial') {
                 break;
             }
-            $this->client->mutate_state(function (ImportRunState $state): void {
-                $state->status = 'in_progress';
-            });
+            $this->client->set_run_status('in_progress');
             $this->client->exit_code = 0;
             $this->progress->tick_spinner();
         }
@@ -520,9 +509,7 @@ class Pull
         // server (Ctrl-C) doesn't leave the pipeline mid-flight.
         $checkpoint = $this->checkpoint();
         $checkpoint->stage = 'start';
-        $this->client->mutate_state(function (ImportRunState $state): void {
-            $state->status = 'complete';
-        });
+        $this->client->set_run_status('complete');
         $this->client->save_pull_checkpoint($checkpoint);
 
         $green = "\033[32m";

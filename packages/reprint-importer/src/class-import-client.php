@@ -130,7 +130,7 @@ class ImportClient
      * @var ImportRunState|null Session-level run state loaded from / saved to $state_file.
      * Workflow-specific progress belongs in per-workflow checkpoint files.
      */
-    public ?ImportRunState $state = null;
+    private ?ImportRunState $state = null;
 
     private ?PullCheckpoint $pull_checkpoint = null;
     private ?PreflightCheckpoint $preflight_checkpoint = null;
@@ -442,24 +442,51 @@ class ImportClient
         }
     }
 
-    /**
-     * Apply a mutation to the state and persist it. Used by orchestrator
-     * commands (Pull) that need to update multiple fields atomically.
-     */
-    public function mutate_state(callable $mutator): void
-    {
-        $state = $this->run_state();
-        $mutator($state);
-        $this->save_state($state);
-    }
-
-    public function run_state(): ImportRunState
+    private function run_state(): ImportRunState
     {
         if (!$this->state instanceof ImportRunState) {
             $this->state = $this->load_state();
         }
 
         return $this->state;
+    }
+
+    public function set_request_user_agent(string $user_agent): void
+    {
+        $this->run_state()->user_agent = $user_agent;
+    }
+
+    public function current_filter(): string
+    {
+        return $this->run_state()->filter;
+    }
+
+    public function current_run_status(): ?string
+    {
+        return $this->run_state()->status;
+    }
+
+    public function set_run_status(?string $status): void
+    {
+        $state = $this->run_state();
+        $state->status = $status;
+        $this->save_state($state);
+    }
+
+    public function record_command_status(string $command, ?string $status): void
+    {
+        $state = $this->run_state();
+        $state->set_command_status($command, $status);
+        $this->save_state($state);
+    }
+
+    public function prepare_repull_run_state(): void
+    {
+        $state = $this->run_state();
+        $state->command = null;
+        $state->status = null;
+        $state->sql_output = null;
+        $this->save_state($state);
     }
 
     /** True when the skipped-download list exists and still has entries. */
@@ -1858,13 +1885,6 @@ class ImportClient
         $this->write_status_file();
     }
 
-    private function record_command_status(string $command, ?string $status): void
-    {
-        $state = $this->run_state();
-        $state->set_command_status($command, $status);
-        $this->save_state($state);
-    }
-
     /**
      * Format a byte count into a human-readable string.
      */
@@ -2408,7 +2428,7 @@ class ImportClient
      * Download files from a prepared list.
      *
      * @param string $list_file Path to the JSONL download list to process.
-     * @param string $state_key Key in $this->state that holds fetch progress
+     * @param string $state_key FilesPullCheckpoint fetch slot to update
      *                          (e.g. "fetch" or "fetch_skipped").
      */
     private function download_files_from_list(
@@ -2963,7 +2983,7 @@ class ImportClient
         ]);
     }
 
-    public function default_state(): ImportRunState
+    private function default_state(): ImportRunState
     {
         return ImportRunState::fresh();
     }
@@ -3046,7 +3066,7 @@ class ImportClient
      * Uses atomic write (temp file + rename) to prevent corruption if
      * the process is killed mid-write.
      */
-    public function save_state(ImportRunState $state): void
+    private function save_state(ImportRunState $state): void
     {
         // Keep the spinner alive between curl requests. save_state is
         // called frequently during streaming operations, so this fills
