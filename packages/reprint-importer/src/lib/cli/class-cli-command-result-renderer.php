@@ -48,14 +48,14 @@ final class CliCommandResultRenderer
         $entry = $result->entry();
         if ($entry === null) {
             echo "No preflight data available.\n";
-            $client->exit_code = 1;
+            $client->set_exit_code(1);
             return;
         }
 
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes.
         echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         $client->write_status_file($result->is_ok() ? null : "Preflight failed");
-        $client->exit_code = $result->is_ok() ? 0 : 1;
+        $client->set_exit_code($result->is_ok() ? 0 : 1);
     }
 
     private function render_preflight_assert(
@@ -76,13 +76,13 @@ final class CliCommandResultRenderer
         if ($result->all_pass()) {
             echo "Migration looks feasible.\n";
             $client->write_status_file();
-            $client->exit_code = 0;
+            $client->set_exit_code(0);
             return;
         }
 
         echo "Migration may not be feasible. Review the failures above.\n";
         $client->write_status_file("Preflight assertions failed");
-        $client->exit_code = 1;
+        $client->set_exit_code(1);
     }
 
     private function render_db_domains(

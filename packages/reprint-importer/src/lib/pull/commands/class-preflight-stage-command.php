@@ -20,7 +20,7 @@ final class PreflightStageCommand extends PullStageCommand
     {
         $pull->client()->run_preflight();
         if ($pull->check_plugin_installed()) {
-            $pull->client()->exit_code = 1;
+            $pull->client()->set_exit_code(1);
             return;
         }
 

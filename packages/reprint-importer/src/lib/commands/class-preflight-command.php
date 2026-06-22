@@ -68,7 +68,7 @@ final class PreflightCommand extends ImportCommand
         }
 
         $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
-        if ($detected_webhost === 'other' && is_link($client->fs_root . '/__wp__')) {
+        if ($detected_webhost === 'other' && $client->has_wpcloud_docroot_link()) {
             $detected_webhost = 'wpcloud';
         }
         $client->audit_log("WEBHOST DETECTED | {$detected_webhost}", true);

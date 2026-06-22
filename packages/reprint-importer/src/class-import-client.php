@@ -65,13 +65,13 @@ class ImportClient
     private const MAX_CONSECUTIVE_TIMEOUTS = 3;
 
     /** @var string Export server URL. */
-    public $remote_url;
+    private string $remote_url;
 
     /** @var string Directory for import state files (.reprint/run.json, db.sql, etc.). */
-    public $state_dir;
+    private string $state_dir;
 
     /** @var string Directory where downloaded site files are written (no filesystem-root/ wrapper). */
-    public $fs_root;
+    private string $fs_root;
 
     /** @var ImportPaths Derived filesystem paths for this import session. */
     private ImportPaths $paths;
@@ -209,7 +209,7 @@ class ImportClient
     private $max_allowed_packet = null;
 
     /** @var string|null Machine-readable error code from the last HTTP diagnosis. */
-    public $last_error_code = null;
+    private ?string $last_error_code = null;
 
     /** @var ImportOutput Reports progress, status, and human-readable output. */
     private ImportOutput $output;
@@ -269,7 +269,7 @@ class ImportClient
      * @var int Process exit code. 0 = import complete, 2 = partial progress
      * (caller should invoke again to continue).
      */
-    public $exit_code = 0;
+    private int $exit_code = 0;
 
     public function __construct(
         string $remote_url,
@@ -454,6 +454,56 @@ class ImportClient
     public function set_request_user_agent(string $user_agent): void
     {
         $this->run_state()->user_agent = $user_agent;
+    }
+
+    public function paths(): ImportPaths
+    {
+        return $this->paths;
+    }
+
+    public function remote_host(): string
+    {
+        return parse_url($this->remote_url, PHP_URL_HOST) ?? $this->remote_url;
+    }
+
+    public function ensure_site_export_api_url(): void
+    {
+        if (strpos($this->remote_url, 'site-export-api') !== false) {
+            return;
+        }
+
+        $separator = strpos($this->remote_url, '?') === false ? '?' : '&';
+        $this->remote_url .= $separator . 'site-export-api';
+    }
+
+    public function default_runtime_output_dir(): string
+    {
+        return $this->paths->state_dir() . '/runtime';
+    }
+
+    public function fs_root(): string
+    {
+        return $this->fs_root;
+    }
+
+    public function has_wpcloud_docroot_link(): bool
+    {
+        return is_link($this->fs_root . '/__wp__');
+    }
+
+    public function exit_code(): int
+    {
+        return $this->exit_code;
+    }
+
+    public function set_exit_code(int $exit_code): void
+    {
+        $this->exit_code = $exit_code;
+    }
+
+    public function last_error_code(): ?string
+    {
+        return $this->last_error_code;
     }
 
     public function current_filter(): string

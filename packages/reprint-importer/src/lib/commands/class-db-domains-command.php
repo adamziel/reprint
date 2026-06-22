@@ -12,8 +12,9 @@ final class DbDomainsCommand extends ImportCommand
 {
     public function execute(ImportClient $client, array $options): ?ImportCommandResult
     {
-        $domains_file = $client->state_dir . "/.import-domains.json";
-        $sql_file = $client->state_dir . "/db.sql";
+        $paths = $client->paths();
+        $domains_file = $paths->domains_file();
+        $sql_file = $paths->sql_file();
 
         if (file_exists($domains_file)) {
             $domains = json_decode(file_get_contents($domains_file), true);
@@ -26,7 +27,7 @@ final class DbDomainsCommand extends ImportCommand
 
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
-                "No domain data found. Run db-pull first, or place a db.sql file in {$client->state_dir}.",
+                "No domain data found. Run db-pull first, or place a db.sql file in {$paths->state_dir()}.",
             );
         }
 

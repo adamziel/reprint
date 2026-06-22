@@ -90,7 +90,7 @@ class Pull
      */
     public function run(array $options): void
     {
-        $this->normalize_url();
+        $this->client->ensure_site_export_api_url();
         $this->progress->enable_quiet_lifecycle();
 
         $options = $this->validate_and_default_options($options);
@@ -113,7 +113,7 @@ class Pull
             }
         }
 
-        $host = parse_url($this->client->remote_url, PHP_URL_HOST) ?? $this->client->remote_url;
+        $host = $this->client->remote_host();
         $bold = "\033[1m";
         $r = "\033[0m";
         $this->progress->print_line("\n{$bold}Pulling {$host}{$r}\n");
@@ -308,7 +308,7 @@ class Pull
         }
 
         if (empty($options['output_dir'])) {
-            $options['output_dir'] = $this->client->state_dir . '/runtime';
+            $options['output_dir'] = $this->client->default_runtime_output_dir();
         }
 
         if (!isset($options['filter'])) {
@@ -354,19 +354,6 @@ class Pull
     }
 
     /**
-     * Append ?site-export-api to bare site URLs so users can pass
-     * https://example.com instead of https://example.com/?site-export-api.
-     */
-    private function normalize_url(): void
-    {
-        $url = $this->client->remote_url;
-        if (strpos($url, 'site-export-api') === false) {
-            $separator = strpos($url, '?') === false ? '?' : '&';
-            $this->client->remote_url = $url . $separator . 'site-export-api';
-        }
-    }
-
-    /**
      * Reset sub-command state for a delta re-pull.
      *
      * Keeps the local file index (so files-pull runs in delta mode) and
@@ -375,16 +362,16 @@ class Pull
      */
     private function prepare_repull(): void
     {
-        $state_dir = $this->client->state_dir;
+        $paths = $this->client->paths();
         $this->client->prepare_repull_run_state();
 
         foreach ([
-            $state_dir . "/db.sql",
-            $state_dir . "/.import-domains.json",
-            $state_dir . "/.import-remote-index.jsonl",
-            $state_dir . "/.import-download-list.jsonl",
-            $state_dir . "/.import-download-list-skipped.jsonl",
-            $state_dir . "/.reprint/files-pull/checkpoint.json",
+            $paths->sql_file(),
+            $paths->domains_file(),
+            $paths->remote_index_file(),
+            $paths->download_list_file(),
+            $paths->skipped_download_list_file(),
+            $paths->files_pull_checkpoint_file(),
         ] as $path) {
             if (file_exists($path)) {
                 @unlink($path);
@@ -408,7 +395,7 @@ class Pull
                 break;
             }
             $this->client->set_run_status('in_progress');
-            $this->client->exit_code = 0;
+            $this->client->set_exit_code(0);
             $this->progress->tick_spinner();
         }
     }
@@ -426,7 +413,7 @@ class Pull
         }
 
         $error = $preflight["error"] ?? null;
-        $error_code = $this->client->last_error_code;
+        $error_code = $this->client->last_error_code();
         $is_not_installed =
             $error_code === 'NOT_FOUND' ||
             $error_code === 'HTML_RESPONSE';
@@ -491,7 +478,7 @@ class Pull
      */
     public function start_server(array $options): void
     {
-        $output_dir = $options['output_dir'] ?? $this->client->state_dir . '/runtime';
+        $output_dir = $options['output_dir'] ?? $this->client->default_runtime_output_dir();
         $start_sh = $output_dir . '/start.sh';
 
         if (!file_exists($start_sh)) {
@@ -531,7 +518,7 @@ class Pull
         ], true);
 
         passthru("bash " . escapeshellarg($start_sh), $exit_code);
-        $this->client->exit_code = $exit_code;
+        $this->client->set_exit_code($exit_code);
     }
 
     private function print_stage_header(string $stage): void
@@ -572,7 +559,7 @@ class Pull
         $bold = "\033[1m";
         $dim = "\033[2m";
         $r = "\033[0m";
-        $fs_root = $this->client->fs_root;
+        $fs_root = $this->client->fs_root();
         $this->progress->print_line(
             "\n{$green}{$bold}Done.{$r} {$dim}Files in {$fs_root}{$r}\n"
         );
@@ -590,7 +577,7 @@ class Pull
             "command" => "pull",
             "failed_stage" => $stage,
             "completed_stages" => array_slice($stages, 0, $i),
-            "error_code" => $this->client->last_error_code,
+            "error_code" => $this->client->last_error_code(),
             "error" => $e->getMessage(),
             "message" => "Pull failed at {$stage}: " . $e->getMessage(),
         ]);

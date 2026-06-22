@@ -22,7 +22,7 @@ final class DbPullStageCommand extends PullStageCommand
             $pull->client()->run_db_sync();
         });
 
-        $sql_file = $pull->client()->state_dir . "/db.sql";
+        $sql_file = $pull->client()->paths()->sql_file();
         $size = file_exists($sql_file) ? $pull->format_bytes((int) filesize($sql_file)) : null;
         $pull->print_done($this->name(), $size);
     }

@@ -1179,14 +1179,14 @@ if (
         // register_shutdown_function, where exceptions have no
         // channel to surface as ndjson events. Stash the exit code on
         // a global so the embedder can read it.
-        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = (int) $client->exit_code;
+        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = $client->exit_code();
         if (!defined('EXIT_AFTER_IMPORT') || EXIT_AFTER_IMPORT) {
-            exit($client->exit_code);
+            exit($client->exit_code());
         }
         return;
     } catch (\Throwable $e) {
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
-        $error_code = isset($client) ? $client->last_error_code : null;
+        $error_code = isset($client) ? $client->last_error_code() : null;
         if ($is_tty) {
             fwrite(STDERR, "\nError: " . $e->getMessage() . "\n");
         } else {

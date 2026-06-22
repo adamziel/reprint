@@ -64,11 +64,11 @@ class PullFilterFakeClient extends ImportClient
     {
         if ($this->create_skipped_list) {
             file_put_contents(
-                $this->state_dir . '/.import-download-list-skipped.jsonl',
+                $this->paths()->skipped_download_list_file(),
                 "{\"path\":\"" . base64_encode('/wp-content/uploads/2024/01/photo.jpg') . "\"}\n",
             );
         } else {
-            @unlink($this->state_dir . '/.import-download-list-skipped.jsonl');
+            @unlink($this->paths()->skipped_download_list_file());
         }
 
         $this->record_command_status("files-pull", "complete");
@@ -76,7 +76,7 @@ class PullFilterFakeClient extends ImportClient
 
     public function run_db_sync(): void
     {
-        file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
+        file_put_contents($this->paths()->sql_file(), "SELECT 1;\n");
         $this->record_command_status("db-pull", "complete");
     }
 
