@@ -4,7 +4,6 @@ namespace Reprint\Importer\Pull;
 
 use InvalidArgumentException;
 use RuntimeException;
-use Reprint\Importer\ImportClient;
 use Reprint\Importer\Pull\Command\PullStageCommands;
 use Reprint\Importer\Support\ByteFormatter;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
@@ -19,23 +18,27 @@ use Reprint\Importer\TerminalProgress\TerminalProgress;
  * preflight → files-pull → db-pull → db-apply → flat-docroot →
  * apply-runtime → start.
  *
- * The class holds a reference to ImportClient because each stage
- * delegates to an ImportClient method (run_preflight, run_files_sync,
- * etc.). The orchestration logic (pipeline state, retry loop, stage
- * framing) lives here; the actual transfer logic stays in ImportClient.
+ * The class owns pull orchestration only. It delegates environment-specific
+ * work through PullRuntime so pipeline state, retry policy, and stage framing
+ * stay independent from the importer composition root.
  */
 class Pull
 {
-    private ImportClient $client;
+    private PullRuntime $client;
     private TerminalProgress $progress;
 
-    public function __construct(ImportClient $client, TerminalProgress $progress)
+    public function __construct(PullRuntime $client, TerminalProgress $progress)
     {
         $this->client = $client;
         $this->progress = $progress;
     }
 
-    public function client(): ImportClient
+    public function runtime(): PullRuntime
+    {
+        return $this->client;
+    }
+
+    public function client(): PullRuntime
     {
         return $this->client;
     }
@@ -387,10 +390,10 @@ class Pull
      * drops the connection. This loop retries automatically, resetting the
      * status to "in_progress" so the handler enters its resume path.
      */
-    public function run_until_complete(callable $handler): void
+    public function run_resumable_stage(string $stage, array $options): void
     {
         for ($attempt = 0; $attempt < 1000; $attempt++) {
-            $handler();
+            $this->run_runtime_stage($stage, $options);
             if ($this->client->current_run_status() !== 'partial') {
                 break;
             }
@@ -398,6 +401,41 @@ class Pull
             $this->client->set_exit_code(0);
             $this->progress->tick_spinner();
         }
+    }
+
+    public function run_runtime_stage(string $stage, array $options): void
+    {
+        if ($stage === 'preflight') {
+            $this->client->run_preflight();
+            return;
+        }
+
+        if ($stage === 'files-pull') {
+            $this->client->run_files_sync();
+            return;
+        }
+
+        if ($stage === 'db-pull') {
+            $this->client->run_db_sync();
+            return;
+        }
+
+        if ($stage === 'db-apply') {
+            $this->client->run_db_apply($options);
+            return;
+        }
+
+        if ($stage === 'flat-docroot') {
+            $this->client->run_flat_document_root($options);
+            return;
+        }
+
+        if ($stage === 'apply-runtime') {
+            $this->client->run_apply_runtime($options);
+            return;
+        }
+
+        throw new InvalidArgumentException("Invalid runtime stage: {$stage}");
     }
 
     /**

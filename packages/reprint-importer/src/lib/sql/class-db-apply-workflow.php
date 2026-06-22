@@ -5,7 +5,12 @@ namespace Reprint\Importer\Sql;
 use InvalidArgumentException;
 use PDO;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
-use Reprint\Importer\Output\ImportOutput;
+use Reprint\Importer\Observability\AuditLogger;
+use Reprint\Importer\Sql\Infrastructure\HostPluginDeactivationPolicy;
+use Reprint\Importer\Sql\Port\DbApplyCheckpointStore;
+use Reprint\Importer\Sql\Port\DbApplyObserver;
+use Reprint\Importer\Sql\Port\DbApplyShutdownToken;
+use Reprint\Importer\Sql\Port\SqlStatementStatsStore;
 use Reprint\Importer\UrlRewrite\NewSiteUrlResolver;
 use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
 use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
@@ -16,38 +21,30 @@ final class DbApplyWorkflow
     private string $state_dir;
     private string $remote_url;
     private LocalImportFilesystem $filesystem;
-    private ImportOutput $output;
-
-    /** @var callable */
-    private $save_state;
-
-    /** @var callable */
-    private $audit;
-
-    /** @var callable */
-    private $output_progress;
-
-    /** @var callable */
-    private $should_stop;
+    private DbApplyCheckpointStore $checkpoints;
+    private AuditLogger $audit;
+    private DbApplyObserver $observer;
+    private DbApplyShutdownToken $shutdown;
+    private SqlStatementStatsStore $statement_stats;
 
     public function __construct(
         string $state_dir,
         string $remote_url,
         LocalImportFilesystem $filesystem,
-        ImportOutput $output,
-        callable $save_state,
-        callable $audit,
-        callable $output_progress,
-        callable $should_stop
+        DbApplyCheckpointStore $checkpoints,
+        AuditLogger $audit,
+        DbApplyObserver $observer,
+        DbApplyShutdownToken $shutdown,
+        SqlStatementStatsStore $statement_stats
     ) {
         $this->state_dir = $state_dir;
         $this->remote_url = $remote_url;
         $this->filesystem = $filesystem;
-        $this->output = $output;
-        $this->save_state = $save_state;
+        $this->checkpoints = $checkpoints;
         $this->audit = $audit;
-        $this->output_progress = $output_progress;
-        $this->should_stop = $should_stop;
+        $this->observer = $observer;
+        $this->shutdown = $shutdown;
+        $this->statement_stats = $statement_stats;
     }
 
     /**
@@ -91,15 +88,7 @@ final class DbApplyWorkflow
                 ),
                 true,
             );
-            $this->output->show_lifecycle_line("Resuming db-apply (executed: {$statements_executed} statements)\n");
-            $this->output_progress([
-                "type" => "lifecycle",
-                "event" => "resuming",
-                "command" => "db-apply",
-                "statements_executed" => $statements_executed,
-                "bytes_read" => $bytes_read,
-                "message" => "Resuming db-apply (executed: {$statements_executed} statements)",
-            ], true);
+            $this->observer->on_workflow_resuming($statements_executed, $bytes_read);
         } else {
             $checkpoint->reset(!empty($url_mapping) ? $url_mapping : null);
             $this->save_state($checkpoint);
@@ -107,13 +96,7 @@ final class DbApplyWorkflow
             $bytes_read = 0;
 
             $this->audit("START db-apply", true);
-            $this->output->show_lifecycle_line("Starting db-apply\n");
-            $this->output_progress([
-                "type" => "lifecycle",
-                "event" => "starting",
-                "command" => "db-apply",
-                "message" => "Starting db-apply",
-            ], true);
+            $this->observer->on_workflow_starting();
         }
 
         if (empty($url_mapping) && !empty($checkpoint->rewrite_url)) {
@@ -132,45 +115,16 @@ final class DbApplyWorkflow
         $this->audit("CONNECTED | {$connection_label}", false);
 
         return (new SqlDumpApplier(
-            function (): bool {
-                return $this->should_stop();
-            },
-            function (DbApplyCheckpoint $checkpoint): void {
-                $this->save_state($checkpoint);
-            },
-            function (string $message, bool $to_console): void {
-                $this->audit($message, $to_console);
-            },
-            function (array $progress, bool $force): void {
-                $this->output_progress($progress, $force);
-            },
-            function (string $message, ?float $fraction): void {
-                $this->output->show_progress_line($message, $fraction);
-            },
-            function (string $message): void {
-                $this->output->show_lifecycle_line($message);
-            },
-            function (): void {
-                $this->output->clear_progress_line();
-            },
-            function (): bool {
-                return $this->output->is_quiet_lifecycle();
-            },
-            function (PDO $pdo) use ($source): array {
-                return $this->deactivate_host_plugins($pdo, $source);
-            },
-            function (PDO $pdo, string $new_site_url) use ($source): array {
-                return $this->deactivate_path_incompatible_plugins(
-                    $pdo,
-                    $source,
-                    $new_site_url,
-                );
-            },
+            $this->shutdown,
+            $this->checkpoints,
+            $this->audit,
+            $this->observer,
+            $this->statement_stats,
+            new HostPluginDeactivationPolicy($source, $this->audit),
         ))->apply(
             $checkpoint,
             [
                 "sql_file" => $sql_file,
-                "state_dir" => $this->state_dir,
                 "new_site_url" => (string) ($options["new_site_url"] ?? ""),
             ],
             $query_executor,
@@ -220,24 +174,7 @@ final class DbApplyWorkflow
             sprintf("DISCOVERED DOMAINS | %s", implode(", ", $domains)),
             false,
         );
-        $this->output->show_lifecycle_line("Discovered domains in SQL dump:\n");
-        foreach ($domains as $domain) {
-            $mapped = isset($url_mapping[$domain])
-                ? " => {$url_mapping[$domain]}"
-                : " (not mapped)";
-            $this->output->show_lifecycle_line("  {$domain}{$mapped}\n");
-        }
-        $this->output->show_lifecycle_line("\n");
-
-        $domain_map = [];
-        foreach ($domains as $domain) {
-            $domain_map[$domain] = $url_mapping[$domain] ?? null;
-        }
-        $this->output_progress([
-            "type" => "domains_discovered",
-            "domains" => $domain_map,
-            "message" => "Discovered " . count($domains) . " domain(s) in SQL dump",
-        ], true);
+        $this->observer->on_domains_discovered($domains, $url_mapping);
     }
 
     /**
@@ -318,7 +255,7 @@ final class DbApplyWorkflow
             }
             $target_path = $this->filesystem->filesystem_root_path() . $content_dir . '/database/.ht.sqlite';
             $this->audit("DB-APPLY | defaulting SQLite path to: {$target_path}");
-            $this->output->show_lifecycle_line("SQLite path: {$target_path}\n");
+            $this->observer->on_lifecycle_line("SQLite path: {$target_path}\n");
         }
 
         $checkpoint->target_engine = "sqlite";
@@ -449,24 +386,11 @@ final class DbApplyWorkflow
 
     private function save_state(DbApplyCheckpoint $checkpoint): void
     {
-        ($this->save_state)($checkpoint);
+        $this->checkpoints->save($checkpoint);
     }
 
     private function audit(string $message, bool $to_console = true): void
     {
-        ($this->audit)($message, $to_console);
-    }
-
-    /**
-     * @param array<string, mixed> $progress
-     */
-    private function output_progress(array $progress, bool $force = false): void
-    {
-        ($this->output_progress)($progress, $force);
-    }
-
-    private function should_stop(): bool
-    {
-        return (bool) ($this->should_stop)();
+        $this->audit->record($message, $to_console);
     }
 }

@@ -2,6 +2,7 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\LocalFileApplyContext;
 use Reprint\Importer\Protocol\PreserveLocalSkipException;
 use RuntimeException;
 use function Reprint\Exporter\normalize_path;
@@ -10,61 +11,14 @@ use function Reprint\Exporter\path_is_within_root;
 final class SymlinkChunkApplier
 {
     private bool $preserve_local;
-
-    /** @var callable */
-    private $local_path_for_remote_path;
-
-    /** @var callable */
-    private $map_target_for_local;
-
-    /** @var callable */
-    private $filesystem_root;
-
-    /** @var callable */
-    private $path_traverses_symlink;
-
-    /** @var callable */
-    private $remove_path;
-
-    /** @var callable */
-    private $ensure_directory;
-
-    /** @var callable */
-    private $audit;
-
-    /** @var callable */
-    private $emit_skip;
-
-    /** @var callable */
-    private $upsert_index_entry;
-
-    /** @var callable */
-    private $emit_progress;
+    private LocalFileApplyContext $local;
 
     public function __construct(
         bool $preserve_local,
-        callable $local_path_for_remote_path,
-        callable $map_target_for_local,
-        callable $filesystem_root,
-        callable $path_traverses_symlink,
-        callable $remove_path,
-        callable $ensure_directory,
-        callable $audit,
-        callable $emit_skip,
-        callable $upsert_index_entry,
-        callable $emit_progress
+        LocalFileApplyContext $local
     ) {
         $this->preserve_local = $preserve_local;
-        $this->local_path_for_remote_path = $local_path_for_remote_path;
-        $this->map_target_for_local = $map_target_for_local;
-        $this->filesystem_root = $filesystem_root;
-        $this->path_traverses_symlink = $path_traverses_symlink;
-        $this->remove_path = $remove_path;
-        $this->ensure_directory = $ensure_directory;
-        $this->audit = $audit;
-        $this->emit_skip = $emit_skip;
-        $this->upsert_index_entry = $upsert_index_entry;
-        $this->emit_progress = $emit_progress;
+        $this->local = $local;
     }
 
     public function handle(array $chunk): void
@@ -207,7 +161,7 @@ final class SymlinkChunkApplier
 
     private function local_path_for_remote_path(string $path): string
     {
-        return (string) ($this->local_path_for_remote_path)($path);
+        return $this->local->local_path_for_remote_path($path);
     }
 
     private function map_target_for_local(
@@ -215,37 +169,41 @@ final class SymlinkChunkApplier
         string $local_path,
         string $target
     ): string {
-        return (string) ($this->map_target_for_local)($path, $local_path, $target);
+        return $this->local->map_absolute_symlink_target_for_local_mirror(
+            $path,
+            $local_path,
+            $target,
+        );
     }
 
     private function filesystem_root(): string
     {
-        return (string) ($this->filesystem_root)();
+        return $this->local->filesystem_root_path();
     }
 
     private function path_traverses_symlink(string $path): bool
     {
-        return (bool) ($this->path_traverses_symlink)($path);
+        return $this->local->path_traverses_symlink($path);
     }
 
     private function remove_path(string $local_path): bool
     {
-        return (bool) ($this->remove_path)($local_path);
+        return $this->local->remove_path_without_following_symlinks($local_path);
     }
 
     private function ensure_directory(string $dir): void
     {
-        ($this->ensure_directory)($dir);
+        $this->local->ensure_directory_path($dir);
     }
 
     private function audit(string $message, bool $to_console): void
     {
-        ($this->audit)($message, $to_console);
+        $this->local->audit($message, $to_console);
     }
 
     private function emit_skip(string $path): void
     {
-        ($this->emit_skip)($path);
+        $this->local->emit_skip_progress($path);
     }
 
     private function upsert_index_entry(
@@ -254,11 +212,11 @@ final class SymlinkChunkApplier
         int $size,
         string $type
     ): void {
-        ($this->upsert_index_entry)($path, $ctime, $size, $type);
+        $this->local->upsert_index_entry($path, $ctime, $size, $type);
     }
 
     private function emit_progress(array $progress): void
     {
-        ($this->emit_progress)($progress);
+        $this->local->output_progress($progress);
     }
 }

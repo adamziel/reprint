@@ -3,19 +3,19 @@
 namespace Reprint\Importer\Session;
 
 use Reprint\Importer\Index\IndexStore;
+use Reprint\Importer\Observability\AuditLogger;
 
 final class ImportAbortHandler
 {
     private ImportPaths $paths;
     private IndexStore $index_store;
 
-    /** @var callable */
-    private $audit;
+    private AuditLogger $audit;
 
     public function __construct(
         ImportPaths $paths,
         IndexStore $index_store,
-        callable $audit
+        AuditLogger $audit
     ) {
         $this->paths = $paths;
         $this->index_store = $index_store;
@@ -105,6 +105,6 @@ final class ImportAbortHandler
 
     private function audit(string $message, bool $to_console = true): void
     {
-        ($this->audit)($message, $to_console);
+        $this->audit->record($message, $to_console);
     }
 }

@@ -2,61 +2,46 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\LocalFileChangePlanner;
+use Reprint\Importer\FileSync\Port\ProgressTicker;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
 use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Index\IndexStore;
+use Reprint\Importer\Observability\AuditLogger;
 use RuntimeException;
 
 final class FetchListBuilder
 {
     private IndexStore $index_store;
-
-    /** @var callable */
-    private $delete_local_path;
-
-    /** @var callable */
-    private $should_skip;
-
-    /** @var callable */
-    private $emit_skip;
-
-    /** @var callable */
-    private $persist_diff;
-
-    /** @var callable */
-    private $should_stop;
-
-    /** @var callable */
-    private $tick;
-
-    /** @var callable */
-    private $audit;
+    private LocalFileChangePlanner $local_changes;
+    private FilesPullCheckpointStore $checkpoints;
+    private ShutdownToken $shutdown;
+    private ProgressTicker $ticker;
+    private AuditLogger $audit;
 
     public function __construct(
         IndexStore $index_store,
-        callable $delete_local_path,
-        callable $should_skip,
-        callable $emit_skip,
-        callable $persist_diff,
-        callable $should_stop,
-        callable $tick,
-        callable $audit
+        LocalFileChangePlanner $local_changes,
+        FilesPullCheckpointStore $checkpoints,
+        ShutdownToken $shutdown,
+        ProgressTicker $ticker,
+        AuditLogger $audit
     ) {
         $this->index_store = $index_store;
-        $this->delete_local_path = $delete_local_path;
-        $this->should_skip = $should_skip;
-        $this->emit_skip = $emit_skip;
-        $this->persist_diff = $persist_diff;
-        $this->should_stop = $should_stop;
-        $this->tick = $tick;
+        $this->local_changes = $local_changes;
+        $this->checkpoints = $checkpoints;
+        $this->shutdown = $shutdown;
+        $this->ticker = $ticker;
         $this->audit = $audit;
     }
 
     public function build(
+        FilesPullCheckpoint $checkpoint,
         string $remote_index_file,
         string $local_index_file,
         string $download_list_file,
         string $skipped_download_list_file,
-        array $diff,
         string $filter,
         ?string $uploads_basedir
     ): bool {
@@ -64,6 +49,7 @@ final class FetchListBuilder
             throw new RuntimeException("Remote index file not found");
         }
 
+        $diff = $checkpoint->diff_state();
         $remote_offset = (int) ($diff["remote_offset"] ?? 0);
         $local_after = $diff["local_after"] ?? null;
         $download_mode = $remote_offset > 0 ? "a" : "w";
@@ -179,7 +165,7 @@ final class FetchListBuilder
 
             $processed++;
             if ($processed % 200 === 0) {
-                $this->persist_diff($remote_offset, $local_after);
+                $this->persist_diff($checkpoint, $remote_offset, $local_after);
                 $this->tick();
             }
         }
@@ -200,7 +186,7 @@ final class FetchListBuilder
             fclose($skipped_handle);
         }
 
-        $this->persist_diff($remote_offset, $local_after);
+        $this->persist_diff($checkpoint, $remote_offset, $local_after);
         $this->index_store->finalize_updates();
 
         return !$this->should_stop();
@@ -257,41 +243,46 @@ final class FetchListBuilder
         $this->audit("FILE APPEND | {$path} | resuming skipped download list build");
     }
 
-    private function persist_diff(int $remote_offset, ?string $local_after): void
+    private function persist_diff(
+        FilesPullCheckpoint $checkpoint,
+        int $remote_offset,
+        ?string $local_after
+    ): void
     {
-        ($this->persist_diff)([
+        $checkpoint->set_diff_state([
             "remote_offset" => $remote_offset,
             "local_after" => $local_after,
         ]);
+        $this->checkpoints->save($checkpoint);
     }
 
     private function delete_local_path(string $path): void
     {
-        ($this->delete_local_path)($path);
+        $this->local_changes->delete_local_file_path($path);
     }
 
     private function should_skip(string $path): ?string
     {
-        return ($this->should_skip)($path);
+        return $this->local_changes->should_skip_for_preserve_local($path);
     }
 
     private function emit_skip(string $path): void
     {
-        ($this->emit_skip)($path);
+        $this->local_changes->emit_skip_progress($path);
     }
 
     private function should_stop(): bool
     {
-        return (bool) ($this->should_stop)();
+        return $this->shutdown->is_shutdown_requested();
     }
 
     private function tick(): void
     {
-        ($this->tick)();
+        $this->ticker->tick();
     }
 
     private function audit(string $message, bool $to_console = true): void
     {
-        ($this->audit)($message, $to_console);
+        $this->audit->record($message, $to_console);
     }
 }

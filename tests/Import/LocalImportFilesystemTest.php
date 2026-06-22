@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
+use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Protocol\PreserveLocalSkipException;
 use RuntimeException;
 
@@ -95,9 +96,7 @@ final class LocalImportFilesystemTest extends TestCase
         return new LocalImportFilesystem(
             $this->temp_dir,
             $mode,
-            function (string $message, bool $to_console): void {
-                $this->audit[] = [$message, $to_console];
-            },
+            new LocalImportFilesystemTestAuditLogger($this->audit),
         );
     }
 
@@ -123,5 +122,25 @@ final class LocalImportFilesystemTest extends TestCase
             }
         }
         return rmdir($path);
+    }
+}
+
+final class LocalImportFilesystemTestAuditLogger implements AuditLogger
+{
+    private $audit;
+
+    public function __construct(array &$audit)
+    {
+        $this->audit =& $audit;
+    }
+
+    public function record(string $message, bool $to_console = true): void
+    {
+        $this->audit[] = [$message, $to_console];
+    }
+
+    public function path(): string
+    {
+        return '';
     }
 }

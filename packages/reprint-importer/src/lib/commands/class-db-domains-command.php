@@ -33,11 +33,7 @@ final class DbDomainsCommand extends ImportCommand
 
         $query_stream = new WP_MySQL_Naive_Query_Stream();
         $domain_collector = new DomainCollector();
-        $domain_scanner = new SqlDomainScanner(
-            function (string $message, bool $to_console) use ($client): void {
-                $client->audit_log($message, $to_console);
-            },
-        );
+        $domain_scanner = new SqlDomainScanner($client->audit_logger());
 
         $sql_handle = fopen($sql_file, "r");
         if (!$sql_handle) {

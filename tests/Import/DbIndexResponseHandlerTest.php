@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Sql\DbIndexResponseHandler;
+use Reprint\Importer\Sql\Port\DbIndexTableSink;
 use RuntimeException;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
@@ -27,8 +28,8 @@ final class DbIndexResponseHandlerTest extends TestCase
 
     public function testTableStatsWritesJsonLinesAndTracksStats(): void
     {
-        $handle = fopen($this->tables_file, 'w+');
         $context = new StreamingContext();
+        $sink = new RecordingDbIndexTableSink(2, 5, 11);
         $rows = [
             ['name' => 'wp_posts', 'rows' => 7],
             ['name' => 'wp_options', 'rows' => '3'],
@@ -39,7 +40,7 @@ final class DbIndexResponseHandlerTest extends TestCase
             $expected_body .= json_encode($row) . "\n";
         }
 
-        $handler = $this->make_handler($handle, 'cursor-0', $context, 2, 5, 11);
+        $handler = $this->make_handler($sink, 'cursor-0', $context);
         $handler->handle([
             'headers' => [
                 'x-chunk-type' => 'table_stats',
@@ -48,10 +49,7 @@ final class DbIndexResponseHandlerTest extends TestCase
             'body' => json_encode($rows),
         ]);
 
-        fflush($handle);
-        fclose($handle);
-
-        $this->assertSame($expected_body, file_get_contents($this->tables_file));
+        $this->assertSame([$rows], $sink->writes);
         $this->assertSame('cursor-1', $handler->cursor());
         $this->assertSame(5, $handler->tables_written());
         $this->assertSame(15, $handler->rows_estimated());
@@ -60,9 +58,9 @@ final class DbIndexResponseHandlerTest extends TestCase
 
     public function testCompletionUpdatesStatsAndProgress(): void
     {
-        $handle = fopen($this->tables_file, 'w+');
+        $sink = new RecordingDbIndexTableSink();
         $context = new StreamingContext();
-        $handler = $this->make_handler($handle, null, $context);
+        $handler = $this->make_handler($sink, null, $context);
 
         $handler->handle([
             'headers' => [
@@ -76,7 +74,6 @@ final class DbIndexResponseHandlerTest extends TestCase
             ],
             'body' => '',
         ]);
-        fclose($handle);
 
         $this->assertTrue($handler->complete());
         $this->assertTrue($context->saw_completion);
@@ -92,16 +89,15 @@ final class DbIndexResponseHandlerTest extends TestCase
 
     public function testProgressChunksAreIgnored(): void
     {
-        $handle = fopen($this->tables_file, 'w+');
+        $sink = new RecordingDbIndexTableSink();
         $context = new StreamingContext();
-        $handler = $this->make_handler($handle, null, $context);
+        $handler = $this->make_handler($sink, null, $context);
 
         $progress_chunk = [
             'headers' => ['x-chunk-type' => 'progress'],
             'body' => '',
         ];
         $handler->handle($progress_chunk);
-        fclose($handle);
 
         $this->assertNull($handler->cursor());
         $this->assertFalse($handler->complete());
@@ -109,9 +105,9 @@ final class DbIndexResponseHandlerTest extends TestCase
 
     public function testErrorChunkThrowsRemoteMessage(): void
     {
-        $handle = fopen($this->tables_file, 'w+');
+        $sink = new RecordingDbIndexTableSink();
         $context = new StreamingContext();
-        $handler = $this->make_handler($handle, null, $context);
+        $handler = $this->make_handler($sink, null, $context);
         $error_chunk = [
             'headers' => ['x-chunk-type' => 'error'],
             'body' => json_encode(['message' => 'remote failed']),
@@ -121,24 +117,72 @@ final class DbIndexResponseHandlerTest extends TestCase
         $this->expectExceptionMessage('remote failed');
 
         $handler->handle($error_chunk);
-        fclose($handle);
     }
 
     private function make_handler(
-        $handle,
+        DbIndexTableSink $sink,
         ?string $cursor,
-        StreamingContext $context,
+        StreamingContext $context
+    ): DbIndexResponseHandler {
+        return new DbIndexResponseHandler(
+            $sink,
+            $cursor,
+            $context
+        );
+    }
+}
+
+final class RecordingDbIndexTableSink implements DbIndexTableSink
+{
+    private int $tables_written;
+    private int $rows_estimated;
+    private int $bytes_written;
+    public array $writes = [];
+
+    public function __construct(
         int $tables_written = 0,
         int $rows_estimated = 0,
         int $bytes_written = 0
-    ): DbIndexResponseHandler {
-        return new DbIndexResponseHandler(
-            $handle,
-            $cursor,
-            $context,
-            $tables_written,
-            $rows_estimated,
-            $bytes_written,
-        );
+    ) {
+        $this->tables_written = $tables_written;
+        $this->rows_estimated = $rows_estimated;
+        $this->bytes_written = $bytes_written;
+    }
+
+    public function write_rows(array $rows): void
+    {
+        $this->writes[] = $rows;
+        $this->tables_written += count($rows);
+        $bytes = 0;
+        foreach ($rows as $row) {
+            if (isset($row['rows']) && is_numeric($row['rows'])) {
+                $this->rows_estimated += (int) $row['rows'];
+            }
+            $bytes += strlen(json_encode($row) . "\n");
+        }
+        $this->bytes_written += $bytes;
+    }
+
+    public function tables_written(): int
+    {
+        return $this->tables_written;
+    }
+
+    public function rows_estimated(): int
+    {
+        return $this->rows_estimated;
+    }
+
+    public function bytes_written(): int
+    {
+        return $this->bytes_written;
+    }
+
+    public function flush(): void
+    {
+    }
+
+    public function close(): void
+    {
     }
 }

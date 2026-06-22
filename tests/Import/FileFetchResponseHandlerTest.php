@@ -4,6 +4,10 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\FileFetchResponseHandler;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
+use Reprint\Importer\FileSync\Port\FileSyncStreamObserver;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
 use Reprint\Importer\Protocol\StreamingContext;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
@@ -100,28 +104,83 @@ final class FileFetchResponseHandlerTest extends TestCase
         StreamingContext $context,
         int $save_every = 50
     ): FileFetchResponseHandler {
+        $checkpoint = FilesPullCheckpoint::fresh();
+        $saved = &$this->saved;
+        $files = &$this->files;
+        $missing = &$this->missing;
+        $completion_progress = &$this->completion_progress;
+
         return new FileFetchResponseHandler(
             $cursor,
             'fetch',
             $context,
             $save_every,
-            fn(): bool => false,
-            function (string $state_key, ?string $cursor, StreamingContext $context): void {
-                $this->saved[] = compact('state_key', 'cursor', 'context');
+            $checkpoint,
+            new class implements ShutdownToken {
+                public function is_shutdown_requested(): bool
+                {
+                    return false;
+                }
             },
-            fn(array $chunk, StreamingContext $context): null => null,
-            function (array $chunk, StreamingContext $context): void {
-                $this->files[] = $chunk;
+            new class($saved) implements FilesPullCheckpointStore {
+                private array $saved;
+
+                public function __construct(array &$saved)
+                {
+                    $this->saved = &$saved;
+                }
+
+                public function get(): FilesPullCheckpoint
+                {
+                    return FilesPullCheckpoint::fresh();
+                }
+
+                public function save(FilesPullCheckpoint $checkpoint): void
+                {
+                    $this->saved[] = [
+                        'state_key' => 'fetch',
+                        'cursor' => $checkpoint->fetch->cursor,
+                    ];
+                }
             },
-            fn(array $chunk): null => null,
-            fn(array $chunk): null => null,
-            function (string $path): void {
-                $this->missing[] = $path;
-            },
-            fn(array $chunk, string $phase, StreamingContext $context): null => null,
-            fn(array $chunk, string $phase): null => null,
-            function (array $progress): void {
-                $this->completion_progress[] = $progress;
+            new class($files, $missing, $completion_progress) implements FileSyncStreamObserver {
+                private array $files;
+                private array $missing;
+                private array $completion_progress;
+
+                public function __construct(
+                    array &$files,
+                    array &$missing,
+                    array &$completion_progress
+                ) {
+                    $this->files = &$files;
+                    $this->missing = &$missing;
+                    $this->completion_progress = &$completion_progress;
+                }
+
+                public function on_metadata_chunk(array $chunk, StreamingContext $context): void {}
+
+                public function on_file_chunk(array $chunk, StreamingContext $context): void
+                {
+                    $this->files[] = $chunk;
+                }
+
+                public function on_directory_chunk(array $chunk): void {}
+                public function on_symlink_chunk(array $chunk): void {}
+
+                public function on_missing_path(string $path): void
+                {
+                    $this->missing[] = $path;
+                }
+
+                public function on_error_chunk(array $chunk, string $phase, StreamingContext $context): void {}
+                public function on_progress_chunk(array $chunk, string $phase): void {}
+                public function on_index_progress(int $entries_counted): void {}
+
+                public function on_completion_progress(array $progress): void
+                {
+                    $this->completion_progress[] = $progress;
+                }
             },
         );
     }

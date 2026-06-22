@@ -18,15 +18,13 @@ final class FilesPullStageCommand extends PullStageCommand
 
     public function execute(Pull $pull, array $options): void
     {
-        $pull->run_until_complete(function () use ($pull) {
-            $pull->client()->run_files_sync();
-        });
+        $pull->run_resumable_stage($this->name(), $options);
 
         $skipped_pending =
             $options['filter'] === 'essential-files' &&
-            $pull->client()->has_skipped_files_pending();
+            $pull->runtime()->has_skipped_files_pending();
         $pull->record_files_state($options['filter'], $skipped_pending);
-        $count = $pull->client()->index_count();
+        $count = $pull->runtime()->index_count();
         $summary = $count > 0 ? number_format($count) . " files" : null;
         if ($skipped_pending) {
             $summary = $summary !== null

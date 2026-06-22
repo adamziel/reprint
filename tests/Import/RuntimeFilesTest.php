@@ -3,8 +3,10 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\ImportClient;
+use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Protocol\StreamingContext;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -207,47 +209,8 @@ class RuntimeFilesTest extends TestCase
         $urls = [];
 
         $downloader = new RuntimeFilesDownloader(
-            function (string $endpoint, ?string $cursor, array $params) use (&$urls): string {
-                $this->assertSame('file_fetch', $endpoint);
-                $this->assertNull($cursor);
-                $this->assertSame(['/scripts'], $params['directory']);
-
-                $url = 'http://fake.url/export.php?endpoint=' . $endpoint;
-                $urls[] = $url;
-
-                return $url;
-            },
-            function (
-                string $url,
-                ?string $cursor,
-                StreamingContext $context,
-                ?array $post_data,
-                string $phase
-            ): void {
-                $this->assertSame('http://fake.url/export.php?endpoint=file_fetch', $url);
-                $this->assertNull($cursor);
-                $this->assertSame('file_fetch', $phase);
-                $this->assertIsArray($post_data);
-                $this->assertArrayHasKey('file_list', $post_data);
-
-                ($context->on_chunk)([
-                    'headers' => [
-                        'x-chunk-type' => 'file',
-                        'x-file-path' => base64_encode('/scripts/env.php'),
-                        'x-first-chunk' => '1',
-                        'x-last-chunk' => '1',
-                    ],
-                    'body' => "<?php\nreturn ['loaded' => true];\n",
-                ]);
-                ($context->on_chunk)([
-                    'headers' => [
-                        'x-chunk-type' => 'completion',
-                    ],
-                ]);
-            },
-            function (string $message) use (&$audit): void {
-                $audit[] = $message;
-            },
+            new RuntimeFilesTestStreamClient($this, $urls),
+            new RuntimeFilesTestAuditLogger($audit),
         );
 
         $downloaded = $downloader->download(
@@ -273,5 +236,87 @@ class RuntimeFilesTest extends TestCase
             'Saved /scripts/env.php',
             implode("\n", $audit),
         );
+    }
+}
+
+final class RuntimeFilesTestStreamClient implements FileSyncStreamClient
+{
+    private RuntimeFilesTest $test;
+    private $urls;
+
+    public function __construct(RuntimeFilesTest $test, array &$urls)
+    {
+        $this->test = $test;
+        $this->urls =& $urls;
+    }
+
+    public function build_url(string $endpoint, ?string $cursor, array $params): string
+    {
+        $this->test->assertSame('file_fetch', $endpoint);
+        $this->test->assertNull($cursor);
+        $this->test->assertSame(['/scripts'], $params['directory']);
+
+        $url = 'http://fake.url/export.php?endpoint=' . $endpoint;
+        $this->urls[] = $url;
+
+        return $url;
+    }
+
+    public function tuned_params(string $endpoint): array
+    {
+        return [];
+    }
+
+    public function fetch_streaming(
+        string $url,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data,
+        string $phase
+    ): void {
+        $this->test->assertSame('http://fake.url/export.php?endpoint=file_fetch', $url);
+        $this->test->assertNull($cursor);
+        $this->test->assertSame('file_fetch', $phase);
+        $this->test->assertIsArray($post_data);
+        $this->test->assertArrayHasKey('file_list', $post_data);
+
+        ($context->on_chunk)([
+            'headers' => [
+                'x-chunk-type' => 'file',
+                'x-file-path' => base64_encode('/scripts/env.php'),
+                'x-first-chunk' => '1',
+                'x-last-chunk' => '1',
+            ],
+            'body' => "<?php\nreturn ['loaded' => true];\n",
+        ]);
+        ($context->on_chunk)([
+            'headers' => [
+                'x-chunk-type' => 'completion',
+            ],
+        ]);
+    }
+
+    public function finalize_request(string $endpoint, float $wall_time, array $response_stats): void
+    {
+    }
+}
+
+final class RuntimeFilesTestAuditLogger implements AuditLogger
+{
+    private $messages;
+
+    public function __construct(array &$messages)
+    {
+        $this->messages =& $messages;
+    }
+
+    public function record(string $message, bool $to_console = true): void
+    {
+        $this->messages[] = $message;
+    }
+
+    public function path(): string
+    {
+        return '';
     }
 }

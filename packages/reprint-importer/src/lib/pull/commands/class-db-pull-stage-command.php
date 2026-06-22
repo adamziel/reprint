@@ -18,11 +18,9 @@ final class DbPullStageCommand extends PullStageCommand
 
     public function execute(Pull $pull, array $options): void
     {
-        $pull->run_until_complete(function () use ($pull) {
-            $pull->client()->run_db_sync();
-        });
+        $pull->run_resumable_stage($this->name(), $options);
 
-        $sql_file = $pull->client()->paths()->sql_file();
+        $sql_file = $pull->runtime()->paths()->sql_file();
         $size = file_exists($sql_file) ? $pull->format_bytes((int) filesize($sql_file)) : null;
         $pull->print_done($this->name(), $size);
     }

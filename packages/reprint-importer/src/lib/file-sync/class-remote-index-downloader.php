@@ -2,78 +2,42 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
+use Reprint\Importer\FileSync\Port\FileSyncStreamObserver;
+use Reprint\Importer\FileSync\Port\FileSyncWorkspace;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\FilesPullTimeoutPolicy;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
+use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;
 use RuntimeException;
 
 final class RemoteIndexDownloader
 {
-    /** @var callable */
-    private $build_url;
-
-    /** @var callable */
-    private $fetch_streaming;
-
-    /** @var callable */
-    private $get_tuned_params;
-
-    /** @var callable */
-    private $should_stop;
-
-    /** @var callable */
-    private $save_state;
-
-    /** @var callable */
-    private $handle_metadata;
-
-    /** @var callable */
-    private $handle_error;
-
-    /** @var callable */
-    private $handle_progress;
-
-    /** @var callable */
-    private $show_progress;
-
-    /** @var callable */
-    private $assert_can_retry_timeout;
-
-    /** @var callable */
-    private $finalize_request;
-
-    /** @var callable */
-    private $count_lines;
-
-    /** @var callable */
-    private $audit;
+    private FileSyncStreamClient $stream;
+    private ShutdownToken $shutdown;
+    private FilesPullCheckpointStore $checkpoints;
+    private FileSyncStreamObserver $observer;
+    private FilesPullTimeoutPolicy $timeout_policy;
+    private FileSyncWorkspace $workspace;
+    private AuditLogger $audit;
 
     public function __construct(
-        callable $build_url,
-        callable $fetch_streaming,
-        callable $get_tuned_params,
-        callable $should_stop,
-        callable $save_state,
-        callable $handle_metadata,
-        callable $handle_error,
-        callable $handle_progress,
-        callable $show_progress,
-        callable $assert_can_retry_timeout,
-        callable $finalize_request,
-        callable $count_lines,
-        callable $audit
+        FileSyncStreamClient $stream,
+        ShutdownToken $shutdown,
+        FilesPullCheckpointStore $checkpoints,
+        FileSyncStreamObserver $observer,
+        FilesPullTimeoutPolicy $timeout_policy,
+        FileSyncWorkspace $workspace,
+        AuditLogger $audit
     ) {
-        $this->build_url = $build_url;
-        $this->fetch_streaming = $fetch_streaming;
-        $this->get_tuned_params = $get_tuned_params;
-        $this->should_stop = $should_stop;
-        $this->save_state = $save_state;
-        $this->handle_metadata = $handle_metadata;
-        $this->handle_error = $handle_error;
-        $this->handle_progress = $handle_progress;
-        $this->show_progress = $show_progress;
-        $this->assert_can_retry_timeout = $assert_can_retry_timeout;
-        $this->finalize_request = $finalize_request;
-        $this->count_lines = $count_lines;
+        $this->stream = $stream;
+        $this->shutdown = $shutdown;
+        $this->checkpoints = $checkpoints;
+        $this->observer = $observer;
+        $this->timeout_policy = $timeout_policy;
+        $this->workspace = $workspace;
         $this->audit = $audit;
     }
 
@@ -109,16 +73,16 @@ final class RemoteIndexDownloader
         $remote_index_file = $config["remote_index_file"];
         $mode = file_exists($remote_index_file) ? "a" : "w";
         if ($mode === "a" && $entries_counted === 0) {
-            $entries_counted = (int) ($this->count_lines)($remote_index_file);
+            $entries_counted = $this->workspace->count_lines($remote_index_file);
         }
 
         if ($mode === "w") {
-            ($this->audit)(
+            $this->audit->record(
                 "FILE CREATE | {$remote_index_file} | downloading fresh remote index",
                 true,
             );
         } else {
-            ($this->audit)(
+            $this->audit->record(
                 "FILE APPEND | {$remote_index_file} | resuming remote index download",
                 true,
             );
@@ -130,7 +94,7 @@ final class RemoteIndexDownloader
         }
 
         try {
-            $params = (array) ($this->get_tuned_params)("file_index");
+            $params = $this->stream->tuned_params("file_index");
             if ($cursor === null) {
                 $params["list_dir"] = $config["list_dir_override"] ?? $roots[0];
             }
@@ -145,42 +109,42 @@ final class RemoteIndexDownloader
                 $params["directory"] = $export_dirs;
             }
 
-            $url = (string) ($this->build_url)("file_index", $cursor, $params);
+            $url = $this->stream->build_url("file_index", $cursor, $params);
             $context = new StreamingContext();
 
             $response_handler = new IndexResponseHandler(
                 $handle,
+                $checkpoint,
                 $cursor,
                 $context,
                 $entries_counted,
                 $config["save_every"],
-                $this->should_stop,
-                function (?string $cursor) use ($checkpoint): void {
-                    $checkpoint->index_cursor = $cursor;
-                    ($this->save_state)($checkpoint);
-                },
-                $this->handle_metadata,
-                $this->handle_error,
-                $this->handle_progress,
-                $this->show_progress,
+                $this->shutdown,
+                $this->checkpoints,
+                $this->observer,
             );
             $context->on_chunk = [$response_handler, 'handle'];
 
             $cursor_before = $cursor;
             $request_start = microtime(true);
             try {
-                ($this->fetch_streaming)($url, $cursor, $context, null, "file_index");
+                $this->stream->fetch_streaming($url, $cursor, $context, null, "file_index");
             } catch (CurlTimeoutException $e) {
                 $cursor = $response_handler->cursor();
                 $entries_counted = $response_handler->entries_counted();
-                ($this->assert_can_retry_timeout)("file_index", $cursor_before, $cursor);
+                $this->timeout_policy->assert_can_retry(
+                    $checkpoint,
+                    "file_index",
+                    $cursor_before,
+                    $cursor,
+                );
 
                 fclose($handle);
                 $handle = null;
 
                 $checkpoint->index_cursor = $cursor;
                 $checkpoint->status = "partial";
-                ($this->save_state)($checkpoint);
+                $this->checkpoints->save($checkpoint);
                 return false;
             }
 
@@ -189,7 +153,7 @@ final class RemoteIndexDownloader
             $entries_counted = $response_handler->entries_counted();
             $checkpoint->consecutive_timeouts = 0;
             $wall_time = microtime(true) - $request_start;
-            ($this->finalize_request)(
+            $this->stream->finalize_request(
                 "file_index",
                 $wall_time,
                 $context->response_stats ?? [],
@@ -199,7 +163,7 @@ final class RemoteIndexDownloader
             $handle = null;
 
             $checkpoint->index_cursor = $complete ? null : $cursor;
-            ($this->save_state)($checkpoint);
+            $this->checkpoints->save($checkpoint);
 
             return $complete;
         } finally {

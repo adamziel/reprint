@@ -2,46 +2,37 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\RemoteFileIndexGateway;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
+use Reprint\Importer\FileSync\Port\SymlinkTargetObserver;
+use Reprint\Importer\Observability\AuditLogger;
 use RuntimeException;
 
 final class SymlinkTargetIndexer
 {
     private string $remote_index_file;
-
-    /** @var callable */
-    private $download_remote_index;
-
-    /** @var callable */
-    private $save_state;
-
-    /** @var callable */
-    private $should_stop;
-
-    /** @var callable */
-    private $audit;
-
-    /** @var callable */
-    private $show_lifecycle_line;
-
-    /** @var callable */
-    private $emit_progress;
+    private RemoteFileIndexGateway $remote_index;
+    private FilesPullCheckpointStore $checkpoints;
+    private ShutdownToken $shutdown;
+    private AuditLogger $audit;
+    private SymlinkTargetObserver $observer;
+    private ?FilesPullCheckpoint $active_checkpoint = null;
 
     public function __construct(
         string $remote_index_file,
-        callable $download_remote_index,
-        callable $save_state,
-        callable $should_stop,
-        callable $audit,
-        callable $show_lifecycle_line,
-        callable $emit_progress
+        RemoteFileIndexGateway $remote_index,
+        FilesPullCheckpointStore $checkpoints,
+        ShutdownToken $shutdown,
+        AuditLogger $audit,
+        SymlinkTargetObserver $observer
     ) {
         $this->remote_index_file = $remote_index_file;
-        $this->download_remote_index = $download_remote_index;
-        $this->save_state = $save_state;
-        $this->should_stop = $should_stop;
+        $this->remote_index = $remote_index;
+        $this->checkpoints = $checkpoints;
+        $this->shutdown = $shutdown;
         $this->audit = $audit;
-        $this->show_lifecycle_line = $show_lifecycle_line;
-        $this->emit_progress = $emit_progress;
+        $this->observer = $observer;
     }
 
     /**
@@ -51,6 +42,7 @@ final class SymlinkTargetIndexer
      */
     public function discover(FilesPullCheckpoint $checkpoint, array $roots): void
     {
+        $this->active_checkpoint = $checkpoint;
         $visited = [];
         foreach ($roots as $root) {
             $visited[$root] = true;
@@ -78,12 +70,7 @@ final class SymlinkTargetIndexer
                 "FOLLOW SYMLINK | indexing target directory: {$dir}",
                 true,
             );
-            $this->show_lifecycle_line("Following symlink target: {$dir}\n");
-            $this->emit_progress([
-                "type" => "symlink_follow",
-                "directory" => $dir,
-                "message" => "Following symlink target: {$dir}",
-            ]);
+            $this->observer->on_following_directory($dir);
 
             $checkpoint->index_cursor = null;
             $this->save_state($checkpoint);
@@ -163,12 +150,7 @@ final class SymlinkTargetIndexer
                 substr($message, 0, 200),
             true,
         );
-        $this->show_lifecycle_line("  Skipped (server rejected): {$dir}\n");
-        $this->emit_progress([
-            "type" => "symlink_follow_rejected",
-            "directory" => $dir,
-            "message" => "Skipped (server rejected): {$dir}",
-        ]);
+        $this->observer->on_rejected_directory($dir);
 
         return true;
     }
@@ -255,34 +237,25 @@ final class SymlinkTargetIndexer
      */
     private function save_state(FilesPullCheckpoint $checkpoint): void
     {
-        ($this->save_state)($checkpoint);
+        $this->checkpoints->save($checkpoint);
     }
 
     private function should_stop(): bool
     {
-        return (bool) ($this->should_stop)();
+        return $this->shutdown->is_shutdown_requested();
     }
 
     private function download_remote_index(string $dir): bool
     {
-        return (bool) ($this->download_remote_index)($dir);
+        if ($this->active_checkpoint === null) {
+            throw new RuntimeException("Cannot index symlink target without an active checkpoint");
+        }
+
+        return $this->remote_index->download($this->active_checkpoint, $dir);
     }
 
     private function audit(string $message, bool $to_console): void
     {
-        ($this->audit)($message, $to_console);
-    }
-
-    private function show_lifecycle_line(string $message): void
-    {
-        ($this->show_lifecycle_line)($message);
-    }
-
-    /**
-     * @param array<string, mixed> $progress
-     */
-    private function emit_progress(array $progress): void
-    {
-        ($this->emit_progress)($progress);
+        $this->audit->record($message, $to_console);
     }
 }

@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Index\IndexStore;
+use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Session\ImportAbortHandler;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportRunState;
@@ -74,9 +75,7 @@ final class ImportAbortHandlerTest extends TestCase
                     $this->audit[] = [$message, true];
                 },
             ),
-            function (string $message, bool $to_console = true): void {
-                $this->audit[] = [$message, $to_console];
-            },
+            new ImportAbortHandlerTestAuditLogger($this->audit),
         );
     }
 
@@ -97,5 +96,25 @@ final class ImportAbortHandlerTest extends TestCase
             }
         }
         return rmdir($path);
+    }
+}
+
+final class ImportAbortHandlerTestAuditLogger implements AuditLogger
+{
+    private $audit;
+
+    public function __construct(array &$audit)
+    {
+        $this->audit =& $audit;
+    }
+
+    public function record(string $message, bool $to_console = true): void
+    {
+        $this->audit[] = [$message, $to_console];
+    }
+
+    public function path(): string
+    {
+        return '';
     }
 }

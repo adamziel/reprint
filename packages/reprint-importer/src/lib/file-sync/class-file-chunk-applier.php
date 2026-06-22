@@ -2,6 +2,7 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\LocalFileApplyContext;
 use Reprint\Importer\Protocol\PreserveLocalSkipException;
 use Reprint\Importer\Protocol\StreamingContext;
 use RuntimeException;
@@ -9,56 +10,14 @@ use RuntimeException;
 final class FileChunkApplier
 {
     private int $files_imported;
-
-    /** @var callable */
-    private $local_path_for_remote_path;
-
-    /** @var callable */
-    private $remove_path;
-
-    /** @var callable */
-    private $ensure_directory;
-
-    /** @var callable */
-    private $audit;
-
-    /** @var callable */
-    private $file_started;
-
-    /** @var callable */
-    private $emit_skip;
-
-    /** @var callable */
-    private $upsert_index_entry;
-
-    /** @var callable */
-    private $clear_volatile_file;
-
-    /** @var callable */
-    private $set_current_file;
+    private LocalFileApplyContext $local;
 
     public function __construct(
         int $files_imported,
-        callable $local_path_for_remote_path,
-        callable $remove_path,
-        callable $ensure_directory,
-        callable $audit,
-        callable $file_started,
-        callable $emit_skip,
-        callable $upsert_index_entry,
-        callable $clear_volatile_file,
-        callable $set_current_file
+        LocalFileApplyContext $local
     ) {
         $this->files_imported = $files_imported;
-        $this->local_path_for_remote_path = $local_path_for_remote_path;
-        $this->remove_path = $remove_path;
-        $this->ensure_directory = $ensure_directory;
-        $this->audit = $audit;
-        $this->file_started = $file_started;
-        $this->emit_skip = $emit_skip;
-        $this->upsert_index_entry = $upsert_index_entry;
-        $this->clear_volatile_file = $clear_volatile_file;
-        $this->set_current_file = $set_current_file;
+        $this->local = $local;
     }
 
     public function files_imported(): int
@@ -219,32 +178,32 @@ final class FileChunkApplier
 
     private function local_path_for_remote_path(string $path): string
     {
-        return (string) ($this->local_path_for_remote_path)($path);
+        return $this->local->local_path_for_remote_path($path);
     }
 
     private function remove_path(string $local_path): bool
     {
-        return (bool) ($this->remove_path)($local_path);
+        return $this->local->remove_path_without_following_symlinks($local_path);
     }
 
     private function ensure_directory(string $dir): void
     {
-        ($this->ensure_directory)($dir);
+        $this->local->ensure_directory_path($dir);
     }
 
     private function audit(string $message, bool $to_console): void
     {
-        ($this->audit)($message, $to_console);
+        $this->local->audit($message, $to_console);
     }
 
     private function file_started(string $path, int $file_size): void
     {
-        ($this->file_started)($path, $file_size);
+        $this->local->show_file_fetch_progress($path, $file_size);
     }
 
     private function emit_skip(string $path): void
     {
-        ($this->emit_skip)($path);
+        $this->local->emit_skip_progress($path);
     }
 
     private function upsert_index_entry(
@@ -253,16 +212,16 @@ final class FileChunkApplier
         int $size,
         string $type
     ): void {
-        ($this->upsert_index_entry)($path, $ctime, $size, $type);
+        $this->local->upsert_index_entry($path, $ctime, $size, $type);
     }
 
     private function clear_volatile_file(string $path): void
     {
-        ($this->clear_volatile_file)($path);
+        $this->local->clear_volatile_file($path);
     }
 
     private function set_current_file(?string $path, ?int $bytes): void
     {
-        ($this->set_current_file)($path, $bytes);
+        $this->local->set_current_file($path, $bytes);
     }
 }

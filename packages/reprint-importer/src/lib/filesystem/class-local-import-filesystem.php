@@ -2,6 +2,7 @@
 
 namespace Reprint\Importer\Filesystem;
 
+use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Protocol\PreserveLocalSkipException;
 use RuntimeException;
 use function Reprint\Exporter\assert_valid_path;
@@ -13,13 +14,12 @@ final class LocalImportFilesystem
     private string $fs_root;
     private string $fs_root_nonempty_behavior;
 
-    /** @var callable */
-    private $audit;
+    private AuditLogger $audit;
 
     public function __construct(
         string $fs_root,
         string $fs_root_nonempty_behavior,
-        callable $audit
+        AuditLogger $audit
     ) {
         $this->fs_root = $fs_root;
         $this->fs_root_nonempty_behavior = $fs_root_nonempty_behavior;
@@ -252,6 +252,6 @@ final class LocalImportFilesystem
 
     private function audit(string $message, bool $to_console): void
     {
-        ($this->audit)($message, $to_console);
+        $this->audit->record($message, $to_console);
     }
 }

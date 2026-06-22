@@ -2,37 +2,35 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\FetchBatchDownloader;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\Observability\AuditLogger;
+
 final class FetchListExecutor
 {
     private ?int $download_list_total;
     private ?int $download_list_done;
     private int $files_imported;
     private int $max_request_bytes;
-
-    /** @var callable */
-    private $download_batch;
-
-    /** @var callable */
-    private $save_fetch_state;
-
-    /** @var callable */
-    private $audit;
+    private FetchBatchDownloader $batch_downloader;
+    private FilesPullCheckpointStore $checkpoints;
+    private AuditLogger $audit;
 
     public function __construct(
         ?int $download_list_total,
         ?int $download_list_done,
         int $files_imported,
         int $max_request_bytes,
-        callable $download_batch,
-        callable $save_fetch_state,
-        callable $audit
+        FetchBatchDownloader $batch_downloader,
+        FilesPullCheckpointStore $checkpoints,
+        AuditLogger $audit
     ) {
         $this->download_list_total = $download_list_total;
         $this->download_list_done = $download_list_done;
         $this->files_imported = $files_imported;
         $this->max_request_bytes = $max_request_bytes;
-        $this->download_batch = $download_batch;
-        $this->save_fetch_state = $save_fetch_state;
+        $this->batch_downloader = $batch_downloader;
+        $this->checkpoints = $checkpoints;
         $this->audit = $audit;
     }
 
@@ -54,8 +52,9 @@ final class FetchListExecutor
     public function run(
         string $list_file,
         string $state_key,
-        FetchCheckpoint $fetch_checkpoint
+        FilesPullCheckpoint $checkpoint
     ): bool {
+        $fetch_checkpoint = $checkpoint->fetch_checkpoint($state_key);
         if (!file_exists($list_file)) {
             return true;
         }
@@ -97,7 +96,7 @@ final class FetchListExecutor
             $fetch_checkpoint->batch_file = $batch_file;
             $fetch_checkpoint->batch_entries = $batch_entries;
             $fetch_checkpoint->cursor = null;
-            $this->save_fetch_checkpoint($state_key, $fetch_checkpoint);
+            $this->save_fetch_checkpoint($checkpoint, $state_key, $fetch_checkpoint);
         }
 
         $complete = $this->download_batch($batch_file, $cursor, $state_key);
@@ -120,26 +119,28 @@ final class FetchListExecutor
         $fetch_checkpoint->batch_file = null;
         $fetch_checkpoint->batch_entries = 0;
         $fetch_checkpoint->cursor = null;
-        $this->save_fetch_checkpoint($state_key, $fetch_checkpoint);
+        $this->save_fetch_checkpoint($checkpoint, $state_key, $fetch_checkpoint);
 
         return $next_offset >= filesize($list_file);
     }
 
-    private function download_batch(string $batch_file, $cursor, string $state_key): bool
+    private function download_batch(string $batch_file, ?string $cursor, string $state_key): bool
     {
-        return (bool) ($this->download_batch)($batch_file, $cursor, $state_key);
+        return $this->batch_downloader->download_batch($batch_file, $cursor, $state_key);
     }
 
     private function save_fetch_checkpoint(
+        FilesPullCheckpoint $checkpoint,
         string $state_key,
         FetchCheckpoint $fetch_checkpoint
     ): void
     {
-        ($this->save_fetch_state)($state_key, $fetch_checkpoint);
+        $checkpoint->{$state_key} = $fetch_checkpoint;
+        $this->checkpoints->save($checkpoint);
     }
 
     private function audit(string $message): void
     {
-        ($this->audit)($message);
+        $this->audit->record($message);
     }
 }

@@ -7,6 +7,11 @@ use Reprint\Importer\Filesystem\PathUtils;
 use Reprint\Importer\Index\IndexPathPrefixMatcher;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Output\ImportOutput;
+use Reprint\Importer\FileSync\Port\LocalFileChangePlanner;
+use Reprint\Importer\FileSync\Port\FileSyncStreamObserver;
+use Reprint\Importer\FileSync\Port\LocalFileApplyContext;
+use Reprint\Importer\Observability\AuditLogger;
+use Reprint\Importer\Observability\MachineEventEmitter;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Session\VolatileFileTracker;
 use Reprint\Importer\Support\PathDisplayFormatter;
@@ -14,7 +19,7 @@ use RuntimeException;
 use function Reprint\Exporter\normalize_path;
 use function Reprint\Exporter\path_is_within_root;
 
-final class FileSyncLocalApplier
+final class FileSyncLocalApplier implements FileSyncStreamObserver, LocalFileChangePlanner, LocalFileApplyContext
 {
     private LocalImportFilesystem $filesystem;
     private IndexStore $index_store;
@@ -30,11 +35,8 @@ final class FileSyncLocalApplier
     private ?IndexPathPrefixMatcher $remote_index_prefix_matcher = null;
     private ?FilesPullCheckpoint $checkpoint;
 
-    /** @var callable */
-    private $audit;
-
-    /** @var callable */
-    private $output_progress;
+    private AuditLogger $audit;
+    private MachineEventEmitter $machine_events;
 
     /**
      */
@@ -51,8 +53,8 @@ final class FileSyncLocalApplier
         ?int $download_list_done,
         ?int $download_list_total,
         ?FilesPullCheckpoint $checkpoint,
-        callable $audit,
-        callable $output_progress
+        AuditLogger $audit,
+        MachineEventEmitter $machine_events
     ) {
         $this->filesystem = $filesystem;
         $this->index_store = $index_store;
@@ -67,7 +69,7 @@ final class FileSyncLocalApplier
         $this->download_list_total = $download_list_total;
         $this->checkpoint = $checkpoint;
         $this->audit = $audit;
-        $this->output_progress = $output_progress;
+        $this->machine_events = $machine_events;
     }
 
     public function files_imported(): int
@@ -155,36 +157,7 @@ final class FileSyncLocalApplier
     ): void {
         $applier = new FileChunkApplier(
             $this->files_imported,
-            function (string $path): string {
-                return $this->local_path_for_remote_path($path);
-            },
-            function (string $local_path): bool {
-                return $this->remove_path_without_following_symlinks($local_path);
-            },
-            function (string $dir): void {
-                $this->ensure_directory_path($dir);
-            },
-            function (string $message, bool $to_console): void {
-                $this->audit($message, $to_console);
-            },
-            function (string $path, int $file_size): void {
-                $this->show_file_fetch_progress($path, $file_size);
-            },
-            function (string $path): void {
-                $this->emit_skip_progress($path);
-            },
-            function (string $path, int $ctime, int $size, string $type): void {
-                $this->upsert_index_entry($path, $ctime, $size, $type);
-            },
-            function (string $path): void {
-                $this->volatile_file_tracker->clear($path);
-            },
-            function (?string $path, ?int $bytes): void {
-                if ($this->checkpoint !== null) {
-                    $this->checkpoint->current_file = $path;
-                    $this->checkpoint->current_file_bytes = $bytes;
-                }
-            },
+            $this,
         );
 
         try {
@@ -198,27 +171,7 @@ final class FileSyncLocalApplier
     {
         $applier = new DirectoryChunkApplier(
             $this->fs_root_nonempty_behavior === 'preserve-local',
-            function (string $path): string {
-                return $this->local_path_for_remote_path($path);
-            },
-            function (string $path): bool {
-                return $this->path_traverses_symlink($path);
-            },
-            function (string $local_path): bool {
-                return $this->remove_path_without_following_symlinks($local_path);
-            },
-            function (string $dir): void {
-                $this->ensure_directory_path($dir);
-            },
-            function (string $message, bool $to_console): void {
-                $this->audit($message, $to_console);
-            },
-            function (string $path): void {
-                $this->emit_skip_progress($path);
-            },
-            function (string $path, int $ctime, int $size, string $type): void {
-                $this->upsert_index_entry($path, $ctime, $size, $type);
-            },
+            $this,
         );
 
         $applier->handle($chunk);
@@ -228,40 +181,7 @@ final class FileSyncLocalApplier
     {
         $applier = new SymlinkChunkApplier(
             $this->fs_root_nonempty_behavior === 'preserve-local',
-            function (string $path): string {
-                return $this->local_path_for_remote_path($path);
-            },
-            function (string $path, string $local_path, string $target): string {
-                return $this->map_absolute_symlink_target_for_local_mirror(
-                    $path,
-                    $local_path,
-                    $target,
-                );
-            },
-            function (): string {
-                return $this->filesystem_root_path();
-            },
-            function (string $path): bool {
-                return $this->path_traverses_symlink($path);
-            },
-            function (string $local_path): bool {
-                return $this->remove_path_without_following_symlinks($local_path);
-            },
-            function (string $dir): void {
-                $this->ensure_directory_path($dir);
-            },
-            function (string $message, bool $to_console): void {
-                $this->audit($message, $to_console);
-            },
-            function (string $path): void {
-                $this->emit_skip_progress($path);
-            },
-            function (string $path, int $ctime, int $size, string $type): void {
-                $this->upsert_index_entry($path, $ctime, $size, $type);
-            },
-            function (array $progress): void {
-                $this->output_progress($progress);
-            },
+            $this,
         );
 
         $applier->handle($chunk);
@@ -343,7 +263,66 @@ final class FileSyncLocalApplier
         $this->output_progress(array_merge(["phase" => $phase], $data));
     }
 
-    private function show_file_fetch_progress(string $path, int $file_size): void
+    public function on_metadata_chunk(array $chunk, StreamingContext $context): void
+    {
+        $this->handle_metadata_chunk($chunk, $context);
+    }
+
+    public function on_file_chunk(array $chunk, StreamingContext $context): void
+    {
+        $this->handle_file_chunk($chunk, $context);
+    }
+
+    public function on_directory_chunk(array $chunk): void
+    {
+        $this->handle_directory_chunk($chunk);
+    }
+
+    public function on_symlink_chunk(array $chunk): void
+    {
+        $this->handle_symlink_chunk($chunk);
+    }
+
+    public function on_missing_path(string $path): void
+    {
+        $this->audit("Missing on server: {$path}", true);
+    }
+
+    public function on_error_chunk(
+        array $chunk,
+        string $phase,
+        StreamingContext $context
+    ): void {
+        $this->handle_error_chunk($chunk, $phase, $context);
+    }
+
+    public function on_progress_chunk(array $chunk, string $phase): void
+    {
+        $this->handle_progress($chunk, $phase);
+    }
+
+    /**
+     * @param array<string, mixed> $progress
+     */
+    public function on_completion_progress(array $progress): void
+    {
+        $this->output_progress($progress, true);
+    }
+
+    public function on_index_progress(int $entries_counted): void
+    {
+        if ($entries_counted > 0) {
+            $this->output->show_progress_line(
+                'Scanning remote files - ' .
+                number_format($entries_counted) . ' scanned',
+            );
+            return;
+        }
+
+        $this->output->show_progress_line('Scanning remote files');
+    }
+
+    public function show_file_fetch_progress(string $path, int $file_size): void
     {
         $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
         $files_total = $this->download_list_total;
@@ -367,7 +346,7 @@ final class FileSyncLocalApplier
         $this->output_progress($progress_record);
     }
 
-    private function map_absolute_symlink_target_for_local_mirror(
+    public function map_absolute_symlink_target_for_local_mirror(
         string $path,
         string $local_path,
         string $target
@@ -415,32 +394,32 @@ final class FileSyncLocalApplier
         return $this->remote_index_prefix_matcher->contains($path);
     }
 
-    private function filesystem_root_path(): string
+    public function filesystem_root_path(): string
     {
         return $this->filesystem->filesystem_root_path();
     }
 
-    private function local_path_for_remote_path(string $path): string
+    public function local_path_for_remote_path(string $path): string
     {
         return $this->filesystem->local_path_for_remote_path($path);
     }
 
-    private function remove_path_without_following_symlinks(string $local_path): bool
+    public function remove_path_without_following_symlinks(string $local_path): bool
     {
         return $this->filesystem->remove_path_without_following_symlinks($local_path);
     }
 
-    private function path_traverses_symlink(string $path): bool
+    public function path_traverses_symlink(string $path): bool
     {
         return $this->filesystem->path_traverses_symlink($path);
     }
 
-    private function ensure_directory_path(string $dir): void
+    public function ensure_directory_path(string $dir): void
     {
         $this->filesystem->ensure_directory_path($dir);
     }
 
-    private function upsert_index_entry(
+    public function upsert_index_entry(
         string $path,
         int $ctime,
         int $size,
@@ -454,16 +433,31 @@ final class FileSyncLocalApplier
         $this->index_store->delete($path);
     }
 
-    private function audit(string $message, bool $to_console = true): void
+    public function clear_volatile_file(string $path): void
     {
-        ($this->audit)($message, $to_console);
+        $this->volatile_file_tracker->clear($path);
+    }
+
+    public function set_current_file(?string $path, ?int $bytes): void
+    {
+        if ($this->checkpoint === null) {
+            return;
+        }
+
+        $this->checkpoint->current_file = $path;
+        $this->checkpoint->current_file_bytes = $bytes;
+    }
+
+    public function audit(string $message, bool $to_console = true): void
+    {
+        $this->audit->record($message, $to_console);
     }
 
     /**
      * @param array<string, mixed> $progress
      */
-    private function output_progress(array $progress, bool $force = false): void
+    public function output_progress(array $progress, bool $force = false): void
     {
-        ($this->output_progress)($progress, $force);
+        $this->machine_events->emit($progress, $force);
     }
 }

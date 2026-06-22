@@ -2,6 +2,9 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\FileSyncStreamObserver;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
 use Reprint\Importer\Protocol\StreamingContext;
 use RuntimeException;
 use function Reprint\Exporter\assert_valid_path;
@@ -17,49 +20,31 @@ final class IndexResponseHandler
     private int $chunks_since_save = 0;
     private int $entries_counted;
     private bool $complete = false;
-
-    /** @var callable */
-    private $should_stop;
-
-    /** @var callable */
-    private $save_checkpoint;
-
-    /** @var callable */
-    private $handle_metadata;
-
-    /** @var callable */
-    private $handle_error;
-
-    /** @var callable */
-    private $handle_progress;
-
-    /** @var callable */
-    private $show_index_progress;
+    private FilesPullCheckpoint $checkpoint;
+    private FilesPullCheckpointStore $checkpoints;
+    private ShutdownToken $shutdown;
+    private FileSyncStreamObserver $observer;
 
     public function __construct(
         $handle,
+        FilesPullCheckpoint $checkpoint,
         ?string $cursor,
         StreamingContext $context,
         int $entries_counted,
         int $save_every,
-        callable $should_stop,
-        callable $save_checkpoint,
-        callable $handle_metadata,
-        callable $handle_error,
-        callable $handle_progress,
-        callable $show_index_progress
+        ShutdownToken $shutdown,
+        FilesPullCheckpointStore $checkpoints,
+        FileSyncStreamObserver $observer
     ) {
         $this->handle = $handle;
+        $this->checkpoint = $checkpoint;
         $this->cursor = $cursor;
         $this->context = $context;
         $this->entries_counted = $entries_counted;
         $this->save_every = $save_every;
-        $this->should_stop = $should_stop;
-        $this->save_checkpoint = $save_checkpoint;
-        $this->handle_metadata = $handle_metadata;
-        $this->handle_error = $handle_error;
-        $this->handle_progress = $handle_progress;
-        $this->show_index_progress = $show_index_progress;
+        $this->shutdown = $shutdown;
+        $this->checkpoints = $checkpoints;
+        $this->observer = $observer;
     }
 
     public function cursor(): ?string
@@ -206,17 +191,18 @@ final class IndexResponseHandler
 
     private function should_stop(): bool
     {
-        return (bool) ($this->should_stop)();
+        return $this->shutdown->is_shutdown_requested();
     }
 
     private function save_checkpoint(?string $cursor): void
     {
-        ($this->save_checkpoint)($cursor);
+        $this->checkpoint->index_cursor = $cursor;
+        $this->checkpoints->save($this->checkpoint);
     }
 
     private function handle_metadata(array $chunk, StreamingContext $context): void
     {
-        ($this->handle_metadata)($chunk, $context);
+        $this->observer->on_metadata_chunk($chunk, $context);
     }
 
     private function handle_error(
@@ -224,16 +210,16 @@ final class IndexResponseHandler
         string $phase,
         StreamingContext $context
     ): void {
-        ($this->handle_error)($chunk, $phase, $context);
+        $this->observer->on_error_chunk($chunk, $phase, $context);
     }
 
     private function handle_progress(array $chunk, string $phase): void
     {
-        ($this->handle_progress)($chunk, $phase);
+        $this->observer->on_progress_chunk($chunk, $phase);
     }
 
     private function show_index_progress(int $entries_counted): void
     {
-        ($this->show_index_progress)($entries_counted);
+        $this->observer->on_index_progress($entries_counted);
     }
 }

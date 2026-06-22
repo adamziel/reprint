@@ -3,11 +3,20 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\ImportClient;
+use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Sql\DbPullConfiguration;
 use Reprint\Importer\Sql\DbPullCheckpoint;
+use Reprint\Importer\Sql\Infrastructure\JsonlDbIndexTableSinkFactory;
+use Reprint\Importer\Sql\Infrastructure\RemoteDbIndexDownloader;
+use Reprint\Importer\Sql\Port\DbPullCheckpointStore;
+use Reprint\Importer\Sql\Port\DbPullObserver;
+use Reprint\Importer\Sql\Port\DbPullTimeoutPolicy;
+use Reprint\Importer\Sql\Port\SqlDumpDownloader;
+use Reprint\Importer\Sql\Port\SqlShutdownToken;
+use Reprint\Importer\Sql\Port\SqlStreamClient;
 use Reprint\Importer\Sql\DbPullWorkflow;
 use RuntimeException;
 
@@ -16,14 +25,14 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 final class DbPullWorkflowTest extends TestCase
 {
     private string $temp_dir;
-    private DbPullWorkflowTestClient $client;
+    private DbPullWorkflowTestHarness $client;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->temp_dir = sys_get_temp_dir() . '/db-pull-workflow-' . uniqid('', true);
         mkdir($this->temp_dir, 0755, true);
-        $this->client = new DbPullWorkflowTestClient($this->temp_dir);
+        $this->client = new DbPullWorkflowTestHarness();
     }
 
     protected function tearDown(): void
@@ -67,7 +76,7 @@ final class DbPullWorkflowTest extends TestCase
         $checkpoint = $this->make_workflow()->download_db_index($checkpoint, $tables_file);
 
         $expected = '';
-        foreach (DbPullWorkflowTestClient::TABLE_ROWS as $row) {
+        foreach (DbPullWorkflowTestHarness::TABLE_ROWS as $row) {
             $expected .= json_encode($row) . "\n";
         }
         $this->assertSame($expected, file_get_contents($tables_file));
@@ -95,12 +104,25 @@ final class DbPullWorkflowTest extends TestCase
     private function make_workflow(): DbPullWorkflow
     {
         return new DbPullWorkflow(
-            $this->client,
-            $this->temp_dir,
-            $this->temp_dir . '/.import-audit.log',
-            'file',
-            null,
-            new BufferedImportOutput(),
+            new DbPullConfiguration(
+                $this->temp_dir,
+                $this->temp_dir . '/.import-audit.log',
+                'file',
+                null,
+            ),
+            new WorkflowTestCheckpointStore($this->client),
+            new RemoteDbIndexDownloader(
+                new WorkflowTestStreamClient($this->client),
+                new WorkflowTestShutdownToken(),
+                new WorkflowTestCheckpointStore($this->client),
+                new WorkflowTestTimeoutPolicy($this->client),
+                new JsonlDbIndexTableSinkFactory(new WorkflowTestAuditLogger($this->client)),
+                new WorkflowTestAuditLogger($this->client),
+                $this->temp_dir . '/db-tables.jsonl',
+            ),
+            new WorkflowTestSqlDumpDownloader($this->client),
+            new WorkflowTestDbPullObserver(),
+            new WorkflowTestAuditLogger($this->client),
         );
     }
 
@@ -129,7 +151,7 @@ final class DbPullWorkflowTest extends TestCase
     }
 }
 
-final class DbPullWorkflowTestClient extends ImportClient
+final class DbPullWorkflowTestHarness
 {
     public const TABLE_ROWS = [
         ['name' => 'wp_posts', 'rows' => 5, 'bytes' => 100],
@@ -145,42 +167,15 @@ final class DbPullWorkflowTestClient extends ImportClient
     public array $finalized = [];
     public bool $db_index_times_out = false;
 
-    public function __construct(string $state_dir)
-    {
-        parent::__construct(
-            'https://example.test/export.php',
-            $state_dir,
-            $state_dir . '/fs',
-            new BufferedImportOutput(),
-        );
-    }
-
-    public function save_db_pull_checkpoint(DbPullCheckpoint $checkpoint): void
-    {
-        $this->saved_checkpoints[] = clone $checkpoint;
-    }
-
-    public function audit_log(string $message, bool $to_console = true): void
-    {
-        $this->audit[] = [$message, $to_console];
-    }
-
-    public function output_progress(array $data, bool $force = false): void
-    {
-        $this->progress[] = [$data, $force];
-    }
-
-    public function stream_export_endpoint(
-        string $endpoint,
+    public function fetch_db_index(
         ?string $cursor,
         StreamingContext $context,
-        ?array $post_data = null,
-        array $params = []
+        ?array $post_data,
+        string $phase
     ): void {
         $this->downloads[] = 'db-index';
-        TestCase::assertSame('db_index', $endpoint);
         TestCase::assertNull($post_data);
-        TestCase::assertSame(['tables_per_batch' => 1000], $params);
+        TestCase::assertSame('db_index', $phase);
 
         if ($this->db_index_times_out) {
             throw new CurlTimeoutException('cURL error: timeout');
@@ -202,32 +197,152 @@ final class DbPullWorkflowTestClient extends ImportClient
             ],
         ]);
     }
+}
 
-    public function assert_can_retry_db_pull_timeout(
+final class WorkflowTestStreamClient implements SqlStreamClient
+{
+    private DbPullWorkflowTestHarness $harness;
+
+    public function __construct(DbPullWorkflowTestHarness $harness)
+    {
+        $this->harness = $harness;
+    }
+
+    public function build_url(string $endpoint, ?string $cursor, array $params): string
+    {
+        TestCase::assertSame('db_index', $endpoint);
+        TestCase::assertSame(['tables_per_batch' => 1000], $params);
+        return 'https://example.test/export.php?endpoint=db_index';
+    }
+
+    public function tuned_params(string $endpoint): array
+    {
+        return [];
+    }
+
+    public function fetch_streaming(
+        string $url,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data,
+        string $phase
+    ): void {
+        TestCase::assertSame('https://example.test/export.php?endpoint=db_index', $url);
+        $this->harness->fetch_db_index($cursor, $context, $post_data, $phase);
+    }
+
+    public function finalize_request(
+        string $endpoint,
+        float $wall_time,
+        array $response_stats
+    ): void {
+        $this->harness->finalized[] = compact('endpoint', 'wall_time', 'response_stats');
+    }
+}
+
+final class WorkflowTestShutdownToken implements SqlShutdownToken
+{
+    public function is_shutdown_requested(): bool
+    {
+        return false;
+    }
+}
+
+final class WorkflowTestCheckpointStore implements DbPullCheckpointStore
+{
+    private DbPullWorkflowTestHarness $harness;
+
+    public function __construct(DbPullWorkflowTestHarness $harness)
+    {
+        $this->harness = $harness;
+    }
+
+    public function get(): DbPullCheckpoint
+    {
+        return DbPullCheckpoint::fresh();
+    }
+
+    public function save(DbPullCheckpoint $checkpoint): void
+    {
+        $this->harness->saved_checkpoints[] = clone $checkpoint;
+    }
+}
+
+final class WorkflowTestTimeoutPolicy implements DbPullTimeoutPolicy
+{
+    private DbPullWorkflowTestHarness $harness;
+
+    public function __construct(DbPullWorkflowTestHarness $harness)
+    {
+        $this->harness = $harness;
+    }
+
+    public function assert_can_retry(
         DbPullCheckpoint $checkpoint,
         string $phase,
         ?string $cursor_before,
         ?string $cursor_after
     ): void {
-        $this->retry_checks[] = [
+        $this->harness->retry_checks[] = [
             'phase' => $phase,
             'before' => $cursor_before,
             'after' => $cursor_after,
         ];
         $checkpoint->consecutive_timeouts++;
     }
+}
 
-    public function finalize_stream_request(
-        string $endpoint,
-        float $wall_time,
-        array $response_stats
-    ): void {
-        $this->finalized[] = compact('endpoint', 'wall_time', 'response_stats');
+final class WorkflowTestSqlDumpDownloader implements SqlDumpDownloader
+{
+    private DbPullWorkflowTestHarness $harness;
+
+    public function __construct(DbPullWorkflowTestHarness $harness)
+    {
+        $this->harness = $harness;
     }
 
-    public function download_sql_stage(DbPullCheckpoint $checkpoint): DbPullCheckpoint
+    public function download(DbPullCheckpoint $checkpoint): DbPullCheckpoint
     {
-        $this->downloads[] = 'sql';
+        $this->harness->downloads[] = 'sql';
         return $checkpoint;
+    }
+}
+
+final class WorkflowTestDbPullObserver implements DbPullObserver
+{
+    public function on_starting(): void
+    {
+    }
+
+    public function on_resuming(DbPullCheckpoint $checkpoint): void
+    {
+    }
+
+    public function on_stage_starting(string $phase, string $message): void
+    {
+    }
+
+    public function on_complete(DbPullConfiguration $config): void
+    {
+    }
+}
+
+final class WorkflowTestAuditLogger implements AuditLogger
+{
+    private DbPullWorkflowTestHarness $harness;
+
+    public function __construct(DbPullWorkflowTestHarness $harness)
+    {
+        $this->harness = $harness;
+    }
+
+    public function record(string $message, bool $to_console = true): void
+    {
+        $this->harness->audit[] = [$message, $to_console];
+    }
+
+    public function path(): string
+    {
+        return '';
     }
 }

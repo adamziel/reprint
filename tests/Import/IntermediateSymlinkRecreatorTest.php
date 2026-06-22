@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\IntermediateSymlinkRecreator;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
+use Reprint\Importer\Observability\AuditLogger;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -66,13 +67,9 @@ final class IntermediateSymlinkRecreatorTest extends TestCase
             new LocalImportFilesystem(
                 $this->root_path(),
                 'error',
-                function (string $message, bool $to_console): void {
-                    $this->audit[] = [$message, $to_console];
-                },
+                new IntermediateSymlinkRecreatorTestAuditLogger($this->audit),
             ),
-            function (string $message, bool $to_console): void {
-                $this->audit[] = [$message, $to_console];
-            },
+            new IntermediateSymlinkRecreatorTestAuditLogger($this->audit),
         );
     }
 
@@ -112,5 +109,25 @@ final class IntermediateSymlinkRecreatorTest extends TestCase
             }
         }
         return rmdir($path);
+    }
+}
+
+final class IntermediateSymlinkRecreatorTestAuditLogger implements AuditLogger
+{
+    private $audit;
+
+    public function __construct(array &$audit)
+    {
+        $this->audit =& $audit;
+    }
+
+    public function record(string $message, bool $to_console = true): void
+    {
+        $this->audit[] = [$message, $to_console];
+    }
+
+    public function path(): string
+    {
+        return '';
     }
 }

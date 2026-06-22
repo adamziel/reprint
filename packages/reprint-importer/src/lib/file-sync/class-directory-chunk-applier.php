@@ -2,52 +2,21 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\LocalFileApplyContext;
 use Reprint\Importer\Protocol\PreserveLocalSkipException;
 use RuntimeException;
 
 final class DirectoryChunkApplier
 {
     private bool $preserve_local;
-
-    /** @var callable */
-    private $local_path_for_remote_path;
-
-    /** @var callable */
-    private $path_traverses_symlink;
-
-    /** @var callable */
-    private $remove_path;
-
-    /** @var callable */
-    private $ensure_directory;
-
-    /** @var callable */
-    private $audit;
-
-    /** @var callable */
-    private $emit_skip;
-
-    /** @var callable */
-    private $upsert_index_entry;
+    private LocalFileApplyContext $local;
 
     public function __construct(
         bool $preserve_local,
-        callable $local_path_for_remote_path,
-        callable $path_traverses_symlink,
-        callable $remove_path,
-        callable $ensure_directory,
-        callable $audit,
-        callable $emit_skip,
-        callable $upsert_index_entry
+        LocalFileApplyContext $local
     ) {
         $this->preserve_local = $preserve_local;
-        $this->local_path_for_remote_path = $local_path_for_remote_path;
-        $this->path_traverses_symlink = $path_traverses_symlink;
-        $this->remove_path = $remove_path;
-        $this->ensure_directory = $ensure_directory;
-        $this->audit = $audit;
-        $this->emit_skip = $emit_skip;
-        $this->upsert_index_entry = $upsert_index_entry;
+        $this->local = $local;
     }
 
     public function handle(array $chunk): void
@@ -118,32 +87,32 @@ final class DirectoryChunkApplier
 
     private function local_path_for_remote_path(string $path): string
     {
-        return (string) ($this->local_path_for_remote_path)($path);
+        return $this->local->local_path_for_remote_path($path);
     }
 
     private function path_traverses_symlink(string $path): bool
     {
-        return (bool) ($this->path_traverses_symlink)($path);
+        return $this->local->path_traverses_symlink($path);
     }
 
     private function remove_path(string $local_path): bool
     {
-        return (bool) ($this->remove_path)($local_path);
+        return $this->local->remove_path_without_following_symlinks($local_path);
     }
 
     private function ensure_directory(string $dir): void
     {
-        ($this->ensure_directory)($dir);
+        $this->local->ensure_directory_path($dir);
     }
 
     private function audit(string $message, bool $to_console): void
     {
-        ($this->audit)($message, $to_console);
+        $this->local->audit($message, $to_console);
     }
 
     private function emit_skip(string $path): void
     {
-        ($this->emit_skip)($path);
+        $this->local->emit_skip_progress($path);
     }
 
     private function upsert_index_entry(
@@ -152,6 +121,6 @@ final class DirectoryChunkApplier
         int $size,
         string $type
     ): void {
-        ($this->upsert_index_entry)($path, $ctime, $size, $type);
+        $this->local->upsert_index_entry($path, $ctime, $size, $type);
     }
 }

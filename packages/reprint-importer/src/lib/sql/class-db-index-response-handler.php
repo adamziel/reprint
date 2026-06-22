@@ -3,34 +3,24 @@
 namespace Reprint\Importer\Sql;
 
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Sql\Port\DbIndexTableSink;
 use RuntimeException;
 
 final class DbIndexResponseHandler
 {
-    /** @var resource */
-    private $handle;
-
+    private DbIndexTableSink $sink;
     private ?string $cursor;
     private StreamingContext $context;
-    private int $tables_written;
-    private int $rows_estimated;
-    private int $bytes_written;
     private bool $complete = false;
 
     public function __construct(
-        $handle,
+        DbIndexTableSink $sink,
         ?string $cursor,
-        StreamingContext $context,
-        int $tables_written,
-        int $rows_estimated,
-        int $bytes_written
+        StreamingContext $context
     ) {
-        $this->handle = $handle;
+        $this->sink = $sink;
         $this->cursor = $cursor;
         $this->context = $context;
-        $this->tables_written = $tables_written;
-        $this->rows_estimated = $rows_estimated;
-        $this->bytes_written = $bytes_written;
     }
 
     public function cursor(): ?string
@@ -45,17 +35,17 @@ final class DbIndexResponseHandler
 
     public function tables_written(): int
     {
-        return $this->tables_written;
+        return $this->sink->tables_written();
     }
 
     public function rows_estimated(): int
     {
-        return $this->rows_estimated;
+        return $this->sink->rows_estimated();
     }
 
     public function bytes_written(): int
     {
-        return $this->bytes_written;
+        return $this->sink->bytes_written();
     }
 
     public function handle(array $chunk): void
@@ -88,23 +78,7 @@ final class DbIndexResponseHandler
             return;
         }
 
-        foreach ($data as $row) {
-            $line = json_encode($row) . "\n";
-            $line_length = strlen($line);
-            $bytes = fwrite($this->handle, $line);
-            if ($bytes === false || $bytes !== $line_length) {
-                throw new RuntimeException(
-                    "Table stats write failed: wrote " . ($bytes === false ? "0" : $bytes) .
-                    "/" . $line_length . " bytes (disk full?)"
-                );
-            }
-
-            $this->bytes_written += $bytes;
-            $this->tables_written++;
-            if (isset($row["rows"]) && is_numeric($row["rows"])) {
-                $this->rows_estimated += (int) $row["rows"];
-            }
-        }
+        $this->sink->write_rows($data);
     }
 
     private function handle_completion(array $chunk): void

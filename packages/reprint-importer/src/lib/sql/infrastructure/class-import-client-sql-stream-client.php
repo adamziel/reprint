@@ -1,0 +1,57 @@
+<?php
+
+namespace Reprint\Importer\Sql\Infrastructure;
+
+use Reprint\Importer\ImportClient;
+use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Sql\Port\SqlStreamClient;
+
+final class ImportClientSqlStreamClient implements SqlStreamClient
+{
+    private ImportClient $client;
+
+    public function __construct(ImportClient $client)
+    {
+        $this->client = $client;
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     */
+    public function build_url(string $endpoint, ?string $cursor, array $params): string
+    {
+        return $this->client->build_url($endpoint, $cursor, $params);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function tuned_params(string $endpoint): array
+    {
+        return $this->client->get_tuned_params($endpoint);
+    }
+
+    /**
+     * @param array<string, mixed>|null $post_data
+     */
+    public function fetch_streaming(
+        string $url,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data,
+        string $phase
+    ): void {
+        $this->client->fetch_export_streaming($url, $cursor, $context, $post_data, $phase);
+    }
+
+    /**
+     * @param array<string, mixed> $response_stats
+     */
+    public function finalize_request(
+        string $endpoint,
+        float $wall_time,
+        array $response_stats
+    ): void {
+        $this->client->finalize_stream_request($endpoint, $wall_time, $response_stats);
+    }
+}

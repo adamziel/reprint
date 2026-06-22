@@ -2,48 +2,91 @@
 
 namespace Reprint\Importer\FileSync;
 
-use Reprint\Importer\Output\ImportOutput;
+use Reprint\Importer\FileSync\Port\FetchListGateway;
+use Reprint\Importer\FileSync\Port\FileFetchGateway;
+use Reprint\Importer\FileSync\Port\FileIndexGateway;
+use Reprint\Importer\FileSync\Port\FileSyncSettings;
+use Reprint\Importer\FileSync\Port\FileSyncWorkspace;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\FilesSyncRunStore;
+use Reprint\Importer\FileSync\Port\RemoteFileIndexGateway;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
+use Reprint\Importer\FileSync\Port\SymlinkGateway;
+use Reprint\Importer\FileSync\Port\VolatileFileReporter;
+use Reprint\Importer\Observability\EventPublisher;
 use RuntimeException;
 
 final class FilesSyncWorkflow
 {
-    private FilesSyncRuntime $runtime;
-    private ImportOutput $output;
+    private FilesSyncRunStore $run_store;
+    private FilesPullCheckpointStore $checkpoints;
+    private FileSyncSettings $settings;
+    private FileSyncWorkspace $workspace;
+    private FileIndexGateway $index;
+    private RemoteFileIndexGateway $remote_index;
+    private FetchListGateway $fetch_lists;
+    private FileFetchGateway $file_fetch;
+    private SymlinkGateway $symlinks;
+    private ShutdownToken $shutdown;
+    private VolatileFileReporter $volatile_files;
+    private EventPublisher $events;
 
-    public function __construct(FilesSyncRuntime $runtime, ImportOutput $output)
-    {
-        $this->runtime = $runtime;
-        $this->output = $output;
+    public function __construct(
+        FilesSyncRunStore $run_store,
+        FilesPullCheckpointStore $checkpoints,
+        FileSyncSettings $settings,
+        FileSyncWorkspace $workspace,
+        FileIndexGateway $index,
+        RemoteFileIndexGateway $remote_index,
+        FetchListGateway $fetch_lists,
+        FileFetchGateway $file_fetch,
+        SymlinkGateway $symlinks,
+        ShutdownToken $shutdown,
+        VolatileFileReporter $volatile_files,
+        EventPublisher $events
+    ) {
+        $this->run_store = $run_store;
+        $this->checkpoints = $checkpoints;
+        $this->settings = $settings;
+        $this->workspace = $workspace;
+        $this->index = $index;
+        $this->remote_index = $remote_index;
+        $this->fetch_lists = $fetch_lists;
+        $this->file_fetch = $file_fetch;
+        $this->symlinks = $symlinks;
+        $this->shutdown = $shutdown;
+        $this->volatile_files = $volatile_files;
+        $this->events = $events;
     }
 
     public function run_files_sync(): void
     {
-        $checkpoint = $this->runtime->files_pull_checkpoint();
-        $state_command = $this->runtime->current_command();
+        $checkpoint = $this->checkpoints->get();
+        $state_command = $this->run_store->current_command();
         $current_status =
-            $state_command === "files-pull"
-                ? $checkpoint->status ?? $this->runtime->current_run_status()
+            $state_command === 'files-pull'
+                ? $checkpoint->status ?? $this->run_store->current_status()
                 : null;
         $has_progress =
-            $state_command === "files-pull" &&
+            $state_command === 'files-pull' &&
             $current_status !== null &&
-            $current_status !== "complete";
+            $current_status !== 'complete';
 
-        $this->runtime->recover_index_updates();
+        $this->index->recover_updates();
 
-        if ($current_status === "complete") {
+        if ($current_status === 'complete') {
             $this->handle_completed_files_sync($checkpoint);
             return;
         }
 
-        if ($this->runtime->current_filter() === "skipped-earlier") {
+        if ($this->settings->current_filter() === 'skipped-earlier') {
             throw new RuntimeException(
-                "--filter=skipped-earlier was requested but there is no completed sync with skipped files. " .
-                    "Run files-pull with --filter=essential-files first.",
+                '--filter=skipped-earlier was requested but there is no completed sync with skipped files. ' .
+                    'Run files-pull with --filter=essential-files first.',
             );
         }
 
-        $is_delta = $this->has_local_file_index();
+        $is_delta = $this->index->local_index_has_entries();
 
         if ($has_progress) {
             $this->report_files_sync_resume($checkpoint);
@@ -51,14 +94,14 @@ final class FilesSyncWorkflow
             $this->start_files_sync($checkpoint, $is_delta);
         }
 
-        $checkpoint->status = "in_progress";
-        $this->runtime->save_files_pull_checkpoint($checkpoint);
-        $this->runtime->record_command_status("files-pull", "in_progress");
+        $checkpoint->status = 'in_progress';
+        $this->checkpoints->save($checkpoint);
+        $this->run_store->record_command_status('files-pull', 'in_progress');
 
         $this->run_files_sync_pipeline($checkpoint);
 
-        if ($checkpoint->status === "partial") {
-            $this->runtime->record_command_status("files-pull", "partial");
+        if ($checkpoint->status === 'partial') {
+            $this->run_store->record_command_status('files-pull', 'partial');
             return;
         }
 
@@ -67,460 +110,314 @@ final class FilesSyncWorkflow
 
     public function run_files_index(): void
     {
-        $checkpoint = $this->runtime->files_pull_checkpoint();
-        $state_command = $this->runtime->current_command();
+        $checkpoint = $this->checkpoints->get();
+        $state_command = $this->run_store->current_command();
         $current_status =
-            $state_command === "files-index"
-                ? $this->runtime->current_run_status()
+            $state_command === 'files-index'
+                ? $this->run_store->current_status()
                 : null;
 
-        if ($current_status === "complete") {
+        if ($current_status === 'complete') {
             throw new RuntimeException(
-                "files-index already completed. Use --abort flag to start over.",
+                'files-index already completed. Use --abort flag to start over.',
             );
         }
 
         if ($current_status === null) {
             $checkpoint->reset_for_files_pull();
-            $this->runtime->save_files_pull_checkpoint($checkpoint);
-            $this->runtime->record_command_status("files-index", "in_progress");
-            $this->runtime->audit_log("START files-index", true);
-            $this->output->show_lifecycle_line("Starting files-index\n");
-            $this->runtime->output_progress([
-                "type" => "lifecycle",
-                "event" => "starting",
-                "command" => "files-index",
-                "message" => "Starting files-index",
-            ], true);
+            $this->checkpoints->save($checkpoint);
+            $this->run_store->record_command_status('files-index', 'in_progress');
+            $this->events->publish(FileSyncEvent::named(FileSyncEvent::FILES_INDEX_STARTING));
         } else {
-            $cursor = $checkpoint->index_cursor;
-            $this->runtime->audit_log(
-                sprintf(
-                    "RESUME files-index | cursor=%s",
-                    $cursor ? substr($cursor, 0, 20) . "..." : "none",
-                ),
-                true,
-            );
-            $this->output->show_lifecycle_line("Resuming files-index\n");
-            $this->runtime->output_progress([
-                "type" => "lifecycle",
-                "event" => "resuming",
-                "command" => "files-index",
-                "message" => "Resuming files-index",
-            ], true);
+            $this->events->publish(FileSyncEvent::named(
+                FileSyncEvent::FILES_INDEX_RESUMING,
+                ['cursor' => $checkpoint->index_cursor],
+            ));
         }
 
-        $this->runtime->record_command_status("files-index", "in_progress");
+        $this->run_store->record_command_status('files-index', 'in_progress');
 
         $attempts = 0;
         $last_cursor = $checkpoint->index_cursor;
         while (true) {
-            $complete = $this->runtime->download_remote_index($checkpoint);
+            $complete = $this->remote_index->download($checkpoint);
             if ($complete) {
                 break;
             }
 
-            if ($this->runtime->shutdown_requested()) {
-                $checkpoint->status = "partial";
-                $this->runtime->save_files_pull_checkpoint($checkpoint);
-                $this->runtime->record_command_status("files-index", "partial");
+            if ($this->shutdown->is_shutdown_requested()) {
+                $checkpoint->status = 'partial';
+                $this->checkpoints->save($checkpoint);
+                $this->run_store->record_command_status('files-index', 'partial');
                 return;
             }
 
             $current_cursor = $checkpoint->index_cursor;
             if ($current_cursor === $last_cursor) {
-                throw new RuntimeException(
-                    "files-index made no progress (cursor unchanged)",
-                );
+                throw new RuntimeException('files-index made no progress (cursor unchanged)');
             }
             $last_cursor = $current_cursor;
 
             $attempts++;
             if ($attempts > 100000) {
-                throw new RuntimeException(
-                    "files-index exceeded maximum attempts",
-                );
+                throw new RuntimeException('files-index exceeded maximum attempts');
             }
         }
 
-        if ($this->runtime->follow_symlinks()) {
-            $this->runtime->discover_symlink_targets($checkpoint);
+        if ($this->settings->follow_symlinks()) {
+            $this->symlinks->discover_targets($checkpoint);
         }
 
-        $this->runtime->sort_index_file($this->runtime->remote_index_file());
-        $checkpoint->status = "complete";
+        $this->index->sort_remote_index();
+        $checkpoint->status = 'complete';
         $checkpoint->stage = null;
-        $this->runtime->save_files_pull_checkpoint($checkpoint);
-        $this->runtime->record_command_status("files-index", "complete");
+        $this->checkpoints->save($checkpoint);
+        $this->run_store->record_command_status('files-index', 'complete');
 
-        $count = 0;
-        if (file_exists($this->runtime->remote_index_file())) {
-            $h = fopen($this->runtime->remote_index_file(), "r");
-            if ($h) {
-                while (fgets($h) !== false) {
-                    $count++;
-                }
-                fclose($h);
-            }
-        }
-        $this->runtime->audit_log(
-            sprintf("files-index complete: %d entries indexed", $count),
-            true,
-        );
-
-        $this->output->show_lifecycle_line("files-index complete: {$count} entries indexed\n");
-        $this->output->show_lifecycle_line("Remote index: {$this->runtime->remote_index_file()}\n");
-        $this->output->show_lifecycle_line("Audit log: {$this->runtime->audit_log_file()}\n");
-        $this->runtime->output_progress([
-            "type" => "lifecycle",
-            "event" => "complete",
-            "command" => "files-index",
-            "entries_indexed" => $count,
-            "remote_index" => $this->runtime->remote_index_file(),
-            "audit_log" => $this->runtime->audit_log_file(),
-            "message" => "files-index complete: {$count} entries indexed",
-        ], true);
+        $this->events->publish(FileSyncEvent::named(
+            FileSyncEvent::FILES_INDEX_COMPLETE,
+            [
+                'entries_indexed' => $this->index->count_remote_index(),
+                'remote_index' => $this->workspace->remote_index_file(),
+            ],
+        ));
     }
 
     private function handle_completed_files_sync(FilesPullCheckpoint $checkpoint): void
     {
         $has_skipped = $this->has_skipped_download_list();
 
-        if ($this->runtime->current_filter() === "skipped-earlier") {
+        if ($this->settings->current_filter() === 'skipped-earlier') {
             $this->start_skipped_files_fetch($checkpoint, $has_skipped);
             return;
         }
 
-        $this->report_files_sync_already_complete($has_skipped);
-    }
-
-    private function has_skipped_download_list(): bool
-    {
-        return $this->file_has_entries($this->runtime->skipped_download_list_file());
+        $this->events->publish(FileSyncEvent::named(
+            FileSyncEvent::FILES_PULL_ALREADY_COMPLETE,
+            [
+                'files_indexed' => $this->index->count_local_index(),
+                'has_skipped' => $has_skipped,
+            ],
+        ));
     }
 
     private function start_skipped_files_fetch(
         FilesPullCheckpoint $checkpoint,
         bool $has_skipped
-    ): void
-    {
+    ): void {
         if (!$has_skipped) {
             throw new RuntimeException(
-                "--filter=skipped-earlier was requested but there is no skipped file list. " .
-                    "Run files-pull with --filter=essential-files first.",
+                '--filter=skipped-earlier was requested but there is no skipped file list. ' .
+                    'Run files-pull with --filter=essential-files first.',
             );
         }
 
-        $this->runtime->audit_log(
-            "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
-            true,
-        );
-        $this->output->show_lifecycle_line("Downloading previously skipped files\n");
-        $this->runtime->output_progress([
-            "type" => "lifecycle",
-            "event" => "starting",
-            "command" => "files-pull",
-            "stage" => "fetch-skipped",
-            "message" => "Downloading previously skipped files",
-        ], true);
-        $checkpoint->status = "in_progress";
-        $checkpoint->stage = "fetch-skipped";
-        $this->runtime->save_files_pull_checkpoint($checkpoint);
-        $this->runtime->record_command_status("files-pull", "in_progress");
+        $this->events->publish(FileSyncEvent::named(
+            FileSyncEvent::FILES_PULL_FETCH_SKIPPED_STARTING,
+        ));
+        $checkpoint->status = 'in_progress';
+        $checkpoint->stage = 'fetch-skipped';
+        $this->checkpoints->save($checkpoint);
+        $this->run_store->record_command_status('files-pull', 'in_progress');
 
         $this->run_files_sync_pipeline($checkpoint);
-        if ($checkpoint->status === "partial") {
-            $this->runtime->record_command_status("files-pull", "partial");
+        if ($checkpoint->status === 'partial') {
+            $this->run_store->record_command_status('files-pull', 'partial');
             return;
         }
 
-        $checkpoint->status = "complete";
+        $checkpoint->status = 'complete';
         $checkpoint->stage = null;
-        $this->runtime->save_files_pull_checkpoint($checkpoint);
-        $this->runtime->record_command_status("files-pull", "complete");
-    }
-
-    private function report_files_sync_already_complete(bool $has_skipped): void
-    {
-        $index_size = $this->runtime->index_count();
-        $this->output->clear_progress_line();
-
-        $skipped_note = $has_skipped
-            ? " (some files were skipped — re-run with --filter=skipped-earlier to download them)"
-            : "";
-        $this->runtime->audit_log(
-            sprintf("files-pull already complete: %d files indexed%s", $index_size, $skipped_note),
-            true,
-        );
-
-        $this->output->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
-        if ($has_skipped) {
-            $this->output->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
-        } else {
-            $this->output->show_lifecycle_line("To re-sync, run with --abort first to clear state.\n");
-        }
-        $this->runtime->output_progress([
-            "type" => "lifecycle",
-            "event" => "already_complete",
-            "command" => "files-pull",
-            "files_indexed" => $index_size,
-            "has_skipped" => $has_skipped,
-            "message" => "files-pull already complete: {$index_size} files indexed",
-        ], true);
-    }
-
-    private function has_local_file_index(): bool
-    {
-        return $this->file_has_entries($this->runtime->index_file());
-    }
-
-    private function is_fs_root_empty(): bool
-    {
-        return !is_dir($this->runtime->fs_root()) || count(array_diff(
-            scandir($this->runtime->fs_root()) ?: [],
-            [".", ".."]
-        )) === 0;
+        $this->checkpoints->save($checkpoint);
+        $this->run_store->record_command_status('files-pull', 'complete');
     }
 
     private function report_files_sync_resume(FilesPullCheckpoint $checkpoint): void
     {
-        $index_size = $this->runtime->index_count();
-        $stage = $checkpoint->stage ?? "index";
-
-        $this->runtime->audit_log(
-            sprintf(
-                "RESUME files-pull | stage=%s | indexed_files=%d",
-                $stage,
-                $index_size,
-            ),
-            true,
-        );
-
-        $this->output->show_lifecycle_line("Resuming files-pull\n");
-        $this->output->show_lifecycle_line("  Stage: {$stage}\n");
-        $this->output->show_lifecycle_line("  Already indexed: {$index_size} files\n");
-        $this->runtime->output_progress([
-            "type" => "lifecycle",
-            "event" => "resuming",
-            "command" => "files-pull",
-            "stage" => $stage,
-            "index_size" => $index_size,
-            "message" => "Resuming files-pull (stage: {$stage}, indexed: {$index_size} files)",
-        ], true);
+        $this->events->publish(FileSyncEvent::named(
+            FileSyncEvent::FILES_PULL_RESUMING,
+            [
+                'stage' => $checkpoint->stage ?? 'index',
+                'index_size' => $this->index->count_local_index(),
+            ],
+        ));
     }
 
     private function start_files_sync(FilesPullCheckpoint $checkpoint, bool $is_delta): void
     {
-        $is_empty = $this->is_fs_root_empty();
-        if (!$is_empty && !$is_delta && $this->runtime->fs_root_nonempty_behavior() === 'error') {
+        $is_empty = $this->workspace->is_fs_root_empty();
+        if (
+            !$is_empty &&
+            !$is_delta &&
+            $this->settings->fs_root_nonempty_behavior() === 'error'
+        ) {
             throw new RuntimeException(
-                "Target directory is not empty and no cursor found. " .
-                    "Either clear the target directory, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
+                'Target directory is not empty and no cursor found. ' .
+                    'Either clear the target directory, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.',
             );
         }
 
         $checkpoint->reset_for_files_pull();
-        $this->runtime->save_files_pull_checkpoint($checkpoint);
-        $this->runtime->record_command_status("files-pull", "in_progress");
+        $this->checkpoints->save($checkpoint);
+        $this->run_store->record_command_status('files-pull', 'in_progress');
 
         if ($is_delta) {
-            $this->report_files_sync_delta_start();
-        } else {
-            $this->report_files_sync_initial_start($is_empty);
+            $this->index->reset_transfer_progress();
         }
-    }
 
-    private function report_files_sync_delta_start(): void
-    {
-        $this->runtime->set_file_sync_progress(0, null, null);
-        $index_size = $this->runtime->index_count();
-
-        $this->runtime->audit_log(
-            "START files-pull (delta) | index_files={$index_size}",
-            true,
-        );
-
-        $this->output->show_lifecycle_line("Starting files-pull (delta)\n");
-        $this->output->show_lifecycle_line("  Index contains: {$index_size} files\n");
-        $this->output->show_lifecycle_line("  Stage: index\n");
-        $this->runtime->output_progress([
-            "type" => "lifecycle",
-            "event" => "starting",
-            "command" => "files-pull",
-            "delta" => true,
-            "index_size" => $index_size,
-            "message" => "Starting files-pull (delta, {$index_size} files indexed)",
-        ], true);
-    }
-
-    private function report_files_sync_initial_start(bool $is_empty): void
-    {
-        $this->runtime->audit_log(
-            "START files-pull ({$this->runtime->fs_root_nonempty_behavior()} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
-            true,
-        );
-
-        $this->output->show_lifecycle_line("Starting files-pull\n");
-        $this->runtime->output_progress([
-            "type" => "lifecycle",
-            "event" => "starting",
-            "command" => "files-pull",
-            "message" => "Starting files-pull",
-        ], true);
+        $this->events->publish(FileSyncEvent::named(
+            FileSyncEvent::FILES_PULL_STARTING,
+            [
+                'delta' => $is_delta,
+                'index_size' => $this->index->count_local_index(),
+                'is_empty' => $is_empty,
+                'fs_root_nonempty_behavior' => $this->settings->fs_root_nonempty_behavior(),
+            ],
+        ));
     }
 
     private function complete_files_sync(
         FilesPullCheckpoint $checkpoint,
         bool $is_delta
-    ): void
-    {
-        $checkpoint->status = "complete";
+    ): void {
+        $checkpoint->status = 'complete';
         $checkpoint->stage = null;
-        $this->runtime->save_files_pull_checkpoint($checkpoint);
-        $this->runtime->record_command_status("files-pull", "complete");
+        $this->checkpoints->save($checkpoint);
+        $this->run_store->record_command_status('files-pull', 'complete');
 
-        $this->output->clear_progress_line();
-        $index_size = $this->runtime->index_count();
-        $label = $is_delta ? "files-pull (delta)" : "files-pull";
+        $this->events->publish(FileSyncEvent::named(
+            FileSyncEvent::FILES_PULL_COMPLETE,
+            [
+                'delta' => $is_delta,
+                'files_indexed' => $this->index->count_local_index(),
+            ],
+        ));
 
-        $this->runtime->audit_log(
-            sprintf("%s complete: %d files indexed", $label, $index_size),
-            true,
-        );
-
-        $this->output->show_lifecycle_line("{$label} complete: {$index_size} files indexed\n");
-        $this->output->show_lifecycle_line("Audit log: {$this->runtime->audit_log_file()}\n");
-        $this->runtime->output_progress([
-            "type" => "lifecycle",
-            "event" => "complete",
-            "command" => "files-pull",
-            "delta" => $is_delta,
-            "files_indexed" => $index_size,
-            "audit_log" => $this->runtime->audit_log_file(),
-            "message" => "{$label} complete: {$index_size} files indexed",
-        ], true);
-
-        $this->runtime->report_volatile_files();
+        $this->volatile_files->report();
     }
 
     private function run_files_sync_pipeline(FilesPullCheckpoint $checkpoint): void
     {
-        $stage = $checkpoint->stage ?? "index";
+        $stage = $checkpoint->stage ?? 'index';
 
-        if ($stage === "index") {
-            if (!$this->runtime->download_remote_index($checkpoint)) {
+        if ($stage === 'index') {
+            if (!$this->remote_index->download($checkpoint)) {
                 $this->mark_files_sync_partial($checkpoint);
                 return;
             }
 
-            if ($this->runtime->follow_symlinks()) {
-                $this->runtime->discover_symlink_targets($checkpoint);
-                if ($this->runtime->shutdown_requested()) {
+            if ($this->settings->follow_symlinks()) {
+                $this->symlinks->discover_targets($checkpoint);
+                if ($this->shutdown->is_shutdown_requested()) {
                     $this->mark_files_sync_partial($checkpoint);
                     return;
                 }
             }
 
-            $this->runtime->sort_index_file($this->runtime->remote_index_file());
-            $checkpoint->stage = "diff";
+            $this->index->sort_remote_index();
+            $checkpoint->stage = 'diff';
             $checkpoint->reset_diff();
             $this->delete_file_if_exists(
-                $this->runtime->download_list_file(),
-                "clearing before diff stage",
+                $this->workspace->download_list_file(),
+                'clearing before diff stage',
             );
             $this->delete_file_if_exists(
-                $this->runtime->skipped_download_list_file(),
-                "clearing before diff stage",
+                $this->workspace->skipped_download_list_file(),
+                'clearing before diff stage',
             );
-            $this->runtime->save_files_pull_checkpoint($checkpoint);
-            $stage = "diff";
+            $this->checkpoints->save($checkpoint);
+            $stage = 'diff';
         }
 
-        if ($stage === "diff") {
-            if (!$this->runtime->diff_indexes_and_build_fetch_list($checkpoint)) {
+        if ($stage === 'diff') {
+            if (!$this->fetch_lists->build($checkpoint)) {
                 $this->mark_files_sync_partial($checkpoint);
                 return;
             }
 
-            $has_downloads = $this->file_has_entries($this->runtime->download_list_file());
-            $has_skipped = $this->file_has_entries($this->runtime->skipped_download_list_file());
+            $has_downloads = $this->workspace->file_has_entries($this->workspace->download_list_file());
+            $has_skipped = $this->workspace->file_has_entries($this->workspace->skipped_download_list_file());
 
             if ($has_downloads) {
-                $stage = "fetch";
+                $stage = 'fetch';
             } elseif ($has_skipped) {
-                $stage = "fetch-skipped";
+                $stage = 'fetch-skipped';
             } else {
                 $stage = null;
             }
 
             $checkpoint->stage = $stage;
-            $this->runtime->save_files_pull_checkpoint($checkpoint);
+            $this->checkpoints->save($checkpoint);
 
             if ($has_downloads) {
-                $this->show_download_progress_start(
-                    $this->runtime->index_entries_counted(),
-                    $this->runtime->download_list_file(),
-                );
+                $this->events->publish(FileSyncEvent::named(
+                    FileSyncEvent::DOWNLOAD_PROGRESS_STARTING,
+                    [
+                        'scanned' => $this->index->index_entries_counted(),
+                        'total' => $this->workspace->count_lines($this->workspace->download_list_file()),
+                    ],
+                ));
             }
 
             if (!$has_downloads) {
                 $this->delete_file_if_exists(
-                    $this->runtime->download_list_file(),
-                    "no files to fetch",
+                    $this->workspace->download_list_file(),
+                    'no files to fetch',
                 );
             }
             if (!$has_skipped) {
                 $this->delete_file_if_exists(
-                    $this->runtime->skipped_download_list_file(),
-                    "no skipped files to fetch",
+                    $this->workspace->skipped_download_list_file(),
+                    'no skipped files to fetch',
                 );
             }
         }
 
-        if ($stage === "fetch") {
-            if (!$this->runtime->download_files_from_list(
+        if ($stage === 'fetch') {
+            if (!$this->file_fetch->fetch_from_list(
                 $checkpoint,
-                $this->runtime->download_list_file(),
-                "fetch",
+                $this->workspace->download_list_file(),
+                'fetch',
             )) {
                 $this->mark_files_sync_partial($checkpoint);
                 return;
             }
 
             $checkpoint->fetch->reset();
-            $this->delete_file_if_exists($this->runtime->download_list_file(), "fetch complete");
+            $this->delete_file_if_exists($this->workspace->download_list_file(), 'fetch complete');
 
-            $has_skipped = $this->file_has_entries($this->runtime->skipped_download_list_file());
+            $has_skipped = $this->workspace->file_has_entries($this->workspace->skipped_download_list_file());
 
-            if ($has_skipped && $this->runtime->current_filter() === "essential-files") {
+            if ($has_skipped && $this->settings->current_filter() === 'essential-files') {
                 $checkpoint->stage = null;
-                $this->runtime->save_files_pull_checkpoint($checkpoint);
-                $this->runtime->audit_log(
-                    "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->runtime->skipped_download_list_file()} - run with --filter=skipped-earlier to download them",
+                $this->checkpoints->save($checkpoint);
+                $this->events->publish(FileSyncEvent::audit(
+                    'ESSENTIAL FILES COMPLETE | skipped files listed in ' .
+                        $this->workspace->skipped_download_list_file() .
+                        ' - run with --filter=skipped-earlier to download them',
                     true,
-                );
+                ));
                 $stage = null;
             } elseif ($has_skipped) {
-                $checkpoint->stage = "fetch-skipped";
-                $this->runtime->save_files_pull_checkpoint($checkpoint);
-                $stage = "fetch-skipped";
-                $this->runtime->audit_log(
-                    "ESSENTIAL FILES COMPLETE | transitioning to skipped files",
+                $checkpoint->stage = 'fetch-skipped';
+                $this->checkpoints->save($checkpoint);
+                $stage = 'fetch-skipped';
+                $this->events->publish(FileSyncEvent::audit(
+                    'ESSENTIAL FILES COMPLETE | transitioning to skipped files',
                     true,
-                );
-                $this->runtime->write_status_file();
+                ));
             } else {
                 $checkpoint->stage = null;
-                $this->runtime->save_files_pull_checkpoint($checkpoint);
+                $this->checkpoints->save($checkpoint);
                 $stage = null;
             }
         }
 
-        if ($stage === "fetch-skipped") {
-            if (!$this->runtime->download_files_from_list(
+        if ($stage === 'fetch-skipped') {
+            if (!$this->file_fetch->fetch_from_list(
                 $checkpoint,
-                $this->runtime->skipped_download_list_file(),
-                "fetch_skipped",
+                $this->workspace->skipped_download_list_file(),
+                'fetch_skipped',
             )) {
                 $this->mark_files_sync_partial($checkpoint);
                 return;
@@ -528,62 +425,42 @@ final class FilesSyncWorkflow
 
             $checkpoint->stage = null;
             $checkpoint->fetch_skipped->reset();
-            $this->runtime->save_files_pull_checkpoint($checkpoint);
+            $this->checkpoints->save($checkpoint);
 
             $this->delete_file_if_exists(
-                $this->runtime->skipped_download_list_file(),
-                "skipped files fetch complete",
+                $this->workspace->skipped_download_list_file(),
+                'skipped files fetch complete',
             );
         }
 
-        if ($this->runtime->follow_symlinks()) {
-            $this->runtime->recreate_intermediate_symlinks();
+        if ($this->settings->follow_symlinks()) {
+            $this->symlinks->recreate_intermediate_symlinks();
         }
     }
 
     private function mark_files_sync_partial(FilesPullCheckpoint $checkpoint): void
     {
-        $checkpoint->status = "partial";
-        $this->runtime->save_files_pull_checkpoint($checkpoint);
+        $checkpoint->status = 'partial';
+        $this->checkpoints->save($checkpoint);
     }
 
-    private function file_has_entries(string $file): bool
+    private function has_skipped_download_list(): bool
     {
-        return file_exists($file) && filesize($file) > 0;
+        return $this->workspace->file_has_entries($this->workspace->skipped_download_list_file());
     }
 
     private function delete_file_if_exists(string $file, string $reason): void
     {
-        if (!file_exists($file)) {
+        if (!$this->workspace->delete_file_if_exists($file)) {
             return;
         }
 
-        @unlink($file);
-        $this->runtime->audit_log("FILE DELETE | {$file} | {$reason}");
-    }
-
-    private function show_download_progress_start(
-        int $scanned,
-        string $download_list_file
-    ): void {
-        if (!$this->output->is_quiet_lifecycle()) {
-            return;
-        }
-
-        $green = "\033[32m";
-        $dim = "\033[2m";
-        $r = "\033[0m";
-        $this->output->clear_progress_line();
-        $this->output->print_line(
-            "  {$green}✓{$r} Scanned {$dim}— " .
-            number_format($scanned) .
-            " entries{$r}\n",
-        );
-        $this->output->set_active_label(null);
-        $total = DownloadList::count_lines($download_list_file);
-        $this->output->show_progress_line(
-            "Downloading — 0 / " . number_format($total) . " files",
-            0.0,
-        );
+        $this->events->publish(FileSyncEvent::named(
+            FileSyncEvent::FILE_DELETED,
+            [
+                'file' => $file,
+                'reason' => $reason,
+            ],
+        ));
     }
 }

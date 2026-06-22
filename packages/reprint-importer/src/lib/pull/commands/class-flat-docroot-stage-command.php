@@ -18,7 +18,7 @@ final class FlatDocrootStageCommand extends PullStageCommand
 
     public function execute(Pull $pull, array $options): void
     {
-        $pull->client()->run_flat_document_root($options);
+        $pull->run_runtime_stage($this->name(), $options);
         $pull->print_done($this->name());
     }
 }

@@ -18,9 +18,9 @@ final class PreflightStageCommand extends PullStageCommand
 
     public function execute(Pull $pull, array $options): void
     {
-        $pull->client()->run_preflight();
+        $pull->run_runtime_stage($this->name(), $options);
         if ($pull->check_plugin_installed()) {
-            $pull->client()->set_exit_code(1);
+            $pull->runtime()->set_exit_code(1);
             return;
         }
 

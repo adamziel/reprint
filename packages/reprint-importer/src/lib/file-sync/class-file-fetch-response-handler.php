@@ -2,6 +2,9 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\FileSyncStreamObserver;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
 use Reprint\Importer\Protocol\StreamingContext;
 use RuntimeException;
 
@@ -13,67 +16,29 @@ final class FileFetchResponseHandler
     private int $save_every;
     private int $chunks_since_save = 0;
     private bool $complete = false;
-
-    /** @var callable */
-    private $should_stop;
-
-    /** @var callable */
-    private $save_checkpoint;
-
-    /** @var callable */
-    private $handle_metadata;
-
-    /** @var callable */
-    private $handle_file;
-
-    /** @var callable */
-    private $handle_directory;
-
-    /** @var callable */
-    private $handle_symlink;
-
-    /** @var callable */
-    private $handle_missing;
-
-    /** @var callable */
-    private $handle_error;
-
-    /** @var callable */
-    private $handle_progress;
-
-    /** @var callable */
-    private $handle_completion_progress;
+    private FilesPullCheckpoint $checkpoint;
+    private FilesPullCheckpointStore $checkpoints;
+    private ShutdownToken $shutdown;
+    private FileSyncStreamObserver $observer;
 
     public function __construct(
         ?string $cursor,
         string $state_key,
         StreamingContext $context,
         int $save_every,
-        callable $should_stop,
-        callable $save_checkpoint,
-        callable $handle_metadata,
-        callable $handle_file,
-        callable $handle_directory,
-        callable $handle_symlink,
-        callable $handle_missing,
-        callable $handle_error,
-        callable $handle_progress,
-        callable $handle_completion_progress
+        FilesPullCheckpoint $checkpoint,
+        ShutdownToken $shutdown,
+        FilesPullCheckpointStore $checkpoints,
+        FileSyncStreamObserver $observer
     ) {
         $this->cursor = $cursor;
         $this->state_key = $state_key;
         $this->context = $context;
         $this->save_every = $save_every;
-        $this->should_stop = $should_stop;
-        $this->save_checkpoint = $save_checkpoint;
-        $this->handle_metadata = $handle_metadata;
-        $this->handle_file = $handle_file;
-        $this->handle_directory = $handle_directory;
-        $this->handle_symlink = $handle_symlink;
-        $this->handle_missing = $handle_missing;
-        $this->handle_error = $handle_error;
-        $this->handle_progress = $handle_progress;
-        $this->handle_completion_progress = $handle_completion_progress;
+        $this->checkpoint = $checkpoint;
+        $this->shutdown = $shutdown;
+        $this->checkpoints = $checkpoints;
+        $this->observer = $observer;
     }
 
     public function cursor(): ?string
@@ -181,7 +146,7 @@ final class FileFetchResponseHandler
 
     private function should_stop(): bool
     {
-        return (bool) ($this->should_stop)();
+        return $this->shutdown->is_shutdown_requested();
     }
 
     private function save_checkpoint(
@@ -189,32 +154,34 @@ final class FileFetchResponseHandler
         ?string $cursor,
         StreamingContext $context
     ): void {
-        ($this->save_checkpoint)($state_key, $cursor, $context);
+        $this->checkpoint->fetch_checkpoint($state_key)->cursor = $cursor;
+        $this->track_current_file($context);
+        $this->checkpoints->save($this->checkpoint);
     }
 
     private function handle_metadata(array $chunk, StreamingContext $context): void
     {
-        ($this->handle_metadata)($chunk, $context);
+        $this->observer->on_metadata_chunk($chunk, $context);
     }
 
     private function handle_file(array $chunk, StreamingContext $context): void
     {
-        ($this->handle_file)($chunk, $context);
+        $this->observer->on_file_chunk($chunk, $context);
     }
 
     private function handle_directory(array $chunk): void
     {
-        ($this->handle_directory)($chunk);
+        $this->observer->on_directory_chunk($chunk);
     }
 
     private function handle_symlink(array $chunk): void
     {
-        ($this->handle_symlink)($chunk);
+        $this->observer->on_symlink_chunk($chunk);
     }
 
     private function handle_missing(string $path): void
     {
-        ($this->handle_missing)($path);
+        $this->observer->on_missing_path($path);
     }
 
     private function handle_error(
@@ -222,16 +189,29 @@ final class FileFetchResponseHandler
         string $phase,
         StreamingContext $context
     ): void {
-        ($this->handle_error)($chunk, $phase, $context);
+        $this->observer->on_error_chunk($chunk, $phase, $context);
     }
 
     private function handle_progress(array $chunk, string $phase): void
     {
-        ($this->handle_progress)($chunk, $phase);
+        $this->observer->on_progress_chunk($chunk, $phase);
     }
 
     private function handle_completion_progress(array $progress): void
     {
-        ($this->handle_completion_progress)($progress);
+        $this->observer->on_completion_progress($progress);
+    }
+
+    private function track_current_file(StreamingContext $context): void
+    {
+        if ($context->file_handle && $context->file_path) {
+            fflush($context->file_handle);
+            $this->checkpoint->current_file = $context->file_path;
+            $this->checkpoint->current_file_bytes = $context->file_bytes_written;
+            return;
+        }
+
+        $this->checkpoint->current_file = null;
+        $this->checkpoint->current_file_bytes = null;
     }
 }

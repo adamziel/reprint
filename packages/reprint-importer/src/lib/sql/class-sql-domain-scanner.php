@@ -2,19 +2,19 @@
 
 namespace Reprint\Importer\Sql;
 
+use Reprint\Importer\Observability\AuditLogger;
+use Reprint\Importer\Observability\NullAuditLogger;
 use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
 use Reprint\Importer\UrlRewrite\Base64ValueScanner;
 use Reprint\Importer\UrlRewrite\DomainCollector;
 
 final class SqlDomainScanner
 {
-    /** @var callable */
-    private $audit;
+    private AuditLogger $audit;
 
-    public function __construct(?callable $audit = null)
+    public function __construct(?AuditLogger $audit = null)
     {
-        $this->audit = $audit ?? static function (string $message, bool $to_console): void {
-        };
+        $this->audit = $audit ?? new NullAuditLogger();
     }
 
     public function drain_query_stream(
@@ -88,7 +88,7 @@ final class SqlDomainScanner
         $option_context = $option_name !== null ? ' option=' . $option_name : '';
 
         foreach ($domains as $domain) {
-            ($this->audit)(
+            $this->audit->record(
                 sprintf(
                     "NEW DOMAIN | %s | table=%s %s%s",
                     $domain,

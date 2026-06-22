@@ -3,16 +3,16 @@
 namespace Reprint\Importer\FileSync;
 
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
+use Reprint\Importer\Observability\AuditLogger;
 use RuntimeException;
 
 final class IntermediateSymlinkRecreator
 {
     private LocalImportFilesystem $filesystem;
 
-    /** @var callable */
-    private $audit;
+    private AuditLogger $audit;
 
-    public function __construct(LocalImportFilesystem $filesystem, callable $audit)
+    public function __construct(LocalImportFilesystem $filesystem, AuditLogger $audit)
     {
         $this->filesystem = $filesystem;
         $this->audit = $audit;
@@ -138,6 +138,6 @@ final class IntermediateSymlinkRecreator
 
     private function audit(string $message, bool $to_console): void
     {
-        ($this->audit)($message, $to_console);
+        $this->audit->record($message, $to_console);
     }
 }

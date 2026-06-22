@@ -4,63 +4,38 @@ namespace Reprint\Importer\Sql;
 
 use PDO;
 use PDOException;
+use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\QueryStream\WP_MySQL_FastQueryStream;
+use Reprint\Importer\Sql\Port\DbApplyCheckpointStore;
+use Reprint\Importer\Sql\Port\DbApplyObserver;
+use Reprint\Importer\Sql\Port\DbApplyShutdownToken;
+use Reprint\Importer\Sql\Port\PluginDeactivationPolicy;
+use Reprint\Importer\Sql\Port\SqlStatementStatsStore;
 use RuntimeException;
 
 final class SqlDumpApplier
 {
-    /** @var callable */
-    private $should_stop;
-
-    /** @var callable */
-    private $save_state;
-
-    /** @var callable */
-    private $audit;
-
-    /** @var callable */
-    private $output_progress;
-
-    /** @var callable */
-    private $show_progress_line;
-
-    /** @var callable */
-    private $show_lifecycle_line;
-
-    /** @var callable */
-    private $clear_progress_line;
-
-    /** @var callable */
-    private $is_quiet_lifecycle;
-
-    /** @var callable */
-    private $deactivate_host_plugins;
-
-    /** @var callable */
-    private $deactivate_path_incompatible_plugins;
+    private DbApplyShutdownToken $shutdown;
+    private DbApplyCheckpointStore $checkpoints;
+    private AuditLogger $audit;
+    private DbApplyObserver $observer;
+    private SqlStatementStatsStore $statement_stats;
+    private PluginDeactivationPolicy $plugin_deactivation;
 
     public function __construct(
-        callable $should_stop,
-        callable $save_state,
-        callable $audit,
-        callable $output_progress,
-        callable $show_progress_line,
-        callable $show_lifecycle_line,
-        callable $clear_progress_line,
-        callable $is_quiet_lifecycle,
-        callable $deactivate_host_plugins,
-        callable $deactivate_path_incompatible_plugins
+        DbApplyShutdownToken $shutdown,
+        DbApplyCheckpointStore $checkpoints,
+        AuditLogger $audit,
+        DbApplyObserver $observer,
+        SqlStatementStatsStore $statement_stats,
+        PluginDeactivationPolicy $plugin_deactivation
     ) {
-        $this->should_stop = $should_stop;
-        $this->save_state = $save_state;
+        $this->shutdown = $shutdown;
+        $this->checkpoints = $checkpoints;
         $this->audit = $audit;
-        $this->output_progress = $output_progress;
-        $this->show_progress_line = $show_progress_line;
-        $this->show_lifecycle_line = $show_lifecycle_line;
-        $this->clear_progress_line = $clear_progress_line;
-        $this->is_quiet_lifecycle = $is_quiet_lifecycle;
-        $this->deactivate_host_plugins = $deactivate_host_plugins;
-        $this->deactivate_path_incompatible_plugins = $deactivate_path_incompatible_plugins;
+        $this->observer = $observer;
+        $this->statement_stats = $statement_stats;
+        $this->plugin_deactivation = $plugin_deactivation;
     }
 
     /**
@@ -68,7 +43,6 @@ final class SqlDumpApplier
      *
      * @param array{
      *     sql_file:string,
-     *     state_dir:string,
      *     new_site_url:string
      * } $config
      */
@@ -85,7 +59,7 @@ final class SqlDumpApplier
         $query_stream = new WP_MySQL_FastQueryStream();
         $stmt_count = 0;
         $query_stream->set_error_logger(function (array $err) use (&$stmt_count): void {
-            ($this->audit)(
+            $this->audit->record(
                 sprintf(
                     "FAST QUERY STREAM fallback | reason=%s | byte_offset=%d | stmt=%d | %s | context=%.200s",
                     $err['reason'] ?? '?',
@@ -96,10 +70,7 @@ final class SqlDumpApplier
                 ),
                 true
             );
-            ($this->show_lifecycle_line)(
-                "Fast query stream fell back to lexer-based parser at byte offset "
-                . ($err['byte_offset'] ?? 0) . "; see audit log for details\n"
-            );
+            $this->observer->on_fast_query_stream_fallback((int) ($err['byte_offset'] ?? 0));
         });
 
         $sql_handle = fopen($sql_file, "r");
@@ -111,8 +82,7 @@ final class SqlDumpApplier
         $total_bytes_read = 0;
         $save_every = 100;
         $stmts_since_save = 0;
-
-        $statements_total = $this->load_statements_total($config["state_dir"]);
+        $statements_total = $this->statement_stats->load_total();
 
         $seek_offset = 0;
         $stmts_to_skip = 0;
@@ -124,19 +94,14 @@ final class SqlDumpApplier
             $stmts_to_skip = $statements_executed;
         }
 
-        ($this->output_progress)([
-            "status" => "starting",
-            "phase" => "db-apply",
-            "statements_total" => $statements_total,
-            "message" => "Applying SQL" . ($statements_total !== null ? " ({$statements_total} statements)" : ""),
-        ], false);
+        $this->observer->on_apply_starting($statements_total);
 
         try {
             $chunk_size = 64 * 1024;
 
             while (!feof($sql_handle)) {
-                if (($this->should_stop)()) {
-                    ($this->audit)("SHUTDOWN REQUESTED | saving state", true);
+                if ($this->shutdown->is_shutdown_requested()) {
+                    $this->audit->record("SHUTDOWN REQUESTED | saving state", true);
                     break;
                 }
                 if (function_exists("pcntl_signal_dispatch")) {
@@ -170,10 +135,10 @@ final class SqlDumpApplier
                     if ($stmts_since_save >= $save_every) {
                         $checkpoint->statements_executed = $statements_executed;
                         $checkpoint->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
-                        ($this->save_state)($checkpoint);
+                        $this->checkpoints->save($checkpoint);
                         $stmts_since_save = 0;
 
-                        $this->show_apply_progress(
+                        $this->observer->on_apply_progress(
                             $statements_executed,
                             $statements_total,
                             $total_bytes_read,
@@ -201,86 +166,53 @@ final class SqlDumpApplier
                 $statements_executed++;
             }
 
-            if (($this->should_stop)()) {
+            if ($this->shutdown->is_shutdown_requested()) {
                 $checkpoint->statements_executed = $statements_executed;
                 $checkpoint->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
                 $checkpoint->status = "partial";
-                ($this->save_state)($checkpoint);
-                ($this->audit)(
+                $this->checkpoints->save($checkpoint);
+                $this->audit->record(
                     sprintf(
                         "PARTIAL db-apply | %d statements executed",
                         $statements_executed,
                     ),
                     true,
                 );
-                ($this->output_progress)([
-                    "status" => "partial",
-                    "phase" => "db-apply",
-                    "statements_executed" => $statements_executed,
-                    "statements_total" => $statements_total,
-                    "message" => "db-apply partial: {$statements_executed} statements executed",
-                ], true);
+                $this->observer->on_apply_partial($statements_executed, $statements_total);
                 return $checkpoint;
             }
 
-            foreach ((array) ($this->deactivate_host_plugins)($pdo) as $basename) {
-                ($this->audit)("DB-APPLY | deactivated plugin {$basename} (host-specific)", true);
+            foreach ($this->plugin_deactivation->deactivate_host_specific($pdo) as $basename) {
+                $this->audit->record("DB-APPLY | deactivated plugin {$basename} (host-specific)", true);
             }
 
             foreach (
-                (array) ($this->deactivate_path_incompatible_plugins)(
+                $this->plugin_deactivation->deactivate_path_incompatible(
                     $pdo,
                     $config["new_site_url"],
                 ) as $basename
             ) {
-                ($this->audit)("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)", true);
+                $this->audit->record("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)", true);
             }
 
             $checkpoint->statements_executed = $statements_executed;
             $checkpoint->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
             $checkpoint->status = "complete";
-            ($this->save_state)($checkpoint);
+            $this->checkpoints->save($checkpoint);
 
-            ($this->audit)(
+            $this->audit->record(
                 sprintf(
                     "db-apply complete | %d statements executed",
                     $statements_executed,
                 ),
                 true,
             );
-
-            ($this->output_progress)([
-                "status" => "complete",
-                "phase" => "db-apply",
-                "statements_executed" => $statements_executed,
-                "statements_total" => $statements_total,
-                "message" => "db-apply complete ({$statements_executed} statements executed)",
-            ], false);
-
-            if (!(bool) ($this->is_quiet_lifecycle)()) {
-                ($this->clear_progress_line)();
-            }
-            ($this->show_lifecycle_line)("db-apply complete ({$statements_executed} statements executed)\n");
+            $this->observer->on_apply_complete($statements_executed, $statements_total);
         } finally {
             fclose($sql_handle);
         }
 
         return $checkpoint;
-    }
-
-    private function load_statements_total(string $state_dir): ?int
-    {
-        $sql_stats_file = $state_dir . "/.import-sql-stats.json";
-        if (!file_exists($sql_stats_file)) {
-            return null;
-        }
-
-        $stats = json_decode(file_get_contents($sql_stats_file), true);
-        if (!is_array($stats) || !isset($stats["statements_total"])) {
-            return null;
-        }
-
-        return (int) $stats["statements_total"];
     }
 
     private function execute_statement(
@@ -292,7 +224,7 @@ final class SqlDumpApplier
         try {
             $executed_query = $query_executor->execute($query);
         } catch (PDOException $e) {
-            ($this->audit)(
+            $this->audit->record(
                 sprintf(
                     "SQL ERROR | stmt=%d | %s | query=%.200s",
                     $stmt_count,
@@ -306,36 +238,5 @@ final class SqlDumpApplier
                 $e->getMessage(),
             );
         }
-    }
-
-    private function show_apply_progress(
-        int $statements_executed,
-        ?int $statements_total,
-        int $total_bytes_read,
-        int $sql_file_size
-    ): void {
-        $apply_fraction = $sql_file_size > 0
-            ? $total_bytes_read / $sql_file_size
-            : null;
-        $pct = $apply_fraction !== null ? round($apply_fraction * 100, 1) : 0;
-
-        $progress_message = sprintf(
-            "%s statements",
-            $statements_total === null
-                ? number_format($statements_executed)
-                : number_format($statements_executed) . " / " . number_format($statements_total),
-        );
-
-        ($this->output_progress)([
-            "phase" => "db-apply",
-            "statements_executed" => $statements_executed,
-            "bytes_read" => $total_bytes_read,
-            "bytes_total" => $sql_file_size,
-            "pct" => $pct,
-            "statements_total" => $statements_total,
-            "message" => $progress_message,
-        ], false);
-
-        ($this->show_progress_line)($progress_message, $apply_fraction);
     }
 }

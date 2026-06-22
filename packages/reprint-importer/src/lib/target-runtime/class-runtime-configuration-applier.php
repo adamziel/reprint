@@ -4,15 +4,22 @@ namespace Reprint\Importer\TargetRuntime;
 
 use InvalidArgumentException;
 use Reprint\Importer\Host\RuntimeManifest;
+use Reprint\Importer\Observability\AuditLogger;
 use RuntimeException;
 
 final class RuntimeConfigurationApplier
 {
+    private AuditLogger $audit;
+
+    public function __construct(AuditLogger $audit)
+    {
+        $this->audit = $audit;
+    }
+
     /**
      * Apply the target runtime configuration for an imported site.
      *
      * @param array $config Runtime application options.
-     * @param callable $audit Receives audit log lines.
      * @return array{
      *     runtime: string,
      *     webhost: string,
@@ -24,7 +31,7 @@ final class RuntimeConfigurationApplier
      *     summary: string[]
      * }
      */
-    public function apply(array $config, callable $audit): array
+    public function apply(array $config): array
     {
         $runtime = $this->require_string(
             $config,
@@ -83,11 +90,11 @@ final class RuntimeConfigurationApplier
 
         $analyzer = \host_analyzer_for($webhost);
         $manifest = $analyzer->analyze($preflight_data);
-        $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data, $config, $audit);
+        $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data, $config);
 
         $target_engine = $this->merge_target_database_config($manifest, $apply_state);
 
-        $audit("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
+        $this->audit("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
 
         [$host, $port] = $this->resolve_target_host_and_port($config, $apply_state);
         $wordpress_index = $this->resolve_wordpress_index(
@@ -129,11 +136,11 @@ final class RuntimeConfigurationApplier
 
         $summary = array_merge(
             $summary,
-            $this->remove_production_paths($manifest->paths_to_remove, $abs_fs_root, $audit),
+            $this->remove_production_paths($manifest->paths_to_remove, $abs_fs_root),
         );
 
         foreach ($summary as $line) {
-            $audit("APPLY-RUNTIME | {$line}");
+            $this->audit("APPLY-RUNTIME | {$line}");
         }
 
         $start_config = null;
@@ -280,7 +287,7 @@ final class RuntimeConfigurationApplier
     /**
      * @return string[]
      */
-    private function remove_production_paths(array $paths_to_remove, string $abs_fs_root, callable $audit): array
+    private function remove_production_paths(array $paths_to_remove, string $abs_fs_root): array
     {
         $summary = [];
         foreach ($paths_to_remove as $rel_path) {
@@ -291,7 +298,7 @@ final class RuntimeConfigurationApplier
 
             $this->remove_path_without_following_symlinks($full_path);
             $summary[] = "Removed production drop-in: {$rel_path}";
-            $audit("APPLY-RUNTIME | removed {$rel_path} (production-only)");
+            $this->audit("APPLY-RUNTIME | removed {$rel_path} (production-only)");
         }
 
         return $summary;
@@ -324,8 +331,7 @@ final class RuntimeConfigurationApplier
     private function maybe_enable_remote_upload_proxy(
         RuntimeManifest $manifest,
         array $preflight_data,
-        array $config,
-        callable $audit
+        array $config
     ): void {
         if (empty($config['enable_remote_upload_proxy'])) {
             return;
@@ -333,7 +339,7 @@ final class RuntimeConfigurationApplier
 
         $base_url = $this->remote_upload_proxy_base_url($preflight_data);
         if ($base_url === null) {
-            $audit(
+            $this->audit(
                 'APPLY-RUNTIME | remote upload proxy skipped (no source uploads URL available)',
                 true,
             );
@@ -359,10 +365,15 @@ final class RuntimeConfigurationApplier
             'condition' => 'file_not_found',
             'description' => 'Proxy missing uploads from the source site until files-pull completes',
         ];
-        $audit(
+        $this->audit(
             "APPLY-RUNTIME | enabled remote upload proxy ({$base_url})",
             true,
         );
+    }
+
+    private function audit(string $message, bool $to_console = true): void
+    {
+        $this->audit->record($message, $to_console);
     }
 
     private function remote_upload_proxy_base_url(array $preflight_data): ?string

@@ -5,7 +5,13 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchListBuilder;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\LocalFileChangePlanner;
+use Reprint\Importer\FileSync\Port\ProgressTicker;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
 use Reprint\Importer\Index\IndexStore;
+use Reprint\Importer\Observability\NullAuditLogger;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -57,11 +63,11 @@ final class ImportFetchListBuilderTest extends TestCase
 
         $builder = $this->make_builder($local_index);
         $this->assertTrue($builder->build(
+            FilesPullCheckpoint::fresh(),
             $remote_index,
             $local_index,
             $download_list,
             $skipped_list,
-            [],
             'none',
             null,
         ));
@@ -86,11 +92,11 @@ final class ImportFetchListBuilderTest extends TestCase
 
         $builder = $this->make_builder($local_index);
         $this->assertTrue($builder->build(
+            FilesPullCheckpoint::fresh(),
             $remote_index,
             $local_index,
             $download_list,
             $skipped_list,
-            [],
             'essential-files',
             '/wp-content/uploads/',
         ));
@@ -112,11 +118,11 @@ final class ImportFetchListBuilderTest extends TestCase
 
         $builder = $this->make_builder($local_index);
         $this->assertTrue($builder->build(
+            FilesPullCheckpoint::fresh(),
             $remote_index,
             $local_index,
             $download_list,
             $skipped_list,
-            [],
             'none',
             null,
         ));
@@ -134,25 +140,65 @@ final class ImportFetchListBuilderTest extends TestCase
 
         return new FetchListBuilder(
             $store,
-            function (string $path): void {
-                $this->deleted[] = $path;
+            new class($this->deleted, $this->skip_paths, $this->skipped) implements LocalFileChangePlanner {
+                private array $deleted;
+                private array $skip_paths;
+                private array $skipped;
+
+                public function __construct(array &$deleted, array &$skip_paths, array &$skipped)
+                {
+                    $this->deleted = &$deleted;
+                    $this->skip_paths = &$skip_paths;
+                    $this->skipped = &$skipped;
+                }
+
+                public function delete_local_file_path(string $path): void
+                {
+                    $this->deleted[] = $path;
+                }
+
+                public function should_skip_for_preserve_local(string $path): ?string
+                {
+                    return in_array($path, $this->skip_paths, true)
+                        ? "skip {$path}"
+                        : null;
+                }
+
+                public function emit_skip_progress(string $path): void
+                {
+                    $this->skipped[] = $path;
+                }
             },
-            function (string $path): ?string {
-                return in_array($path, $this->skip_paths, true)
-                    ? "skip {$path}"
-                    : null;
+            new class($this->diffs) implements FilesPullCheckpointStore {
+                private array $diffs;
+
+                public function __construct(array &$diffs)
+                {
+                    $this->diffs = &$diffs;
+                }
+
+                public function get(): FilesPullCheckpoint
+                {
+                    return FilesPullCheckpoint::fresh();
+                }
+
+                public function save(FilesPullCheckpoint $checkpoint): void
+                {
+                    $this->diffs[] = $checkpoint->diff_state();
+                }
             },
-            function (string $path): void {
-                $this->skipped[] = $path;
+            new class implements ShutdownToken {
+                public function is_shutdown_requested(): bool
+                {
+                    return false;
+                }
             },
-            function (array $diff): void {
-                $this->diffs[] = $diff;
+            new class implements ProgressTicker {
+                public function tick(): void
+                {
+                }
             },
-            fn(): bool => false,
-            function (): void {},
-            function (string $message, bool $to_console = true): void {
-                $this->audit[] = [$message, $to_console];
-            },
+            new NullAuditLogger(),
         );
     }
 

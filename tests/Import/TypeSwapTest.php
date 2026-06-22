@@ -7,6 +7,8 @@ use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Index\IndexStore;
+use Reprint\Importer\Observability\NullAuditLogger;
+use Reprint\Importer\Observability\NullMachineEventEmitter;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Session\VolatileFileTracker;
@@ -68,8 +70,7 @@ class TypeSwapTest extends TestCase
         return new LocalImportFilesystem(
             $this->tempDir . '/fs-root',
             'error',
-            function (string $message, bool $to_console): void {
-            },
+            new NullAuditLogger(),
         );
     }
 
@@ -91,10 +92,8 @@ class TypeSwapTest extends TestCase
             null,
             null,
             FilesPullCheckpoint::fresh(),
-            function (string $message, bool $to_console = true): void {
-            },
-            function (array $progress, bool $force = false): void {
-            },
+            new NullAuditLogger(),
+            new NullMachineEventEmitter(),
         );
     }
 

@@ -8,8 +8,10 @@ use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Index\IndexStore;
+use Reprint\Importer\Observability\NullAuditLogger;
 use Reprint\Importer\ImportClient;
 use Reprint\Importer\Output\BufferedImportOutput;
+use Reprint\Importer\Observability\NullMachineEventEmitter;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Session\VolatileFileTracker;
@@ -84,8 +86,7 @@ class FilesSyncStateTest extends TestCase
             new LocalImportFilesystem(
                 $this->fs_root,
                 'preserve-local',
-                function (string $message, bool $to_console): void {
-                },
+                new NullAuditLogger(),
             ),
             new IndexStore(
                 $this->stateDir . '/.import-index.jsonl',
@@ -101,10 +102,8 @@ class FilesSyncStateTest extends TestCase
             null,
             null,
             $checkpoint,
-            function (string $message, bool $to_console = true): void {
-            },
-            function (array $progress, bool $force = false): void {
-            },
+            new NullAuditLogger(),
+            new NullMachineEventEmitter(),
         );
     }
 

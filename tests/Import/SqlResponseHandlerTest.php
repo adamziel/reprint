@@ -3,6 +3,12 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Sql\DbPullCheckpoint;
+use Reprint\Importer\Sql\Port\DbPullCheckpointStore;
+use Reprint\Importer\Sql\Port\SqlDomainStore;
+use Reprint\Importer\Sql\Port\SqlOutputSink;
+use Reprint\Importer\Sql\Port\SqlShutdownToken;
+use Reprint\Importer\Sql\Port\SqlStreamObserver;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\QueryStream\WP_MySQL_Naive_Query_Stream;
 use Reprint\Importer\Sql\SqlDomainScanner;
@@ -42,16 +48,14 @@ final class SqlResponseHandlerTest extends TestCase
 
     public function testFileSqlChunkWritesDataAndTracksCounters(): void
     {
-        $handle = fopen($this->sql_file, 'w+');
         $context = new StreamingContext();
         $query_stream = new WP_MySQL_Naive_Query_Stream();
         $domain_collector = new DomainCollector();
+        $output = new RecordingSqlOutputSink(4);
         $handler = $this->make_handler([
-            'mode' => 'file',
             'cursor' => 'cursor-0',
             'context' => $context,
-            'sql_handle' => $handle,
-            'sql_bytes_written' => 4,
+            'output' => $output,
             'query_stream' => $query_stream,
             'domain_collector' => $domain_collector,
             'domain_scanner' => new SqlDomainScanner(),
@@ -66,10 +70,7 @@ final class SqlResponseHandlerTest extends TestCase
             'body' => 'SELECT 1;',
         ]);
 
-        fflush($handle);
-        fclose($handle);
-
-        $this->assertSame('SELECT 1;', file_get_contents($this->sql_file));
+        $this->assertSame([['sql' => 'SELECT 1;', 'query_complete' => true]], $output->writes);
         $this->assertSame('cursor-1', $handler->cursor());
         $this->assertSame(13, $handler->sql_bytes_written());
         $this->assertSame(3, $handler->sql_statements_counted());
@@ -79,16 +80,14 @@ final class SqlResponseHandlerTest extends TestCase
 
     public function testCheckpointPersistsCurrentCursorAndDomains(): void
     {
-        $handle = fopen($this->sql_file, 'w+');
         $context = new StreamingContext();
         $domain_collector = new DomainCollector();
         $domain_collector->merge(['https://example.com']);
+        $output = new RecordingSqlOutputSink(12);
         $handler = $this->make_handler([
-            'mode' => 'file',
             'cursor' => 'cursor-0',
             'context' => $context,
-            'sql_handle' => $handle,
-            'sql_bytes_written' => 12,
+            'output' => $output,
             'domain_collector' => $domain_collector,
             'sql_statements_counted' => 5,
             'save_every' => 1,
@@ -101,7 +100,6 @@ final class SqlResponseHandlerTest extends TestCase
             ],
             'body' => '',
         ]);
-        fclose($handle);
 
         $this->assertSame([
             [
@@ -191,12 +189,9 @@ final class SqlResponseHandlerTest extends TestCase
 
     public function testMysqlModeBuffersUntilQueryIsComplete(): void
     {
-        $buffer_handle = fopen($this->buffer_file, 'w+');
-        $mysql_conn = new FakeSqlMysqlConnection();
+        $output = new BufferedQuerySqlOutputSink();
         $handler = $this->make_handler([
-            'mode' => 'mysql',
-            'mysql_conn' => $mysql_conn,
-            'buffer_handle' => $buffer_handle,
+            'output' => $output,
         ]);
 
         $handler->handle([
@@ -207,10 +202,9 @@ final class SqlResponseHandlerTest extends TestCase
             'body' => 'INSERT INTO t ',
         ]);
 
-        fflush($buffer_handle);
-        $this->assertSame('INSERT INTO t ', file_get_contents($this->buffer_file));
+        $this->assertSame('INSERT INTO t ', $output->pending_buffer());
         $this->assertSame('INSERT INTO t ', $handler->sql_buffer());
-        $this->assertSame([], $mysql_conn->queries);
+        $this->assertSame([], $output->queries);
 
         $handler->handle([
             'headers' => [
@@ -220,96 +214,185 @@ final class SqlResponseHandlerTest extends TestCase
             'body' => 'VALUES (1);',
         ]);
 
-        fflush($buffer_handle);
-        rewind($buffer_handle);
-        $buffer_contents = stream_get_contents($buffer_handle);
-        fclose($buffer_handle);
-
-        $this->assertSame(['INSERT INTO t VALUES (1);'], $mysql_conn->queries);
+        $this->assertSame(['INSERT INTO t VALUES (1);'], $output->queries);
         $this->assertSame('', $handler->sql_buffer());
-        $this->assertSame('', $buffer_contents);
+        $this->assertSame('', $output->pending_buffer());
     }
 
     private function make_handler(array $overrides = []): SqlResponseHandler
     {
         $context = $overrides['context'] ?? new StreamingContext();
+        $checkpoint = DbPullCheckpoint::fresh();
 
         return new SqlResponseHandler(
-            $overrides['mode'] ?? 'file',
             $overrides['cursor'] ?? null,
             $context,
-            $overrides['sql_handle'] ?? null,
-            $overrides['mysql_conn'] ?? null,
-            $overrides['buffer_handle'] ?? null,
-            $overrides['sql_buffer'] ?? '',
-            $overrides['sql_bytes_written'] ?? 0,
+            $overrides['output'] ?? new RecordingSqlOutputSink($overrides['sql_bytes_written'] ?? 0),
             $overrides['query_stream'] ?? null,
             $overrides['domain_collector'] ?? null,
             $overrides['domain_scanner'] ?? null,
             $overrides['sql_statements_counted'] ?? 0,
             $overrides['chunks_since_save'] ?? 0,
             $overrides['save_every'] ?? 50,
-            fn(): bool => false,
-            function (
-                ?string $cursor,
-                int $sql_bytes_written,
-                int $sql_statements_counted
-            ): void {
-                $this->saved[] = compact(
-                    'cursor',
-                    'sql_bytes_written',
-                    'sql_statements_counted',
-                );
-            },
-            function (array $domains): void {
-                $this->persisted_domains[] = $domains;
-            },
-            function (int $sql_bytes_written): void {
-                $this->progress[] = $sql_bytes_written;
-            },
-            function (array $chunk, string $phase): void {
-                $this->progress[] = compact('chunk', 'phase');
-            },
-            function (
-                array $chunk,
-                string $phase,
-                StreamingContext $context
-            ): void {
-                $this->errors[] = compact('chunk', 'phase', 'context');
-            },
-            function (array $progress): void {
-                $this->completion_progress[] = $progress;
-            },
-            function (): void {
-            },
+            $checkpoint,
+            new TestSqlShutdownToken(),
+            new RecordingDbPullCheckpointStore($this->saved),
+            new RecordingSqlDomainStore($this->persisted_domains),
+            new RecordingSqlStreamObserver(
+                $this->progress,
+                $this->errors,
+                $this->completion_progress,
+            ),
         );
     }
 }
 
-final class FakeSqlMysqlConnection
+class RecordingSqlOutputSink implements SqlOutputSink
 {
-    public string $error = '';
-    public int $errno = 0;
+    private int $bytes_written;
+    private string $buffer = '';
+    public array $writes = [];
+
+    public function __construct(int $bytes_written = 0)
+    {
+        $this->bytes_written = $bytes_written;
+    }
+
+    public function bytes_written(): int
+    {
+        return $this->bytes_written;
+    }
+
+    public function pending_buffer(): string
+    {
+        return $this->buffer;
+    }
+
+    public function write(string $sql, bool $query_complete): void
+    {
+        $this->writes[] = compact('sql', 'query_complete');
+        $this->bytes_written += strlen($sql);
+    }
+
+    public function flush(): void
+    {
+    }
+
+    public function close(): void
+    {
+    }
+}
+
+final class BufferedQuerySqlOutputSink extends RecordingSqlOutputSink
+{
+    private string $buffer = '';
     public array $queries = [];
 
-    public function multi_query(string $sql): bool
+    public function pending_buffer(): string
     {
-        $this->queries[] = $sql;
-        return true;
+        return $this->buffer;
     }
 
-    public function store_result()
+    public function write(string $sql, bool $query_complete): void
     {
-        return null;
-    }
+        parent::write($sql, $query_complete);
+        $this->buffer .= $sql;
 
-    public function more_results(): bool
+        if ($query_complete) {
+            $this->queries[] = $this->buffer;
+            $this->buffer = '';
+        }
+    }
+}
+
+final class TestSqlShutdownToken implements SqlShutdownToken
+{
+    public function is_shutdown_requested(): bool
     {
         return false;
     }
+}
 
-    public function next_result(): bool
+final class RecordingDbPullCheckpointStore implements DbPullCheckpointStore
+{
+    /** @var array<int, array<string, mixed>> */
+    private $saved;
+
+    public function __construct(array &$saved)
     {
-        return false;
+        $this->saved =& $saved;
+    }
+
+    public function get(): DbPullCheckpoint
+    {
+        return DbPullCheckpoint::fresh();
+    }
+
+    public function save(DbPullCheckpoint $checkpoint): void
+    {
+        $this->saved[] = [
+            'cursor' => $checkpoint->cursor,
+            'sql_bytes_written' => $checkpoint->sql_bytes,
+            'sql_statements_counted' => $checkpoint->sql_statements_counted,
+        ];
+    }
+}
+
+final class RecordingSqlDomainStore implements SqlDomainStore
+{
+    /** @var array<int, array<int, string>> */
+    private $persisted;
+
+    public function __construct(array &$persisted)
+    {
+        $this->persisted =& $persisted;
+    }
+
+    public function load(): array
+    {
+        return [];
+    }
+
+    public function persist(array $domains): void
+    {
+        $this->persisted[] = $domains;
+    }
+}
+
+final class RecordingSqlStreamObserver implements SqlStreamObserver
+{
+    private $progress;
+    private $errors;
+    private $completion_progress;
+
+    public function __construct(array &$progress, array &$errors, array &$completion_progress)
+    {
+        $this->progress =& $progress;
+        $this->errors =& $errors;
+        $this->completion_progress =& $completion_progress;
+    }
+
+    public function on_sql_progress(int $sql_bytes_written): void
+    {
+        $this->progress[] = $sql_bytes_written;
+    }
+
+    public function on_progress_chunk(array $chunk, string $phase): void
+    {
+        $this->progress[] = compact('chunk', 'phase');
+    }
+
+    public function on_error_chunk(array $chunk, string $phase, StreamingContext $context): void
+    {
+        $this->errors[] = compact('chunk', 'phase', 'context');
+    }
+
+    public function on_completion_progress(array $progress): void
+    {
+        $this->completion_progress[] = $progress;
+    }
+
+    public function on_stdout_write_failed(): void
+    {
     }
 }

@@ -7,6 +7,8 @@ use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Index\IndexStore;
+use Reprint\Importer\Observability\NullAuditLogger;
+use Reprint\Importer\Observability\NullMachineEventEmitter;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\MultipartStreamParser;
 use Reprint\Importer\Protocol\StreamingContext;
@@ -205,8 +207,7 @@ class FileBodyStreamingTest extends TestCase
             new LocalImportFilesystem(
                 $this->tempDir . '/fs-root',
                 'error',
-                function (string $message, bool $to_console): void {
-                },
+                new NullAuditLogger(),
             ),
             new IndexStore(
                 $this->tempDir . '/state/.import-index.jsonl',
@@ -222,10 +223,8 @@ class FileBodyStreamingTest extends TestCase
             null,
             null,
             FilesPullCheckpoint::fresh(),
-            function (string $message, bool $to_console = true): void {
-            },
-            function (array $progress, bool $force = false): void {
-            },
+            new NullAuditLogger(),
+            new NullMachineEventEmitter(),
         );
     }
 

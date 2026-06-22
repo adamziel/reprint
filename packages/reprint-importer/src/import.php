@@ -49,6 +49,7 @@ require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
 // Small reusable helpers with no ImportClient dependency.
 require_once __DIR__ . '/lib/support/load.php';
+require_once __DIR__ . '/lib/observability/load.php';
 require_once __DIR__ . '/lib/filesystem/load.php';
 require_once __DIR__ . '/lib/index/load.php';
 require_once __DIR__ . '/lib/file-sync/load.php';
@@ -66,6 +67,7 @@ require_once __DIR__ . '/lib/input/load.php';
 require_once __DIR__ . '/lib/output/load.php';
 
 // Pull command — orchestrates the lower-level commands into a pipeline
+require_once __DIR__ . '/lib/pull/interface-pull-runtime.php';
 require_once __DIR__ . '/lib/pull/class-pull-checkpoint.php';
 require_once __DIR__ . '/lib/pull/class-pull.php';
 

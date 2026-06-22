@@ -4,7 +4,12 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\RemoteFileIndexGateway;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
+use Reprint\Importer\FileSync\Port\SymlinkTargetObserver;
 use Reprint\Importer\FileSync\SymlinkTargetIndexer;
+use Reprint\Importer\Observability\AuditLogger;
 use RuntimeException;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
@@ -12,12 +17,12 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 final class SymlinkTargetIndexerTest extends TestCase
 {
     private string $temp_dir;
-    private string $remote_index_file;
-    private array $downloaded = [];
-    private array $saved_states = [];
-    private array $audit = [];
-    private array $lifecycle = [];
-    private array $progress = [];
+    public string $remote_index_file;
+    public array $downloaded = [];
+    public array $saved_states = [];
+    public array $audit = [];
+    public array $lifecycle = [];
+    public array $progress = [];
 
     protected function setUp(): void
     {
@@ -81,26 +86,11 @@ final class SymlinkTargetIndexerTest extends TestCase
     {
         return new SymlinkTargetIndexer(
             $this->remote_index_file,
-            function (string $directory) use ($errors): bool {
-                $this->downloaded[] = $directory;
-                if (isset($errors[$directory])) {
-                    throw $errors[$directory];
-                }
-                return true;
-            },
-            function (FilesPullCheckpoint $checkpoint): void {
-                $this->saved_states[] = clone $checkpoint;
-            },
-            fn(): bool => false,
-            function (string $message, bool $to_console): void {
-                $this->audit[] = [$message, $to_console];
-            },
-            function (string $message): void {
-                $this->lifecycle[] = $message;
-            },
-            function (array $progress): void {
-                $this->progress[] = $progress;
-            },
+            new SymlinkTargetIndexerTestRemoteIndex($this, $errors),
+            new SymlinkTargetIndexerTestCheckpointStore($this),
+            new SymlinkTargetIndexerTestShutdownToken(),
+            new SymlinkTargetIndexerTestAuditLogger($this),
+            new SymlinkTargetIndexerTestObserver($this),
         );
     }
 
@@ -119,5 +109,105 @@ final class SymlinkTargetIndexerTest extends TestCase
             ], JSON_UNESCAPED_SLASHES) . "\n",
             FILE_APPEND,
         );
+    }
+}
+
+final class SymlinkTargetIndexerTestRemoteIndex implements RemoteFileIndexGateway
+{
+    private SymlinkTargetIndexerTest $test;
+    private array $errors;
+
+    public function __construct(SymlinkTargetIndexerTest $test, array $errors)
+    {
+        $this->test = $test;
+        $this->errors = $errors;
+    }
+
+    public function download(FilesPullCheckpoint $checkpoint, ?string $list_dir_override = null): bool
+    {
+        $directory = (string) $list_dir_override;
+        $this->test->downloaded[] = $directory;
+        if (isset($this->errors[$directory])) {
+            throw $this->errors[$directory];
+        }
+        return true;
+    }
+}
+
+final class SymlinkTargetIndexerTestCheckpointStore implements FilesPullCheckpointStore
+{
+    private SymlinkTargetIndexerTest $test;
+
+    public function __construct(SymlinkTargetIndexerTest $test)
+    {
+        $this->test = $test;
+    }
+
+    public function get(): FilesPullCheckpoint
+    {
+        return FilesPullCheckpoint::fresh();
+    }
+
+    public function save(FilesPullCheckpoint $checkpoint): void
+    {
+        $this->test->saved_states[] = clone $checkpoint;
+    }
+}
+
+final class SymlinkTargetIndexerTestShutdownToken implements ShutdownToken
+{
+    public function is_shutdown_requested(): bool
+    {
+        return false;
+    }
+}
+
+final class SymlinkTargetIndexerTestAuditLogger implements AuditLogger
+{
+    private SymlinkTargetIndexerTest $test;
+
+    public function __construct(SymlinkTargetIndexerTest $test)
+    {
+        $this->test = $test;
+    }
+
+    public function record(string $message, bool $to_console = true): void
+    {
+        $this->test->audit[] = [$message, $to_console];
+    }
+
+    public function path(): string
+    {
+        return '';
+    }
+}
+
+final class SymlinkTargetIndexerTestObserver implements SymlinkTargetObserver
+{
+    private SymlinkTargetIndexerTest $test;
+
+    public function __construct(SymlinkTargetIndexerTest $test)
+    {
+        $this->test = $test;
+    }
+
+    public function on_following_directory(string $directory): void
+    {
+        $this->test->lifecycle[] = "Following symlink target: {$directory}\n";
+        $this->test->progress[] = [
+            'type' => 'symlink_follow',
+            'directory' => $directory,
+            'message' => "Following symlink target: {$directory}",
+        ];
+    }
+
+    public function on_rejected_directory(string $directory): void
+    {
+        $this->test->lifecycle[] = "  Skipped (server rejected): {$directory}\n";
+        $this->test->progress[] = [
+            'type' => 'symlink_follow_rejected',
+            'directory' => $directory,
+            'message' => "Skipped (server rejected): {$directory}",
+        ];
     }
 }

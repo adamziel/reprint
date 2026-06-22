@@ -6,6 +6,10 @@ use PHPUnit\Framework\TestCase;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FetchListExecutor;
+use Reprint\Importer\FileSync\FilesPullCheckpoint;
+use Reprint\Importer\FileSync\Port\FetchBatchDownloader;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\Observability\AuditLogger;
 use RuntimeException;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
@@ -51,7 +55,7 @@ final class ImportFetchListExecutorTest extends TestCase
             },
         );
 
-        $complete = $executor->run($list, 'fetch', FetchCheckpoint::fresh());
+        $complete = $executor->run($list, 'fetch', FilesPullCheckpoint::fresh());
 
         $this->assertTrue($complete);
         $this->assertSame(['/a.txt', '/b.txt'], $downloaded);
@@ -68,7 +72,7 @@ final class ImportFetchListExecutorTest extends TestCase
         $list = $this->write_list(['/a.txt']);
         $executor = $this->make_executor(fn(): bool => false);
 
-        $complete = $executor->run($list, 'fetch', FetchCheckpoint::fresh());
+        $complete = $executor->run($list, 'fetch', FilesPullCheckpoint::fresh());
 
         $this->assertFalse($complete);
         $this->assertSame(1, $executor->download_list_total());
@@ -84,7 +88,7 @@ final class ImportFetchListExecutorTest extends TestCase
         });
 
         try {
-            $executor->run($list, 'fetch', FetchCheckpoint::fresh());
+            $executor->run($list, 'fetch', FilesPullCheckpoint::fresh());
             $this->fail('Expected RuntimeException');
         } catch (RuntimeException $e) {
             $this->assertSame('network failed', $e->getMessage());
@@ -101,12 +105,59 @@ final class ImportFetchListExecutorTest extends TestCase
             null,
             7,
             4 * 1024 * 1024,
-            $download_batch,
-            function (string $state_key, FetchCheckpoint $fetch_checkpoint): void {
-                $this->saved_states[$state_key] = clone $fetch_checkpoint;
+            new class($download_batch) implements FetchBatchDownloader {
+                /** @var callable */
+                private $download_batch;
+
+                public function __construct(callable $download_batch)
+                {
+                    $this->download_batch = $download_batch;
+                }
+
+                public function download_batch(
+                    string $batch_file,
+                    ?string $cursor,
+                    string $state_key
+                ): bool {
+                    return (bool) ($this->download_batch)($batch_file, $cursor, $state_key);
+                }
             },
-            function (string $message): void {
-                $this->audit[] = $message;
+            new class($this->saved_states) implements FilesPullCheckpointStore {
+                private array $saved_states;
+
+                public function __construct(array &$saved_states)
+                {
+                    $this->saved_states = &$saved_states;
+                }
+
+                public function get(): FilesPullCheckpoint
+                {
+                    return FilesPullCheckpoint::fresh();
+                }
+
+                public function save(FilesPullCheckpoint $checkpoint): void
+                {
+                    $this->saved_states['fetch'] = clone $checkpoint->fetch;
+                    $this->saved_states['fetch_skipped'] = clone $checkpoint->fetch_skipped;
+                }
+            },
+            new class($this->audit) implements AuditLogger {
+                private array $audit;
+
+                public function __construct(array &$audit)
+                {
+                    $this->audit = &$audit;
+                }
+
+                public function record(string $message, bool $to_console = true): void
+                {
+                    $this->audit[] = $message;
+                }
+
+                public function path(): string
+                {
+                    return '';
+                }
             },
         );
     }

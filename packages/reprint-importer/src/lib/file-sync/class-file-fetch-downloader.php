@@ -2,92 +2,41 @@
 
 namespace Reprint\Importer\FileSync;
 
+use Reprint\Importer\FileSync\Port\FileIndexGateway;
+use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
+use Reprint\Importer\FileSync\Port\FileSyncStreamObserver;
+use Reprint\Importer\FileSync\Port\FilesPullCheckpointStore;
+use Reprint\Importer\FileSync\Port\FilesPullTimeoutPolicy;
+use Reprint\Importer\FileSync\Port\ShutdownToken;
+use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;
 
 final class FileFetchDownloader
 {
-    /** @var callable */
-    private $build_url;
-
-    /** @var callable */
-    private $fetch_streaming;
-
-    /** @var callable */
-    private $get_tuned_params;
-
-    /** @var callable */
-    private $should_stop;
-
-    /** @var callable */
-    private $save_state;
-
-    /** @var callable */
-    private $handle_metadata;
-
-    /** @var callable */
-    private $handle_file;
-
-    /** @var callable */
-    private $handle_directory;
-
-    /** @var callable */
-    private $handle_symlink;
-
-    /** @var callable */
-    private $handle_error;
-
-    /** @var callable */
-    private $handle_progress;
-
-    /** @var callable */
-    private $handle_completion_progress;
-
-    /** @var callable */
-    private $assert_can_retry_timeout;
-
-    /** @var callable */
-    private $finalize_request;
-
-    /** @var callable */
-    private $finalize_index_updates;
-
-    /** @var callable */
-    private $audit;
+    private FileSyncStreamClient $stream;
+    private ShutdownToken $shutdown;
+    private FilesPullCheckpointStore $checkpoints;
+    private FileSyncStreamObserver $observer;
+    private FilesPullTimeoutPolicy $timeout_policy;
+    private FileIndexGateway $index;
+    private AuditLogger $audit;
 
     public function __construct(
-        callable $build_url,
-        callable $fetch_streaming,
-        callable $get_tuned_params,
-        callable $should_stop,
-        callable $save_state,
-        callable $handle_metadata,
-        callable $handle_file,
-        callable $handle_directory,
-        callable $handle_symlink,
-        callable $handle_error,
-        callable $handle_progress,
-        callable $handle_completion_progress,
-        callable $assert_can_retry_timeout,
-        callable $finalize_request,
-        callable $finalize_index_updates,
-        callable $audit
+        FileSyncStreamClient $stream,
+        ShutdownToken $shutdown,
+        FilesPullCheckpointStore $checkpoints,
+        FileSyncStreamObserver $observer,
+        FilesPullTimeoutPolicy $timeout_policy,
+        FileIndexGateway $index,
+        AuditLogger $audit
     ) {
-        $this->build_url = $build_url;
-        $this->fetch_streaming = $fetch_streaming;
-        $this->get_tuned_params = $get_tuned_params;
-        $this->should_stop = $should_stop;
-        $this->save_state = $save_state;
-        $this->handle_metadata = $handle_metadata;
-        $this->handle_file = $handle_file;
-        $this->handle_directory = $handle_directory;
-        $this->handle_symlink = $handle_symlink;
-        $this->handle_error = $handle_error;
-        $this->handle_progress = $handle_progress;
-        $this->handle_completion_progress = $handle_completion_progress;
-        $this->assert_can_retry_timeout = $assert_can_retry_timeout;
-        $this->finalize_request = $finalize_request;
-        $this->finalize_index_updates = $finalize_index_updates;
+        $this->stream = $stream;
+        $this->shutdown = $shutdown;
+        $this->checkpoints = $checkpoints;
+        $this->observer = $observer;
+        $this->timeout_policy = $timeout_policy;
+        $this->index = $index;
         $this->audit = $audit;
     }
 
@@ -131,16 +80,16 @@ final class FileFetchDownloader
             }
         }
 
-        $params = (array) ($this->get_tuned_params)("file_fetch");
+        $params = $this->stream->tuned_params("file_fetch");
         $export_dirs = $config["export_dirs"];
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
         }
 
-        $url = (string) ($this->build_url)("file_fetch", $cursor, $params);
+        $url = $this->stream->build_url("file_fetch", $cursor, $params);
         $post_data = $config["post_data"];
-        ($this->audit)("Downloading file fetch from {$url}", true);
-        ($this->audit)("POST data: " . json_encode($post_data), true);
+        $this->audit->record("Downloading file fetch from {$url}", true);
+        $this->audit->record("POST data: " . json_encode($post_data), true);
 
         $context = new StreamingContext();
         $context->file_handle = null;
@@ -152,7 +101,7 @@ final class FileFetchDownloader
             if ($context->file_handle) {
                 $context->file_path = $tracked_file;
                 $context->file_bytes_written = $tracked_bytes;
-                ($this->audit)(
+                $this->audit->record(
                     sprintf(
                         "RESUME FILE | Re-opened %s at %d bytes for continued download",
                         $tracked_file,
@@ -168,27 +117,17 @@ final class FileFetchDownloader
             $state_key,
             $context,
             $config["save_every"],
-            $this->should_stop,
-            function (string $state_key, ?string $cursor, StreamingContext $context) use ($checkpoint): void {
-                $this->save_file_fetch_checkpoint($checkpoint, $state_key, $cursor, $context);
-            },
-            $this->handle_metadata,
-            $this->handle_file,
-            $this->handle_directory,
-            $this->handle_symlink,
-            function (string $path): void {
-                ($this->audit)("Missing on server: {$path}", true);
-            },
-            $this->handle_error,
-            $this->handle_progress,
-            $this->handle_completion_progress,
+            $checkpoint,
+            $this->shutdown,
+            $this->checkpoints,
+            $this->observer,
         );
         $context->on_chunk = [$response_handler, 'handle'];
 
         $cursor_before = $cursor;
         $request_start = microtime(true);
         try {
-            ($this->fetch_streaming)(
+            $this->stream->fetch_streaming(
                 $url,
                 $cursor,
                 $context,
@@ -197,12 +136,17 @@ final class FileFetchDownloader
             );
         } catch (CurlTimeoutException $e) {
             $cursor = $response_handler->cursor();
-            ($this->assert_can_retry_timeout)("file_fetch", $cursor_before, $cursor);
+            $this->timeout_policy->assert_can_retry(
+                $checkpoint,
+                "file_fetch",
+                $cursor_before,
+                $cursor,
+            );
             $fetch_checkpoint->cursor = $cursor;
-            ($this->finalize_index_updates)();
+            $this->index->finalize_updates();
             $this->track_current_file_if_active($checkpoint, $context);
             $checkpoint->status = "partial";
-            ($this->save_state)($checkpoint);
+            $this->checkpoints->save($checkpoint);
             return false;
         }
 
@@ -211,28 +155,17 @@ final class FileFetchDownloader
         $checkpoint->consecutive_timeouts = 0;
         $wall_time = microtime(true) - $request_start;
 
-        ($this->finalize_request)(
+        $this->stream->finalize_request(
             "file_fetch",
             $wall_time,
             $context->response_stats ?? [],
         );
         $fetch_checkpoint->cursor = $cursor;
-        ($this->finalize_index_updates)();
+        $this->index->finalize_updates();
         $this->track_current_file($checkpoint, $context);
-        ($this->save_state)($checkpoint);
+        $this->checkpoints->save($checkpoint);
 
         return $complete;
-    }
-
-    private function save_file_fetch_checkpoint(
-        FilesPullCheckpoint $checkpoint,
-        string $state_key,
-        ?string $cursor,
-        StreamingContext $context
-    ): void {
-        $checkpoint->fetch_checkpoint($state_key)->cursor = $cursor;
-        $this->track_current_file($checkpoint, $context);
-        ($this->save_state)($checkpoint);
     }
 
     private function track_current_file(
