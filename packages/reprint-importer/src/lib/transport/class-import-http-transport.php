@@ -11,76 +11,32 @@ use RuntimeException;
 
 final class ImportHttpTransport
 {
-    private ImportOutput $output;
+    private ?ImportOutput $output;
 
-    /** @var callable */
-    private $audit;
+    private ?int $last_curl_errno = null;
+    private bool $last_curl_timeout = false;
+    private ?int $last_http_code = null;
+    private ?string $last_error_code = null;
+    private ?int $last_error_body_length = null;
 
-    /** @var callable */
-    private $output_progress;
-
-    /** @var callable */
-    private $user_agent;
-
-    /** @var callable */
-    private $hmac_headers;
-
-    /** @var callable */
-    private $has_hmac_secret;
-
-    /** @var callable */
-    private $set_error_code;
-
-    /** @var callable */
-    private $handle_tuner_error;
-
-    /** @var callable */
-    private $streaming_heartbeat;
-
-    /** @var int|null Last curl error number, for retry/diagnostic logic. */
-    private $last_curl_errno = null;
-
-    /** @var bool Whether the last curl request timed out. */
-    private $last_curl_timeout = false;
-
-    public function __construct(
-        ImportOutput $output,
-        callable $audit,
-        callable $output_progress,
-        callable $user_agent,
-        callable $hmac_headers,
-        callable $has_hmac_secret,
-        callable $set_error_code,
-        callable $handle_tuner_error,
-        callable $streaming_heartbeat
-    ) {
+    public function __construct(?ImportOutput $output = null)
+    {
         $this->output = $output;
-        $this->audit = $audit;
-        $this->output_progress = $output_progress;
-        $this->user_agent = $user_agent;
-        $this->hmac_headers = $hmac_headers;
-        $this->has_hmac_secret = $has_hmac_secret;
-        $this->set_error_code = $set_error_code;
-        $this->handle_tuner_error = $handle_tuner_error;
-        $this->streaming_heartbeat = $streaming_heartbeat;
     }
 
     /**
      * Fetch a JSON response for a lightweight request.
      */
-    public function fetch_json(string $url): array
-    {
+    public function fetch_json(
+        string $url,
+        array $headers,
+        bool $has_hmac_secret
+    ): array {
         $this->reset_curl_state();
-        $this->audit("HTTP_REQUEST | GET | {$url}", false);
 
         $ch = curl_init($url);
         \reprint_apply_curl_proxy_from_env($ch);
         \reprint_apply_curl_ca_bundle($ch);
-
-        $headers = [
-            ...$this->base_headers("application/json"),
-            ...$this->hmac_headers(''),
-        ];
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
@@ -91,7 +47,7 @@ final class ImportHttpTransport
             CURLOPT_NOPROGRESS => false,
             CURLOPT_PROGRESSFUNCTION =>
                 function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
-                    $this->output->tick_spinner();
+                    $this->tick_spinner();
                     return 0;
                 },
         ]);
@@ -117,11 +73,17 @@ final class ImportHttpTransport
         }
 
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $this->last_http_code = $http_code;
         $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
         @curl_close($ch);
 
         if ($http_code !== 200) {
-            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
+            $diagnosis = $this->diagnose_http_error(
+                $http_code,
+                $body,
+                $redirect_url,
+                $has_hmac_secret,
+            );
             return [
                 "ok" => false,
                 "http_code" => $http_code,
@@ -139,13 +101,19 @@ final class ImportHttpTransport
         if ($body !== false && $body !== "") {
             $json = json_decode($body, true);
             if ($json === null && json_last_error() !== JSON_ERROR_NONE) {
-                $diagnosis = $this->diagnose_http_error(200, $body);
+                $diagnosis = $this->diagnose_http_error(
+                    200,
+                    $body,
+                    null,
+                    $has_hmac_secret,
+                );
                 if ($diagnosis['code'] === 'HTML_RESPONSE') {
                     $json_error = $this->format_diagnosed_error($diagnosis);
                     $error_code = $diagnosis['code'];
                 } else {
                     $json_error = "Invalid JSON: " . json_last_error_msg();
                     $error_code = 'INVALID_JSON';
+                    $this->last_error_code = $error_code;
                 }
             }
         }
@@ -166,30 +134,12 @@ final class ImportHttpTransport
      */
     public function fetch_streaming(
         string $url,
-        ?string $cursor,
         StreamingContext $context,
+        array $headers,
         ?array $post_data = null,
-        ?string $endpoint = null
+        bool $has_hmac_secret = false
     ): void {
         $this->reset_curl_state();
-
-        $log_parts = ["HTTP_REQUEST", $post_data ? "POST" : "GET", $url];
-        if ($post_data && isset($post_data["file_list"])) {
-            $file_list_part = $post_data["file_list"];
-            if ($file_list_part instanceof CURLFile) {
-                $upload_path = $file_list_part->getFilename();
-                $upload_size = is_string($upload_path)
-                    ? filesize($upload_path)
-                    : false;
-                $upload_size = $upload_size === false ? 0 : $upload_size;
-                $log_parts[] = "file_list_file=" . $upload_size . "b";
-            } else {
-                $log_parts[] =
-                    "file_list=" . strlen((string) $file_list_part) . "b";
-            }
-        }
-
-        $this->audit(implode(" | ", $log_parts), false);
 
         $ch = curl_init($url);
         \reprint_apply_curl_proxy_from_env($ch);
@@ -197,52 +147,16 @@ final class ImportHttpTransport
 
         $parser = null;
         $current_chunk = null;
-        $bytes_received = 0;
-        $last_heartbeat = microtime(true);
-        $last_progress_check = microtime(true);
-        $last_bytes_received = 0;
         $error_body = "";
 
-        $headers = [
-            ...$this->base_headers("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
-            "Upgrade-Insecure-Requests: 1",
-            "Sec-Fetch-Dest: document",
-            "Sec-Fetch-Mode: navigate",
-            "Sec-Fetch-Site: none",
-            "Sec-Fetch-User: ?1",
-        ];
-
-        if ($cursor) {
-            $headers[] = "X-Export-Cursor: {$cursor}";
-        }
-
-        $body_for_signing = '';
         if ($post_data !== null) {
             curl_setopt($ch, CURLOPT_POST, true);
-            $has_file = false;
-            foreach ($post_data as $value) {
-                if ($value instanceof CURLFile) {
-                    $has_file = true;
-                    break;
-                }
-            }
-            if ($has_file) {
-                foreach ($post_data as $value) {
-                    if ($value instanceof CURLFile) {
-                        $content = file_get_contents($value->getFilename());
-                        if ($content !== false) {
-                            $body_for_signing .= $content;
-                        }
-                    }
-                }
+            if (self::post_data_has_file($post_data)) {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
             } else {
-                $body_for_signing = http_build_query($post_data);
-                curl_setopt($ch, CURLOPT_POSTFIELDS, $body_for_signing);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, self::body_for_signing($post_data));
             }
         }
-
-        array_push($headers, ...$this->hmac_headers($body_for_signing));
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
@@ -252,7 +166,7 @@ final class ImportHttpTransport
             CURLOPT_NOPROGRESS => false,
             CURLOPT_PROGRESSFUNCTION =>
                 function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) {
-                    $this->output->tick_spinner();
+                    $this->tick_spinner();
                     return 0;
                 },
             CURLOPT_HTTPHEADER => $headers,
@@ -264,39 +178,12 @@ final class ImportHttpTransport
                 $len = strlen($header_line);
 
                 if (stripos($header_line, "Content-Type:") === 0) {
-                    $pos = stripos($header_line, "boundary=");
-                    if ($pos !== false) {
-                        $boundary_start = $pos + 9;
-                        $boundary_value = trim(substr($header_line, $boundary_start));
-
-                        if ($boundary_value !== '' && $boundary_value[0] === '"') {
-                            $quote_end = strpos($boundary_value, '"', 1);
-                            if ($quote_end !== false) {
-                                $boundary_value = substr(
-                                    $boundary_value,
-                                    1,
-                                    $quote_end - 1
-                                );
-                            }
-                        } else {
-                            $end_pos = strcspn($boundary_value, ";,\r\n \t");
-                            $boundary_value = substr(
-                                $boundary_value,
-                                0,
-                                $end_pos
-                            );
-                        }
-
-                        if ($boundary_value !== "") {
-                            $this->audit(
-                                "Creating multipart parser with boundary: $boundary_value",
-                                false
-                            );
-                            $parser = new MultipartStreamParser(
-                                $boundary_value,
-                                $this->make_chunk_handler($context, $current_chunk)
-                            );
-                        }
+                    $boundary_value = $this->extract_boundary($header_line);
+                    if ($boundary_value !== "") {
+                        $parser = new MultipartStreamParser(
+                            $boundary_value,
+                            $this->make_chunk_handler($context, $current_chunk)
+                        );
                     }
                 }
 
@@ -306,10 +193,6 @@ final class ImportHttpTransport
                 &$parser,
                 &$current_chunk,
                 $context,
-                &$bytes_received,
-                &$last_heartbeat,
-                &$last_progress_check,
-                &$last_bytes_received,
                 &$error_body
             ) {
                 if (!$parser) {
@@ -325,10 +208,6 @@ final class ImportHttpTransport
                             if (strncmp($line, "--boundary-", 11) === 0) {
                                 $boundary = substr($line, 2);
                                 if ($boundary !== "") {
-                                    $this->audit(
-                                        "Detected boundary in body (no Content-Type): {$boundary}",
-                                        false
-                                    );
                                     $parser = new MultipartStreamParser(
                                         $boundary,
                                         $this->make_chunk_handler($context, $current_chunk)
@@ -339,88 +218,23 @@ final class ImportHttpTransport
                             }
                         }
                     }
-
-                    static $logged_no_parser = false;
-                    if (!$logged_no_parser && strlen($error_body) > 0) {
-                        $this->audit(
-                            "No parser, accumulating error body (first 500 chars): " .
-                                substr($error_body, 0, 500),
-                            false
-                        );
-                        $logged_no_parser = true;
-                    }
                 }
 
                 if ($parser) {
                     $parser->feed($data);
                 }
 
-                $bytes_received += strlen($data);
-                $now = microtime(true);
-
-                if ($now - $last_progress_check >= 5.0) {
-                    $bytes_since_check = $bytes_received - $last_bytes_received;
-                    $rate = $bytes_since_check / 5.0;
-
-                    $this->output_progress([
-                        "progress_check" => true,
-                        "bytes_received" => $bytes_received,
-                        "bytes_last_5s" => $bytes_since_check,
-                        "rate_bps" => round($rate),
-                    ], true);
-
-                    if ($bytes_since_check < 1024 && $bytes_received > 0) {
-                        $this->audit(
-                            "Warning: Slow transfer detected - {$bytes_since_check} bytes in 5 seconds",
-                            false
-                        );
-                    }
-
-                    $last_progress_check = $now;
-                    $last_bytes_received = $bytes_received;
-                }
-
-                if ($now - $last_heartbeat >= 1.0) {
-                    $heartbeat = [
-                        "heartbeat" => true,
-                        "bytes_received" => $bytes_received,
-                    ];
-                    $heartbeat = array_merge(
-                        $heartbeat,
-                        (array) ($this->streaming_heartbeat)()
-                    );
-                    $this->output_progress($heartbeat, true);
-                    $last_heartbeat = $now;
-                }
-
                 return strlen($data);
             },
         ]);
 
-        $this->audit("Executing curl request...", false);
-        $this->output_progress(["debug" => "Waiting for server response..."]);
-        $result = curl_exec($ch);
-        $this->audit(
-            "curl_exec completed, result=" .
-                ($result === false ? "false" : "true"),
-            false
-        );
+        curl_exec($ch);
 
         try {
-            try {
-                $this->check_curl_error($ch);
-            } catch (RuntimeException $curl_error) {
-                if ($endpoint !== null) {
-                    $this->handle_tuner_error($endpoint, [
-                        "http_code" => 0,
-                        "timeout" => $this->last_curl_timeout,
-                        "curl_errno" => $this->last_curl_errno,
-                    ]);
-                }
-                throw $curl_error;
-            }
+            $this->check_curl_error($ch);
 
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $this->last_http_code = $http_code;
             $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
             $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
             $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
@@ -435,21 +249,13 @@ final class ImportHttpTransport
         $context->response_stats["total_time"] = $total_time;
 
         if ($http_code !== 200) {
-            if ($endpoint !== null) {
-                $this->handle_tuner_error($endpoint, [
-                    "http_code" => $http_code,
-                    "timeout" => false,
-                    "curl_errno" => 0,
-                ]);
-            }
-
-            $this->audit(
-                "HTTP error {$http_code} | error_body length: " .
-                    strlen($error_body),
-                true
+            $this->last_error_body_length = strlen($error_body);
+            $diagnosis = $this->diagnose_http_error(
+                $http_code,
+                $error_body,
+                $redirect_url,
+                $has_hmac_secret,
             );
-
-            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url);
             $error_msg = $this->format_diagnosed_error($diagnosis);
 
             if ($error_body) {
@@ -475,6 +281,31 @@ final class ImportHttpTransport
                 "Invalid response: missing completion chunk from server."
             );
         }
+    }
+
+    public static function body_for_signing(?array $post_data): string
+    {
+        if ($post_data === null) {
+            return '';
+        }
+
+        if (!self::post_data_has_file($post_data)) {
+            return http_build_query($post_data);
+        }
+
+        $body = '';
+        foreach ($post_data as $value) {
+            if (!$value instanceof CURLFile) {
+                continue;
+            }
+
+            $content = file_get_contents($value->getFilename());
+            if ($content !== false) {
+                $body .= $content;
+            }
+        }
+
+        return $body;
     }
 
     public function make_chunk_handler(
@@ -550,10 +381,38 @@ final class ImportHttpTransport
         };
     }
 
+    public function last_curl_errno(): ?int
+    {
+        return $this->last_curl_errno;
+    }
+
+    public function last_curl_timed_out(): bool
+    {
+        return $this->last_curl_timeout;
+    }
+
+    public function last_http_code(): ?int
+    {
+        return $this->last_http_code;
+    }
+
+    public function last_error_code(): ?string
+    {
+        return $this->last_error_code;
+    }
+
+    public function last_error_body_length(): ?int
+    {
+        return $this->last_error_body_length;
+    }
+
     private function reset_curl_state(): void
     {
         $this->last_curl_errno = null;
         $this->last_curl_timeout = false;
+        $this->last_http_code = null;
+        $this->last_error_code = null;
+        $this->last_error_body_length = null;
     }
 
     private function check_curl_error($ch): void
@@ -574,47 +433,64 @@ final class ImportHttpTransport
         throw new RuntimeException("cURL error ($errno): {$error}");
     }
 
-    private function base_headers(string $accept): array
+    private function extract_boundary(string $header_line): string
     {
-        return HttpRequestBuilder::base_headers(
-            $accept,
-            ($this->user_agent)()
-        );
+        $pos = stripos($header_line, "boundary=");
+        if ($pos === false) {
+            return "";
+        }
+
+        $boundary_value = trim(substr($header_line, $pos + 9));
+        if ($boundary_value === "") {
+            return "";
+        }
+
+        if ($boundary_value[0] === '"') {
+            $quote_end = strpos($boundary_value, '"', 1);
+            return $quote_end === false
+                ? ""
+                : substr($boundary_value, 1, $quote_end - 1);
+        }
+
+        $end_pos = strcspn($boundary_value, ";,\r\n \t");
+        return substr($boundary_value, 0, $end_pos);
     }
 
-    private function hmac_headers(string $body): array
+    private static function post_data_has_file(array $post_data): bool
     {
-        return ($this->hmac_headers)($body);
+        foreach ($post_data as $value) {
+            if ($value instanceof CURLFile) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null): array
-    {
+    private function diagnose_http_error(
+        int $http_code,
+        ?string $body,
+        ?string $redirect_url,
+        bool $has_hmac_secret
+    ): array {
         return HttpErrorDiagnoser::diagnose(
             $http_code,
             $body,
             $redirect_url,
-            (bool) ($this->has_hmac_secret)()
+            $has_hmac_secret
         );
     }
 
     private function format_diagnosed_error(array $diagnosis): string
     {
-        ($this->set_error_code)($diagnosis['code']);
+        $this->last_error_code = $diagnosis['code'];
         return $diagnosis['message'];
     }
 
-    private function handle_tuner_error(string $endpoint, array $error): void
+    private function tick_spinner(): void
     {
-        ($this->handle_tuner_error)($endpoint, $error);
-    }
-
-    private function audit(string $message, bool $to_console): void
-    {
-        ($this->audit)($message, $to_console);
-    }
-
-    private function output_progress(array $data, bool $force = false): void
-    {
-        ($this->output_progress)($data, $force);
+        if ($this->output instanceof ImportOutput) {
+            $this->output->tick_spinner();
+        }
     }
 }

@@ -234,25 +234,6 @@ class FileBodyStreamingTest extends TestCase
     {
         return (new ImportHttpTransport(
             new BufferedImportOutput(),
-            function (string $message, bool $to_console = true): void {
-            },
-            function (array $progress, bool $force = false): void {
-            },
-            function (): string {
-                return 'test';
-            },
-            function (string $body): array {
-                return [];
-            },
-            function (): bool {
-                return false;
-            },
-            function (?string $error_code): void {
-            },
-            function (string $endpoint, array $error): void {
-            },
-            function (): void {
-            },
         ))->make_chunk_handler($context, $currentChunk);
     }
 

@@ -514,7 +514,7 @@ class EncodingTest extends MySQLDumpProducerTestBase
 
         // binary table gets raw UTF-8 bytes
         $stmt3 = $this->pdo->prepare("INSERT INTO binary_table (data) VALUES (?)");
-        $stmt3->execute([utf8_encode($text)]);
+        $stmt3->execute([$text]);
 
         $sql = $this->getDumpSQL();
 

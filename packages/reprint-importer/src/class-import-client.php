@@ -14,7 +14,7 @@ use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListExecutor;
 use Reprint\Importer\FileSync\FileFetchDownloader;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
-use Reprint\Importer\FileSync\FilesSyncPipeline;
+use Reprint\Importer\FileSync\IntermediateSymlinkRecreator;
 use Reprint\Importer\FileSync\RemoteIndexDownloader;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\FileSync\SymlinkTargetIndexer;
@@ -387,45 +387,7 @@ class ImportClient
             return $this->http_transport;
         }
 
-        $this->http_transport = new ImportHttpTransport(
-            $this->output,
-            function (string $message, bool $to_console): void {
-                $this->audit_log($message, $to_console);
-            },
-            function (array $data, bool $force = false): void {
-                $this->output_progress($data, $force);
-            },
-            function (): ?string {
-                return $this->state["user_agent"] ?? null;
-            },
-            function (string $body): array {
-                if ($this->hmac_client === null) {
-                    return [];
-                }
-
-                return $this->hmac_client->get_curl_headers($body);
-            },
-            function (): bool {
-                return $this->hmac_client !== null;
-            },
-            function (string $code): void {
-                $this->last_error_code = $code;
-            },
-            function (string $endpoint, array $error): void {
-                $this->handle_tuner_error($endpoint, $error);
-            },
-            function (): array {
-                if ($this->download_list_total === null) {
-                    return [];
-                }
-
-                return [
-                    "files_done" =>
-                        ($this->download_list_done ?? 0) + $this->files_imported,
-                    "files_total" => $this->download_list_total,
-                ];
-            },
-        );
+        $this->http_transport = new ImportHttpTransport($this->output);
 
         return $this->http_transport;
     }
@@ -1359,60 +1321,163 @@ class ImportClient
         $this->report_volatile_files();
     }
 
-    /**
-     * Shared index → diff → fetch pipeline used by both initial and delta syncs.
-     *
-     * Reads the current stage from state and runs each stage in sequence.
-     * Returns early (with partial status) if any stage doesn't complete.
-     */
     private function run_files_sync_pipeline(): void
     {
-        (new FilesSyncPipeline(
-            $this->remote_index_file,
-            $this->download_list_file,
-            $this->skipped_download_list_file,
-            $this->follow_symlinks,
-            $this->filter,
-            $this->local_filesystem(),
-            function (): array {
-                return $this->default_state();
-            },
-            function (): bool {
-                return $this->download_remote_index();
-            },
-            function (array &$state): void {
+        $stage = $this->state["stage"] ?? "index";
+
+        if ($stage === "index") {
+            if (!$this->download_remote_index()) {
+                $this->mark_files_sync_partial();
+                return;
+            }
+
+            if ($this->follow_symlinks) {
                 $this->discover_symlink_targets();
-                $state = $this->state;
-            },
-            function (): bool {
-                return $this->shutdown_requested;
-            },
-            function (string $path): void {
-                $this->sort_index_file($path);
-            },
-            function (): bool {
-                return $this->diff_indexes_and_build_fetch_list();
-            },
-            function (string $list_file, string $state_key): bool {
-                return $this->download_files_from_list($list_file, $state_key);
-            },
-            function (array $state): void {
-                $this->state = $state;
+                if ($this->shutdown_requested) {
+                    $this->mark_files_sync_partial();
+                    return;
+                }
+            }
+
+            $this->sort_index_file($this->remote_index_file);
+            $this->state["stage"] = "diff";
+            $this->state["diff"] = $this->default_state()["diff"];
+            $this->delete_file_if_exists(
+                $this->download_list_file,
+                "clearing before diff stage",
+            );
+            $this->delete_file_if_exists(
+                $this->skipped_download_list_file,
+                "clearing before diff stage",
+            );
+            $this->save_state($this->state);
+            $stage = "diff";
+        }
+
+        if ($stage === "diff") {
+            if (!$this->diff_indexes_and_build_fetch_list()) {
+                $this->mark_files_sync_partial();
+                return;
+            }
+
+            $has_downloads = $this->file_has_entries($this->download_list_file);
+            $has_skipped = $this->file_has_entries($this->skipped_download_list_file);
+
+            if ($has_downloads) {
+                $stage = "fetch";
+            } elseif ($has_skipped) {
+                $stage = "fetch-skipped";
+            } else {
+                $stage = null;
+            }
+
+            $this->state["stage"] = $stage;
+            $this->save_state($this->state);
+
+            if ($has_downloads) {
+                $this->show_download_progress_start(
+                    $this->index_entries_counted,
+                    $this->download_list_file,
+                );
+            }
+
+            if (!$has_downloads) {
+                $this->delete_file_if_exists(
+                    $this->download_list_file,
+                    "no files to fetch",
+                );
+            }
+            if (!$has_skipped) {
+                $this->delete_file_if_exists(
+                    $this->skipped_download_list_file,
+                    "no skipped files to fetch",
+                );
+            }
+        }
+
+        if ($stage === "fetch") {
+            if (!$this->download_files_from_list($this->download_list_file, "fetch")) {
+                $this->mark_files_sync_partial();
+                return;
+            }
+
+            $this->state["fetch"] = $this->default_state()["fetch"];
+            $this->delete_file_if_exists($this->download_list_file, "fetch complete");
+
+            $has_skipped = $this->file_has_entries($this->skipped_download_list_file);
+
+            if ($has_skipped && $this->filter === "essential-files") {
+                $this->state["stage"] = null;
                 $this->save_state($this->state);
-            },
-            function (string $message, bool $to_console = true): void {
-                $this->audit_log($message, $to_console);
-            },
-            function (): void {
+                $this->audit_log(
+                    "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_download_list_file} - run with --filter=skipped-earlier to download them",
+                    true,
+                );
+                $stage = null;
+            } elseif ($has_skipped) {
+                $this->state["stage"] = "fetch-skipped";
+                $this->save_state($this->state);
+                $stage = "fetch-skipped";
+                $this->audit_log(
+                    "ESSENTIAL FILES COMPLETE | transitioning to skipped files",
+                    true,
+                );
                 $this->write_status_file();
-            },
-            function (): int {
-                return $this->index_entries_counted;
-            },
-            function (int $scanned, string $download_list_file): void {
-                $this->show_download_progress_start($scanned, $download_list_file);
-            },
-        ))->run($this->state);
+            } else {
+                $this->state["stage"] = null;
+                $this->save_state($this->state);
+                $stage = null;
+            }
+        }
+
+        if ($stage === "fetch-skipped") {
+            if (!$this->download_files_from_list(
+                $this->skipped_download_list_file,
+                "fetch_skipped",
+            )) {
+                $this->mark_files_sync_partial();
+                return;
+            }
+
+            $this->state["stage"] = null;
+            $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
+            $this->save_state($this->state);
+
+            $this->delete_file_if_exists(
+                $this->skipped_download_list_file,
+                "skipped files fetch complete",
+            );
+        }
+
+        if ($this->follow_symlinks) {
+            (new IntermediateSymlinkRecreator(
+                $this->local_filesystem(),
+                function (string $message, bool $to_console): void {
+                    $this->audit_log($message, $to_console);
+                },
+            ))->recreate($this->remote_index_file);
+        }
+    }
+
+    private function mark_files_sync_partial(): void
+    {
+        $this->state["status"] = "partial";
+        $this->save_state($this->state);
+    }
+
+    private function file_has_entries(string $file): bool
+    {
+        return file_exists($file) && filesize($file) > 0;
+    }
+
+    private function delete_file_if_exists(string $file, string $reason): void
+    {
+        if (!file_exists($file)) {
+            return;
+        }
+
+        @unlink($file);
+        $this->audit_log("FILE DELETE | {$file} | {$reason}");
     }
 
     private function show_download_progress_start(
@@ -2560,7 +2625,19 @@ class ImportClient
      */
     public function fetch_json(string $url): array
     {
-        return $this->http_transport()->fetch_json($url);
+        $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
+
+        $result = $this->http_transport()->fetch_json(
+            $url,
+            $this->json_request_headers(''),
+            $this->has_hmac_secret(),
+        );
+
+        if (!empty($result["error_code"])) {
+            $this->last_error_code = $result["error_code"];
+        }
+
+        return $result;
     }
 
     /**
@@ -2573,13 +2650,142 @@ class ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        $this->http_transport()->fetch_streaming(
-            $url,
-            $cursor,
-            $context,
-            $post_data,
-            $endpoint,
+        $body_for_signing = ImportHttpTransport::body_for_signing($post_data);
+        $transport = $this->http_transport();
+
+        $this->audit_log(
+            $this->streaming_request_log_message($url, $post_data),
+            false,
         );
+        $this->output_progress(["debug" => "Waiting for server response..."]);
+
+        try {
+            $transport->fetch_streaming(
+                $url,
+                $context,
+                $this->streaming_request_headers($cursor, $body_for_signing),
+                $post_data,
+                $this->has_hmac_secret(),
+            );
+        } catch (RuntimeException $e) {
+            $this->sync_transport_error_state($transport);
+            if ($endpoint !== null) {
+                $this->handle_transport_tuner_error($endpoint, $transport);
+            }
+
+            $http_code = $transport->last_http_code();
+            if ($http_code !== null && $http_code !== 200) {
+                $this->audit_log(
+                    "HTTP error {$http_code} | error_body length: " .
+                        (int) ($transport->last_error_body_length() ?? 0),
+                    true,
+                );
+            }
+
+            throw $e;
+        }
+    }
+
+    private function json_request_headers(string $body): array
+    {
+        return [
+            ...HttpRequestBuilder::base_headers(
+                "application/json",
+                $this->state["user_agent"] ?? null,
+            ),
+            ...$this->hmac_headers($body),
+        ];
+    }
+
+    private function streaming_request_headers(
+        ?string $cursor,
+        string $body
+    ): array {
+        $headers = [
+            ...HttpRequestBuilder::base_headers(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                $this->state["user_agent"] ?? null,
+            ),
+            "Upgrade-Insecure-Requests: 1",
+            "Sec-Fetch-Dest: document",
+            "Sec-Fetch-Mode: navigate",
+            "Sec-Fetch-Site: none",
+            "Sec-Fetch-User: ?1",
+        ];
+
+        if ($cursor) {
+            $headers[] = "X-Export-Cursor: {$cursor}";
+        }
+
+        return [
+            ...$headers,
+            ...$this->hmac_headers($body),
+        ];
+    }
+
+    private function hmac_headers(string $body): array
+    {
+        if ($this->hmac_client === null) {
+            return [];
+        }
+
+        return $this->hmac_client->get_curl_headers($body);
+    }
+
+    private function has_hmac_secret(): bool
+    {
+        return $this->hmac_client !== null;
+    }
+
+    private function streaming_request_log_message(
+        string $url,
+        ?array $post_data
+    ): string {
+        $log_parts = ["HTTP_REQUEST", $post_data ? "POST" : "GET", $url];
+        if ($post_data && isset($post_data["file_list"])) {
+            $file_list_part = $post_data["file_list"];
+            if ($file_list_part instanceof CURLFile) {
+                $upload_path = $file_list_part->getFilename();
+                $upload_size = is_string($upload_path)
+                    ? filesize($upload_path)
+                    : false;
+                $upload_size = $upload_size === false ? 0 : $upload_size;
+                $log_parts[] = "file_list_file=" . $upload_size . "b";
+            } else {
+                $log_parts[] =
+                    "file_list=" . strlen((string) $file_list_part) . "b";
+            }
+        }
+
+        return implode(" | ", $log_parts);
+    }
+
+    private function sync_transport_error_state(ImportHttpTransport $transport): void
+    {
+        if ($transport->last_error_code() !== null) {
+            $this->last_error_code = $transport->last_error_code();
+        }
+    }
+
+    private function handle_transport_tuner_error(
+        string $endpoint,
+        ImportHttpTransport $transport
+    ): void {
+        $http_code = $transport->last_http_code();
+        $curl_errno = $transport->last_curl_errno();
+
+        if (
+            $curl_errno === null &&
+            ($http_code === null || $http_code === 200)
+        ) {
+            return;
+        }
+
+        $this->handle_tuner_error($endpoint, [
+            "http_code" => $http_code ?? 0,
+            "timeout" => $transport->last_curl_timed_out(),
+            "curl_errno" => $curl_errno ?? 0,
+        ]);
     }
 
     public function default_state(): array
