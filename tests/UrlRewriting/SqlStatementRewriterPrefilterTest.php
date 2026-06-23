@@ -6,7 +6,7 @@ use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
 use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/load.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/bootstrap.php';
 
 /**
  * Adversarial coverage for the base64-prefix fast-reject in

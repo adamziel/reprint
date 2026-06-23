@@ -14,10 +14,10 @@ if (!in_array($mode, array('lexer', 'parser'), true)) {
     exit(2);
 }
 
-$loader = rtrim($project_root, '/') . '/packages/reprint-importer/src/lib/mysql-query-stream/load.php';
+$bootstrap = rtrim($project_root, '/') . '/packages/reprint-importer/src/lib/bootstrap.php';
 $grammar_path = rtrim($project_root, '/') . '/lib/sqlite-database-integration/packages/mysql-on-sqlite/src/mysql/mysql-grammar.php';
-if (!is_readable($loader)) {
-    fwrite(STDERR, "Cannot read query-stream loader: {$loader}\n");
+if (!is_readable($bootstrap)) {
+    fwrite(STDERR, "Cannot read importer bootstrap: {$bootstrap}\n");
     exit(2);
 }
 if (!is_readable($grammar_path)) {
@@ -25,7 +25,8 @@ if (!is_readable($grammar_path)) {
     exit(2);
 }
 
-require $loader;
+require $bootstrap;
+class_exists('WP_MySQL_Lexer');
 
 function reprint_native_parser_fail(string $message): void
 {

@@ -5,7 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Host\Analyzers\SitegroundHostAnalyzer;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/load.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/bootstrap.php';
 
 class SitegroundHostAnalyzerTest extends TestCase
 {

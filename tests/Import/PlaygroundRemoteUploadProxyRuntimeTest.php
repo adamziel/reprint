@@ -7,7 +7,7 @@ use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\TargetRuntime\PlaygroundCliApplier;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/class-runtime-manifest.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/target-runtime/load.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/bootstrap.php';
 
 class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 {

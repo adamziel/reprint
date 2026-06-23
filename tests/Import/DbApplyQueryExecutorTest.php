@@ -8,7 +8,7 @@ use Reprint\Importer\Sql\DbApplyQueryExecutor;
 use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
 use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/sql/load.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/bootstrap.php';
 
 final class DbApplyQueryExecutorTest extends TestCase
 {
