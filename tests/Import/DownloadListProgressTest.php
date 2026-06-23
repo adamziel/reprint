@@ -208,7 +208,7 @@ class DownloadListProgressTest extends TestCase
 
         [$client, $services] = $this->prepareClient();
         try {
-            $services->fetch_files_from_list(
+            $services->files()->fetch_files_from_list(
                 $client->context()->files_pull_checkpoint(),
                 $listFile,
                 'fetch',
@@ -243,7 +243,7 @@ class DownloadListProgressTest extends TestCase
         [$client, $services] = $this->prepareClient();
 
         try {
-            $services->fetch_files_from_list(
+            $services->files()->fetch_files_from_list(
                 $client->context()->files_pull_checkpoint(),
                 $listFile,
                 'fetch',
@@ -280,7 +280,7 @@ class DownloadListProgressTest extends TestCase
         [$client, $services] = $this->prepareClient();
 
         try {
-            $services->fetch_files_from_list(
+            $services->files()->fetch_files_from_list(
                 $client->context()->files_pull_checkpoint(),
                 $listFile,
                 'fetch',
@@ -310,7 +310,7 @@ class DownloadListProgressTest extends TestCase
 
         [$client1, $services1] = $this->prepareClient();
         try {
-            $services1->fetch_files_from_list(
+            $services1->files()->fetch_files_from_list(
                 $client1->context()->files_pull_checkpoint(),
                 $listFile,
                 'fetch',
@@ -331,7 +331,7 @@ class DownloadListProgressTest extends TestCase
 
         [$client2, $services2] = $this->prepareClient();
         try {
-            $services2->fetch_files_from_list(
+            $services2->files()->fetch_files_from_list(
                 $client2->context()->files_pull_checkpoint(),
                 $listFile,
                 'fetch',
@@ -363,7 +363,7 @@ class DownloadListProgressTest extends TestCase
         [$client, $services] = $this->prepareClient("skipped-earlier");
 
         try {
-            $services->fetch_files_from_list(
+            $services->files()->fetch_files_from_list(
                 $client->context()->files_pull_checkpoint(),
                 $skippedList,
                 'fetch_skipped',
@@ -381,10 +381,10 @@ class DownloadListProgressTest extends TestCase
 
         [, $services] = $this->prepareClient();
 
-        $this->assertSame(500, $services->count_download_list_lines($listFile));
+        $this->assertSame(500, $services->files()->count_download_list_lines($listFile));
 
         $offset100 = $this->byteOffsetAfterLines($listFile, 100);
-        $this->assertSame(100, $services->count_download_list_lines($listFile, $offset100));
+        $this->assertSame(100, $services->files()->count_download_list_lines($listFile, $offset100));
     }
 
     public function testPrepareFetchBatchReturnsEntryCount()
@@ -424,7 +424,7 @@ class DownloadListProgressTest extends TestCase
         [$client, $services] = $this->prepareClient();
 
         try {
-            $services->fetch_files_from_list(
+            $services->files()->fetch_files_from_list(
                 $client->context()->files_pull_checkpoint(),
                 $listFile,
                 'fetch',

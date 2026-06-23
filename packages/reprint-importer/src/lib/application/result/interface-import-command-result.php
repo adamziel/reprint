@@ -1,6 +1,6 @@
 <?php
 
-namespace Reprint\Importer\Command;
+namespace Reprint\Importer\Application\Result;
 
 interface ImportCommandResult
 {

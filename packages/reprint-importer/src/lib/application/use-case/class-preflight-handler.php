@@ -5,8 +5,8 @@ namespace Reprint\Importer\Application\UseCase;
 use Reprint\Importer\Application\AbstractCommandHandler;
 use Reprint\Importer\Application\ImportContext;
 use Reprint\Importer\Application\ImportServices;
-use Reprint\Importer\Command\ImportCommandResult;
-use Reprint\Importer\Command\PreflightReportResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
+use Reprint\Importer\Application\Result\PreflightReportResult;
 use Reprint\Importer\Session\PreflightCheckpoint;
 use function Reprint\Importer\Host\detect_host;
 
@@ -86,7 +86,7 @@ final class PreflightHandler extends AbstractCommandHandler
             $this->log_non_standard_layout($context, $paths);
         }
 
-        $services->download_runtime_files();
+        $services->runtime()->download_runtime_files();
 
         return $entry;
     }

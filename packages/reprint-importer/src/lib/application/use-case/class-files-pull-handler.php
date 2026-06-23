@@ -5,7 +5,7 @@ namespace Reprint\Importer\Application\UseCase;
 use Reprint\Importer\Application\AbstractCommandHandler;
 use Reprint\Importer\Application\ImportContext;
 use Reprint\Importer\Application\ImportServices;
-use Reprint\Importer\Command\ImportCommandResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
 
 final class FilesPullHandler extends AbstractCommandHandler
 {
@@ -29,7 +29,7 @@ final class FilesPullHandler extends AbstractCommandHandler
         ImportServices $services,
         array $options
     ): ?ImportCommandResult {
-        $services->file_sync_workflow()->run_files_sync();
+        $services->files()->workflow()->run_files_sync();
         return null;
     }
 }

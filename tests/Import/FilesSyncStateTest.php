@@ -354,7 +354,7 @@ class FilesSyncStateTest extends TestCase
 
         [$client, $services] = $this->prepareClient();
 
-        $services->build_fetch_list($client->context()->files_pull_checkpoint());
+        $services->files()->build_fetch_list($client->context()->files_pull_checkpoint());
 
         $downloads = $this->readDownloadList();
         $this->assertContains(
@@ -391,7 +391,7 @@ class FilesSyncStateTest extends TestCase
 
         [$client, $services] = $this->prepareClient();
 
-        $services->build_fetch_list($client->context()->files_pull_checkpoint());
+        $services->files()->build_fetch_list($client->context()->files_pull_checkpoint());
 
         $downloads = $this->readDownloadList();
         $this->assertNotContains(

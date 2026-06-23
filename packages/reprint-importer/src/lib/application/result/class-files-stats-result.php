@@ -1,6 +1,6 @@
 <?php
 
-namespace Reprint\Importer\Command;
+namespace Reprint\Importer\Application\Result;
 
 final class FilesStatsResult implements ImportCommandResult
 {

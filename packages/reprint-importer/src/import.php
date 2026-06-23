@@ -58,8 +58,7 @@ require_once __DIR__ . '/lib/sql/load.php';
 // Session paths and state persistence helpers.
 require_once __DIR__ . '/lib/session/load.php';
 
-// Stateless command objects used by the importer CLI and pull pipeline.
-require_once __DIR__ . '/lib/commands/load.php';
+// Pull pipeline stage command adapters.
 require_once __DIR__ . '/lib/pull/commands/load.php';
 
 // Output adapters for CLI, web, and embedded consumers.

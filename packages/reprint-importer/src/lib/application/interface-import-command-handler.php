@@ -2,7 +2,7 @@
 
 namespace Reprint\Importer\Application;
 
-use Reprint\Importer\Command\ImportCommandResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
 
 interface ImportCommandHandler
 {

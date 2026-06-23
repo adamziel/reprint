@@ -267,7 +267,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         [$client, $services] = $this->prepareClient();
         $client->context()->set_sql_output_mode('file');
 
-        $checkpoint = $services->download_sql(
+        $checkpoint = $services->database()->download_sql(
             DbPullCheckpoint::from_array($this->readDbPullCheckpoint()),
         );
 
@@ -306,7 +306,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $services] = $this->prepareClient();
 
-        $result = $services->download_file_fetch(
+        $result = $services->files()->download_file_fetch(
             $client->context()->files_pull_checkpoint(),
             null,
             base64_encode('{"path":"/photo.jpg","offset":4096}'),
@@ -351,7 +351,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         );
 
         try {
-            $services->download_file_fetch(
+            $services->files()->download_file_fetch(
                 $client->context()->files_pull_checkpoint(),
                 null,
                 self::fileCursorForBytes(256),
@@ -410,7 +410,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $services] = $this->prepareClient();
 
-        $result = $services->download_remote_index(
+        $result = $services->files()->download_remote_index(
             $client->context()->files_pull_checkpoint(),
         );
 
@@ -547,7 +547,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('consecutive');
 
-        $services->download_sql(DbPullCheckpoint::from_array($this->readDbPullCheckpoint()));
+        $services->database()->download_sql(DbPullCheckpoint::from_array($this->readDbPullCheckpoint()));
     }
 
     public function testFirstTimeoutIncrementsDbPullCheckpointCounter()
@@ -571,7 +571,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         [$client, $services] = $this->prepareClient();
         $client->context()->set_sql_output_mode('file');
 
-        $checkpoint = $services->download_sql(
+        $checkpoint = $services->database()->download_sql(
             DbPullCheckpoint::from_array($this->readDbPullCheckpoint()),
         );
 
@@ -608,7 +608,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $services] = $this->prepareClient(new SuccessTestStreamClient());
 
-        $services->download_remote_index($client->context()->files_pull_checkpoint());
+        $services->files()->download_remote_index($client->context()->files_pull_checkpoint());
 
         $checkpoint = $this->readFilesPullCheckpoint();
         $this->assertEquals(

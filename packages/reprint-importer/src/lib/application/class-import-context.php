@@ -3,7 +3,6 @@
 namespace Reprint\Importer\Application;
 
 use Exception;
-use InvalidArgumentException;
 use RuntimeException;
 use Reprint\Importer\FileSync\FileSyncTransferProgress;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
@@ -14,7 +13,6 @@ use Reprint\Importer\Index\IndexFileSorter;
 use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Observability\AuditLogger;
-use Reprint\Importer\Observability\FileAuditLogger;
 use Reprint\Importer\Output\ImportOutput;
 use Reprint\Importer\Output\NullImportOutput;
 use Reprint\Importer\Protocol\StreamingContext;
@@ -44,13 +42,14 @@ final class ImportContext
     private string $remote_url;
     private string $state_dir;
     private string $fs_root;
-    private ImportOutput $output;
+    private ImportIo $io;
     private ImportPaths $paths;
     private JsonStateStore $store;
     private StatePathCodec $path_codec;
     private RunStateRepository $run_states;
     private RuntimeLifecycle $lifecycle;
     private ShutdownState $shutdown;
+    private ImportOptions $options;
     private FileSyncTransferProgress $file_sync_progress;
     private IndexStore $index_store;
     private IndexFileSorter $index_sorter;
@@ -62,21 +61,6 @@ final class ImportContext
     private int $exit_code = 0;
     private ?string $last_error_code = null;
 
-    private bool $follow_symlinks = true;
-    private bool $include_caches = false;
-    private string $fs_root_nonempty_behavior = "error";
-    private string $filter = "none";
-    private ?string $extra_directory = null;
-    private ?int $max_allowed_packet = null;
-    private string $sql_output_mode = "file";
-    private ?string $mysql_host = null;
-    private ?int $mysql_port = null;
-    private ?string $mysql_user = null;
-    private ?string $mysql_password = null;
-    private ?string $mysql_database = null;
-    private ?int $pipeline_step = null;
-    private ?int $pipeline_steps = null;
-
     public function __construct(
         string $remote_url,
         string $state_dir,
@@ -86,8 +70,8 @@ final class ImportContext
         $this->remote_url = rtrim($remote_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->fs_root = rtrim($fs_root, "/");
-        $this->output = $output ?? new NullImportOutput();
         $this->paths = new ImportPaths($this->state_dir);
+        $this->io = new ImportIo($this->paths, $output ?? new NullImportOutput());
         $this->store = new JsonStateStore();
         $this->path_codec = new StatePathCodec($this->audit_logger());
         $this->run_states = new RunStateRepository(
@@ -97,6 +81,7 @@ final class ImportContext
             $this->audit_logger(),
         );
         $this->shutdown = new ShutdownState();
+        $this->options = new ImportOptions();
         $this->file_sync_progress = new FileSyncTransferProgress();
         $this->lifecycle = new RuntimeLifecycle(
             $this->state_dir,
@@ -115,7 +100,7 @@ final class ImportContext
                 $this->audit_log($message);
             },
             function (): void {
-                $this->output->tick_spinner();
+                $this->output()->tick_spinner();
             },
         );
     }
@@ -132,7 +117,7 @@ final class ImportContext
 
     public function output(): ImportOutput
     {
-        return $this->output;
+        return $this->io->output();
     }
 
     public function paths(): ImportPaths
@@ -208,21 +193,17 @@ final class ImportContext
 
     public function audit_logger(): AuditLogger
     {
-        return new FileAuditLogger($this->paths->audit_log(), $this->output);
+        return $this->io->audit_logger();
     }
 
     public function audit_log(string $message, bool $to_console = true): void
     {
-        $this->audit_logger()->record($message, $to_console);
+        $this->io->audit_log($message, $to_console);
     }
 
     public function audit_log_argv(string $command, array $argv): void
     {
-        $masked = $argv;
-        if (isset($masked[2]) && $command !== "apply-runtime") {
-            $masked[2] = preg_replace("/SECRET_KEY=[^&\s]+/", "SECRET_KEY=***", $masked[2]);
-        }
-        $this->audit_log("COMMAND | {$command} | argv=" . implode(" ", $masked), false);
+        $this->io->audit_log_argv($command, $argv);
     }
 
     public function http_session(): ImportHttpSession
@@ -233,7 +214,7 @@ final class ImportContext
 
         $this->http_session = new ImportHttpSession(
             $this->remote_url,
-            $this->output,
+            $this->output(),
             function (string $message, bool $to_console = true): void {
                 $this->audit_log($message, $to_console);
             },
@@ -297,7 +278,7 @@ final class ImportContext
 
     public function save_state(?ImportRunState $state = null): void
     {
-        $this->output->tick_spinner();
+        $this->output()->tick_spinner();
         $state = $state ?? $this->state();
 
         if (
@@ -356,12 +337,12 @@ final class ImportContext
         ))->abort(
             $this->state(),
             $command,
-            $this->sql_output_mode,
+            $this->options->sql_output_mode(),
         );
 
         $this->preflight_checkpoint = null;
         $this->save_state($state);
-        $this->output->show_lifecycle_line("State cleared for {$command}.\n");
+        $this->output()->show_lifecycle_line("State cleared for {$command}.\n");
     }
 
     public function finish_command_status(string $command): void
@@ -386,7 +367,7 @@ final class ImportContext
 
     public function output_progress(array $data, bool $force = false): void
     {
-        if (!$this->output->emit_event($data, $force)) {
+        if (!$this->io->emit_event($data, $force)) {
             if ($this->state instanceof ImportRunState) {
                 $this->save_state($this->state);
             }
@@ -442,7 +423,7 @@ final class ImportContext
 
     public function save_preflight_checkpoint(PreflightCheckpoint $checkpoint): void
     {
-        $this->output->tick_spinner();
+        $this->output()->tick_spinner();
         $this->preflight_checkpoint = $checkpoint;
         $this->store->save(
             $this->paths->preflight_checkpoint_file(),
@@ -489,7 +470,7 @@ final class ImportContext
 
     public function save_pull_checkpoint(PullCheckpoint $checkpoint): void
     {
-        $this->output->tick_spinner();
+        $this->output()->tick_spinner();
         $this->pull_checkpoint = $checkpoint;
         $this->store->save($this->paths->pull_checkpoint_file(), $checkpoint->to_array());
         $this->write_status_file();
@@ -507,7 +488,7 @@ final class ImportContext
             $this->store,
             $this->paths,
             $this->path_codec,
-            $this->output,
+            $this->output(),
         );
     }
 
@@ -526,7 +507,7 @@ final class ImportContext
         return new JsonDbApplyCheckpointStore(
             $this->store,
             $this->paths,
-            $this->output,
+            $this->output(),
         );
     }
 
@@ -544,7 +525,7 @@ final class ImportContext
 
     public function save_runtime_checkpoint(RuntimeCheckpoint $checkpoint): void
     {
-        $this->output->tick_spinner();
+        $this->output()->tick_spinner();
         $this->store->save($this->paths->runtime_checkpoint_file(), $checkpoint->to_array());
     }
 
@@ -554,7 +535,7 @@ final class ImportContext
             $this->store,
             $this->paths,
             $this->path_codec,
-            new ImportOutputProgressTicker($this->output),
+            new ImportOutputProgressTicker($this->output()),
         );
     }
 
@@ -577,7 +558,7 @@ final class ImportContext
 
         $this->local_filesystem = new LocalImportFilesystem(
             $this->fs_root,
-            $this->fs_root_nonempty_behavior,
+            $this->options->fs_root_nonempty_behavior(),
             $this->audit_logger(),
         );
 
@@ -638,11 +619,11 @@ final class ImportContext
                 $db_pull_checkpoint->status ??
                 ($this->state instanceof ImportRunState ? $this->state->status : null) ??
                 "in_progress"
-            );
+        );
 
         $payload = [
-            "step" => $this->pipeline_step,
-            "steps" => $this->pipeline_steps,
+            "step" => $this->options->pipeline_step(),
+            "steps" => $this->options->pipeline_steps(),
             "command" => $command,
             "status" => $status,
             "phase" => $files_checkpoint->stage ?? $db_pull_checkpoint->stage ?? null,
@@ -674,7 +655,7 @@ final class ImportContext
         $already_shutting_down = true;
 
         $this->shutdown->request();
-        $this->output->clear_progress_line();
+        $this->output()->clear_progress_line();
 
         try {
             $this->finalize_index_updates();
@@ -695,139 +676,132 @@ final class ImportContext
 
     public function follow_symlinks(): bool
     {
-        return $this->follow_symlinks;
+        return $this->options->follow_symlinks();
     }
 
     public function set_follow_symlinks(bool $value): void
     {
-        $this->follow_symlinks = $value;
+        $this->options->set_follow_symlinks($value);
     }
 
     public function include_caches(): bool
     {
-        return $this->include_caches;
+        return $this->options->include_caches();
     }
 
     public function set_include_caches(bool $value): void
     {
-        $this->include_caches = $value;
+        $this->options->set_include_caches($value);
     }
 
     public function fs_root_nonempty_behavior(): string
     {
-        return $this->fs_root_nonempty_behavior;
+        return $this->options->fs_root_nonempty_behavior();
     }
 
     public function set_fs_root_nonempty_behavior(string $value): void
     {
-        $this->fs_root_nonempty_behavior = $value;
+        $this->options->set_fs_root_nonempty_behavior($value);
         $this->reset_local_filesystem();
     }
 
     public function filter(): string
     {
-        return $this->filter;
+        return $this->options->filter();
     }
 
     public function set_filter(string $value): void
     {
-        $this->filter = $value;
+        $this->options->set_filter($value);
     }
 
     public function extra_directory(): ?string
     {
-        return $this->extra_directory;
+        return $this->options->extra_directory();
     }
 
     public function set_extra_directory(?string $value): void
     {
-        $this->extra_directory = $value;
+        $this->options->set_extra_directory($value);
     }
 
     public function max_allowed_packet(): ?int
     {
-        return $this->max_allowed_packet;
+        return $this->options->max_allowed_packet();
     }
 
     public function set_max_allowed_packet(?int $value): void
     {
-        $this->max_allowed_packet = $value;
+        $this->options->set_max_allowed_packet($value);
     }
 
     public function sql_output_mode(): string
     {
-        return $this->sql_output_mode;
+        return $this->options->sql_output_mode();
     }
 
     public function set_sql_output_mode(string $value): void
     {
-        $this->sql_output_mode = $value;
+        $this->options->set_sql_output_mode($value);
     }
 
     public function set_pipeline(?int $step, ?int $steps): void
     {
-        $this->pipeline_step = $step;
-        $this->pipeline_steps = $steps;
+        $this->options->set_pipeline($step, $steps);
     }
 
     public function mysql_host(): ?string
     {
-        return $this->mysql_host;
+        return $this->options->mysql_host();
     }
 
     public function set_mysql_host(?string $value): void
     {
-        $this->mysql_host = $value;
+        $this->options->set_mysql_host($value);
     }
 
     public function mysql_port(): ?int
     {
-        return $this->mysql_port;
+        return $this->options->mysql_port();
     }
 
     public function set_mysql_port(?int $value): void
     {
-        $this->mysql_port = $value;
+        $this->options->set_mysql_port($value);
     }
 
     public function mysql_user(): ?string
     {
-        return $this->mysql_user;
+        return $this->options->mysql_user();
     }
 
     public function set_mysql_user(?string $value): void
     {
-        $this->mysql_user = $value;
+        $this->options->set_mysql_user($value);
     }
 
     public function mysql_password(): ?string
     {
-        return $this->mysql_password;
+        return $this->options->mysql_password();
     }
 
     public function set_mysql_password(?string $value): void
     {
-        $this->mysql_password = $value;
+        $this->options->set_mysql_password($value);
     }
 
     public function mysql_database(): ?string
     {
-        return $this->mysql_database;
+        return $this->options->mysql_database();
     }
 
     public function set_mysql_database(?string $value): void
     {
-        $this->mysql_database = $value;
+        $this->options->set_mysql_database($value);
     }
 
     public function validate_sql_output_options(): void
     {
-        if ($this->sql_output_mode !== "mysql" || !empty($this->mysql_database)) {
-            return;
-        }
-
-        throw new InvalidArgumentException(
-            "--mysql-database is required when using --sql-output=mysql",
-        );
+        $this->options->validate_sql_output_options();
     }
 }

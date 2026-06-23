@@ -5,7 +5,7 @@ namespace Reprint\Importer\Application\UseCase;
 use Reprint\Importer\Application\AbstractCommandHandler;
 use Reprint\Importer\Application\ImportContext;
 use Reprint\Importer\Application\ImportServices;
-use Reprint\Importer\Command\ImportCommandResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
 
 final class DbPullHandler extends AbstractCommandHandler
 {
@@ -29,7 +29,7 @@ final class DbPullHandler extends AbstractCommandHandler
         ImportServices $services,
         array $options
     ): ?ImportCommandResult {
-        $checkpoint = $services->db_pull_workflow()->run($context->db_pull_checkpoint());
+        $checkpoint = $services->database()->pull_workflow()->run($context->db_pull_checkpoint());
         $context->record_command_status("db-pull", $checkpoint->status);
         return null;
     }

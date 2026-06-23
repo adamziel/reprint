@@ -97,7 +97,7 @@ class RuntimeFilesTest extends TestCase
         $context = $client->context();
         $context->state();
 
-        (new ImportServices($context))->download_runtime_files();
+        (new ImportServices($context))->runtime()->download_runtime_files();
     }
 
     /**

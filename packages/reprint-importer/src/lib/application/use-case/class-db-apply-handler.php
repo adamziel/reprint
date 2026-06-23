@@ -5,7 +5,7 @@ namespace Reprint\Importer\Application\UseCase;
 use Reprint\Importer\Application\AbstractCommandHandler;
 use Reprint\Importer\Application\ImportContext;
 use Reprint\Importer\Application\ImportServices;
-use Reprint\Importer\Command\ImportCommandResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
 
 final class DbApplyHandler extends AbstractCommandHandler
 {
@@ -24,9 +24,9 @@ final class DbApplyHandler extends AbstractCommandHandler
         ImportServices $services,
         array $options
     ): ?ImportCommandResult {
-        $checkpoint = $services->db_apply_workflow()->run(
+        $checkpoint = $services->database()->apply_workflow()->run(
             $context->db_apply_checkpoint(),
-            $services->db_apply_source(),
+            $services->database()->apply_source(),
             $options,
         );
         $context->record_command_status("db-apply", $checkpoint->status);

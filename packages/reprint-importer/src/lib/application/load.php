@@ -1,8 +1,21 @@
 <?php
 
+require_once __DIR__ . '/result/interface-import-command-result.php';
+require_once __DIR__ . '/result/class-preflight-report-result.php';
+require_once __DIR__ . '/result/class-preflight-assert-result.php';
+require_once __DIR__ . '/result/class-db-domains-result.php';
+require_once __DIR__ . '/result/class-files-stats-result.php';
 require_once __DIR__ . '/interface-import-command-handler.php';
 require_once __DIR__ . '/class-abstract-command-handler.php';
 require_once __DIR__ . '/class-import-request.php';
+require_once __DIR__ . '/class-import-io.php';
+require_once __DIR__ . '/class-import-options.php';
+require_once __DIR__ . '/class-import-context.php';
+require_once __DIR__ . '/class-file-sync-services.php';
+require_once __DIR__ . '/class-database-services.php';
+require_once __DIR__ . '/class-runtime-services.php';
+require_once __DIR__ . '/class-import-services.php';
+require_once __DIR__ . '/class-import-request-preparer.php';
 require_once __DIR__ . '/use-case/class-preflight-handler.php';
 require_once __DIR__ . '/use-case/class-preflight-assert-handler.php';
 require_once __DIR__ . '/use-case/class-files-stats-handler.php';
@@ -16,8 +29,5 @@ require_once __DIR__ . '/use-case/class-flat-docroot-handler.php';
 require_once __DIR__ . '/use-case/class-runtime-apply-handler.php';
 require_once __DIR__ . '/use-case/class-pull-handler.php';
 require_once __DIR__ . '/class-command-registry.php';
-require_once __DIR__ . '/class-import-context.php';
-require_once __DIR__ . '/class-import-services.php';
-require_once __DIR__ . '/class-import-request-preparer.php';
 require_once __DIR__ . '/class-pull-runtime-adapter.php';
 require_once __DIR__ . '/class-importer.php';

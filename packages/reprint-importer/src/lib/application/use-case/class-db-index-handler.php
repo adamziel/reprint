@@ -6,7 +6,7 @@ use RuntimeException;
 use Reprint\Importer\Application\AbstractCommandHandler;
 use Reprint\Importer\Application\ImportContext;
 use Reprint\Importer\Application\ImportServices;
-use Reprint\Importer\Command\ImportCommandResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
 use Reprint\Importer\Sql\DbPullCheckpoint;
 
 final class DbIndexHandler extends AbstractCommandHandler
@@ -79,7 +79,7 @@ final class DbIndexHandler extends AbstractCommandHandler
         }
 
         $context->record_command_status("db-index", $checkpoint->status);
-        $checkpoint = $services->db_pull_workflow()->download_db_index($checkpoint, $tables_file);
+        $checkpoint = $services->database()->pull_workflow()->download_db_index($checkpoint, $tables_file);
         if ($checkpoint->status === "partial") {
             $context->record_command_status("db-index", "partial");
             return null;

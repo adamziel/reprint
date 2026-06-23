@@ -3,10 +3,10 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\Command\DbDomainsResult;
-use Reprint\Importer\Command\FilesStatsResult;
-use Reprint\Importer\Command\ImportCommandResult;
-use Reprint\Importer\Command\PreflightAssertResult;
+use Reprint\Importer\Application\Result\DbDomainsResult;
+use Reprint\Importer\Application\Result\FilesStatsResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
+use Reprint\Importer\Application\Result\PreflightAssertResult;
 use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\Application\UseCase\PreflightAssertHandler;

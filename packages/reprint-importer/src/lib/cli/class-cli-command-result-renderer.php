@@ -2,11 +2,11 @@
 
 namespace Reprint\Importer\Cli;
 
-use Reprint\Importer\Command\DbDomainsResult;
-use Reprint\Importer\Command\FilesStatsResult;
-use Reprint\Importer\Command\ImportCommandResult;
-use Reprint\Importer\Command\PreflightAssertResult;
-use Reprint\Importer\Command\PreflightReportResult;
+use Reprint\Importer\Application\Result\DbDomainsResult;
+use Reprint\Importer\Application\Result\FilesStatsResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
+use Reprint\Importer\Application\Result\PreflightAssertResult;
+use Reprint\Importer\Application\Result\PreflightReportResult;
 use Reprint\Importer\Application\Importer;
 
 final class CliCommandResultRenderer

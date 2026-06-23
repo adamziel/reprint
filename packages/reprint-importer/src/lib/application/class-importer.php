@@ -3,7 +3,7 @@
 namespace Reprint\Importer\Application;
 
 use Exception;
-use Reprint\Importer\Command\ImportCommandResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
 use Reprint\Importer\Output\ImportOutput;
 
 class Importer

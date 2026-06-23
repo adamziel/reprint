@@ -5,8 +5,8 @@ namespace Reprint\Importer\Application\UseCase;
 use Reprint\Importer\Application\AbstractCommandHandler;
 use Reprint\Importer\Application\ImportContext;
 use Reprint\Importer\Application\ImportServices;
-use Reprint\Importer\Command\ImportCommandResult;
-use Reprint\Importer\Command\PreflightAssertResult;
+use Reprint\Importer\Application\Result\ImportCommandResult;
+use Reprint\Importer\Application\Result\PreflightAssertResult;
 
 final class PreflightAssertHandler extends AbstractCommandHandler
 {
