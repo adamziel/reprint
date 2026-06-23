@@ -35,8 +35,8 @@ final class ImportHttpTransport
         $this->reset_curl_state();
 
         $ch = curl_init($url);
-        \reprint_apply_curl_proxy_from_env($ch);
-        \reprint_apply_curl_ca_bundle($ch);
+        reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
@@ -142,8 +142,8 @@ final class ImportHttpTransport
         $this->reset_curl_state();
 
         $ch = curl_init($url);
-        \reprint_apply_curl_proxy_from_env($ch);
-        \reprint_apply_curl_ca_bundle($ch);
+        reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
 
         $parser = null;
         $current_chunk = null;

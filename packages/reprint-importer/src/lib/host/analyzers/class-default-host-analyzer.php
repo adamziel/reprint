@@ -4,6 +4,8 @@ namespace Reprint\Importer\Host\Analyzers;
 
 use Reprint\Importer\Host\HostAnalyzer;
 use Reprint\Importer\Host\RuntimeManifest;
+use function Reprint\Importer\Host\extract_constants;
+use function Reprint\Importer\Host\extract_php_ini;
 
 /**
  * Default host analyzer for unrecognized hosting providers.

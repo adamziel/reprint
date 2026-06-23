@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use function Reprint\Importer\Host\detect_host;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -46,10 +47,10 @@ class ImporterFatalRegressionTest extends TestCase
         $this->assertStringNotContainsString('undefined function parse_size', $result['stderr']);
     }
 
-    public function testGlobalHostDetectorIsLoadedForPreflight(): void
+    public function testNamespacedHostDetectorIsLoadedForPreflight(): void
     {
-        $this->assertTrue(function_exists('detect_host'));
-        $this->assertSame('other', \detect_host([]));
+        $this->assertTrue(function_exists('Reprint\\Importer\\Host\\detect_host'));
+        $this->assertSame('other', detect_host([]));
     }
 
     /**

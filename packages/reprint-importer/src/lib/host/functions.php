@@ -1,9 +1,10 @@
 <?php
 
+namespace Reprint\Importer\Host;
+
 use Reprint\Importer\Host\Analyzers\DefaultHostAnalyzer;
 use Reprint\Importer\Host\Analyzers\SitegroundHostAnalyzer;
 use Reprint\Importer\Host\Analyzers\WpcloudHostAnalyzer;
-use Reprint\Importer\Host\HostAnalyzer;
 
 /**
  * Host analyzer functions.

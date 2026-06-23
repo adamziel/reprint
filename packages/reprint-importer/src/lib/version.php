@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Importer;
+
 // Returns the importer version string. Inside the phar, reads the baked-in
 // VERSION file. In development, falls back to `git describe`.
 function get_importer_version(): string {

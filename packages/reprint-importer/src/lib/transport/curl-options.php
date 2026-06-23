@@ -1,5 +1,7 @@
 <?php
 
+namespace Reprint\Importer\Transport;
+
 /**
  * If the ALL_PROXY environment variable is set, apply it to the cURL
  * handle via CURLOPT_PROXY.

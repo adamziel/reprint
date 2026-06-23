@@ -7,6 +7,7 @@ use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Sql\ActivePluginDeactivator;
 use Reprint\Importer\Sql\DbApplySourceContext;
 use Reprint\Importer\Sql\Port\PluginDeactivationPolicy;
+use function Reprint\Importer\Host\host_analyzer_for;
 
 final class HostPluginDeactivationPolicy implements PluginDeactivationPolicy
 {
@@ -21,7 +22,7 @@ final class HostPluginDeactivationPolicy implements PluginDeactivationPolicy
 
     public function deactivate_host_specific(PDO $pdo): array
     {
-        $analyzer = \host_analyzer_for($this->source->webhost());
+        $analyzer = host_analyzer_for($this->source->webhost());
         $manifest = $analyzer->analyze($this->source->preflight_data());
 
         return ActivePluginDeactivator::deactivate_for_removed_paths(

@@ -5,8 +5,8 @@ namespace Reprint\Importer\Sql;
 use PDO;
 use PDOException;
 use RuntimeException;
-use function register_sqlite_function;
-use function resolve_sqlite_integration_path;
+use function Reprint\Importer\SQLite\register_sqlite_function;
+use function Reprint\Importer\SQLite\resolve_sqlite_integration_path;
 
 final class TargetDatabaseConnectionFactory
 {

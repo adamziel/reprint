@@ -1,9 +1,12 @@
 <?php
 
+namespace Reprint\Importer\Cli;
+
 use Reprint\Importer\Application\Importer;
-use Reprint\Importer\Cli\CliCommandResultRenderer;
 use Reprint\Importer\Application\CommandRegistry;
 use Reprint\Importer\Output\CliImportOutput;
+use const Reprint\Importer\TargetRuntime\VALID_TARGET_RUNTIMES;
+use function Reprint\Importer\get_importer_version;
 
 // ============================================================================
 // CLI Entry Point

@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use function Reprint\Importer\Transport\reprint_apply_curl_proxy_from_env;
 
 require_once __DIR__ . '/../../importer/import.php';
 

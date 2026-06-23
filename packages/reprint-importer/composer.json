@@ -12,6 +12,9 @@
         "wp-php-toolkit/reprint-exporter": "*@dev"
     },
     "autoload": {
+        "files": [
+            "src/lib/bootstrap.php"
+        ],
         "classmap": [
             "src/lib"
         ]

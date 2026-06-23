@@ -1,4 +1,7 @@
 <?php
+
+namespace Reprint\Importer\TargetRuntime;
+
 /**
  * WP Cloud thumbnail generator — route handler implementation.
  *

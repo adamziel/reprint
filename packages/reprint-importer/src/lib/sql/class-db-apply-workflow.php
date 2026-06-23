@@ -15,6 +15,7 @@ use Reprint\Importer\UrlRewrite\NewSiteUrlResolver;
 use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
 use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
 use RuntimeException;
+use function Reprint\Importer\Host\host_analyzer_for;
 
 final class DbApplyWorkflow
 {
@@ -352,7 +353,7 @@ final class DbApplyWorkflow
         DbApplySourceContext $source
     ): array
     {
-        $analyzer = \host_analyzer_for($source->webhost());
+        $analyzer = host_analyzer_for($source->webhost());
         $preflight_data = $source->preflight_data();
         $manifest = $analyzer->analyze($preflight_data);
 

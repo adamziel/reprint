@@ -409,7 +409,7 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-importer",
-                "reference": "3c6a447d8b092655ea6c298b3fe2d3797a96bff9"
+                "reference": "cef06c73f658bef4430fe2ffc0a4bd98d8a5d24c"
             },
             "require": {
                 "ext-pdo": "*",
@@ -424,6 +424,9 @@
             ],
             "type": "library",
             "autoload": {
+                "files": [
+                    "src/lib/bootstrap.php"
+                ],
                 "classmap": [
                     "src/lib"
                 ]

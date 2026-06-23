@@ -1,4 +1,7 @@
 <?php
+
+namespace Reprint\Importer\TargetRuntime;
+
 /**
  * Remote upload proxy route handler.
  *

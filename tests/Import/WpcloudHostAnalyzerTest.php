@@ -5,10 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Host\Analyzers\WpcloudHostAnalyzer;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/class-runtime-manifest.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/interface-host-analyzer.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/functions.php';
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/analyzers/class-wpcloud-host-analyzer.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/host/load.php';
 
 class WpcloudHostAnalyzerTest extends TestCase
 {

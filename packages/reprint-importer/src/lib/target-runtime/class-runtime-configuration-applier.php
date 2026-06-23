@@ -6,6 +6,8 @@ use InvalidArgumentException;
 use Reprint\Importer\Host\RuntimeManifest;
 use Reprint\Importer\Observability\AuditLogger;
 use RuntimeException;
+use function Reprint\Importer\Host\host_analyzer_for;
+use function Reprint\Importer\SQLite\resolve_sqlite_integration_plugin_path;
 
 final class RuntimeConfigurationApplier
 {
@@ -88,7 +90,7 @@ final class RuntimeConfigurationApplier
             }
         }
 
-        $analyzer = \host_analyzer_for($webhost);
+        $analyzer = host_analyzer_for($webhost);
         $manifest = $analyzer->analyze($preflight_data);
         $this->maybe_enable_remote_upload_proxy($manifest, $preflight_data, $config);
 
@@ -104,7 +106,7 @@ final class RuntimeConfigurationApplier
             $fs_root,
         );
 
-        $applier = \runtime_applier_for($runtime);
+        $applier = runtime_applier_for($runtime);
         $applier_options = [];
         if ($wordpress_index !== '') {
             $applier_options['wordpress_index'] = $wordpress_index;
@@ -117,12 +119,12 @@ final class RuntimeConfigurationApplier
         }
 
         if ($manifest->sqlite !== null) {
-            $copied_plugin = \copy_sqlite_plugin(
+            $copied_plugin = copy_sqlite_plugin(
                 $manifest->sqlite['plugin_source'],
                 $abs_output_dir,
             );
             $manifest->sqlite['plugin_dir'] = $copied_plugin;
-            $manifest->sqlite['db_dir'] = \resolve_runtime_placeholders(
+            $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
                 $manifest->sqlite['db_dir'],
                 $abs_fs_root,
             );
@@ -229,7 +231,7 @@ final class RuntimeConfigurationApplier
                 $db_file = '.ht.sqlite';
             }
             $manifest->sqlite = [
-                'plugin_source' => \resolve_sqlite_integration_plugin_path(),
+                'plugin_source' => resolve_sqlite_integration_plugin_path(),
                 'plugin_dir' => '',
                 'db_dir' => $db_dir,
                 'db_file' => $db_file,

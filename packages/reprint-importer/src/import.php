@@ -26,58 +26,8 @@ foreach ([
     }
 }
 
-// Load vendored MySQL query stream (from sqlite-database-integration PR #264)
-require_once __DIR__ . '/lib/mysql-query-stream/load.php';
-
-// Load WordPress function stubs (needed by wp-php-toolkit outside WordPress)
-require_once __DIR__ . '/lib/wp-stubs.php';
-
-// Load URL rewriting components
-require_once __DIR__ . '/lib/url-rewrite/load.php';
-
-// Load host analyzers (produce a runtime manifest from preflight data)
-require_once __DIR__ . '/lib/host/load.php';
-
-// Load target runtime appliers (consume a manifest, write server config)
-require_once __DIR__ . '/lib/target-runtime/load.php';
-
-// External merge sort for large index files when exec() is unavailable
-require_once __DIR__ . '/lib/class-external-merge-sort.php';
-
-// Terminal progress rendering (spinner, progress lines, lifecycle messages)
-require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
-
-// Small reusable helpers with no Importer dependency.
-require_once __DIR__ . '/lib/support/load.php';
-require_once __DIR__ . '/lib/observability/load.php';
-require_once __DIR__ . '/lib/filesystem/load.php';
-require_once __DIR__ . '/lib/index/load.php';
-require_once __DIR__ . '/lib/file-sync/load.php';
-require_once __DIR__ . '/lib/sql/load.php';
-
-// Session paths and state persistence helpers.
-require_once __DIR__ . '/lib/session/load.php';
-
-// Pull pipeline stage command adapters.
-require_once __DIR__ . '/lib/pull/commands/load.php';
-
-// Output adapters for CLI, web, and embedded consumers.
-require_once __DIR__ . '/lib/output/load.php';
-
-// Pull command — orchestrates the lower-level commands into a pipeline
-require_once __DIR__ . '/lib/pull/interface-pull-runtime.php';
-require_once __DIR__ . '/lib/pull/class-pull-checkpoint.php';
-require_once __DIR__ . '/lib/pull/class-pull.php';
-
-// Load reusable importer modules.
-require_once __DIR__ . '/lib/protocol/load.php';
-require_once __DIR__ . '/lib/transport/load.php';
-require_once __DIR__ . '/lib/sqlite/functions.php';
-require_once __DIR__ . '/lib/tuning/class-adaptive-tuner.php';
-require_once __DIR__ . '/lib/version.php';
-
-// Application core: command dispatch, use cases, and composition.
-require_once __DIR__ . '/lib/application/load.php';
+// Register local autoloading and load global helper functions/constants.
+require_once __DIR__ . '/lib/bootstrap.php';
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -104,5 +54,4 @@ register_shutdown_function(function () {
 if (!defined('REPRINT_IMPORTER_SOURCE_ENTRY')) {
     define('REPRINT_IMPORTER_SOURCE_ENTRY', __FILE__);
 }
-require_once __DIR__ . '/lib/cli/class-cli-command-result-renderer.php';
 require_once __DIR__ . '/lib/cli/entrypoint.php';

@@ -1,5 +1,10 @@
 <?php
 
+namespace Reprint\Importer\SQLite;
+
+use PDO;
+use RuntimeException;
+
 /**
  * Return possible sqlite-database-integration roots for supported runtime
  * layouts. This intentionally does not walk arbitrary parent directories:
@@ -88,7 +93,7 @@ function resolve_sqlite_integration_plugin_path(): string
  */
 function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, int $num_args = 1): void
 {
-    if ($sqlite_pdo instanceof PDO\SQLite) {
+    if ($sqlite_pdo instanceof \PDO\SQLite) {
         $sqlite_pdo->createFunction($name, $fn, $num_args);
     } else {
         $sqlite_pdo->sqliteCreateFunction($name, $fn, $num_args);
