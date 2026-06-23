@@ -7,7 +7,7 @@ use Reprint\Importer\Command\DbDomainsResult;
 use Reprint\Importer\Command\FilesStatsResult;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightAssertResult;
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\Application\UseCase\PreflightAssertHandler;
 use Reprint\Importer\Output\BufferedImportOutput;

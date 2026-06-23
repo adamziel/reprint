@@ -7,7 +7,7 @@ use Reprint\Importer\Command\FilesStatsResult;
 use Reprint\Importer\Command\ImportCommandResult;
 use Reprint\Importer\Command\PreflightAssertResult;
 use Reprint\Importer\Command\PreflightReportResult;
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 
 final class CliCommandResultRenderer
 {

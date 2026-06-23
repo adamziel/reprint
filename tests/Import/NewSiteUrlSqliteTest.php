@@ -3,7 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Sql\TargetDatabaseConnectionFactory;
 
 require_once __DIR__ . '/../../importer/import.php';

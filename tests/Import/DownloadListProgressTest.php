@@ -7,7 +7,7 @@ use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Session\StatePathCodec;
 

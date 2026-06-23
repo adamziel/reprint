@@ -3,7 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\Application\PullRuntimeAdapter;
 use Reprint\Importer\Pull\Pull;

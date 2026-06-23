@@ -8,7 +8,7 @@ use Reprint\Importer\Application\UseCase\DbPullHandler;
 use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;

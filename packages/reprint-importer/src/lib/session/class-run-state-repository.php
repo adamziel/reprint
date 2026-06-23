@@ -2,7 +2,7 @@
 
 namespace Reprint\Importer\Session;
 
-use Reprint\Importer\Command\ImportCommands;
+use Reprint\Importer\Application\CommandRegistry;
 use Reprint\Importer\Observability\AuditLogger;
 use RuntimeException;
 
@@ -48,7 +48,7 @@ final class RunStateRepository
 
         $run_state = ImportRunState::from_array($state);
         if (is_string($run_state->command)) {
-            $run_state->command = ImportCommands::normalize_name($run_state->command);
+            $run_state->command = CommandRegistry::normalize_name($run_state->command);
         }
 
         return $run_state;

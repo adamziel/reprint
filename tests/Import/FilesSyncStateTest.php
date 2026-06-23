@@ -11,7 +11,7 @@ use Reprint\Importer\FileSync\FileSyncLocalApplier;
 use Reprint\Importer\Filesystem\LocalImportFilesystem;
 use Reprint\Importer\Index\IndexStore;
 use Reprint\Importer\Observability\NullAuditLogger;
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Observability\NullMachineEventEmitter;
 use Reprint\Importer\Protocol\StreamingContext;

@@ -1,8 +1,8 @@
 <?php
 
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Cli\CliCommandResultRenderer;
-use Reprint\Importer\Command\ImportCommands;
+use Reprint\Importer\Application\CommandRegistry;
 use Reprint\Importer\Output\CliImportOutput;
 
 // ============================================================================
@@ -1099,7 +1099,7 @@ if (
 
     $command = $argv[1];
 
-    $command = ImportCommands::normalize_name($command) ?? $command;
+    $command = CommandRegistry::normalize_name($command) ?? $command;
 
     // install-exporter is a standalone guide — no URL, state-dir, or fs-root needed.
     // Handle it before per-command --help so it always shows the full guide.

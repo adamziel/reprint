@@ -5,7 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\Application\UseCase\FlatDocrootHandler;
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 
 require_once __DIR__ . '/../../importer/import.php';
 

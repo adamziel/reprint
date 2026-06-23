@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
-use Reprint\Importer\Importer;
+use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Protocol\StreamingContext;
 
