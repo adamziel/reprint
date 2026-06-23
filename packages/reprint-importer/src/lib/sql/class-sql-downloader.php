@@ -104,20 +104,6 @@ final class SqlDownloader
         $buffer_not_flushed = "";
         $chunks_since_save = 0;
 
-        $sync_sql_response_state = function (
-            SqlResponseHandler $response_handler
-        ) use (
-            &$cursor,
-            &$complete,
-            &$sql_statements_counted,
-            &$chunks_since_save
-        ): void {
-            $cursor = $response_handler->cursor();
-            $complete = $response_handler->complete();
-            $sql_statements_counted = $response_handler->sql_statements_counted();
-            $chunks_since_save = $response_handler->chunks_since_save();
-        };
-
         try {
             while (!$complete) {
                 if ($this->shutdown->is_shutdown_requested()) {
@@ -152,7 +138,8 @@ final class SqlDownloader
                 try {
                     $this->stream->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
                 } catch (CurlTimeoutException $e) {
-                    $sync_sql_response_state($response_handler);
+                    [$cursor, $complete, $sql_statements_counted, $chunks_since_save] =
+                        $this->response_state($response_handler);
                     $this->timeout_policy->assert_can_retry(
                         $checkpoint,
                         "sql_chunk",
@@ -169,7 +156,8 @@ final class SqlDownloader
                     $curl_timed_out = true;
                     break;
                 } catch (RuntimeException $e) {
-                    $sync_sql_response_state($response_handler);
+                    [$cursor, $complete, $sql_statements_counted, $chunks_since_save] =
+                        $this->response_state($response_handler);
 
                     if ($this->is_retryable_incomplete_response($e)) {
                         $this->audit->record(
@@ -198,7 +186,8 @@ final class SqlDownloader
                     throw $e;
                 }
 
-                $sync_sql_response_state($response_handler);
+                [$cursor, $complete, $sql_statements_counted, $chunks_since_save] =
+                    $this->response_state($response_handler);
 
                 $checkpoint->consecutive_timeouts = 0;
                 $this->stream->finalize_request(
@@ -278,6 +267,19 @@ final class SqlDownloader
         }
 
         return $checkpoint;
+    }
+
+    /**
+     * @return array{0: ?string, 1: bool, 2: int, 3: int}
+     */
+    private function response_state(SqlResponseHandler $response_handler): array
+    {
+        return [
+            $response_handler->cursor(),
+            $response_handler->complete(),
+            $response_handler->sql_statements_counted(),
+            $response_handler->chunks_since_save(),
+        ];
     }
 
     private function checkpoint_for_retry(

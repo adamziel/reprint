@@ -17,3 +17,13 @@ if (!function_exists('trailingslashit')) {
         return rtrim($value, '/\\') . '/';
     }
 }
+
+if (!function_exists('get_option')) {
+    function get_option(string $option, $default = false) {
+        return $default;
+    }
+}
+
+if (!function_exists('_doing_it_wrong')) {
+    function _doing_it_wrong(string $function_name, string $message, string $version): void {}
+}

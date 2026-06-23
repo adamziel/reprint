@@ -11,22 +11,7 @@ parameters:
 			path: packages/reprint-exporter/src/class-mysql-dump-producer.php
 
 		-
-			message: "#^Function get_option not found\\.$#"
-			count: 5
-			path: packages/reprint-exporter/src/export.php
-
-		-
 			message: "#^Parameter \\#1 \\$flag of function ob_implicit_flush expects int, true given\\.$#"
-			count: 1
-			path: packages/reprint-exporter/src/export.php
-
-		-
-			message: "#^Negated boolean expression is always false\\.$#"
-			count: 1
-			path: packages/reprint-exporter/src/export.php
-
-		-
-			message: "#^Negated boolean expression is always true\\.$#"
 			count: 1
 			path: packages/reprint-exporter/src/export.php
 
@@ -36,26 +21,6 @@ parameters:
 			path: packages/reprint-exporter/src/export.php
 
 		-
-			message: "#^Variable \\$filesystem_root on left side of \\?\\? always exists and is not nullable\\.$#"
-			count: 1
-			path: packages/reprint-exporter/src/export.php
-
-		-
 			message: "#^Strict comparison using \\!\\=\\= between null and null will always evaluate to false\\.$#"
 			count: 1
 			path: packages/reprint-exporter/src/class-file-tree-producer.php
-
-		-
-			message: "#^Function _doing_it_wrong not found\\.$#"
-			count: 1
-			path: packages/reprint-importer/src/lib/url-rewrite/class-structured-data-url-rewriter.php
-
-		-
-			message: "#^Class PDO\\\\SQLite not found\\.$#"
-			count: 1
-			path: packages/reprint-importer/src/import.php
-
-		-
-			message: "#^Call to method createFunction\\(\\) on an unknown class PDO\\\\SQLite\\.$#"
-			count: 1
-			path: packages/reprint-importer/src/import.php

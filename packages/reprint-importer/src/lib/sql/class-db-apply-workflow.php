@@ -15,7 +15,6 @@ use Reprint\Importer\UrlRewrite\NewSiteUrlResolver;
 use Reprint\Importer\UrlRewrite\SqlStatementRewriter;
 use Reprint\Importer\UrlRewrite\StructuredDataUrlRewriter;
 use RuntimeException;
-use function Reprint\Importer\Host\host_analyzer_for;
 
 final class DbApplyWorkflow
 {
@@ -274,7 +273,6 @@ final class DbApplyWorkflow
     }
 
     /**
-     * @param array<string, mixed> $state
      * @param array<string, mixed> $options
      * @return array{0: PDO, 1: string}
      */
@@ -343,46 +341,6 @@ final class DbApplyWorkflow
         );
 
         return $sqlite_pdo;
-    }
-
-    /**
-     * @return string[]
-     */
-    private function deactivate_host_plugins(
-        PDO $pdo,
-        DbApplySourceContext $source
-    ): array
-    {
-        $analyzer = host_analyzer_for($source->webhost());
-        $preflight_data = $source->preflight_data();
-        $manifest = $analyzer->analyze($preflight_data);
-
-        return ActivePluginDeactivator::deactivate_for_removed_paths(
-            $pdo,
-            $manifest->paths_to_remove,
-            $source->table_prefix(),
-            function (string $message): void {
-                $this->audit($message);
-            },
-        );
-    }
-
-    /**
-     * @return string[]
-     */
-    private function deactivate_path_incompatible_plugins(
-        PDO $pdo,
-        DbApplySourceContext $source,
-        string $new_site_url
-    ): array {
-        return ActivePluginDeactivator::deactivate_path_incompatible(
-            $pdo,
-            $new_site_url,
-            $source->table_prefix(),
-            function (string $message): void {
-                $this->audit($message);
-            },
-        );
     }
 
     private function save_state(DbApplyCheckpoint $checkpoint): void

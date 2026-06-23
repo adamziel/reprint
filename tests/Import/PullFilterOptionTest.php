@@ -42,6 +42,10 @@ class PullFilterFakeRuntime implements PullRuntime
     {
     }
 
+    public function write_status_file(?string $error = null): void
+    {
+    }
+
     public function audit_log(string $message, bool $to_console = true): void
     {
     }

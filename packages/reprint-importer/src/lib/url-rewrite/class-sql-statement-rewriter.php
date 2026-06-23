@@ -3,6 +3,7 @@
 namespace Reprint\Importer\UrlRewrite;
 
 use WP_MySQL_Lexer;
+use WP_MySQL_Token;
 
 /**
  * Combines Base64ValueScanner and StructuredDataUrlRewriter to rewrite URLs

@@ -34,7 +34,7 @@ final class PreflightAssertHandler extends AbstractCommandHandler
                 ? "HTTP 200"
                 : "HTTP " . (is_array($entry) ? ($entry["http_code"] ?? "no response") : "no response"),
         ];
-        $all_pass = $all_pass && $http_ok;
+        $all_pass = $http_ok;
 
         $top_ok = is_array($data) && !empty($data["ok"]);
         $checks[] = [

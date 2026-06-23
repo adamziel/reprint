@@ -8,8 +8,6 @@ use RuntimeException;
 
 final class FileSqlOutputSink implements SqlOutputSink
 {
-    private string $sql_file;
-
     /** @var resource|null */
     private $handle;
 
@@ -21,8 +19,6 @@ final class FileSqlOutputSink implements SqlOutputSink
         ?int $tracked_bytes,
         AuditLogger $audit
     ) {
-        $this->sql_file = $sql_file;
-
         if ($tracked_bytes !== null && file_exists($sql_file)) {
             $actual_size = filesize($sql_file);
             if ($actual_size > $tracked_bytes) {

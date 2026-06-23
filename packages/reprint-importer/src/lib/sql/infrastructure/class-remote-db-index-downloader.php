@@ -2,7 +2,6 @@
 
 namespace Reprint\Importer\Sql\Infrastructure;
 
-use Reprint\Importer\Observability\AuditLogger;
 use Reprint\Importer\Protocol\CurlTimeoutException;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Sql\DbIndexCheckpoint;
@@ -23,7 +22,6 @@ final class RemoteDbIndexDownloader implements DbIndexDownloader
     private DbPullCheckpointStore $checkpoints;
     private DbPullTimeoutPolicy $timeout_policy;
     private DbIndexTableSinkFactory $sink_factory;
-    private AuditLogger $audit;
     private string $default_tables_file;
 
     public function __construct(
@@ -32,7 +30,6 @@ final class RemoteDbIndexDownloader implements DbIndexDownloader
         DbPullCheckpointStore $checkpoints,
         DbPullTimeoutPolicy $timeout_policy,
         DbIndexTableSinkFactory $sink_factory,
-        AuditLogger $audit,
         string $default_tables_file
     ) {
         $this->stream = $stream;
@@ -40,7 +37,6 @@ final class RemoteDbIndexDownloader implements DbIndexDownloader
         $this->checkpoints = $checkpoints;
         $this->timeout_policy = $timeout_policy;
         $this->sink_factory = $sink_factory;
-        $this->audit = $audit;
         $this->default_tables_file = $default_tables_file;
     }
 

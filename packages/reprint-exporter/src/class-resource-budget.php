@@ -34,7 +34,11 @@ class ResourceBudget
         $this->memory_threshold = $memory_threshold;
     }
 
-    /** Returns false when the request should yield due to time or memory pressure. */
+    /**
+     * Returns false when the request should yield due to time or memory pressure.
+     *
+     * @phpstan-impure
+     */
     public function has_remaining(): bool
     {
         if (microtime(true) - $this->start_time >= $this->max_time) {

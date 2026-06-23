@@ -3,6 +3,7 @@
 namespace Reprint\Importer\UrlRewrite;
 
 use WP_MySQL_Lexer;
+use WP_MySQL_Token;
 
 /**
  * Cursor-based processor that iterates over FROM_BASE64('...') values in a SQL

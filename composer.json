@@ -10,14 +10,14 @@
             "type": "path",
             "url": "packages/reprint-exporter",
             "options": {
-                "symlink": false
+                "symlink": true
             }
         },
         {
             "type": "path",
             "url": "packages/reprint-importer",
             "options": {
-                "symlink": false
+                "symlink": true
             }
         }
     ],

@@ -6,6 +6,8 @@ parameters:
         - phpstan-bootstrap.php
     stubFiles:
         - phpstan-stubs.php
+    scanFiles:
+        - phpstan-stubs.php
     phpVersion: 70400
     level: 5
     paths:

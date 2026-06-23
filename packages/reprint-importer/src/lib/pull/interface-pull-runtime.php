@@ -13,6 +13,8 @@ interface PullRuntime
 
     public function output_progress(array $data, bool $force = false): void;
 
+    public function write_status_file(?string $error = null): void;
+
     public function audit_log(string $message, bool $to_console = true): void;
 
     public function paths(): ImportPaths;
@@ -38,6 +40,8 @@ interface PullRuntime
     public function preflight_data(): ?array;
 
     public function default_runtime_output_dir(): string;
+
+    public function fs_root(): string;
 
     public function current_filter(): string;
 

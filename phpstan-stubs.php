@@ -4,10 +4,14 @@
  * PHP 8.2, so we stub the class to avoid "not found" errors.
  */
 
-namespace PDO;
+namespace {
+	final class DeflateContext {}
+}
 
-class SQLite extends \PDO {
-	public function createFunction( string $function_name, callable $callback, int $num_args = -1, int $flags = 0 ): bool {
-		return true;
+namespace PDO {
+	class SQLite extends \PDO {
+		public function createFunction( string $function_name, callable $callback, int $num_args = -1, int $flags = 0 ): bool {
+			return true;
+		}
 	}
 }

@@ -61,7 +61,6 @@ final class DatabaseServices
                 $checkpoints,
                 $timeouts,
                 new JsonlDbIndexTableSinkFactory($audit),
-                $audit,
                 $config->tables_file(),
             ),
             new ConfiguredSqlDumpDownloader(

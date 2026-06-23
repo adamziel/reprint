@@ -9,8 +9,6 @@ use RuntimeException;
 
 final class JsonlDbIndexTableSink implements DbIndexTableSink
 {
-    private string $tables_file;
-
     /** @var resource|null */
     private $handle;
 
@@ -24,7 +22,6 @@ final class JsonlDbIndexTableSink implements DbIndexTableSink
         DbIndexCheckpoint $checkpoint,
         AuditLogger $audit
     ) {
-        $this->tables_file = $tables_file;
         $this->tables_written = $checkpoint->tables;
         $this->rows_estimated = $checkpoint->rows_estimated;
         $this->bytes_written = $checkpoint->bytes;

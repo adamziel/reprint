@@ -200,15 +200,15 @@ final class FileIndexCommand extends BudgetedExportCommand
                 "Content-Type: application/json\r\n" .
                 "Content-Length: " . strlen($metadata_json) . "\r\n" .
                 "X-Chunk-Type: metadata\r\n" .
-                "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n" .
-                "X-Index-Dir: " . base64_encode($list_dir_real ?? "") . "\r\n" .
+                "X-Filesystem-Root: " . base64_encode($filesystem_root) . "\r\n" .
+                "X-Index-Dir: " . base64_encode($list_dir_real) . "\r\n" .
                 "\r\n" .
                 $metadata_json . "\r\n",
             );
             $gz->sync();
             $stop = false;
     
-            while (!$stop) {
+            while (true) {
                 if (empty($stack)) {
                     $status = "complete";
                     break;

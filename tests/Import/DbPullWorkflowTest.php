@@ -117,7 +117,6 @@ final class DbPullWorkflowTest extends TestCase
                 new WorkflowTestCheckpointStore($this->client),
                 new WorkflowTestTimeoutPolicy($this->client),
                 new JsonlDbIndexTableSinkFactory(new WorkflowTestAuditLogger($this->client)),
-                new WorkflowTestAuditLogger($this->client),
                 $this->temp_dir . '/db-tables.jsonl',
             ),
             new WorkflowTestSqlDumpDownloader($this->client),
