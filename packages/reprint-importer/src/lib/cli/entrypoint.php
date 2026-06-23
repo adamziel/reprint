@@ -551,7 +551,7 @@ if (
         switch ($cast) {
             case 'int':   return (int) $raw;
             case 'float': return (float) $raw;
-            case 'size':  return parse_size($raw);
+            case 'size':  return \Reprint\Exporter\parse_size($raw);
             default:      return $raw;
         }
     }

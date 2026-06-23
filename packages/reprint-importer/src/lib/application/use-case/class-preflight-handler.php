@@ -8,7 +8,6 @@ use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\Application\Result\ImportCommandResult;
 use Reprint\Importer\Application\Result\PreflightReportResult;
 use Reprint\Importer\Session\PreflightCheckpoint;
-use function Reprint\Importer\Host\detect_host;
 
 final class PreflightHandler extends AbstractCommandHandler
 {
@@ -64,7 +63,7 @@ final class PreflightHandler extends AbstractCommandHandler
         $wp_version = is_array($payload) ? ($payload["database"]["wp"]["wp_version"] ?? null) : null;
         $exporter_version = is_string($wp_version) && $wp_version !== "" ? $wp_version : null;
 
-        $detected_webhost = is_array($payload) ? detect_host($payload) : "other";
+        $detected_webhost = is_array($payload) ? \detect_host($payload) : "other";
         if ($detected_webhost === "other" && $context->has_wpcloud_docroot_link()) {
             $detected_webhost = "wpcloud";
         }
