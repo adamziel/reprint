@@ -45,17 +45,18 @@ Uses multipart/mixed content-type to split large files into chunks while transmi
 ### Running Tests
 
 ```bash
-# Run the regular PHPUnit suite.
-# MySQL-backed tests are skipped when no database is reachable.
-composer run test
-
-# Run the full PHPUnit suite with a local Docker MySQL container.
-# Use this before finalizing changes that touch database export/import behavior.
+# Default final verification for local agent/developer work.
+# This runs the full PHPUnit suite with a local Docker MySQL container.
 composer run test:local-db
 
-# Pass PHPUnit arguments through to the local-DB runner.
+# Focused local-DB checks are fine while iterating, but do not replace
+# the final composer run test:local-db run.
 composer run test:local-db -- --filter ReentrancyTest
 composer run test:local-db -- MySQLDumpProducer/BasicDumpTest.php
+
+# Fallback only when intentionally avoiding local Docker/MySQL.
+# MySQL-backed tests are skipped when no database is reachable.
+composer run test
 
 # Run with coverage (requires Xdebug)
 composer run test:coverage
@@ -73,6 +74,9 @@ cd tests && ../vendor/bin/phpunit --filter testRoundTripIntegrity
 memory limit to 512M by default, and tears the container down when the run
 finishes. It is intended for local development only; GitHub Actions already
 provides its own MySQL service and continues to run `composer run test`.
+Use `composer run test:local-db` before finalizing code changes unless the change
+is strictly docs-only or the local Docker/MySQL environment is unavailable. If
+you use `composer run test` instead, state that limitation in the final response.
 
 ### Coding Standards
 
