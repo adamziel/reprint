@@ -3,6 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Application\ImportServices;
+use Reprint\Importer\Application\UseCase\FlatDocrootHandler;
 use Reprint\Importer\Importer;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -71,11 +73,8 @@ class FlatDocrootWpConfigTest extends TestCase
 
         $flattenTo = $this->tempDir . '/flat';
         $client = $this->makeClient();
-        $this->loadClientState($client);
 
-        $this->callPrivate($client, 'run_flat_document_root', [
-            ['flatten_to' => $flattenTo, 'force' => false],
-        ]);
+        $this->runFlatDocumentRoot($client, $flattenTo);
 
         $wpConfigFlat = $flattenTo . '/wp-config.php';
         $this->assertFileExists($wpConfigFlat, 'wp-config.php should exist in flattened output');
@@ -122,11 +121,8 @@ class FlatDocrootWpConfigTest extends TestCase
 
         $flattenTo = $this->tempDir . '/flat';
         $client = $this->makeClient();
-        $this->loadClientState($client);
 
-        $this->callPrivate($client, 'run_flat_document_root', [
-            ['flatten_to' => $flattenTo, 'force' => false],
-        ]);
+        $this->runFlatDocumentRoot($client, $flattenTo);
 
         $wpConfigFlat = $flattenTo . '/wp-config.php';
         $this->assertFileExists($wpConfigFlat);
@@ -152,19 +148,16 @@ class FlatDocrootWpConfigTest extends TestCase
         return new Importer('https://source.example/export.php', $this->stateDir, $this->fsRoot);
     }
 
-    private function loadClientState(Importer $client): void
+    private function runFlatDocumentRoot(Importer $client, string $flattenTo): void
     {
-        $state = $this->callPrivate($client, 'load_state');
-        $reflection = new \ReflectionClass($client);
-        $property = $reflection->getProperty('state');
-        $property->setValue($client, $state);
-    }
+        $context = $client->context();
+        $context->state();
 
-    private function callPrivate(Importer $client, string $method, array $args = [])
-    {
-        $reflection = new \ReflectionClass($client);
-        $m = $reflection->getMethod($method);
-        return $m->invoke($client, ...$args);
+        (new FlatDocrootHandler())->execute(
+            $context,
+            new ImportServices($context),
+            ['flatten_to' => $flattenTo, 'force' => false],
+        );
     }
 
     private function recursiveDelete(string $dir): void

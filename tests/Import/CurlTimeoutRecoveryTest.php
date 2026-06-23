@@ -3,6 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Application\ImportServices;
+use Reprint\Importer\Application\UseCase\DbPullHandler;
 use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
@@ -210,25 +212,34 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     /**
-     * Prepare a client test double with state loaded and TTY disabled.
-     *
-     * @param class-string $clientClass  Which test double to instantiate
+     * Prepare the application context and inject transport test doubles through
+     * the service boundary instead of subclassing the importer shell.
      */
-    private function prepareClient(string $clientClass = TimeoutTestClient::class): array
+    private function prepareClient(
+        ?FileSyncStreamClient $file_sync_stream = null,
+        ?SqlStreamClient $sql_stream = null
+    ): array
     {
-        $client = new $clientClass(
+        $client = new Importer(
             'http://fake.url',
             $this->stateDir,
             $this->fs_root,
             new BufferedImportOutput(),
         );
-        $reflection = new \ReflectionClass(Importer::class);
+        $context = $client->context();
+        $context->state();
+        $file_sync_stream = $file_sync_stream ?? new TimeoutTestStreamClient();
+        if ($sql_stream === null) {
+            if (!$file_sync_stream instanceof SqlStreamClient) {
+                throw new \LogicException('The default SQL stream must implement SqlStreamClient.');
+            }
+            $sql_stream = $file_sync_stream;
+        }
 
-        $stateProperty = $reflection->getProperty('state');
-        $loadState = $reflection->getMethod('load_state');
-        $stateProperty->setValue($client, $loadState->invoke($client));
-
-        return [$client, $reflection];
+        return [
+            $client,
+            new ImportServices($context, $file_sync_stream, $sql_stream),
+        ];
     }
 
     // ---------------------------------------------------------------
@@ -253,14 +264,10 @@ class CurlTimeoutRecoveryTest extends TestCase
         $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
         file_put_contents($this->stateDir . '/db.sql', $sql_content);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
+        $client->context()->set_sql_output_mode('file');
 
-        $modeProp = $reflection->getProperty('sql_output_mode');
-        $modeProp->setValue($client, 'file');
-
-        $downloadSql = $reflection->getMethod('download_sql');
-        $checkpoint = $downloadSql->invoke(
-            $client,
+        $checkpoint = $services->download_sql(
             DbPullCheckpoint::from_array($this->readDbPullCheckpoint()),
         );
 
@@ -297,12 +304,10 @@ class CurlTimeoutRecoveryTest extends TestCase
             ],
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
 
-        $downloadFilesFetch = $reflection->getMethod('download_file_fetch');
-        $result = $downloadFilesFetch->invoke(
-            $client,
-            $client->files_pull_checkpoint(),
+        $result = $services->download_file_fetch(
+            $client->context()->files_pull_checkpoint(),
             null,
             base64_encode('{"path":"/photo.jpg","offset":4096}'),
             "fetch",
@@ -341,23 +346,18 @@ class CurlTimeoutRecoveryTest extends TestCase
             "current_file_bytes" => 256,
         ]);
 
-        [$client, $reflection] = $this->prepareClient(
-            InterruptedAfterStreamedPartCloseClient::class,
+        [$client, $services] = $this->prepareClient(
+            new InterruptedAfterStreamedPartCloseStreamClient(),
         );
 
-        $downloadFilesFetch = $reflection->getMethod('download_file_fetch');
-
         try {
-            $downloadFilesFetch->invoke(
-                $client,
-                $client->files_pull_checkpoint(),
+            $services->download_file_fetch(
+                $client->context()->files_pull_checkpoint(),
                 null,
                 self::fileCursorForBytes(256),
                 "fetch",
             );
             $this->fail('Expected simulated hard crash during file fetch');
-        } catch (\ReflectionException $e) {
-            throw $e;
         } catch (\RuntimeException $e) {
             $this->assertSame(
                 'Simulated hard crash after streamed file part close',
@@ -408,10 +408,11 @@ class CurlTimeoutRecoveryTest extends TestCase
             ],
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
 
-        $downloadIndex = $reflection->getMethod('download_remote_index');
-        $result = $downloadIndex->invoke($client, $client->files_pull_checkpoint());
+        $result = $services->download_remote_index(
+            $client->context()->files_pull_checkpoint(),
+        );
 
         $this->assertFalse(
             $result,
@@ -456,10 +457,9 @@ class CurlTimeoutRecoveryTest extends TestCase
             "consecutive_timeouts" => 0,
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
 
-        $runDbSync = $reflection->getMethod('run_db_sync');
-        $runDbSync->invoke($client);
+        (new DbPullHandler())->execute($client->context(), $services, []);
 
         $state = $this->readState();
         $this->assertEquals(
@@ -495,14 +495,11 @@ class CurlTimeoutRecoveryTest extends TestCase
             "consecutive_timeouts" => 0,
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
-
-        $modeProp = $reflection->getProperty('sql_output_mode');
-        $modeProp->setValue($client, 'file');
+        [$client, $services] = $this->prepareClient();
+        $client->context()->set_sql_output_mode('file');
 
         // run_db_sync should NOT throw — it should return with partial status
-        $runDbSync = $reflection->getMethod('run_db_sync');
-        $runDbSync->invoke($client);
+        (new DbPullHandler())->execute($client->context(), $services, []);
 
         $state = $this->readState();
         $this->assertEquals(
@@ -544,16 +541,13 @@ class CurlTimeoutRecoveryTest extends TestCase
         $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
         file_put_contents($this->stateDir . '/db.sql', $sql_content);
 
-        [$client, $reflection] = $this->prepareClient();
-
-        $modeProp = $reflection->getProperty('sql_output_mode');
-        $modeProp->setValue($client, 'file');
+        [$client, $services] = $this->prepareClient();
+        $client->context()->set_sql_output_mode('file');
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('consecutive');
 
-        $downloadSql = $reflection->getMethod('download_sql');
-        $downloadSql->invoke($client, DbPullCheckpoint::from_array($this->readDbPullCheckpoint()));
+        $services->download_sql(DbPullCheckpoint::from_array($this->readDbPullCheckpoint()));
     }
 
     public function testFirstTimeoutIncrementsDbPullCheckpointCounter()
@@ -574,14 +568,10 @@ class CurlTimeoutRecoveryTest extends TestCase
         $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
         file_put_contents($this->stateDir . '/db.sql', $sql_content);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
+        $client->context()->set_sql_output_mode('file');
 
-        $modeProp = $reflection->getProperty('sql_output_mode');
-        $modeProp->setValue($client, 'file');
-
-        $downloadSql = $reflection->getMethod('download_sql');
-        $checkpoint = $downloadSql->invoke(
-            $client,
+        $checkpoint = $services->download_sql(
             DbPullCheckpoint::from_array($this->readDbPullCheckpoint()),
         );
 
@@ -616,12 +606,9 @@ class CurlTimeoutRecoveryTest extends TestCase
             ],
         ]);
 
-        [$client, $reflection] = $this->prepareClient(
-            SuccessTestClient::class,
-        );
+        [$client, $services] = $this->prepareClient(new SuccessTestStreamClient());
 
-        $downloadIndex = $reflection->getMethod('download_remote_index');
-        $downloadIndex->invoke($client, $client->files_pull_checkpoint());
+        $services->download_remote_index($client->context()->files_pull_checkpoint());
 
         $checkpoint = $this->readFilesPullCheckpoint();
         $this->assertEquals(
@@ -658,37 +645,11 @@ abstract class CurlTimeoutRecoveryTestStreamClient implements FileSyncStreamClie
     }
 }
 
-class TimeoutTestClient extends Importer
-{
-    protected function file_sync_stream_client(): FileSyncStreamClient
-    {
-        return new TimeoutTestStreamClient();
-    }
-
-    protected function sql_stream_client(): SqlStreamClient
-    {
-        return new TimeoutTestStreamClient();
-    }
-}
-
 /**
  * Test double that simulates a process dying immediately after a streamed
  * file part-complete checkpoint. This is a hard crash, so download_file_fetch()
  * must not get a chance to do its normal final save.
  */
-class InterruptedAfterStreamedPartCloseClient extends Importer
-{
-    protected function file_sync_stream_client(): FileSyncStreamClient
-    {
-        return new InterruptedAfterStreamedPartCloseStreamClient();
-    }
-
-    protected function sql_stream_client(): SqlStreamClient
-    {
-        return new TimeoutTestStreamClient();
-    }
-}
-
 class InterruptedAfterStreamedPartCloseStreamClient extends CurlTimeoutRecoveryTestStreamClient
 {
     public function fetch_streaming(
@@ -731,19 +692,6 @@ class InterruptedAfterStreamedPartCloseStreamClient extends CurlTimeoutRecoveryT
  * Test double that completes successfully without throwing,
  * simulating a normal request that finishes.
  */
-class SuccessTestClient extends Importer
-{
-    protected function file_sync_stream_client(): FileSyncStreamClient
-    {
-        return new SuccessTestStreamClient();
-    }
-
-    protected function sql_stream_client(): SqlStreamClient
-    {
-        return new SuccessTestStreamClient();
-    }
-}
-
 class TimeoutTestStreamClient extends CurlTimeoutRecoveryTestStreamClient
 {
     public function fetch_streaming(

@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
@@ -162,23 +163,21 @@ class DownloadListProgressTest extends TestCase
     private function prepareClient(string $filter = "none"): array
     {
         $client = $this->makeClient();
-        $reflection = new \ReflectionClass($client);
+        $context = $client->context();
+        $context->state();
+        $context->set_filter($filter);
 
-        $loadState = $reflection->getMethod('load_state');
-        $stateProperty = $reflection->getProperty('state');
-        $stateProperty->setValue($client, $loadState->invoke($client));
-
-        $filterProp = $reflection->getProperty('filter');
-        $filterProp->setValue($client, $filter);
-
-        return [$client, $reflection];
+        return [$client, new ImportServices($context)];
     }
 
-    private function readCounters(Importer $client, \ReflectionClass $reflection): array
+    private function readCounters(Importer $client): array
     {
+        $progress = $client->context()->file_sync_progress();
+
         return [
-            'total' => $reflection->getProperty('download_list_total')->getValue($client),
-            'done' => $reflection->getProperty('download_list_done')->getValue($client),
+            'total' => $progress->download_list_total(),
+            'done' => $progress->download_list_done(),
+            'imported' => $progress->files_imported(),
         ];
     }
 
@@ -207,16 +206,18 @@ class DownloadListProgressTest extends TestCase
             "stage" => "fetch",
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
-
-        $method = $reflection->getMethod('download_files_from_list');
+        [$client, $services] = $this->prepareClient();
         try {
-            $method->invoke($client, $client->files_pull_checkpoint(), $listFile, 'fetch');
+            $services->fetch_files_from_list(
+                $client->context()->files_pull_checkpoint(),
+                $listFile,
+                'fetch',
+            );
         } catch (\Exception $e) {
             // Expected: network error
         }
 
-        $counters = $this->readCounters($client, $reflection);
+        $counters = $this->readCounters($client);
         $this->assertSame(100, $counters['total']);
         $this->assertSame(0, $counters['done']);
     }
@@ -239,16 +240,19 @@ class DownloadListProgressTest extends TestCase
             ],
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
 
         try {
-            $reflection->getMethod('download_files_from_list')
-                ->invoke($client, $client->files_pull_checkpoint(), $listFile, 'fetch');
+            $services->fetch_files_from_list(
+                $client->context()->files_pull_checkpoint(),
+                $listFile,
+                'fetch',
+            );
         } catch (\Exception $e) {
             // Expected
         }
 
-        $counters = $this->readCounters($client, $reflection);
+        $counters = $this->readCounters($client);
         $this->assertSame(100, $counters['total']);
         $this->assertSame(40, $counters['done']);
     }
@@ -273,16 +277,19 @@ class DownloadListProgressTest extends TestCase
             ],
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
 
         try {
-            $reflection->getMethod('download_files_from_list')
-                ->invoke($client, $client->files_pull_checkpoint(), $listFile, 'fetch');
+            $services->fetch_files_from_list(
+                $client->context()->files_pull_checkpoint(),
+                $listFile,
+                'fetch',
+            );
         } catch (\Exception $e) {
             // Expected
         }
 
-        $counters = $this->readCounters($client, $reflection);
+        $counters = $this->readCounters($client);
         $this->assertSame(50, $counters['total']);
         $this->assertLessThanOrEqual($counters['total'], $counters['done']);
     }
@@ -301,17 +308,16 @@ class DownloadListProgressTest extends TestCase
             "fetch" => ["offset" => $offset30, "next_offset" => $offset30, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
         ]);
 
-        [$client1, $ref1] = $this->prepareClient();
+        [$client1, $services1] = $this->prepareClient();
         try {
-            $ref1->getMethod('download_files_from_list')->invoke(
-                $client1,
-                $client1->files_pull_checkpoint(),
+            $services1->fetch_files_from_list(
+                $client1->context()->files_pull_checkpoint(),
                 $listFile,
                 'fetch',
             );
         } catch (\Exception $e) {}
 
-        $c1 = $this->readCounters($client1, $ref1);
+        $c1 = $this->readCounters($client1);
         $this->assertSame(100, $c1['total']);
         $this->assertSame(30, $c1['done']);
 
@@ -323,17 +329,16 @@ class DownloadListProgressTest extends TestCase
             "fetch" => ["offset" => $offset60, "next_offset" => $offset60, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
         ]);
 
-        [$client2, $ref2] = $this->prepareClient();
+        [$client2, $services2] = $this->prepareClient();
         try {
-            $ref2->getMethod('download_files_from_list')->invoke(
-                $client2,
-                $client2->files_pull_checkpoint(),
+            $services2->fetch_files_from_list(
+                $client2->context()->files_pull_checkpoint(),
                 $listFile,
                 'fetch',
             );
         } catch (\Exception $e) {}
 
-        $c2 = $this->readCounters($client2, $ref2);
+        $c2 = $this->readCounters($client2);
         $this->assertSame(100, $c2['total']);
         $this->assertSame(60, $c2['done']);
 
@@ -355,19 +360,17 @@ class DownloadListProgressTest extends TestCase
             "fetch_skipped" => ["offset" => $offset20, "next_offset" => $offset20, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
         ]);
 
-        [$client, $reflection] = $this->prepareClient("skipped-earlier");
+        [$client, $services] = $this->prepareClient("skipped-earlier");
 
         try {
-            $reflection->getMethod('download_files_from_list')
-                ->invoke(
-                    $client,
-                    $client->files_pull_checkpoint(),
-                    $skippedList,
-                    'fetch_skipped',
-                );
+            $services->fetch_files_from_list(
+                $client->context()->files_pull_checkpoint(),
+                $skippedList,
+                'fetch_skipped',
+            );
         } catch (\Exception $e) {}
 
-        $counters = $this->readCounters($client, $reflection);
+        $counters = $this->readCounters($client);
         $this->assertSame(200, $counters['total']);
         $this->assertSame(20, $counters['done']);
     }
@@ -376,13 +379,12 @@ class DownloadListProgressTest extends TestCase
     {
         $listFile = $this->writeDownloadList(500);
 
-        [$client, $reflection] = $this->prepareClient();
-        $method = $reflection->getMethod('count_newlines');
+        [, $services] = $this->prepareClient();
 
-        $this->assertSame(500, $method->invoke($client, $listFile));
+        $this->assertSame(500, $services->count_download_list_lines($listFile));
 
         $offset100 = $this->byteOffsetAfterLines($listFile, 100);
-        $this->assertSame(100, $method->invoke($client, $listFile, $offset100));
+        $this->assertSame(100, $services->count_download_list_lines($listFile, $offset100));
     }
 
     public function testPrepareFetchBatchReturnsEntryCount()
@@ -419,19 +421,28 @@ class DownloadListProgressTest extends TestCase
             "fetch" => ["offset" => $offset40, "next_offset" => $offset40, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
 
         try {
-            $reflection->getMethod('download_files_from_list')
-                ->invoke($client, $client->files_pull_checkpoint(), $listFile, 'fetch');
+            $services->fetch_files_from_list(
+                $client->context()->files_pull_checkpoint(),
+                $listFile,
+                'fetch',
+            );
         } catch (\Exception $e) {}
 
         // Simulate 5 files written in this invocation
-        $reflection->getProperty('files_imported')->setValue($client, 5);
+        $progress = $client->context()->file_sync_progress();
+        $client->context()->set_file_sync_progress(
+            5,
+            $progress->download_list_done(),
+            $progress->download_list_total(),
+        );
 
-        $done = $reflection->getProperty('download_list_done')->getValue($client);
-        $imported = $reflection->getProperty('files_imported')->getValue($client);
-        $total = $reflection->getProperty('download_list_total')->getValue($client);
+        $counters = $this->readCounters($client);
+        $done = $counters['done'];
+        $imported = $counters['imported'];
+        $total = $counters['total'];
 
         // files_done as emitted in progress records = done + imported
         $filesDone = $done + $imported;

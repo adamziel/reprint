@@ -4,6 +4,8 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Importer;
+use Reprint\Importer\Application\ImportServices;
+use Reprint\Importer\Application\PullRuntimeAdapter;
 use Reprint\Importer\Pull\Pull;
 use Reprint\Importer\TerminalProgress\TerminalProgress;
 
@@ -55,7 +57,10 @@ class PullStartModeTest extends TestCase
     private function makePull(): Pull
     {
         $client = new Importer('http://example.invalid', $this->stateDir, $this->fsRoot);
-        return new Pull($client, new TerminalProgress(false, STDOUT));
+        return new Pull(
+            new PullRuntimeAdapter($client->context(), new ImportServices($client->context())),
+            new TerminalProgress(false, STDOUT),
+        );
     }
 
     /**
@@ -104,17 +109,12 @@ class PullStartModeTest extends TestCase
 
     public function testStartRuntimeCanSelectRuntimeWhenRuntimeIsOmitted(): void
     {
-        $pull = $this->makePull();
-        $reflection = new \ReflectionClass($pull);
-        $method = $reflection->getMethod('validate_and_default_options');
-        $method->setAccessible(true);
-
-        $options = $method->invoke($pull, [
+        $stages = $this->makePull()->stages([
             'start_runtime' => 'playground-cli',
         ]);
 
-        $this->assertSame('playground-cli', $options['runtime']);
-        $this->assertSame('playground-cli', $options['start_runtime']);
+        $this->assertContains('apply-runtime', $stages);
+        $this->assertContains('start', $stages);
     }
 
     public function testInvalidStartRuntimeValueIsRejectedBeforeNetworkIO(): void

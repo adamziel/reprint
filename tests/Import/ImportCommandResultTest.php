@@ -3,14 +3,13 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\Command\DbDomainsCommand;
 use Reprint\Importer\Command\DbDomainsResult;
-use Reprint\Importer\Command\FilesStatsCommand;
 use Reprint\Importer\Command\FilesStatsResult;
 use Reprint\Importer\Command\ImportCommandResult;
-use Reprint\Importer\Command\PreflightAssertCommand;
 use Reprint\Importer\Command\PreflightAssertResult;
 use Reprint\Importer\Importer;
+use Reprint\Importer\Application\ImportServices;
+use Reprint\Importer\Application\UseCase\PreflightAssertHandler;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Output\CliImportOutput;
 use Reprint\Importer\Session\PreflightCheckpoint;
@@ -59,7 +58,7 @@ class ImportCommandResultTest extends TestCase
         );
 
         ob_start();
-        $result = (new FilesStatsCommand())->execute($client, []);
+        $result = $client->run(['command' => 'files-stats']);
         $output = ob_get_clean();
 
         $this->assertSame('', $output);
@@ -82,7 +81,7 @@ class ImportCommandResultTest extends TestCase
         );
 
         ob_start();
-        $result = (new DbDomainsCommand())->execute($client, []);
+        $result = $client->run(['command' => 'db-domains']);
         $output = ob_get_clean();
 
         $this->assertSame('', $output);
@@ -212,7 +211,11 @@ class ImportCommandResultTest extends TestCase
         ));
 
         ob_start();
-        $result = (new PreflightAssertCommand())->execute($client, []);
+        $result = (new PreflightAssertHandler())->execute(
+            $client->context(),
+            new ImportServices($client->context()),
+            [],
+        );
         $output = ob_get_clean();
 
         $this->assertSame('', $output);

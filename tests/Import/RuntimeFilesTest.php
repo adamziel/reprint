@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\FileSync\Port\FileSyncStreamClient;
 use Reprint\Importer\FileSync\RuntimeFilesDownloader;
 use Reprint\Importer\Importer;
@@ -91,24 +92,12 @@ class RuntimeFilesTest extends TestCase
         );
     }
 
-    private function callPrivate(Importer $client, string $method, array $args = [])
+    private function downloadRuntimeFiles(Importer $client): void
     {
-        $reflection = new \ReflectionClass($client);
-        $m = $reflection->getMethod($method);
-        return $m->invoke($client, ...$args);
-    }
+        $context = $client->context();
+        $context->state();
 
-    private function setPrivate(Importer $client, string $property, $value): void
-    {
-        $reflection = new \ReflectionClass($client);
-        $p = $reflection->getProperty($property);
-        $p->setValue($client, $value);
-    }
-
-    private function loadClientState(Importer $client): void
-    {
-        $state = $this->callPrivate($client, 'load_state');
-        $this->setPrivate($client, 'state', $state);
+        (new ImportServices($context))->download_runtime_files();
     }
 
     /**
@@ -133,8 +122,7 @@ class RuntimeFilesTest extends TestCase
         ]);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
-        $this->callPrivate($client, 'download_runtime_files');
+        $this->downloadRuntimeFiles($client);
 
         $this->assertDirectoryDoesNotExist($this->stateDir . '/runtime_files');
     }
@@ -165,8 +153,7 @@ class RuntimeFilesTest extends TestCase
         ]);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
-        $this->callPrivate($client, 'download_runtime_files');
+        $this->downloadRuntimeFiles($client);
 
         // The old stale file should be gone because the directory was wiped.
         $this->assertFileDoesNotExist($runtimeDir . '/old/stale.php');
@@ -193,10 +180,9 @@ class RuntimeFilesTest extends TestCase
         ]);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
 
         // This must not throw — failures are caught internally.
-        $this->callPrivate($client, 'download_runtime_files');
+        $this->downloadRuntimeFiles($client);
 
         // The directory should exist even though no files were downloaded.
         $this->assertDirectoryExists($this->stateDir . '/runtime_files');

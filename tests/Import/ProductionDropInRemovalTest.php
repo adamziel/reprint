@@ -3,8 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use Reprint\Importer\Host\Analyzers\DefaultHostAnalyzer;
-use Reprint\Importer\Host\Analyzers\WpcloudHostAnalyzer;
+use Reprint\Importer\Application\ImportServices;
+use Reprint\Importer\Application\UseCase\RuntimeApplyHandler;
 use Reprint\Importer\Importer;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -126,26 +126,6 @@ class ProductionDropInRemovalTest extends TestCase
         return new Importer('https://source.example/export.php', $this->stateDir, $this->fsRoot);
     }
 
-    private function callPrivate(Importer $client, string $method, array $args = [])
-    {
-        $reflection = new \ReflectionClass($client);
-        $method_reflection = $reflection->getMethod($method);
-        return $method_reflection->invoke($client, ...$args);
-    }
-
-    private function setPrivate(Importer $client, string $property, $value): void
-    {
-        $reflection = new \ReflectionClass($client);
-        $property_reflection = $reflection->getProperty($property);
-        $property_reflection->setValue($client, $value);
-    }
-
-    private function loadClientState(Importer $client): void
-    {
-        $state = $this->callPrivate($client, 'load_state');
-        $this->setPrivate($client, 'state', $state);
-    }
-
     private function readRuntimeCheckpoint(): array
     {
         return json_decode(
@@ -156,13 +136,16 @@ class ProductionDropInRemovalTest extends TestCase
 
     private function runApplyRuntime(Importer $client): void
     {
+        $context = $client->context();
+        $context->state();
+
         ob_start();
         try {
-            $this->callPrivate($client, 'run_apply_runtime', [[
+            (new RuntimeApplyHandler())->execute($context, new ImportServices($context), [
                 'runtime' => 'php-builtin',
                 'output_dir' => $this->outputDir,
                 'flat_document_root' => $this->fsRoot,
-            ]]);
+            ]);
         } finally {
             ob_end_clean();
         }
@@ -202,7 +185,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertFileExists($objectCachePath);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $this->assertFileDoesNotExist($objectCachePath);
@@ -217,7 +199,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertDirectoryExists($wpcomshDir);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $this->assertDirectoryDoesNotExist($wpcomshDir);
@@ -232,7 +213,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertDirectoryExists($wpcomshDevDir);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $this->assertDirectoryDoesNotExist($wpcomshDevDir);
@@ -247,7 +227,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertFileExists($loaderPath);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $this->assertFileDoesNotExist($loaderPath);
@@ -261,7 +240,6 @@ class ProductionDropInRemovalTest extends TestCase
         mkdir($this->fsRoot . '/wp-content', 0755, true);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
 
         // Should not throw.
         $this->runApplyRuntime($client);
@@ -278,7 +256,6 @@ class ProductionDropInRemovalTest extends TestCase
         file_put_contents($muPlugins . '/my-custom-plugin.php', "<?php // custom\n");
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $this->assertFileExists($muPlugins . '/my-custom-plugin.php');
@@ -290,7 +267,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->createProductionDropIns();
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         // The audit log records every removal.
@@ -316,7 +292,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->createProductionDropIns();
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $checkpoint = $this->readRuntimeCheckpoint();
@@ -354,7 +329,6 @@ class ProductionDropInRemovalTest extends TestCase
         file_put_contents($wpContent . '/object-cache.php', "<?php // Redis object cache\n");
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $this->assertFileExists($wpContent . '/object-cache.php');
@@ -416,7 +390,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertDirectoryExists($sgCacheDir);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $this->assertDirectoryDoesNotExist($sgCacheDir);
@@ -431,7 +404,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertDirectoryExists($sgSecurityDir);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $this->assertDirectoryDoesNotExist($sgSecurityDir);
@@ -447,7 +419,6 @@ class ProductionDropInRemovalTest extends TestCase
         file_put_contents($plugins . '/woocommerce/woocommerce.php', "<?php // WooCommerce\n");
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $this->assertDirectoryExists($plugins . '/woocommerce');
@@ -459,7 +430,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->createSitegroundPlugins();
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $auditLog = file_get_contents($this->stateDir . '/.import-audit.log');
@@ -480,7 +450,6 @@ class ProductionDropInRemovalTest extends TestCase
         $this->createSitegroundPlugins();
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
         $checkpoint = $this->readRuntimeCheckpoint();

@@ -3,6 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Application\ImportServices;
+use Reprint\Importer\Application\UseCase\FilesPullHandler;
 use Reprint\Importer\FileSync\FetchCheckpoint;
 use Reprint\Importer\FileSync\FilesPullCheckpoint;
 use Reprint\Importer\FileSync\FileSyncLocalApplier;
@@ -228,16 +230,11 @@ class FilesSyncStateTest extends TestCase
     private function prepareClient(): array
     {
         $client = $this->makeClient();
-        $reflection = new \ReflectionClass($client);
+        $context = $client->context();
+        $context->state();
+        $context->set_fs_root_nonempty_behavior('preserve-local');
 
-        $stateProperty = $reflection->getProperty('state');
-        $loadState = $reflection->getMethod('load_state');
-        $stateProperty->setValue($client, $loadState->invoke($client));
-
-        $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
-        $behaviorProp->setValue($client, 'preserve-local');
-
-        return [$client, $reflection];
+        return [$client, new ImportServices($context)];
     }
 
     // ---------------------------------------------------------------
@@ -254,10 +251,9 @@ class FilesSyncStateTest extends TestCase
             "status" => "complete",
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
 
-        $method = $reflection->getMethod('run_files_sync');
-        $method->invoke($client);
+        (new FilesPullHandler())->execute($client->context(), $services, []);
 
         $state = $this->readState();
         $this->assertEquals("complete", $state["status"]);
@@ -277,10 +273,8 @@ class FilesSyncStateTest extends TestCase
             "status" => "complete",
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
-
-        $abortMethod = $reflection->getMethod('handle_abort');
-        $abortMethod->invoke($client, 'files-pull');
+        [$client] = $this->prepareClient();
+        $client->context()->abort_command('files-pull');
 
         $state = $this->readState();
         $this->assertNotEquals(
@@ -305,14 +299,14 @@ class FilesSyncStateTest extends TestCase
         ]);
 
         // Step 1: abort
-        [$client, $reflection] = $this->prepareClient();
-        $reflection->getMethod('handle_abort')->invoke($client, 'files-pull');
+        [$client] = $this->prepareClient();
+        $client->context()->abort_command('files-pull');
 
         // Step 2: new client, try run_files_sync
-        [$client2, $reflection2] = $this->prepareClient();
+        [$client2, $services2] = $this->prepareClient();
 
         try {
-            $reflection2->getMethod('run_files_sync')->invoke($client2);
+            (new FilesPullHandler())->execute($client2->context(), $services2, []);
         } catch (\Exception $e) {
             // Expected: will fail trying to contact the fake URL
         }
@@ -358,10 +352,9 @@ class FilesSyncStateTest extends TestCase
             "stage" => "diff",
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
 
-        $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
-        $diffMethod->invoke($client, $client->files_pull_checkpoint());
+        $services->build_fetch_list($client->context()->files_pull_checkpoint());
 
         $downloads = $this->readDownloadList();
         $this->assertContains(
@@ -396,10 +389,9 @@ class FilesSyncStateTest extends TestCase
             "stage" => "diff",
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
+        [$client, $services] = $this->prepareClient();
 
-        $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
-        $diffMethod->invoke($client, $client->files_pull_checkpoint());
+        $services->build_fetch_list($client->context()->files_pull_checkpoint());
 
         $downloads = $this->readDownloadList();
         $this->assertNotContains(

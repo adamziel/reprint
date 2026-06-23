@@ -78,6 +78,9 @@ require_once __DIR__ . '/lib/sqlite/functions.php';
 require_once __DIR__ . '/lib/tuning/class-adaptive-tuner.php';
 require_once __DIR__ . '/lib/version.php';
 
+// Application core: command dispatch, use cases, and composition.
+require_once __DIR__ . '/lib/application/load.php';
+
 register_shutdown_function(function () {
     $error = error_get_last();
     if ($error === null) {

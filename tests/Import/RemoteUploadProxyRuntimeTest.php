@@ -3,6 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Application\ImportServices;
+use Reprint\Importer\Application\UseCase\RuntimeApplyHandler;
 use Reprint\Importer\Importer;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -104,35 +106,18 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         return new Importer('https://source.example/export.php', $this->stateDir, $this->fsRoot);
     }
 
-    private function callPrivate(Importer $client, string $method, array $args = [])
-    {
-        $reflection = new \ReflectionClass($client);
-        $method_reflection = $reflection->getMethod($method);
-        return $method_reflection->invoke($client, ...$args);
-    }
-
-    private function setPrivate(Importer $client, string $property, $value): void
-    {
-        $reflection = new \ReflectionClass($client);
-        $property_reflection = $reflection->getProperty($property);
-        $property_reflection->setValue($client, $value);
-    }
-
-    private function loadClientState(Importer $client): void
-    {
-        $state = $this->callPrivate($client, 'load_state');
-        $this->setPrivate($client, 'state', $state);
-    }
-
     private function runApplyRuntime(Importer $client): string
     {
+        $context = $client->context();
+        $context->state();
+
         ob_start();
         try {
-            $this->callPrivate($client, 'run_apply_runtime', [[
+            (new RuntimeApplyHandler())->execute($context, new ImportServices($context), [
                 'runtime' => 'php-builtin',
                 'output_dir' => $this->outputDir,
                 'flat_document_root' => $this->fsRoot,
-            ]]);
+            ]);
         } finally {
             ob_end_clean();
         }
@@ -153,7 +138,6 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         );
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $runtime = $this->runApplyRuntime($client);
 
         $this->assertStringContainsString(
@@ -186,7 +170,6 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         ]);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $runtime = $this->runApplyRuntime($client);
 
         $this->assertStringContainsString(
@@ -212,7 +195,6 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         ]);
 
         $client = $this->makeClient();
-        $this->loadClientState($client);
         $runtime = $this->runApplyRuntime($client);
 
         $this->assertStringNotContainsString(

@@ -115,9 +115,7 @@ class LegacyCommandAliasTest extends TestCase
         );
 
         $client = new Importer('http://fake.invalid', $this->stateDir, $this->fs_root);
-        $reflection = new \ReflectionClass($client);
-        $loadState = $reflection->getMethod('load_state');
-        $state = $loadState->invoke($client);
+        $state = $client->context()->state();
 
         $this->assertEquals(
             $new_name,
