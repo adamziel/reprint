@@ -215,6 +215,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('complete', $state["pull"]["stage"]);
         $this->assertSame('essential-files', $state["pull"]["files_filter"]);
         $this->assertTrue($state["pull"]["skipped_pending"]);
+        $this->assertTrue($state["pull"]["has_completed_once"]);
         $this->assertSame('essential-files', $state["filter"]);
         $this->assertFileExists($this->stateDir . '/.import-download-list-skipped.jsonl');
     }
@@ -234,6 +235,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('complete', $state["pull"]["stage"]);
         $this->assertSame('none', $state["pull"]["files_filter"]);
         $this->assertFalse($state["pull"]["skipped_pending"]);
+        $this->assertTrue($state["pull"]["has_completed_once"]);
         $this->assertSame('none', $state["filter"]);
         $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
     }

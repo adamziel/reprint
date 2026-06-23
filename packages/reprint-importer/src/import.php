@@ -10,6 +10,7 @@
  * - Three-phase import: files, SQL, then file deltas
  */
 
+use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
@@ -1131,6 +1132,20 @@ class ImportClient
     /** @var string|null Extra remote directory to include in the export (--extra-directory). */
     private $extra_directory = null;
 
+    /**
+     * @var array<string,string> Resolved remap rules: full source path => its
+     * full local target path (both absolute). Empty = no remapping (files land
+     * nested based on their source).
+     */
+    private $remap_rules = [];
+
+    /**
+     * @var array<int,string> Resolved `--only` file paths: a list of real source
+     * absolute path prefixes the files-pull command is restricted to. Empty = full sync
+     * (every detected root).
+     */
+    private $pull_only_files_with_path_prefixes = [];
+
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
@@ -1348,6 +1363,7 @@ class ImportClient
     public function mark_pull_complete(): void
     {
         $this->state['pull']['stage'] = 'complete';
+        $this->state['pull']['has_completed_once'] = true;
         $this->state['status'] = 'complete';
         $this->save_state($this->state);
     }
@@ -1538,34 +1554,40 @@ class ImportClient
         $this->pipeline_step = $options["pipeline_step"] ?? null;
         $this->pipeline_steps = $options["pipeline_steps"] ?? null;
 
+        $valid_commands = [
+            "pull",
+            "files-pull",
+            "files-index",
+            "files-stats",
+            "db-pull",
+            "db-index",
+            "db-domains",
+            "db-apply",
+            "import-metadata",
+            "preflight",
+            "preflight-assert",
+            "flat-docroot",
+            "apply-runtime",
+        ];
+
         if (!$command) {
             throw new InvalidArgumentException(
-                "Command is required. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Command is required. Valid commands: " . implode(", ", $valid_commands),
             );
         }
 
-        if (
-            !in_array($command, [
-                "pull",
-                "files-pull",
-                "files-index",
-                "db-pull",
-                "db-index",
-                "db-domains",
-                "db-apply",
-                "files-stats",
-                "preflight",
-                "preflight-assert",
-                "flat-docroot",
-                "apply-runtime",
-            ])
-        ) {
+        if (!in_array($command, $valid_commands, true)) {
             throw new InvalidArgumentException(
-                "Invalid command: {$command}. Valid commands: pull, files-pull, files-index, files-stats, db-pull, db-index, db-domains, db-apply, preflight, preflight-assert, flat-docroot, apply-runtime",
+                "Invalid command: {$command}. Valid commands: " . implode(", ", $valid_commands),
             );
         }
 
         $this->state = $this->load_state();
+
+        if ($command === "import-metadata") {
+            $this->run_import_metadata();
+            return;
+        }
 
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
@@ -1792,6 +1814,21 @@ class ImportClient
         // All other commands require a prior preflight run.
         $this->require_preflight();
 
+        // Resolve the `--remap` rules (requires preflight to be available first)
+        $remap_raw = $options["remap"] ?? [];
+        if (!empty($remap_raw)) {
+            $this->remap_rules = $this->resolve_remap($remap_raw);
+        }
+
+        // Resolve the `--only` file path prefixes (also requires preflight).
+        $only_raw = $options["only"] ?? [];
+        if (is_string($only_raw)) {
+            $only_raw = [$only_raw];
+        }
+        if (!empty($only_raw)) {
+            $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
+        }
+
         // Handle --abort: clear state for the command and exit immediately.
         // To abort a sync, run `<command> --abort` (clears state), then
         // run `<command>` again (starts fresh).
@@ -1800,6 +1837,10 @@ class ImportClient
             //        for that command.
             $this->handle_abort($command);
             return;
+        }
+
+        if ($command === "files-pull") {
+            $this->assert_files_remap_consistent();
         }
 
         // Dispatch to appropriate command handler
@@ -2602,6 +2643,7 @@ class ImportClient
             $current_status !== "complete";
 
         $this->recover_index_updates();
+        $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
 
         // Already completed.
         if ($current_status === "complete") {
@@ -2633,6 +2675,7 @@ class ImportClient
                 ], true);
                 $this->state["status"] = "in_progress";
                 $this->state["stage"] = "fetch-skipped";
+                $this->state["files_pull_only_fingerprint"] = $this->files_pull_only_fingerprint();
                 $this->save_state($this->state);
                 $this->run_files_sync_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
@@ -2742,6 +2785,7 @@ class ImportClient
             $this->state["command"] = "files-pull";
             $this->state["status"] = "in_progress";
             $this->state["stage"] = "index";
+            $this->state["files_pull_only_fingerprint"] = $this->files_pull_only_fingerprint();
             $this->state["diff"] = $this->default_state()["diff"];
             $this->state["index"] = $this->default_state()["index"];
             $this->state["fetch"] = $this->default_state()["fetch"];
@@ -2751,7 +2795,7 @@ class ImportClient
             if ($is_delta) {
                 $this->files_imported = 0;
                 $index_size = $this->index_count();
-    
+
                 $this->audit_log(
                     "START files-pull (delta) | index_files={$index_size}",
                     true,
@@ -3378,7 +3422,7 @@ class ImportClient
             /**
              * base64_decode second parameter is a `strict` flag. It rejects the entire
              * input if it contains any bytes that are not produced by base64_encode().
-             * 
+             *
              * @see https://www.php.net/base64_decode
              */
             $path = base64_decode($path_encoded, true);
@@ -3830,6 +3874,42 @@ class ImportClient
         echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
     }
 
+    /**
+     * Prints host-facing import lifecycle metadata without mutating state.
+     */
+    private function run_import_metadata(): void
+    {
+        echo json_encode(
+            $this->build_import_metadata(),
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+        ) . "\n";
+    }
+
+    /**
+     * Builds the small metadata contract exposed to host integrations.
+     *
+     * `hasCompletedOnce` is derived from Reprint-owned pull state so
+     * callers do not need to persist a parallel flag that could drift.
+     *
+     * @return array{hasCompletedOnce: bool, pullStage: mixed}
+     */
+    private function build_import_metadata(): array
+    {
+        $pull = $this->state["pull"] ?? [];
+        if (!is_array($pull)) {
+            $pull = [];
+        }
+
+        $pull_stage = $pull["stage"] ?? null;
+        $has_completed_once =
+            !empty($pull["has_completed_once"]) ||
+            $pull_stage === "complete";
+
+        return [
+            "hasCompletedOnce" => $has_completed_once,
+            "pullStage" => $pull_stage,
+        ];
+    }
 
     /**
      * Format a byte count into a human-readable string.
@@ -4271,13 +4351,13 @@ class ImportClient
         $uploads_basedir = null;
 
         if (is_array($paths_urls)) {
-            $abspath = $this->flatten_clean_path($paths_urls["abspath"] ?? null);
-            $wp_admin_path = $this->flatten_clean_path($paths_urls["wp_admin_path"] ?? null);
-            $wp_includes_path = $this->flatten_clean_path($paths_urls["wp_includes_path"] ?? null);
-            $content_dir = $this->flatten_clean_path($paths_urls["content_dir"] ?? null);
-            $plugins_dir = $this->flatten_clean_path($paths_urls["plugins_dir"] ?? null);
-            $mu_plugins_dir = $this->flatten_clean_path($paths_urls["mu_plugins_dir"] ?? null);
-            $uploads_basedir = $this->flatten_clean_path(
+            $abspath = $this->clean_preflight_path( $paths_urls["abspath"] ?? null);
+            $wp_admin_path = $this->clean_preflight_path( $paths_urls["wp_admin_path"] ?? null);
+            $wp_includes_path = $this->clean_preflight_path( $paths_urls["wp_includes_path"] ?? null);
+            $content_dir = $this->clean_preflight_path( $paths_urls["content_dir"] ?? null);
+            $plugins_dir = $this->clean_preflight_path( $paths_urls["plugins_dir"] ?? null);
+            $mu_plugins_dir = $this->clean_preflight_path( $paths_urls["mu_plugins_dir"] ?? null);
+            $uploads_basedir = $this->clean_preflight_path(
                 $paths_urls["uploads"]["basedir"] ?? null,
             );
         }
@@ -4286,7 +4366,7 @@ class ImportClient
         if ($abspath === null) {
             $roots = $preflight["wp_detect"]["roots"] ?? [];
             if (!empty($roots)) {
-                $abspath = $this->flatten_clean_path($roots[0]["path"] ?? null);
+                $abspath = $this->clean_preflight_path( $roots[0]["path"] ?? null);
             }
         }
 
@@ -4615,7 +4695,7 @@ class ImportClient
      * Clean a path value from preflight data: trim, strip trailing slash.
      * Returns null if the value is not a non-empty string.
      */
-    private function flatten_clean_path($value): ?string
+    private function clean_preflight_path($value): ?string
     {
         if (!is_string($value) || trim($value) === "") {
             return null;
@@ -6028,9 +6108,23 @@ class ImportClient
 
         $complete = false;
         $chunks_since_save = 0;
+
+        $export_dirs = $this->get_export_directories();
         $params = $this->get_tuned_params("file_index");
+
         if ($cursor === null) {
-            $params["list_dir"] = $list_dir_override ?? $roots[0];
+            $start = $roots[0];
+            if (!empty($this->pull_only_files_with_path_prefixes)) {
+                // With --only, get_export_directories() returns only the resolved
+                // file path prefixes, and those become the request's directory[]
+                // allowlist. The exporter rejects list_dir unless it is inside
+                // that allowlist, so $roots[0] may no longer be valid. Start from
+                // the first --only file path prefix; the exporter still traverses
+                // the remaining directory[] entries.
+                $start = $export_dirs[0] ?? $roots[0];
+            }
+
+            $params["list_dir"] = $list_dir_override ?? $start;
         }
         if ($this->follow_symlinks) {
             $params["follow_symlinks"] = "1";
@@ -6046,7 +6140,6 @@ class ImportClient
         // a shared WordPress core directory (e.g. /wordpress/core/6.9.4/)
         // rather than the site's document root, so the scan would miss
         // wp-content entirely (no plugins, themes, or uploads).
-        $export_dirs = $this->get_export_directories();
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
         }
@@ -6309,8 +6402,12 @@ class ImportClient
                 $local !== null &&
                 strcmp($local["path"], $remote["path"]) < 0
             ) {
-                $this->delete_local_file_path($local["path"]);
-                $this->delete_index_entry($local["path"]);
+                // When --only file prefixes are active, only delete local files that fall under those prefixes.
+                // The local files index ends up being a union across files-pull --only runs.
+                if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
+                    $this->delete_local_file_path($local["path"]);
+                    $this->delete_index_entry($local["path"]);
+                }
                 $local_after = $local["path"];
                 $local = $this->read_index_line($local_handle);
             }
@@ -6363,8 +6460,10 @@ class ImportClient
         }
 
         while ($local !== null) {
-            $this->delete_local_file_path($local["path"]);
-            $this->delete_index_entry($local["path"]);
+            if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
+                $this->delete_local_file_path($local["path"]);
+                $this->delete_index_entry($local["path"]);
+            }
             $local_after = $local["path"];
             $local = $this->read_index_line($local_handle);
         }
@@ -8302,6 +8401,367 @@ class ImportClient
         return $real;
     }
 
+    /**
+     * Refuse to reuse a files index with different --remap rules.
+     *
+     * The files index stores remote paths. Local writes/deletes derive their
+     * targets from the current remap rules, so changing those rules while the
+     * same index is still in use can point future updates at the wrong path.
+     */
+    private function assert_files_remap_consistent(): void
+    {
+        $fingerprint = $this->files_remap_fingerprint();
+        $previous = $this->state["files_remap_fingerprint"] ?? null;
+
+        $has_existing_index = file_exists($this->index_file) && filesize($this->index_file) > 0;
+        if ($previous === null && $has_existing_index && !empty($this->remap_rules)) {
+            throw new RuntimeException(
+                "Cannot use --remap with an existing files index that was created before remap tracking. " .
+                    "Use a new --state-dir or clear the existing files index first.",
+            );
+        }
+
+        if ($previous !== null && $previous !== $fingerprint) {
+            throw new RuntimeException(
+                "Cannot change --remap rules while reusing the same files index. " .
+                    "Use the original --remap rules, or use a new --state-dir for a fresh files-pull.",
+            );
+        }
+
+        if ($previous === null) {
+            $this->state["files_remap_fingerprint"] = $fingerprint;
+            $this->save_state($this->state);
+        }
+    }
+
+    /**
+     * Stable fingerprint for the resolved remap rule set.
+     *
+     * Rule order does not matter: remap matching chooses the deepest source
+     * path, not the first matching rule.
+     */
+    private function files_remap_fingerprint(): string
+    {
+        $rules = $this->remap_rules;
+        ksort($rules, SORT_STRING);
+        return hash("sha256", json_encode($rules, JSON_UNESCAPED_SLASHES));
+    }
+
+    /**
+     * Refuse to resume a files-pull after changing --only.
+     *
+     * The in-progress remote index cursor/file was built from one directory[]
+     * allowlist. Switching the selected source path prefixes mid-resume would
+     * mix indexes from different traversals. Completed runs are allowed to use
+     * different --only prefixes because the local index is intentionally a union
+     * across files-pull --only runs.
+     */
+    private function assert_files_pull_only_unchanged_while_resuming(bool $has_progress): void
+    {
+        if (!$has_progress) {
+            return;
+        }
+
+        $fingerprint = $this->files_pull_only_fingerprint();
+        $previous = $this->state["files_pull_only_fingerprint"] ?? null;
+
+        if ($previous !== null && $previous !== $fingerprint) {
+            throw new RuntimeException(
+                "Cannot change --only while resuming files-pull. " .
+                    "Use the original --only values, or use --abort to start a new files-pull.",
+            );
+        }
+
+        // Older in-progress state may not have this guard persisted yet. Record
+        // the current value so subsequent resumes cannot drift.
+        if ($previous === null) {
+            $this->state["files_pull_only_fingerprint"] = $fingerprint;
+            $this->save_state($this->state);
+        }
+    }
+
+    /**
+     * Stable fingerprint for the resolved --only file path prefixes.
+     *
+     * Prefix order is part of the fingerprint because it determines the first
+     * list_dir used to start the traversal.
+     */
+    private function files_pull_only_fingerprint(): string
+    {
+        return hash(
+            "sha256",
+            json_encode($this->pull_only_files_with_path_prefixes, JSON_UNESCAPED_SLASHES),
+        );
+    }
+
+    /**
+     * Build the remap rules from the raw remap pairs + preflight data.
+     *
+     * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
+     * Source arguments resolve against the remote site's WordPress path tokens.
+     * Target arguments resolve under --fs-root and must stay within it.
+     * Each rule is a full source path => full local target path (both absolute).
+     *
+     * @param array<int,array{0:string,1:string}> $remap_raw Raw (SOURCE, TARGET) pairs.
+     * @return array<string,string> Source path => target path (both absolute).
+     */
+    private function resolve_remap(array $remap_raw): array
+    {
+        $fs_root = rtrim($this->get_filesystem_root_path(), "/");
+
+        $source_tokens = $this->wp_source_path_tokens();
+        $target_tokens = ["fs-root" => $fs_root];
+
+        $rules = [];
+        $wp_content_target = null;
+        foreach ($remap_raw as [$source_raw, $target_raw]) {
+            $source = $this->resolve_token_path($source_raw, $source_tokens);
+            $target = $this->resolve_token_path($target_raw, $target_tokens);
+
+            if (!path_is_within_root($target, $fs_root)) {
+                throw new InvalidArgumentException(
+                    "--remap target \"{$target}\" resolves outside --fs-root ({$fs_root}); " .
+                        "targets must stay within the destination root",
+                );
+            }
+
+            $rules[$source] = $target;
+            if ($source === $source_tokens["wp-content"]) {
+                $wp_content_target = $target;
+            }
+        }
+
+        // When remapping wp-content, also remap plugins, mu-plugins, and uploads
+        // directories that live outside WP_CONTENT_DIR. Skip any directory that already
+        // has its own explicit --remap rule.
+        if ($wp_content_target !== null) {
+            foreach ($this->content_directories_outside_wp_content($source_tokens) as $name => $source) {
+                if (!isset($rules[$source])) {
+                    $rules[$source] = wp_join_unix_paths($wp_content_target, $name);
+                }
+            }
+        }
+
+        return $rules;
+    }
+
+    /**
+     * Find plugins, mu-plugins, and uploads directories that WordPress reports
+     * outside WP_CONTENT_DIR.
+     *
+     * When wp-content is selected with --only or --remap, these directories are not
+     * covered by WP_CONTENT_DIR itself, so callers need to handle them separately.
+     * Unknown paths are omitted because both WP_CONTENT_DIR and the directory path
+     * are needed to decide whether the directory lives outside WP_CONTENT_DIR.
+     *
+     * @param array<string,string|null> $source_tokens From wp_source_path_tokens().
+     * @return array<string,string> Directory name => real source path, for
+     *                              directories outside WP_CONTENT_DIR only.
+     */
+    private function content_directories_outside_wp_content(array $source_tokens): array
+    {
+        $content = $source_tokens["wp-content"];
+        if ($content === null) {
+            return [];
+        }
+
+        $directories = [];
+        foreach (["wp-plugins" => "plugins", "wp-mu-plugins" => "mu-plugins", "wp-uploads" => "uploads"] as $token => $name) {
+            $source = $source_tokens[$token];
+            if ($source !== null && !path_is_within_root($source, $content)) {
+                $directories[$name] = $source;
+            }
+        }
+
+        return $directories;
+    }
+
+    /**
+     * Resolve raw `--only` sources into a deduped list of real source absolute
+     * prefixes selected for files-pull. Each source is a `:token:` template (e.g.
+     * `:wp-content:`, `:wp-uploads:`) or a raw absolute path,
+     * resolved through the same source token table (wp_source_path_tokens)
+     * as --remap.
+     *
+     * @param array<int,string> $only_raw Raw SOURCE values from the CLI.
+     * @return array<int,string> Real source prefixes (deduped).
+     */
+    private function resolve_pull_only_files_with_path_prefixes(array $only_raw): array
+    {
+        $source_tokens = $this->wp_source_path_tokens();
+
+        $prefixes = [];
+        foreach ($only_raw as $src) {
+            if ($src === "") {
+                throw new InvalidArgumentException("--only source cannot be empty");
+            }
+
+            $resolved = $this->resolve_token_path($src, $source_tokens);
+            $prefixes[$resolved] = true;
+
+            // Selecting content_dir with --only also pulls in any plugins, mu-plugins,
+            // or uploads directory outside WP_CONTENT_DIR so files-pull enumerates it too.
+            if ($resolved === $source_tokens["wp-content"]) {
+                foreach ($this->content_directories_outside_wp_content($source_tokens) as $source) {
+                    $prefixes[$source] = true;
+                }
+            }
+        }
+
+        // Drop any prefix already covered by a broader one (e.g. wp-content and wp-content/plugins)
+        // A files-pull --only run doesn't need to walk the same subtree twice.
+        $sources = array_keys($prefixes);
+        $minimal = [];
+        foreach ($sources as $path) {
+            $covered = false;
+
+            foreach ($sources as $other) {
+                if ($other !== $path && path_is_within_root($path, $other)) {
+                    $covered = true;
+                    break;
+                }
+            }
+
+            if (!$covered) {
+                $minimal[] = $path;
+            }
+        }
+
+        return $minimal;
+    }
+
+    /**
+     * Whether $path is selected by the active --only file path prefixes. With no
+     * --only flag, every file path is selected (returns true) — this keeps
+     * the diff's delete drains at their default behavior. When --only is set,
+     * true only when $path falls under one of those file path prefixes.
+     */
+    private function is_file_path_selected_by_pull_only_files(string $path): bool
+    {
+        if (empty($this->pull_only_files_with_path_prefixes)) {
+            return true;
+        }
+
+        foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
+            if (self::path_remainder_under($path, $prefix) !== null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The source site's real paths from preflight data, as remap/--only token
+     * name => absolute path (wp-content, wp-plugins, wp-mu-plugins, wp-uploads,
+     * abspath).
+     *
+     * Plugins, mu-plugins, and uploads fall back to their conventional locations
+     * under WP_CONTENT_DIR when WP_CONTENT_DIR is known. This is a pure
+     * data-gatherer: any entry may be null when preflight lacks it (no
+     * content_dir, abspath undetermined).
+     */
+    private function wp_source_path_tokens(): array
+    {
+        $preflight = $this->state["preflight"]["data"] ?? [];
+        $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
+
+        $content_dir = $this->clean_preflight_path( $paths["content_dir"] ?? null);
+
+        $abspath = $this->clean_preflight_path( $paths["abspath"] ?? null);
+        if ($abspath === null) {
+            $abspath = $this->clean_preflight_path( $preflight["wp_detect"]["roots"][0]["path"] ?? null);
+        }
+
+        $plugins_dir = $this->clean_preflight_path( $paths["plugins_dir"] ?? null);
+        $mu_plugins_dir = $this->clean_preflight_path( $paths["mu_plugins_dir"] ?? null);
+        $uploads_dir = $this->clean_preflight_path( $paths["uploads"]["basedir"] ?? null);
+
+        // If preflight did not report a directory path, use its conventional
+        // location under WP_CONTENT_DIR when WP_CONTENT_DIR is known.
+        if ($content_dir !== null) {
+            $plugins_dir = $plugins_dir ?? wp_join_unix_paths( $content_dir, "plugins" );
+            $mu_plugins_dir = $mu_plugins_dir ?? wp_join_unix_paths( $content_dir, "mu-plugins" );
+            $uploads_dir = $uploads_dir ?? wp_join_unix_paths( $content_dir, "uploads" );
+        }
+
+        return [
+            "abspath" => $abspath,
+            "wp-content" => $content_dir,
+            "wp-plugins" => $plugins_dir,
+            "wp-mu-plugins" => $mu_plugins_dir,
+            "wp-uploads" => $uploads_dir,
+        ];
+    }
+
+    /**
+     * Resolve a --remap/--only path argument into an absolute path.
+     *
+     * Substitutes a known leading `:token:` (see the token tables in
+     * resolve_remap and resolve_pull_only_files_with_path_prefixes) with its
+     * value, then trims trailing slashes. The result must be a valid absolute
+     * path with no `.`/`..` segments; a relative path or an unknown token (left
+     * unsubstituted) fails that check. Referencing a token whose value is
+     * unavailable in preflight is a distinct, clear error.
+     *
+     * @param string $raw The raw argument.
+     * @param array<string,string|null> $tokens Token name => value (null = unavailable).
+     */
+    private function resolve_token_path(string $raw, array $tokens): string
+    {
+        $resolved = $raw;
+        foreach ($tokens as $name => $value) {
+            $token = ":{$name}:";
+            $token_offset = strpos($resolved, $token);
+            if ($token_offset === false) {
+                continue;
+            }
+
+            if ($token_offset !== 0 || strpos($resolved, $token, strlen($token)) !== false) {
+                throw new InvalidArgumentException(
+                    "token \"{$token}\" must appear only at the beginning of the path"
+                );
+            }
+
+            if ($value === null) {
+                throw new InvalidArgumentException(
+                    "Cannot resolve token \"{$token}\": not available in preflight data. Run preflight first."
+                );
+            }
+
+            $resolved = $value . substr($resolved, strlen($token));
+        }
+
+        $resolved = rtrim($resolved, "/");
+        assert_valid_path($resolved, "path \"{$raw}\"");
+
+        return $resolved;
+    }
+
+    /**
+     * Map a source absolute path to its absolute local target via the remap
+     * rules (most specific source wins), or null when no rule applies.
+     *
+     * Any rules that match the same path are nested (each is a path-prefix of
+     * it, and prefixes of one string are ordered by length), so the longest
+     * matching source is the deepest — i.e. the most specific — match. Ranking
+     * by source, not target: a rule applies based purely on its source side.
+     */
+    private function remap_source_path_to_target(string $source_path): ?string
+    {
+        $best = null;
+        $best_source_length = -1;
+
+        foreach ($this->remap_rules as $source => $target) {
+            $rest = self::path_remainder_under($source_path, $source);
+            if ($rest !== null && strlen($source) > $best_source_length) {
+                $best = wp_join_unix_paths($target, $rest);
+                $best_source_length = strlen($source);
+            }
+        }
+
+        return $best;
+    }
 
     /**
      * Resolve a remote absolute path into a local path under the fs root.
@@ -8310,12 +8770,45 @@ class ImportClient
      * local path under the import fs root. Performs symlink traversal security
      * checks to prevent directory traversal attacks that could write files
      * outside the import root.
+     *
+     * With --remap active, a source path matched by a remap rule is first routed to its
+     * target (e.g. "/var/www/html/wp-content/x" -> "<docroot>/wp-content/x");
+     * paths under no remap rule are still written under --fs-root using their
+     * remote absolute path, exactly as a plain pull.
      */
     private function remote_path_to_local_path_within_import_root(
         string $path
     ): string {
         assert_valid_path($path, "remote path");
+        if (!empty($this->remap_rules)) {
+            $target = $this->remap_source_path_to_target($path);
+            if ($target !== null) {
+                return $target;
+            }
+        }
         return $this->get_filesystem_root_path() . $path;
+    }
+
+
+    /**
+     * Returns the remainder of $path underneath $prefix,
+     * empty string if $path === $prefix,
+     * or null if $path is not under $prefix.
+     */
+    private static function path_remainder_under(string $path, string $prefix): ?string
+    {
+        $path = rtrim($path, "/");
+        $prefix = rtrim($prefix, "/");
+
+        if ($path === $prefix) {
+            return "";
+        }
+
+        if (str_starts_with($path, $prefix . "/")) {
+            return substr($path, strlen($prefix));
+        }
+
+        return null;
     }
 
     /**
@@ -9119,6 +9612,13 @@ class ImportClient
      */
     private function get_export_directories(): array
     {
+        // With --only, files-pull should enumerate only the selected source path
+        // prefixes. Do not add the default roots, remap sources, document root, or
+        // auto-prepend/append directories below.
+        if (!empty($this->pull_only_files_with_path_prefixes)) {
+            return $this->pull_only_files_with_path_prefixes;
+        }
+
         $dirs = $this->get_root_directories_from_preflight();
         if (empty($dirs)) {
             return [];
@@ -9134,6 +9634,15 @@ class ImportClient
 
         if ($this->extra_directory !== null && $this->extra_directory !== "") {
             $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
+        }
+
+        // Ensure every --remap source is enumerated — including plugins or
+        // uploads directories that live outside the WordPress roots and so
+        // wouldn't be discovered by traversal alone.
+        $remap_index = 0;
+        foreach (array_keys($this->remap_rules) as $source) {
+            $extra_paths["remap_source_{$remap_index}"] = $source;
+            $remap_index++;
         }
 
         // auto_prepend_file / auto_append_file may point to directories
@@ -10229,6 +10738,7 @@ class ImportClient
         $follow = $this->state["follow_symlinks"] ?? false;
         $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
+        $files_remap_fingerprint = $this->state["files_remap_fingerprint"] ?? null;
         $pull = $this->state["pull"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
@@ -10237,6 +10747,7 @@ class ImportClient
         $this->state["follow_symlinks"] = $follow;
         $this->state["fs_root_nonempty_behavior"] = $nonempty;
         $this->state["max_allowed_packet"] = $max_packet;
+        $this->state["files_remap_fingerprint"] = $files_remap_fingerprint;
         if ($pull !== null) {
             $this->state["pull"] = $pull;
         }
@@ -10258,6 +10769,8 @@ class ImportClient
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "max_allowed_packet" => null,
+            "files_remap_fingerprint" => null,
+            "files_pull_only_fingerprint" => null,
             "db_index" => [
                 "file" => null,
                 "tables" => 0,
@@ -10330,6 +10843,7 @@ class ImportClient
                 "stage" => null,
                 "files_filter" => null,
                 "skipped_pending" => false,
+                "has_completed_once" => false,
             ],
         ];
     }
@@ -10995,6 +11509,7 @@ if (
     //   placeholder    Value placeholder in help, e.g. 'DIR' (value types)
     //   short          Single-char alias, e.g. 'v' for -v (flag types)
     //   aliases        Array of alternative --names (hidden from help)
+    //   repeatable     Append each value to target instead of replacing it
     //   cast           'int' | 'float' | 'size' (default: string)
     //   flag_value     What to store for flag types (default: true)
     //   valid_values   Array of allowed values (enforced at parse time)
@@ -11275,6 +11790,25 @@ if (
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
             'commands' => ['pull', 'db-apply'],
         ],
+        [
+            'name' => 'remap',
+            'type' => 'pair',
+            'target' => 'remap',
+            'pair_args' => 'SOURCE TARGET',
+            'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
+                '(a :fs-root: path or an absolute path within --fs-root); repeatable',
+            'commands' => ['files-pull'],
+        ],
+        [
+            'name' => 'only',
+            'type' => 'value-or-next',
+            'target' => 'only',
+            'placeholder' => 'SOURCE',
+            'repeatable' => true,
+            'help' => 'Restrict the files-pull command to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
+                'repeat for several. Default pulls everything',
+            'commands' => ['files-pull'],
+        ],
 
         // ── flat-docroot options ────────────────────────────────
         [
@@ -11506,6 +12040,13 @@ if (
             $options['tuning_config'][substr($target, strlen('tuning_config.'))] = $value;
             return;
         }
+        if (!empty($def['repeatable'])) {
+            if (!isset($options[$target])) {
+                $options[$target] = [];
+            }
+            $options[$target][] = $value;
+            return;
+        }
         $options[$target] = $value;
     }
 
@@ -11585,7 +12126,8 @@ if (
         }
 
         $info = $command_info[$command];
-        echo "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n";
+        $usage = $info["usage"] ?? "reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]";
+        echo "Usage: {$usage}\n";
         echo "\n";
         echo $info["description"];
 
@@ -11935,6 +12477,17 @@ if (
                 "  reprint db-domains - --state-dir=/path/to/state\n",
             "extra" => null,
         ],
+        "import-metadata" => [
+            "level" => "low",
+            "short" => "Print local import lifecycle metadata as JSON",
+            "usage" => "reprint import-metadata --state-dir=DIR",
+            "description" =>
+                "Reads --state-dir/.import-state.json and prints metadata for\n" .
+                "host integrations. No network calls are made.\n",
+            "extra" =>
+                "Example:\n" .
+                "  reprint import-metadata --state-dir=./state | jq '.hasCompletedOnce'\n",
+        ],
         "db-apply" => [
             "level" => "low",
             "short" => "Import the SQL dump into a local MySQL or SQLite database",
@@ -12062,10 +12615,10 @@ if (
         exit(0);
     }
 
-    // Only apply-runtime truly doesn't need a remote URL. Other local-only
-    // commands (db-domains, db-apply, etc.) still accept it for CLI
-    // consistency and backward compatibility with existing callers.
-    $local_only_commands = ["apply-runtime"];
+    // apply-runtime and import-metadata don't need a remote URL. Other
+    // local-only commands (db-domains, db-apply, etc.) still accept it for
+    // CLI consistency and backward compatibility with existing callers.
+    $local_only_commands = ["apply-runtime", "import-metadata"];
     $is_local_only = in_array($command, $local_only_commands, true);
 
     if ($is_local_only) {
@@ -12099,7 +12652,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$fs_root && !$flat_document_root) {
+    if (!$fs_root && !$flat_document_root && $command !== "import-metadata") {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
@@ -12107,7 +12660,10 @@ if (
     if (!$fs_root) {
         // For commands that need an fs root in the constructor, use the
         // flattened fs root. run_apply_runtime will resolve it properly.
-        $fs_root = $flat_document_root;
+        // import-metadata reads only state, but ImportClient still expects
+        // an fs root path. Point it at state-dir rather than requiring an
+        // otherwise-unused CLI option.
+        $fs_root = $flat_document_root ?: $state_dir;
     }
 
     try {

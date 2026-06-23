@@ -7,7 +7,7 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import {
@@ -136,6 +136,18 @@ describe('Import: SQLite Export', () => {
                     allowRoot,
                     { timeout: 60000, stdio: 'pipe' },
                 );
+
+                // Finish any pending DB upgrade before the site is served.
+                // On the Playground CLI job, the first PHP-FPM request can otherwise
+                // race WordPress's upgrade flow and briefly leave the fresh SQLite
+                // site in maintenance mode.
+                execSync(
+                    `php /tmp/wp-cli.phar core update-db` +
+                    ` --path=${JSON.stringify(siteDir)}` +
+                    allowRoot,
+                    { timeout: 60000, stdio: 'pipe' },
+                );
+                rmSync(join(siteDir, '.maintenance'), { force: true });
 
                 // Activate the site-export plugin.
                 execSync(

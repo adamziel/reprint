@@ -125,8 +125,11 @@
     "file-body-resume": {
       "port": 8120
     },
-    "edit-locks": {
+    "only-remap-managed": {
       "port": 8121
+    },
+    "edit-locks": {
+      "port": 8122
     }
   }
 }
