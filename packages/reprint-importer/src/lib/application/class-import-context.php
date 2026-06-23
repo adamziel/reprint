@@ -371,7 +371,7 @@ final class ImportContext
             if ($this->state instanceof ImportRunState) {
                 $this->save_state($this->state);
             }
-            exit(0);
+            throw new ImportOutputClosedException("Import output stream closed.");
         }
     }
 
@@ -647,10 +647,7 @@ final class ImportContext
     {
         static $already_shutting_down = false;
         if ($already_shutting_down) {
-            if (function_exists("posix_kill") && function_exists("posix_getpid")) {
-                posix_kill(posix_getpid(), SIGKILL);
-            }
-            die("\nForced exit.\n");
+            throw new ImportShutdownRequestedException('Forced importer shutdown requested.', $signal, true);
         }
         $already_shutting_down = true;
 
@@ -667,11 +664,7 @@ final class ImportContext
             $this->save_state($this->state);
         }
 
-        if (function_exists("posix_kill") && function_exists("posix_getpid")) {
-            posix_kill(posix_getpid(), SIGKILL);
-        }
-
-        die();
+        throw new ImportShutdownRequestedException('Importer shutdown requested.', $signal);
     }
 
     public function follow_symlinks(): bool

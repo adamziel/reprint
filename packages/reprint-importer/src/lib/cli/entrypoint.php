@@ -4,6 +4,8 @@ namespace Reprint\Importer\Cli;
 
 use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Application\CommandRegistry;
+use Reprint\Importer\Application\ImportOutputClosedException;
+use Reprint\Importer\Application\ImportShutdownRequestedException;
 use Reprint\Importer\Output\CliImportOutput;
 use const Reprint\Importer\TargetRuntime\VALID_TARGET_RUNTIMES;
 use function Reprint\Importer\get_importer_version;
@@ -1187,6 +1189,19 @@ if (
             exit($client->exit_code());
         }
         return;
+    } catch (ImportOutputClosedException $e) {
+        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = 0;
+        if (!defined('EXIT_AFTER_IMPORT') || EXIT_AFTER_IMPORT) {
+            exit(0);
+        }
+        return;
+    } catch (ImportShutdownRequestedException $e) {
+        $exit_code = $e->exit_code();
+        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = $exit_code;
+        if (!defined('EXIT_AFTER_IMPORT') || EXIT_AFTER_IMPORT) {
+            exit($exit_code);
+        }
+        throw $e;
     } catch (\Throwable $e) {
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
         $error_code = isset($client) ? $client->last_error_code() : null;

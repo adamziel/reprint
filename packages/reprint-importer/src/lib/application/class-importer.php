@@ -59,6 +59,8 @@ class Importer
                     $this->context->finish_command_status($request->command());
                 }
                 return $result;
+            } catch (ImportOutputClosedException | ImportShutdownRequestedException $e) {
+                throw $e;
             } catch (Exception $e) {
                 $this->context->report_command_exception($e);
                 throw $e;

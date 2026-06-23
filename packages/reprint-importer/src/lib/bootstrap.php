@@ -3,69 +3,75 @@
  * Runtime bootstrap for the importer library.
  *
  * Composer classmaps package classes when installed, but src/import.php can
- * also be executed directly from a checkout. Register a local classmap-style
+ * also be executed directly from a checkout. Register a deterministic local
  * autoloader with prepend=true so the checkout's classes win over any stale
  * vendor copy of this package.
  */
 
-$reprint_importer_classmap = static function (string $lib_dir): array {
-    static $maps = [];
+$reprint_importer_lib_dir = __DIR__;
 
-    $key = realpath($lib_dir) ?: $lib_dir;
-    if (isset($maps[$key])) {
-        return $maps[$key];
+$reprint_importer_kebab_case = static function (string $name): string {
+    $special = [
+        'SQLitePreparedInsertBuilder' => 'sqlite-prepared-insert-builder',
+        'WP_MySQL_FastQueryStream' => 'wp-mysql-fast-query-stream',
+        'WP_MySQL_Naive_Query_Stream' => 'wp-mysql-naive-query-stream',
+    ];
+    if (isset($special[$name])) {
+        return $special[$name];
     }
 
-    $map = [];
-    $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($lib_dir, RecursiveDirectoryIterator::SKIP_DOTS)
-    );
-
-    foreach ($iterator as $file) {
-        if (!$file->isFile() || $file->getExtension() !== 'php') {
-            continue;
-        }
-
-        $path = $file->getPathname();
-        $basename = $file->getBasename();
-        if (
-            $basename === 'load.php' ||
-            $basename === 'bootstrap.php' ||
-            $basename === 'functions.php' ||
-            $basename === 'constants.php' ||
-            $basename === 'curl-options.php' ||
-            $basename === 'wp-stubs.php' ||
-            $basename === 'version.php' ||
-            strpos($path, DIRECTORY_SEPARATOR . 'route-handlers' . DIRECTORY_SEPARATOR) !== false
-        ) {
-            continue;
-        }
-
-        $source = file_get_contents($path);
-        if (!is_string($source)) {
-            continue;
-        }
-
-        $namespace = '';
-        if (preg_match('/^\s*namespace\s+([^;]+);/m', $source, $namespace_match)) {
-            $namespace = trim($namespace_match[1]);
-        }
-
-        if (!preg_match_all('/^\s*(?:abstract\s+|final\s+)?(?:class|interface|trait)\s+([A-Za-z_][A-Za-z0-9_]*)\b/m', $source, $matches)) {
-            continue;
-        }
-
-        foreach ($matches[1] as $short_name) {
-            $class = $namespace === '' ? $short_name : $namespace . '\\' . $short_name;
-            $map[$class] = $path;
-        }
-    }
-
-    $maps[$key] = $map;
-    return $map;
+    $name = str_replace('_', '-', $name);
+    $name = preg_replace('/(?<=[A-Z])(?=[A-Z][a-z])/', '-', $name);
+    $name = preg_replace('/(?<=[a-z0-9])(?=[A-Z])/', '-', $name);
+    return strtolower($name);
 };
 
-$reprint_importer_lib_dir = __DIR__;
+$reprint_importer_namespace_dir = static function (string $segment) use ($reprint_importer_kebab_case): string {
+    $special = [
+        'FileSync' => 'file-sync',
+        'TargetRuntime' => 'target-runtime',
+        'UrlRewrite' => 'url-rewrite',
+        'UseCase' => 'use-case',
+        'QueryStream' => 'mysql-query-stream',
+        'Command' => 'commands',
+    ];
+
+    return $special[$segment] ?? $reprint_importer_kebab_case($segment);
+};
+
+$reprint_importer_class_file = static function (string $class_name) use (
+    $reprint_importer_lib_dir,
+    $reprint_importer_kebab_case,
+    $reprint_importer_namespace_dir
+): ?string {
+    $prefix = 'Reprint\\Importer\\';
+    if (strpos($class_name, $prefix) !== 0) {
+        return null;
+    }
+
+    $relative = substr($class_name, strlen($prefix));
+    $parts = explode('\\', $relative);
+    $short_name = array_pop($parts);
+    if ($short_name === null || $short_name === '') {
+        return null;
+    }
+
+    $path_parts = array_map($reprint_importer_namespace_dir, $parts);
+    $base_path = $reprint_importer_lib_dir;
+    if ($path_parts !== []) {
+        $base_path .= '/' . implode('/', $path_parts);
+    }
+
+    $file_base = $reprint_importer_kebab_case($short_name);
+    foreach (['class', 'interface', 'trait'] as $type) {
+        $path = "{$base_path}/{$type}-{$file_base}.php";
+        if (is_file($path)) {
+            return $path;
+        }
+    }
+
+    return null;
+};
 
 if (!class_exists('Composer\\Autoload\\ClassLoader', false)) {
     foreach ([
@@ -97,23 +103,20 @@ $reprint_importer_load_mysql_parser = static function () use ($reprint_importer_
 };
 
 spl_autoload_register(
-    static function (string $class) use (
-        $reprint_importer_classmap,
-        $reprint_importer_lib_dir,
+    static function (string $class_name) use (
+        $reprint_importer_class_file,
         $reprint_importer_load_mysql_parser
     ): void {
-        if (strpos($class, 'Reprint\\Importer\\') === 0) {
-            $map = $reprint_importer_classmap($reprint_importer_lib_dir);
-            if (isset($map[$class])) {
-                require_once $map[$class];
-            }
+        $file = $reprint_importer_class_file($class_name);
+        if ($file !== null) {
+            require_once $file;
             return;
         }
 
         if (
-            strpos($class, 'WP_MySQL_') === 0 ||
-            strpos($class, 'WP_Parser') === 0 ||
-            strpos($class, 'WP_Grammar') === 0
+            strpos($class_name, 'WP_MySQL_') === 0 ||
+            strpos($class_name, 'WP_Parser') === 0 ||
+            strpos($class_name, 'WP_Grammar') === 0
         ) {
             $reprint_importer_load_mysql_parser();
         }
@@ -148,4 +151,10 @@ if (!function_exists('Reprint\\Importer\\get_importer_version')) {
     require_once $reprint_importer_lib_dir . '/version.php';
 }
 
-unset($reprint_importer_classmap, $reprint_importer_lib_dir, $reprint_importer_load_mysql_parser);
+unset(
+    $reprint_importer_class_file,
+    $reprint_importer_kebab_case,
+    $reprint_importer_lib_dir,
+    $reprint_importer_load_mysql_parser,
+    $reprint_importer_namespace_dir
+);
