@@ -958,12 +958,109 @@ class AdaptiveTuner
     }
 }
 
+
+/**
+ * Export request transport used by ImportClient.
+ *
+ * ImportClient owns the migration workflow; transport implementations only decide
+ * how a typed exporter request reaches the source. Keeping this boundary small
+ * prevents relay/push mechanics from leaking into file and database sequencing.
+ */
+interface ExportRequestTransport
+{
+    public function fetch_json(ImportClient $client, string $url): array;
+
+    public function fetch_streaming(
+        ImportClient $client,
+        string $url,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data,
+        ?string $endpoint
+    ): void;
+}
+
+class DirectExportRequestTransport implements ExportRequestTransport
+{
+    public function fetch_json(ImportClient $client, string $url): array
+    {
+        return $client->fetch_direct_json($url);
+    }
+
+    public function fetch_streaming(
+        ImportClient $client,
+        string $url,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data,
+        ?string $endpoint
+    ): void {
+        $client->fetch_direct_streaming($url, $cursor, $context, $post_data, $endpoint);
+    }
+}
+
+class RelayExportRequestTransport implements ExportRequestTransport
+{
+    public function fetch_json(ImportClient $client, string $url): array
+    {
+        return $client->fetch_relay_json($url);
+    }
+
+    public function fetch_streaming(
+        ImportClient $client,
+        string $url,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data,
+        ?string $endpoint
+    ): void {
+        $client->fetch_relay_streaming($url, $cursor, $context, $post_data, $endpoint);
+    }
+}
+
 class ImportClient
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    private const RELAY_PROTOCOL_VERSION = 1;
+
+    /**
+     * Exporter endpoints that a source-side relay worker may execute.
+     *
+     * Relay requests are target-authored, so the local source worker must
+     * re-apply the exporter endpoint allowlist before it turns a relay record
+     * back into an HTTP request.
+     */
+    private const RELAY_ENDPOINT_PARAM_ALLOWLIST = [
+        "preflight" => [],
+        "file_index" => [
+            "batch_size",
+            "directory",
+            "follow_symlinks",
+            "include_caches",
+            "list_dir",
+            "max_execution_time",
+            "memory_threshold",
+        ],
+        "file_fetch" => [
+            "chunk_size",
+            "directory",
+            "max_execution_time",
+            "memory_threshold",
+        ],
+        "sql_chunk" => [
+            "db_query_time_limit",
+            "db_unbuffered",
+            "fragments_per_batch",
+            "max_allowed_packet",
+            "max_execution_time",
+            "memory_threshold",
+            "skip_rows",
+        ],
+        "db_index" => ["tables_per_batch"],
+    ];
 
     /**
      * Maximum number of consecutive cURL timeouts with no cursor progress
@@ -1154,6 +1251,36 @@ class ImportClient
 
     /** @var Site_Export_HMAC_Client|null Signs requests when HMAC auth is configured. */
     private $hmac_client = null;
+
+    /** @var string Export request transport: direct HTTP or relay. */
+    private $export_transport = 'direct';
+
+    /** @var string|null Directory used by relay transports to exchange requests and responses. */
+    private $relay_dir = null;
+
+    /** @var string|null Remote target push API used by relay-source workers. */
+    private $relay_url = null;
+
+    /** @var string|null Remote target push session fulfilled by this source worker. */
+    private $relay_session = null;
+
+    /** @var string|null HMAC secret for the remote relay API; defaults to --secret. */
+    private $relay_secret = null;
+
+    /** @var Site_Export_HMAC_Client|null Signs remote relay API requests. */
+    private $relay_hmac_client = null;
+
+    /** @var int Seconds to wait for a relay response before failing the export request. */
+    private $relay_timeout = 300;
+
+    /** @var int Seconds a relay source worker waits without work before exiting. */
+    private $relay_idle_timeout = 30;
+
+    /** @var array<int,string> Source-side paths the relay worker is allowed to export. */
+    private $relay_source_allowed_paths = [];
+
+    /** @var ExportRequestTransport|null Lazily constructed exporter transport. */
+    private $export_request_transport = null;
 
     /**
      * @var int|null MySQL max_allowed_packet value for the import database connection.
@@ -1558,6 +1685,8 @@ class ImportClient
      */
     public function run(array $options = []): void
     {
+        $command = $options["command"] ?? null;
+
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
@@ -1565,14 +1694,50 @@ class ImportClient
         $this->extra_directory = $options["extra_directory"] ?? null;
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
-            if (!in_array($this->fs_root_nonempty_behavior, ['error', 'preserve-local'])) {
+            if (!in_array($this->fs_root_nonempty_behavior, ['error', 'preserve-local', 'overwrite'])) {
                 throw new InvalidArgumentException(
                     "Invalid --on-fs-root-nonempty value: {$this->fs_root_nonempty_behavior}. " .
-                        "Valid values: error, preserve-local",
+                        "Valid values: error, preserve-local, overwrite",
                 );
             }
         }
-        $command = $options["command"] ?? null;
+        if (isset($options["transport"])) {
+            $this->export_transport = (string) $options["transport"];
+            $this->export_request_transport = null;
+        }
+        if (!in_array($this->export_transport, ['direct', 'relay'], true)) {
+            throw new InvalidArgumentException(
+                "Invalid --transport value: {$this->export_transport}. Valid values: direct, relay",
+            );
+        }
+        if (isset($options["relay_dir"])) {
+            $this->relay_dir = rtrim((string) $options["relay_dir"], "/");
+        }
+        if (isset($options["relay_url"])) {
+            $this->relay_url = rtrim((string) $options["relay_url"], "?&");
+        }
+        if (isset($options["relay_session"])) {
+            $this->relay_session = (string) $options["relay_session"];
+        }
+        if (isset($options["relay_secret"])) {
+            $this->relay_secret = (string) $options["relay_secret"];
+        }
+        if (isset($options["relay_timeout"])) {
+            $this->relay_timeout = max(1, (int) $options["relay_timeout"]);
+        }
+        if (isset($options["relay_idle_timeout"])) {
+            $this->relay_idle_timeout = max(1, (int) $options["relay_idle_timeout"]);
+        }
+        if (isset($options["relay_allow_path"])) {
+            $paths = is_array($options["relay_allow_path"]) ? $options["relay_allow_path"] : [$options["relay_allow_path"]];
+            $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths($paths);
+        }
+        if ($this->export_transport === 'relay' && ($this->relay_dir === null || $this->relay_dir === '')) {
+            throw new InvalidArgumentException("--relay-dir is required when --transport=relay");
+        }
+        if ($command === "relay-source" && $this->relay_url !== null && $this->relay_session === null) {
+            throw new InvalidArgumentException("--relay-session is required when relay-source uses --relay-url");
+        }
 
         // Apply legacy command aliases so callers using old names still work.
         static $command_aliases = [
@@ -1605,6 +1770,7 @@ class ImportClient
             "preflight-assert",
             "flat-docroot",
             "apply-runtime",
+            "relay-source",
         ];
 
         if (!$command) {
@@ -1786,6 +1952,21 @@ class ImportClient
                 );
             }
             $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
+        }
+
+        $relay_secret = $this->relay_secret ?? ($options["secret"] ?? null);
+        if ($relay_secret !== null && $relay_secret !== "") {
+            if (!class_exists('Site_Export_HMAC_Client')) {
+                throw new RuntimeException(
+                    'Streaming exporter runtime not found. Run composer install before using --relay-secret.'
+                );
+            }
+            $this->relay_hmac_client = new \Site_Export_HMAC_Client((string) $relay_secret);
+        }
+
+        if ($command === "relay-source") {
+            $this->run_relay_source_worker();
+            return;
         }
 
         // Pull-like commands orchestrate preflight and lower-level stages
@@ -9629,6 +9810,1142 @@ class ImportClient
     }
 
     /**
+     * Writes one target-controlled export request and waits for the source response.
+     *
+     * The directory relay is the concrete proof transport for Studio push: the
+     * target importer still decides the next exporter request, while the local
+     * source worker performs all network I/O. Request records, upload sidecars,
+     * response metadata, and streamed bodies are separate files so large exporter
+     * responses never need to be buffered in PHP memory.
+     */
+    private function fetch_relay_response(array $request): array
+    {
+        $relay_dir = $this->require_relay_dir();
+        $request_id = sprintf(
+            "req-%s-%06d",
+            str_replace(".", "", uniqid("", true)),
+            random_int(0, 999999),
+        );
+
+        $requests_dir = $relay_dir . "/requests";
+        $responses_dir = $relay_dir . "/responses";
+        $uploads_dir = $relay_dir . "/uploads";
+        foreach ([$requests_dir, $responses_dir, $uploads_dir] as $dir) {
+            $this->ensure_directory($dir, "relay directory");
+        }
+
+        $request["request_id"] = $request_id;
+        $request["created_at"] = gmdate("c");
+        $request["post_data"] = $this->serialize_relay_post_data(
+            $request_id,
+            $uploads_dir,
+            $request["post_data"] ?? null,
+        );
+
+        $request_file = $requests_dir . "/{$request_id}.json";
+        $this->write_json_file_atomically($request_file, $request);
+
+        $this->audit_log(
+            sprintf(
+                "RELAY_REQUEST | %s | endpoint=%s kind=%s",
+                $request_id,
+                $request["endpoint"] ?? "unknown",
+                $request["kind"] ?? "unknown",
+            ),
+            false,
+        );
+
+        $response_file = $responses_dir . "/{$request_id}.json";
+        $deadline = time() + $this->relay_timeout;
+        while (!file_exists($response_file)) {
+            if ($this->shutdown_requested) {
+                throw new RuntimeException("Shutdown requested");
+            }
+            if (time() >= $deadline) {
+                throw new RuntimeException("Timed out waiting for relay response {$request_id}");
+            }
+            $this->progress->tick_spinner();
+            usleep(100000);
+        }
+
+        $response = $this->read_json_file($response_file, "relay response metadata {$request_id}");
+        if (!empty($response["error"])) {
+            throw new RuntimeException((string) $response["error"]);
+        }
+
+        return $response;
+    }
+
+    /**
+     * Runs the outbound relay source worker for a local exporter.
+     *
+     * The worker polls target-authored ExportRequests, validates each one against
+     * the source-side allowlist, executes it against $remote_url, and writes the
+     * response back for the target importer. This is the Reprint-side primitive
+     * Studio can use for a local-user-driven push without giving the target broad
+     * authority over the local site.
+     */
+    private function run_relay_source_worker(): void
+    {
+        if ($this->relay_url !== null && $this->relay_url !== "") {
+            $this->run_remote_relay_source_worker();
+            return;
+        }
+
+        $relay_dir = $this->require_relay_dir();
+        $requests_dir = $relay_dir . "/requests";
+        $responses_dir = $relay_dir . "/responses";
+        $processing_dir = $relay_dir . "/processing";
+        $uploads_dir = $relay_dir . "/uploads";
+        foreach ([$requests_dir, $responses_dir, $processing_dir, $uploads_dir] as $dir) {
+            $this->ensure_directory($dir, "relay directory");
+        }
+
+        if (!empty($this->relay_source_allowed_paths)) {
+            $this->state["relay_source_allowed_paths"] = $this->relay_source_allowed_paths;
+            $this->save_state($this->state);
+        } elseif (isset($this->state["relay_source_allowed_paths"]) && is_array($this->state["relay_source_allowed_paths"])) {
+            $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths(
+                $this->state["relay_source_allowed_paths"],
+            );
+        }
+
+        $this->audit_log("RELAY_SOURCE | started | source={$this->remote_url}", true);
+        $last_work_at = time();
+        while (!$this->shutdown_requested) {
+            $request_file = $this->claim_next_relay_request($requests_dir, $processing_dir);
+            if ($request_file === null) {
+                if (time() - $last_work_at >= $this->relay_idle_timeout) {
+                    $this->audit_log("RELAY_SOURCE | idle timeout", true);
+                    return;
+                }
+                $this->progress->tick_spinner();
+                usleep(100000);
+                continue;
+            }
+
+            $last_work_at = time();
+            $request_id = basename($request_file, ".json");
+            $request = null;
+            try {
+                $request = $this->read_json_file($request_file, "relay request {$request_id}");
+                $response = $this->execute_relay_source_request($request, $responses_dir, $uploads_dir);
+            } catch (\Throwable $e) {
+                $response = [
+                    "request_id" => $request_id,
+                    "endpoint" => isset($request) && is_array($request) ? ($request["endpoint"] ?? null) : null,
+                    "kind" => isset($request) && is_array($request) ? ($request["kind"] ?? null) : null,
+                    "error" => $e->getMessage(),
+                    "created_at" => gmdate("c"),
+                ];
+                $this->audit_log("RELAY_SOURCE_ERROR | {$request_id} | " . $e->getMessage(), true);
+            }
+
+            $this->write_json_file_atomically($responses_dir . "/{$request_id}.json", $response);
+            if (!@unlink($request_file) && file_exists($request_file)) {
+                throw new RuntimeException("Cannot remove processed relay request: {$request_file}");
+            }
+        }
+    }
+
+    /**
+     * Runs relay-source against a remote target plugin push session.
+     */
+    private function run_remote_relay_source_worker(): void
+    {
+        $this->require_remote_relay_config();
+
+        if (!empty($this->relay_source_allowed_paths)) {
+            $this->state["relay_source_allowed_paths"] = $this->relay_source_allowed_paths;
+            $this->save_state($this->state);
+        } elseif (isset($this->state["relay_source_allowed_paths"]) && is_array($this->state["relay_source_allowed_paths"])) {
+            $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths(
+                $this->state["relay_source_allowed_paths"],
+            );
+        }
+
+        $this->audit_log("RELAY_SOURCE_REMOTE | started | source={$this->remote_url} target={$this->relay_url} session={$this->relay_session}", true);
+        $last_work_at = time();
+        while (!$this->shutdown_requested) {
+            $claim = $this->relay_api_json_request('claim');
+            if (empty($claim['ok'])) {
+                throw new RuntimeException((string) ($claim['error'] ?? 'Remote relay claim failed.'));
+            }
+
+            $request = $claim['request'] ?? null;
+            if (!is_array($request)) {
+                $status = (string) ($claim['status'] ?? '');
+                if (in_array($status, ['complete', 'aborted', 'error'], true)) {
+                    $this->audit_log("RELAY_SOURCE_REMOTE | target session {$status}", true);
+                    return;
+                }
+                if (time() - $last_work_at >= $this->relay_idle_timeout) {
+                    $this->audit_log("RELAY_SOURCE_REMOTE | idle timeout", true);
+                    return;
+                }
+                $this->progress->tick_spinner();
+                usleep(250000);
+                continue;
+            }
+
+            $last_work_at = time();
+            $request_id = (string) ($request['request_id'] ?? '');
+            $work_dir = $this->state_dir . '/.relay-remote-' . preg_replace('/[^A-Za-z0-9_.-]/', '_', $request_id);
+            $responses_dir = $work_dir . '/responses';
+            $uploads_dir = $work_dir . '/uploads';
+            foreach ([$responses_dir, $uploads_dir] as $dir) {
+                $this->ensure_directory($dir, "remote relay work directory");
+            }
+
+            try {
+                $this->materialize_remote_relay_uploads($claim['uploads'] ?? [], $uploads_dir);
+                $response = $this->execute_relay_source_request($request, $responses_dir, $uploads_dir);
+            } catch (\Throwable $e) {
+                $response = [
+                    'request_id' => $request_id,
+                    'endpoint' => $request['endpoint'] ?? null,
+                    'kind' => $request['kind'] ?? null,
+                    'error' => $e->getMessage(),
+                    'created_at' => gmdate('c'),
+                ];
+                $this->audit_log("RELAY_SOURCE_REMOTE_ERROR | {$request_id} | " . $e->getMessage(), true);
+            }
+
+            if (!empty($response['body_file']) && is_string($response['body_file'])) {
+                $this->relay_api_upload_response_body($request_id, $response['body_file']);
+            }
+            $this->relay_api_json_request('response', $response);
+            $this->remove_directory_recursive($work_dir);
+        }
+    }
+
+    private function require_remote_relay_config(): void
+    {
+        if ($this->relay_url === null || $this->relay_url === '') {
+            throw new RuntimeException('--relay-url is required for remote relay-source mode.');
+        }
+        if ($this->relay_session === null || $this->relay_session === '') {
+            throw new RuntimeException('--relay-session is required for remote relay-source mode.');
+        }
+        if ($this->relay_hmac_client === null) {
+            throw new RuntimeException('--relay-secret is required for remote relay-source mode unless --secret is shared.');
+        }
+    }
+
+    private function materialize_remote_relay_uploads($uploads, string $uploads_dir): void
+    {
+        if (!is_array($uploads)) {
+            return;
+        }
+        foreach ($uploads as $name => $encoded) {
+            if (!is_string($name) || !is_string($encoded) || !preg_match('/^[A-Za-z0-9_.-]+$/', $name)) {
+                throw new RuntimeException('Invalid remote relay upload payload.');
+            }
+            $decoded = base64_decode($encoded, true);
+            if ($decoded === false) {
+                throw new RuntimeException('Invalid remote relay upload encoding.');
+            }
+            if (file_put_contents($uploads_dir . '/' . $name, $decoded) === false) {
+                throw new RuntimeException('Cannot write remote relay upload sidecar.');
+            }
+        }
+    }
+
+    private function relay_api_json_request(string $endpoint, ?array $payload = null): array
+    {
+        $body = $payload === null
+            ? ''
+            : json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($body === false) {
+            throw new RuntimeException('Cannot encode relay API JSON payload.');
+        }
+
+        $ch = curl_init($this->build_relay_api_url($endpoint));
+        reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
+
+        $headers = [
+            'Accept: application/json',
+            ...$this->relay_hmac_client->get_curl_headers($body),
+        ];
+        if ($payload !== null) {
+            $headers[] = 'Content-Type: application/json';
+        }
+
+        curl_setopt_array($ch, [
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => $headers,
+        ]);
+        if ($payload !== null) {
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        }
+
+        $response_body = curl_exec($ch);
+        if ($response_body === false) {
+            $error = curl_error($ch);
+            curl_close($ch);
+            throw new RuntimeException("Remote relay API request failed: {$error}");
+        }
+        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        $decoded = json_decode((string) $response_body, true);
+        if (!is_array($decoded)) {
+            throw new RuntimeException("Remote relay API returned invalid JSON (HTTP {$http_code}).");
+        }
+        if ($http_code < 200 || $http_code >= 300) {
+            throw new RuntimeException((string) ($decoded['error'] ?? "Remote relay API returned HTTP {$http_code}."));
+        }
+        return $decoded;
+    }
+
+    private function relay_api_upload_response_body(string $request_id, string $body_file): void
+    {
+        if (!is_file($body_file)) {
+            throw new RuntimeException("Relay response body missing: {$body_file}");
+        }
+
+        $content_hash = hash_file('sha256', $body_file);
+        if ($content_hash === false) {
+            throw new RuntimeException("Cannot hash relay response body: {$body_file}");
+        }
+        $nonce = $this->relay_hmac_client->generate_nonce();
+        $timestamp = $this->relay_hmac_client->get_timestamp();
+        $signature = $this->relay_hmac_client->compute_signature($nonce, $timestamp, $content_hash);
+
+        $ch = curl_init($this->build_relay_api_url('response-body', ['request_id' => $request_id]));
+        reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
+        curl_setopt_array($ch, [
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_TIMEOUT => 300,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => [
+                'body' => new \CURLFile($body_file, 'application/octet-stream', basename($body_file)),
+            ],
+            CURLOPT_HTTPHEADER => [
+                'Accept: application/json',
+                "X-Auth-Signature: {$signature}",
+                "X-Auth-Nonce: {$nonce}",
+                "X-Auth-Timestamp: {$timestamp}",
+                "X-Auth-Content-Hash: {$content_hash}",
+            ],
+        ]);
+
+        $response_body = curl_exec($ch);
+        if ($response_body === false) {
+            $error = curl_error($ch);
+            curl_close($ch);
+            throw new RuntimeException("Remote relay body upload failed: {$error}");
+        }
+        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        $decoded = json_decode((string) $response_body, true);
+        if ($http_code < 200 || $http_code >= 300 || !is_array($decoded) || empty($decoded['ok'])) {
+            $message = is_array($decoded) ? ($decoded['error'] ?? null) : null;
+            throw new RuntimeException((string) ($message ?? "Remote relay body upload returned HTTP {$http_code}."));
+        }
+    }
+
+    private function build_relay_api_url(string $endpoint, array $params = []): string
+    {
+        $url = $this->relay_url;
+        $separator = strpos($url, '?') === false ? '?' : '&';
+        $query = array_merge([
+            'reprint-push-api' => '1',
+            'endpoint' => $endpoint,
+            'session_id' => $this->relay_session,
+        ], $params);
+        return $url . $separator . http_build_query($query);
+    }
+
+    /**
+     * Executes one relay ExportRequest against the source exporter.
+     */
+    private function execute_relay_source_request(array $request, string $responses_dir, string $uploads_dir): array
+    {
+        $request_id = (string) ($request["request_id"] ?? "");
+        $kind = (string) ($request["kind"] ?? "");
+        $endpoint = (string) ($request["endpoint"] ?? "");
+        $params = $request["params"] ?? [];
+        if ($request_id === "" || !in_array($kind, ["json", "stream"], true) || $endpoint === "") {
+            throw new RuntimeException("Relay request is missing request_id, kind, or endpoint.");
+        }
+        if (($request["protocol"] ?? null) !== self::RELAY_PROTOCOL_VERSION) {
+            throw new RuntimeException("Unsupported relay protocol version for {$request_id}.");
+        }
+        if (!is_array($params)) {
+            throw new RuntimeException("Relay request params must be an object or array.");
+        }
+
+        $cursor = isset($request["cursor"]) && is_string($request["cursor"])
+            ? $request["cursor"]
+            : null;
+        $post_data = isset($request["post_data"]) && is_array($request["post_data"])
+            ? $request["post_data"]
+            : null;
+        $this->validate_relay_source_request($endpoint, $kind, $params, $post_data, $uploads_dir);
+
+        $url = $this->build_source_request_url($endpoint, $cursor, $params);
+        $this->audit_log("RELAY_SOURCE_REQUEST | {$request_id} | {$kind} | {$url}", false);
+
+        if ($kind === "json") {
+            $result = $this->execute_relay_source_json_request($url);
+            if ($endpoint === "preflight" && isset($result["json"]) && is_array($result["json"])) {
+                $this->remember_relay_source_preflight_paths($result["json"]);
+            }
+            return [
+                "request_id" => $request_id,
+                "endpoint" => $endpoint,
+                "kind" => $kind,
+                "json_result" => $result,
+                "http_code" => $result["http_code"] ?? 0,
+                "elapsed" => $result["elapsed"] ?? null,
+                "created_at" => gmdate("c"),
+            ];
+        }
+
+        $body_file = $responses_dir . "/{$request_id}.body";
+        $result = $this->execute_relay_source_stream_request($url, $post_data, $uploads_dir, $body_file);
+        $result["request_id"] = $request_id;
+        $result["endpoint"] = $endpoint;
+        $result["kind"] = $kind;
+        $result["body_file"] = $body_file;
+        $result["created_at"] = gmdate("c");
+        return $result;
+    }
+
+    /**
+     * Builds the typed export request shared by direct and relay transports.
+     */
+    private function build_export_request_from_url(
+        string $url,
+        ?string $cursor,
+        string $kind,
+        ?array $post_data = null,
+        ?string $endpoint_hint = null
+    ): array {
+        $parts = parse_url($url);
+        $query = [];
+        if (isset($parts["query"])) {
+            parse_str($parts["query"], $query);
+        }
+        $base_parts = parse_url($this->remote_url);
+        if (isset($base_parts["query"])) {
+            // Query parameters already present on the configured exporter URL
+            // (for example ?reprint-api) select the exporter entrypoint. They
+            // are not target-authored endpoint parameters and must not be
+            // revalidated as part of the relay request.
+            $base_query = [];
+            parse_str($base_parts["query"], $base_query);
+            foreach (array_keys($base_query) as $base_key) {
+                unset($query[$base_key]);
+            }
+        }
+        $endpoint = $endpoint_hint ?? ($query["endpoint"] ?? null);
+        if (!is_string($endpoint) || $endpoint === "") {
+            throw new RuntimeException("Relay export request is missing an endpoint.");
+        }
+        unset($query["endpoint"], $query["_cache_bust"]);
+
+        if ($cursor === null && isset($query["cursor"]) && is_string($query["cursor"])) {
+            $cursor = $query["cursor"];
+        }
+        unset($query["cursor"]);
+
+        return [
+            "protocol" => self::RELAY_PROTOCOL_VERSION,
+            "kind" => $kind,
+            "endpoint" => $endpoint,
+            "cursor" => $cursor,
+            "params" => $query,
+            "post_data" => $post_data,
+        ];
+    }
+
+    /**
+     * Executes a relay source JSON request and returns the normal fetch_json shape.
+     */
+    private function execute_relay_source_json_request(string $url): array
+    {
+        $this->reset_curl_state();
+        $ch = curl_init($url);
+        reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
+        curl_setopt_array($ch, [
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_ENCODING => "gzip, deflate",
+            CURLOPT_HTTPHEADER => [
+                ...$this->get_base_headers("application/json"),
+                ...($this->get_hmac_headers()),
+            ],
+            CURLOPT_RETURNTRANSFER => true,
+        ]);
+
+        $start = microtime(true);
+        $body = curl_exec($ch);
+        $elapsed = microtime(true) - $start;
+        try {
+            $this->check_curl_error($ch);
+        } catch (RuntimeException $e) {
+            @curl_close($ch);
+            return [
+                "ok" => false,
+                "http_code" => 0,
+                "elapsed" => $elapsed,
+                "body" => null,
+                "json" => null,
+                "error" => $e->getMessage(),
+                "curl_errno" => $this->last_curl_errno,
+                "timeout" => $this->last_curl_timeout,
+            ];
+        }
+        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
+        @curl_close($ch);
+
+        if ($http_code !== 200) {
+            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
+            return [
+                "ok" => false,
+                "http_code" => $http_code,
+                "elapsed" => $elapsed,
+                "body" => $body,
+                "json" => null,
+                "error" => $this->format_diagnosed_error($diagnosis),
+                "error_code" => $diagnosis["code"],
+            ];
+        }
+
+        $json = null;
+        $json_error = null;
+        if ($body !== false && $body !== "") {
+            $json = json_decode($body, true);
+            if ($json === null && json_last_error() !== JSON_ERROR_NONE) {
+                $json_error = "Invalid JSON: " . json_last_error_msg();
+            }
+        }
+
+        return [
+            "ok" => $json_error === null,
+            "http_code" => $http_code,
+            "elapsed" => $elapsed,
+            "body" => $body,
+            "json" => $json,
+            "error" => $json_error,
+            "error_code" => $json_error === null ? null : "INVALID_JSON",
+        ];
+    }
+
+    /**
+     * Streams a relay source request body to disk and returns bounded metadata.
+     */
+    private function execute_relay_source_stream_request(
+        string $url,
+        ?array $post_data,
+        string $uploads_dir,
+        string $body_file
+    ): array {
+        $this->reset_curl_state();
+        $ch = curl_init($url);
+        reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
+
+        $headers = [
+            ...$this->get_base_headers("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+            "Upgrade-Insecure-Requests: 1",
+            "Sec-Fetch-Dest: document",
+            "Sec-Fetch-Mode: navigate",
+            "Sec-Fetch-Site: none",
+            "Sec-Fetch-User: ?1",
+        ];
+        $curl_post_data = null;
+        $body_hash_context = hash_init("sha256");
+        if ($post_data !== null) {
+            $curl_post_data = $this->recreate_relay_post_data($post_data, $uploads_dir, $body_hash_context);
+        }
+        array_push($headers, ...($this->get_hmac_headers_for_content_hash(hash_final($body_hash_context))));
+
+        $tmp_body_file = $body_file . ".tmp";
+        $body_handle = fopen($tmp_body_file, "wb");
+        if (!$body_handle) {
+            throw new RuntimeException("Cannot create relay response body file: {$tmp_body_file}");
+        }
+
+        $response_headers = [];
+        $bytes_received = 0;
+        $body_preview = "";
+        $options = [
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_LOW_SPEED_LIMIT => 1,
+            CURLOPT_LOW_SPEED_TIME => 300,
+            CURLOPT_ENCODING => "gzip, deflate",
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (&$response_headers) {
+                $this->capture_response_header_line($response_headers, $header_line);
+                return strlen($header_line);
+            },
+            CURLOPT_WRITEFUNCTION => function ($ch, $data) use ($body_handle, &$bytes_received, &$body_preview) {
+                $written = fwrite($body_handle, $data);
+                if ($written !== strlen($data)) {
+                    return -1;
+                }
+                $bytes_received += strlen($data);
+                if (strlen($body_preview) < 65536) {
+                    $body_preview .= substr($data, 0, 65536 - strlen($body_preview));
+                }
+                return strlen($data);
+            },
+        ];
+        if ($curl_post_data !== null) {
+            $options[CURLOPT_POST] = true;
+            $options[CURLOPT_POSTFIELDS] = $curl_post_data;
+        }
+        curl_setopt_array($ch, $options);
+
+        $start = microtime(true);
+        $result = curl_exec($ch);
+        $elapsed = microtime(true) - $start;
+        try {
+            $this->check_curl_error($ch);
+            $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
+            $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
+        } catch (\Throwable $e) {
+            @unlink($tmp_body_file);
+            throw $e;
+        } finally {
+            @curl_close($ch);
+            fclose($body_handle);
+        }
+
+        if ($result === false) {
+            @unlink($tmp_body_file);
+            throw new RuntimeException("Relay source stream request failed before writing a response body.");
+        }
+        $this->rename_file_atomically($tmp_body_file, $body_file);
+
+        return [
+            "http_code" => $http_code,
+            "headers" => $response_headers,
+            "body_bytes" => $bytes_received,
+            "body_preview" => $body_preview,
+            "elapsed" => $elapsed,
+            "ttfb" => $ttfb,
+            "redirect_url" => $redirect_url,
+        ];
+    }
+
+    /**
+     * Claims the next relay request by atomically moving it to processing/.
+     */
+    private function claim_next_relay_request(string $requests_dir, string $processing_dir): ?string
+    {
+        $this->requeue_expired_relay_requests($requests_dir, $processing_dir);
+
+        $files = glob($requests_dir . "/*.json");
+        if (!is_array($files) || empty($files)) {
+            return null;
+        }
+        sort($files, SORT_STRING);
+        foreach ($files as $file) {
+            $claimed = $processing_dir . "/" . basename($file);
+            // Another worker may claim the same file first; suppress that expected race
+            // and try the next request instead of treating it as a protocol error.
+            if (@rename($file, $claimed)) {
+                if (!touch($claimed)) {
+                    throw new RuntimeException("Cannot refresh claimed relay request lease: {$claimed}");
+                }
+                return $claimed;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Builds the direct source URL for a relay worker request.
+     */
+    private function build_source_request_url(string $endpoint, ?string $cursor, array $params): string
+    {
+        $url = $this->remote_url;
+        $separator = strpos($url, "?") === false ? "?" : "&";
+        $params["endpoint"] = $endpoint;
+        if ($cursor !== null && $cursor !== "") {
+            $params["cursor"] = $cursor;
+        }
+        $params["_cache_bust"] = time() . "-" . rand(0, 999999);
+        return $url . $separator . http_build_query($params);
+    }
+
+    /**
+     * Returns the configured relay directory or fails with an actionable error.
+     */
+    private function require_relay_dir(): string
+    {
+        if ($this->relay_dir === null || $this->relay_dir === "") {
+            throw new RuntimeException("--relay-dir is required for relay transport.");
+        }
+        $this->ensure_directory($this->relay_dir, "relay directory");
+        return $this->relay_dir;
+    }
+
+    /**
+     * Serializes POST data into relay sidecars so uploads stay bounded in memory.
+     */
+    private function serialize_relay_post_data(string $request_id, string $uploads_dir, ?array $post_data): ?array
+    {
+        if ($post_data === null) {
+            return null;
+        }
+
+        $serialized = [];
+        foreach ($post_data as $name => $value) {
+            if ($value instanceof \CURLFile) {
+                $filename = $value->getFilename();
+                if (!is_string($filename) || !is_file($filename)) {
+                    throw new RuntimeException("Cannot read relay upload payload for {$name}.");
+                }
+                $upload_name = $request_id . "-" . preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $name) . ".upload";
+                $upload_path = $uploads_dir . "/" . $upload_name;
+                $this->copy_file_streaming($filename, $upload_path . ".tmp");
+                $this->rename_file_atomically($upload_path . ".tmp", $upload_path);
+                $upload_size = filesize($upload_path);
+                if ($upload_size === false) {
+                    throw new RuntimeException("Cannot stat relay upload sidecar: {$upload_path}");
+                }
+                $serialized[$name] = [
+                    "type" => "file",
+                    "name" => $value->getPostFilename() ?: basename($filename),
+                    "mime" => $value->getMimeType() ?: "application/octet-stream",
+                    "upload" => $upload_name,
+                    "size" => $upload_size,
+                ];
+            } else {
+                $serialized[$name] = [
+                    "type" => "value",
+                    "value" => (string) $value,
+                ];
+            }
+        }
+
+        return $serialized;
+    }
+
+    /**
+     * Recreates cURL POST fields from a relay request and hashes the logical body.
+     *
+     * The exporter HMAC covers the concatenated logical field bytes, matching the
+     * direct transport's convention for CURLFile uploads without loading upload
+     * sidecars into memory.
+     */
+    private function recreate_relay_post_data(array $post_data, string $uploads_dir, $body_hash_context): array
+    {
+        $curl_post_data = [];
+        foreach ($post_data as $name => $item) {
+            if (!is_array($item)) {
+                throw new RuntimeException("Invalid relay POST field for {$name}.");
+            }
+            if (($item["type"] ?? "") === "file") {
+                $upload_path = $this->relay_upload_path_from_post_field($item, $uploads_dir, (string) $name);
+                if (!hash_update_file($body_hash_context, $upload_path)) {
+                    throw new RuntimeException("Cannot hash relay upload payload for {$name}.");
+                }
+                $curl_post_data[$name] = new \CURLFile(
+                    $upload_path,
+                    (string) ($item["mime"] ?? "application/octet-stream"),
+                    (string) ($item["name"] ?? $name),
+                );
+            } else {
+                $value = (string) ($item["value"] ?? "");
+                hash_update($body_hash_context, $value);
+                $curl_post_data[$name] = $value;
+            }
+        }
+        return $curl_post_data;
+    }
+
+    private function validate_relay_source_request(
+        string $endpoint,
+        string $kind,
+        array $params,
+        ?array $post_data = null,
+        ?string $uploads_dir = null
+    ): void
+    {
+        if (!isset(self::RELAY_ENDPOINT_PARAM_ALLOWLIST[$endpoint])) {
+            throw new RuntimeException("Relay source rejected endpoint '{$endpoint}'.");
+        }
+        if ($endpoint === "preflight" && $kind !== "json") {
+            throw new RuntimeException("Relay source rejected preflight request with non-json kind.");
+        }
+        if ($endpoint !== "preflight" && $kind !== "stream") {
+            throw new RuntimeException("Relay source rejected {$endpoint} request with non-stream kind.");
+        }
+
+        $allowed_params = array_flip(self::RELAY_ENDPOINT_PARAM_ALLOWLIST[$endpoint]);
+        foreach (array_keys($params) as $key) {
+            if (!isset($allowed_params[(string) $key])) {
+                throw new RuntimeException("Relay source rejected parameter '{$key}' for endpoint '{$endpoint}'.");
+            }
+        }
+
+        if ($endpoint === "file_index" || $endpoint === "file_fetch") {
+            $this->validate_relay_file_params($endpoint, $params);
+        }
+        $this->validate_relay_post_data($endpoint, $post_data, $uploads_dir);
+    }
+
+    private function validate_relay_file_params(string $endpoint, array $params): void
+    {
+        foreach ($this->relay_request_paths($params["directory"] ?? []) as $path) {
+            $this->assert_relay_path_allowed($path, "directory", $endpoint);
+        }
+        if (isset($params["list_dir"])) {
+            foreach ($this->relay_request_paths($params["list_dir"]) as $path) {
+                $this->assert_relay_path_allowed($path, "list_dir", $endpoint);
+            }
+        }
+    }
+
+    private function validate_relay_post_data(string $endpoint, ?array $post_data, ?string $uploads_dir): void
+    {
+        if ($endpoint !== "file_fetch") {
+            if ($post_data !== null) {
+                throw new RuntimeException("Relay source rejected POST data for endpoint '{$endpoint}'.");
+            }
+            return;
+        }
+
+        if ($post_data === null || $uploads_dir === null || !isset($post_data["file_list"])) {
+            throw new RuntimeException("Relay source rejected file_fetch request without a file_list upload.");
+        }
+        if (count($post_data) !== 1) {
+            throw new RuntimeException("Relay source rejected file_fetch request with unexpected POST fields.");
+        }
+        $file_list_path = $this->relay_upload_path_from_post_field($post_data["file_list"], $uploads_dir, "file_list");
+        $raw = file_get_contents($file_list_path);
+        $decoded = $raw !== false ? json_decode($raw, true) : null;
+        if (!is_array($decoded)) {
+            throw new RuntimeException("Relay source rejected invalid file_fetch file_list upload.");
+        }
+        foreach ($decoded as $path) {
+            if (!is_string($path) || $path === "") {
+                throw new RuntimeException("Relay source rejected invalid file_fetch file_list path.");
+            }
+            $this->assert_relay_path_allowed($path, "file_list", "file_fetch");
+        }
+    }
+
+    private function relay_upload_path_from_post_field($item, string $uploads_dir, string $name): string
+    {
+        if (!is_array($item) || ($item["type"] ?? "") !== "file") {
+            throw new RuntimeException("Relay source rejected invalid upload field for {$name}.");
+        }
+        $upload_name = (string) ($item["upload"] ?? "");
+        if ($upload_name === "" || basename($upload_name) !== $upload_name) {
+            throw new RuntimeException("Invalid relay upload reference for {$name}.");
+        }
+        $upload_path = $uploads_dir . "/" . $upload_name;
+        if (!is_file($upload_path)) {
+            throw new RuntimeException("Relay upload payload is missing for {$name}.");
+        }
+        return $upload_path;
+    }
+
+    private function assert_relay_path_allowed(string $path, string $param, string $endpoint): void
+    {
+        $normalized = $this->normalize_relay_source_path($path);
+        $allowed_paths = $this->get_relay_source_allowed_paths();
+        foreach ($allowed_paths as $allowed_path) {
+            if ($normalized === $allowed_path || strpos($normalized . "/", $allowed_path . "/") === 0) {
+                return;
+            }
+        }
+        throw new RuntimeException(
+            "Relay source rejected {$endpoint} {$param} path outside the local allowlist: {$path}",
+        );
+    }
+
+    /** @return array<int,string> */
+    private function get_relay_source_allowed_paths(): array
+    {
+        if (!empty($this->relay_source_allowed_paths)) {
+            return $this->relay_source_allowed_paths;
+        }
+        if (isset($this->state["relay_source_allowed_paths"]) && is_array($this->state["relay_source_allowed_paths"])) {
+            $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths(
+                $this->state["relay_source_allowed_paths"],
+            );
+        }
+        if (empty($this->relay_source_allowed_paths)) {
+            throw new RuntimeException(
+                "Relay source has no file path allowlist yet. Run relayed preflight first or pass --relay-allow-path.",
+            );
+        }
+        return $this->relay_source_allowed_paths;
+    }
+
+    private function remember_relay_source_preflight_paths(array $preflight): void
+    {
+        $discovered = $this->extract_relay_allowed_paths_from_preflight($preflight);
+        $merged = array_merge($this->relay_source_allowed_paths, $discovered);
+        $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths($merged);
+        $this->state["relay_source_allowed_paths"] = $this->relay_source_allowed_paths;
+        $this->save_state($this->state);
+    }
+
+    /** @return array<int,string> */
+    private function extract_relay_allowed_paths_from_preflight(array $preflight): array
+    {
+        $paths = [];
+        $roots = $preflight["wp_detect"]["roots"] ?? [];
+        if (is_array($roots)) {
+            foreach ($roots as $root) {
+                if (is_array($root) && isset($root["path"]) && is_string($root["path"])) {
+                    $paths[] = $root["path"];
+                }
+            }
+        }
+        $wp_paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
+        if (is_array($wp_paths)) {
+            foreach (["abspath", "content_dir", "plugins_dir", "mu_plugins_dir"] as $key) {
+                if (isset($wp_paths[$key]) && is_string($wp_paths[$key])) {
+                    $paths[] = $wp_paths[$key];
+                }
+            }
+            if (isset($wp_paths["uploads"]["basedir"]) && is_string($wp_paths["uploads"]["basedir"])) {
+                $paths[] = $wp_paths["uploads"]["basedir"];
+            }
+        }
+        if (isset($preflight["runtime"]["document_root"]) && is_string($preflight["runtime"]["document_root"])) {
+            $paths[] = $preflight["runtime"]["document_root"];
+        }
+        return $paths;
+    }
+
+    /** @return array<int,string> */
+    private function normalize_relay_source_allowed_paths(array $paths): array
+    {
+        $normalized = [];
+        foreach ($paths as $path) {
+            if (!is_string($path) || trim($path) === "") {
+                continue;
+            }
+            $normalized[] = $this->normalize_relay_source_path($path);
+        }
+        $normalized = array_values(array_unique($normalized));
+        sort($normalized, SORT_STRING);
+        return $normalized;
+    }
+
+    private function normalize_relay_source_path(string $path): string
+    {
+        assert_valid_path($path, "relay source path");
+        $normalized = normalize_path($path);
+        return rtrim($normalized, "/") ?: "/";
+    }
+
+    /** @return array<int,string> */
+    private function relay_request_paths($value): array
+    {
+        if (is_string($value)) {
+            return [$value];
+        }
+        if (!is_array($value)) {
+            return [];
+        }
+        $paths = [];
+        foreach ($value as $path) {
+            if (is_string($path)) {
+                $paths[] = $path;
+            }
+        }
+        return $paths;
+    }
+
+    private function requeue_expired_relay_requests(string $requests_dir, string $processing_dir): void
+    {
+        $files = glob($processing_dir . "/*.json");
+        if (!is_array($files)) {
+            return;
+        }
+        $now = time();
+        foreach ($files as $file) {
+            $mtime = filemtime($file);
+            if ($mtime === false || $now - $mtime < $this->relay_timeout) {
+                continue;
+            }
+            $requeued = $requests_dir . "/" . basename($file);
+            // The original worker may finish while we are reclaiming; a failed rename
+            // only means there is no expired request left for this worker to recover.
+            if (@rename($file, $requeued)) {
+                $this->audit_log("RELAY_SOURCE | requeued expired request " . basename($file), true);
+            }
+        }
+    }
+
+    private function capture_response_header_line(array &$headers, string $header_line): void
+    {
+        $line = trim($header_line);
+        if ($line === "") {
+            return;
+        }
+        if (stripos($line, "HTTP/") === 0) {
+            $headers = [];
+            return;
+        }
+        $colon_pos = strpos($line, ":");
+        if ($colon_pos === false) {
+            return;
+        }
+        $name = strtolower(trim(substr($line, 0, $colon_pos)));
+        $value = ltrim(substr($line, $colon_pos + 1));
+        if (!isset($headers[$name])) {
+            $headers[$name] = $value;
+            return;
+        }
+        if (!is_array($headers[$name])) {
+            $headers[$name] = [$headers[$name]];
+        }
+        $headers[$name][] = $value;
+    }
+
+    private function ensure_directory(string $dir, string $label): void
+    {
+        // Relay source and target may start at the same time and create the
+        // shared subdirectories concurrently. A failed mkdir is only fatal if
+        // the directory still does not exist after the race.
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            throw new RuntimeException("Cannot create {$label}: {$dir}");
+        }
+    }
+
+    private function write_json_file_atomically(string $path, array $data): void
+    {
+        $encoded = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($encoded === false) {
+            throw new RuntimeException("Cannot encode JSON file: {$path}");
+        }
+        $this->write_file_atomically($path, $encoded);
+    }
+
+    private function read_json_file(string $path, string $label): array
+    {
+        $raw = file_get_contents($path);
+        $decoded = $raw !== false ? json_decode($raw, true) : null;
+        if (!is_array($decoded)) {
+            throw new RuntimeException("Invalid {$label} JSON.");
+        }
+        return $decoded;
+    }
+
+    private function write_file_atomically(string $path, string $contents): void
+    {
+        $tmp = $path . ".tmp";
+        if (file_put_contents($tmp, $contents) === false) {
+            throw new RuntimeException("Cannot write temporary file: {$tmp}");
+        }
+        $this->rename_file_atomically($tmp, $path);
+    }
+
+    private function rename_file_atomically(string $from, string $to): void
+    {
+        if (!@rename($from, $to)) {
+            throw new RuntimeException("Cannot move {$from} to {$to}");
+        }
+    }
+
+    private function copy_file_streaming(string $from, string $to): void
+    {
+        $in = fopen($from, "rb");
+        if (!$in) {
+            throw new RuntimeException("Cannot open relay upload source: {$from}");
+        }
+        $out = fopen($to, "wb");
+        if (!$out) {
+            fclose($in);
+            throw new RuntimeException("Cannot create relay upload sidecar: {$to}");
+        }
+        try {
+            while (!feof($in)) {
+                $chunk = fread($in, 1024 * 1024);
+                if ($chunk === false) {
+                    throw new RuntimeException("Cannot read relay upload source: {$from}");
+                }
+                if ($chunk === "") {
+                    continue;
+                }
+                if (fwrite($out, $chunk) !== strlen($chunk)) {
+                    throw new RuntimeException("Cannot write relay upload sidecar: {$to}");
+                }
+            }
+        } finally {
+            fclose($in);
+            fclose($out);
+        }
+    }
+
+    /**
+     * Returns HMAC headers when the caller already streamed the content hash.
+     */
+    private function get_hmac_headers_for_content_hash(string $content_hash): array
+    {
+        if ($this->hmac_client === null) {
+            return [];
+        }
+        $nonce = $this->hmac_client->generate_nonce();
+        $timestamp = $this->hmac_client->get_timestamp();
+        $signature = $this->hmac_client->compute_signature($nonce, $timestamp, $content_hash);
+        return [
+            "X-Auth-Signature: {$signature}",
+            "X-Auth-Nonce: {$nonce}",
+            "X-Auth-Timestamp: {$timestamp}",
+            "X-Auth-Content-Hash: {$content_hash}",
+        ];
+    }
+
+    /**
+     * Returns the last response header value matching a case-insensitive name.
+     */
+    private function find_response_header(array $headers, string $name): ?string
+    {
+        $needle = strtolower($name);
+        $found = null;
+        foreach ($headers as $key => $value) {
+            if (strtolower((string) $key) === $needle) {
+                $found = is_array($value) ? end($value) : $value;
+            }
+        }
+        return is_string($found) ? $found : null;
+    }
+
+    /**
+     * Extracts the multipart boundary parameter from a Content-Type header.
+     */
+    private function extract_multipart_boundary(string $content_type): ?string
+    {
+        $pos = stripos($content_type, "boundary=");
+        if ($pos === false) {
+            return null;
+        }
+        $boundary = trim(substr($content_type, $pos + strlen("boundary=")));
+        if ($boundary === "") {
+            return null;
+        }
+        if ($boundary[0] === '"') {
+            $end = strpos($boundary, '"', 1);
+            return $end === false ? null : substr($boundary, 1, $end - 1);
+        }
+        $end = strcspn($boundary, ";,\r\n \t");
+        return substr($boundary, 0, $end);
+    }
+
+    /**
      * Extract root directories from preflight wp_detect data.
      * Falls back to this when the URL doesn't contain directory[] params.
      */
@@ -10076,6 +11393,87 @@ class ImportClient
     }
 
     /**
+     * Feeds a relayed multipart body through the same parser direct cURL uses.
+     */
+    private function consume_relay_streaming_response(
+        array $response,
+        StreamingContext $context,
+        ?string $endpoint
+    ): void {
+        $http_code = (int) ($response["http_code"] ?? 0);
+        $body_file = $response["body_file"] ?? null;
+        $headers = $response["headers"] ?? [];
+        if (!is_array($headers)) {
+            $headers = [];
+        }
+
+        if (!isset($context->response_stats) || !is_array($context->response_stats)) {
+            $context->response_stats = [];
+        }
+        $context->response_stats["ttfb"] = (float) ($response["ttfb"] ?? 0);
+        $context->response_stats["total_time"] = (float) ($response["elapsed"] ?? 0);
+
+        if ($http_code !== 200) {
+            if ($endpoint !== null) {
+                $this->handle_tuner_error($endpoint, [
+                    "http_code" => $http_code,
+                    "timeout" => false,
+                    "curl_errno" => 0,
+                ]);
+            }
+            $diagnosis = $this->diagnose_http_error(
+                $http_code,
+                (string) ($response["body_preview"] ?? ""),
+                $response["redirect_url"] ?? null,
+            );
+            throw new RuntimeException($this->format_diagnosed_error($diagnosis));
+        }
+
+        if (!is_string($body_file) || !is_file($body_file)) {
+            throw new RuntimeException("Relay streaming response body is missing.");
+        }
+
+        $content_type = $this->find_response_header($headers, "content-type");
+        $boundary = is_string($content_type) ? $this->extract_multipart_boundary($content_type) : null;
+        if ($boundary === null) {
+            $preview = (string) ($response["body_preview"] ?? "");
+            throw new RuntimeException(
+                "Invalid relay response: missing multipart boundary. " .
+                    ($preview !== "" ? "Body: " . substr($preview, 0, 500) : ""),
+            );
+        }
+
+        $current_chunk = null;
+        $parser = new MultipartStreamParser(
+            $boundary,
+            $this->make_chunk_handler($context, $current_chunk),
+        );
+        $handle = fopen($body_file, "rb");
+        if (!$handle) {
+            throw new RuntimeException("Cannot open relay streaming response body: {$body_file}");
+        }
+        try {
+            while (!feof($handle)) {
+                $chunk = fread($handle, 1024 * 1024);
+                if ($chunk === false) {
+                    throw new RuntimeException("Cannot read relay streaming response body: {$body_file}");
+                }
+                if ($chunk !== "") {
+                    $parser->feed($chunk);
+                }
+            }
+        } finally {
+            fclose($handle);
+        }
+
+        if (!$context->saw_completion) {
+            throw new RuntimeException(
+                "Invalid relay response: missing completion chunk from server.",
+            );
+        }
+    }
+
+    /**
      * Check for curl errors after curl_exec and record timeout state.
      * Throws RuntimeException on any curl error.
      */
@@ -10325,10 +11723,41 @@ class ImportClient
         return $diagnosis['message'];
     }
 
+    private function get_export_request_transport(): ExportRequestTransport
+    {
+        if ($this->export_request_transport instanceof ExportRequestTransport) {
+            return $this->export_request_transport;
+        }
+        $this->export_request_transport = $this->export_transport === 'relay'
+            ? new RelayExportRequestTransport()
+            : new DirectExportRequestTransport();
+        return $this->export_request_transport;
+    }
+
     /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
     private function fetch_json(string $url): array
+    {
+        return $this->get_export_request_transport()->fetch_json($this, $url);
+    }
+
+    public function fetch_relay_json(string $url): array
+    {
+        $request = $this->build_export_request_from_url($url, null, "json");
+        $response = $this->fetch_relay_response($request);
+        return $response["json_result"] ?? [
+            "ok" => false,
+            "http_code" => $response["http_code"] ?? 0,
+            "elapsed" => $response["elapsed"] ?? null,
+            "body" => $response["body"] ?? null,
+            "json" => null,
+            "error" => $response["error"] ?? "Relay response did not include a JSON result.",
+            "error_code" => "RELAY_INVALID_JSON_RESPONSE",
+        ];
+    }
+
+    public function fetch_direct_json(string $url): array
     {
         $this->reset_curl_state();
 
@@ -10428,6 +11857,41 @@ class ImportClient
      * Fetch URL with streaming multipart parsing.
      */
     protected function fetch_streaming(
+        string $url,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data = null,
+        ?string $endpoint = null
+    ): void {
+        $this->get_export_request_transport()->fetch_streaming(
+            $this,
+            $url,
+            $cursor,
+            $context,
+            $post_data,
+            $endpoint,
+        );
+    }
+
+    public function fetch_relay_streaming(
+        string $url,
+        ?string $cursor,
+        StreamingContext $context,
+        ?array $post_data = null,
+        ?string $endpoint = null
+    ): void {
+        $request = $this->build_export_request_from_url(
+            $url,
+            $cursor,
+            "stream",
+            $post_data,
+            $endpoint,
+        );
+        $response = $this->fetch_relay_response($request);
+        $this->consume_relay_streaming_response($response, $context, $endpoint);
+    }
+
+    public function fetch_direct_streaming(
         string $url,
         ?string $cursor,
         StreamingContext $context,
@@ -11651,7 +13115,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert', 'relay-source'],
         ],
         [
             'name' => 'abort',
@@ -11668,7 +13132,77 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime', 'relay-source'],
+        ],
+        [
+            'name' => 'transport',
+            'type' => 'value',
+            'target' => 'transport',
+            'placeholder' => 'MODE',
+            'valid_values' => ['direct', 'relay'],
+            'help' => 'Export request transport: direct (default) or relay',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+        ],
+        [
+            'name' => 'relay-dir',
+            'type' => 'value',
+            'target' => 'relay_dir',
+            'placeholder' => 'DIR',
+            'help' => 'Directory used to exchange relay export requests and responses',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert', 'relay-source'],
+        ],
+        [
+            'name' => 'relay-url',
+            'type' => 'value',
+            'target' => 'relay_url',
+            'placeholder' => 'URL',
+            'help' => 'Remote target push API URL for relay-source workers',
+            'commands' => ['relay-source'],
+        ],
+        [
+            'name' => 'relay-session',
+            'type' => 'value',
+            'target' => 'relay_session',
+            'placeholder' => 'ID',
+            'help' => 'Remote target push session ID for relay-source workers',
+            'commands' => ['relay-source'],
+        ],
+        [
+            'name' => 'relay-secret',
+            'type' => 'value',
+            'target' => 'relay_secret',
+            'placeholder' => 'TOKEN',
+            'help' => 'HMAC shared secret for the remote relay API; defaults to --secret',
+            'commands' => ['relay-source'],
+        ],
+        [
+            'name' => 'relay-timeout',
+            'type' => 'value',
+            'target' => 'relay_timeout',
+            'placeholder' => 'SECONDS',
+            'cast' => 'int',
+            'help' => null,
+            'commands' => [],
+        ],
+        [
+            'name' => 'relay-idle-timeout',
+            'type' => 'value',
+            'target' => 'relay_idle_timeout',
+            'placeholder' => 'SECONDS',
+            'cast' => 'int',
+            'help' => 'Seconds relay-source waits without work before exiting',
+            'commands' => ['relay-source'],
+        ],
+        [
+            'name' => 'relay-allow-path',
+            'type' => 'value-or-next',
+            'target' => 'relay_allow_path',
+            'placeholder' => 'PATH',
+            'repeatable' => true,
+            'help' => 'Source-side file path allowlist for relay-source; repeat for several paths',
+            'commands' => ['relay-source'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11692,7 +13226,7 @@ if (
             'type' => 'value',
             'target' => 'fs_root_nonempty_behavior',
             'placeholder' => 'MODE',
-            'help' => 'What to do when fs root is non-empty (error|preserve-local)',
+            'help' => 'What to do when fs root is non-empty (error|preserve-local|overwrite)',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
@@ -12645,6 +14179,25 @@ if (
             "extra" =>
                 "Example:\n" .
                 "  reprint import-metadata --state-dir=./state | jq '.hasCompletedOnce'\n",
+        ],
+        "relay-source" => [
+            "level" => "low",
+            "short" => "Serve target-controlled export requests through a relay directory",
+            "description" =>
+                "Polls --relay-dir for typed ExportRequests written by a target\n" .
+                "importer running with --transport=relay. Each request is executed\n" .
+                "against <remote-url> using the normal exporter protocol, then the\n" .
+                "response is written back to the relay for the target importer.\n" .
+                "\n" .
+                "This models push as a local-initiated, target-controlled inverse\n" .
+                "pull: the local source initiates connectivity, but the remote target\n" .
+                "still decides which exporter endpoint and cursor are needed next.\n",
+            "extra" =>
+                "Example:\n" .
+                "  reprint relay-source http://127.0.0.1:8888/?reprint-api \\\n" .
+                "    --secret=TOKEN --relay-dir=/tmp/reprint-relay \\\n" .
+                "    --state-dir=/tmp/reprint-source-state --fs-root=/tmp/reprint-source-state/fs \\\n" .
+                "    --relay-allow-path=/absolute/source/path/wp-content/themes/my-theme\n",
         ],
         "db-apply" => [
             "level" => "low",

@@ -81,6 +81,118 @@ php reprint.phar pull https://example.com --secret=TOKEN \
 
 **All options** — run `php reprint.phar pull --help` for the full list.
 
+
+### Experimental relay export transport
+
+The normal importer connects directly to the exporter on the source site. For
+push-style workflows, the source site may be local or behind a firewall, so the
+target cannot always open that direct connection. Reprint now also has a relay
+transport that keeps the target importer in charge while a source-side worker
+initiates the exporter connection.
+
+In relay mode, the target writes typed exporter requests to a relay directory.
+The source worker polls that directory, executes the request against its local
+exporter URL, and writes the response back for the target importer to consume.
+This is a file-backed proof transport for the push architecture: direct and
+relay requests use the same exporter endpoints and importer sequencing.
+
+Start a source worker from the site that can reach the exporter:
+
+```bash
+RELAY_DIR=/tmp/reprint-relay
+SOURCE_STATE=/tmp/reprint-source-state
+php reprint.phar relay-source "http://127.0.0.1:8888/?reprint-api" \
+  --secret=TOKEN \
+  --relay-dir="$RELAY_DIR" \
+  --state-dir="$SOURCE_STATE" \
+  --fs-root="$SOURCE_STATE/fs" \
+  --relay-allow-path=/absolute/source/path/wp-content/themes/my-theme \
+  --relay-idle-timeout=300
+```
+
+Run the target importer with the relay transport:
+
+```bash
+TARGET_STATE=/tmp/reprint-target-state
+TARGET_FILES=/tmp/reprint-target-files
+php reprint.phar preflight "http://127.0.0.1:8888/?reprint-api" \
+  --secret=TOKEN \
+  --transport=relay \
+  --relay-dir="$RELAY_DIR" \
+  --state-dir="$TARGET_STATE" \
+  --fs-root="$TARGET_FILES"
+
+php reprint.phar files-pull "http://127.0.0.1:8888/?reprint-api" \
+  --secret=TOKEN \
+  --transport=relay \
+  --relay-dir="$RELAY_DIR" \
+  --state-dir="$TARGET_STATE" \
+  --fs-root="$TARGET_FILES" \
+  --only=/absolute/source/path/wp-content/themes/my-theme
+```
+
+`--transport=direct` remains the default and preserves the existing behavior.
+The relay transport currently uses a shared directory so the request protocol is
+simple to inspect and test. A hosted relay can later replace the directory while
+keeping the same target-authored `ExportRequest` shape.
+
+The source worker validates every target-authored request before it calls the
+local exporter. It only accepts Reprint exporter endpoints, it rejects unexpected
+query parameters, and file requests must stay inside the local source allowlist.
+Pass one or more `--relay-allow-path` values to make a local Studio selection the
+source-side authority for a selective push. If no allowlist is passed, a relayed
+preflight discovers the site's WordPress roots and uses those as the allowlist for
+subsequent file requests.
+
+The target side keeps the normal Reprint interruption and progress behavior:
+`--only` limits selected file paths, `--abort` clears an in-progress command, and
+JSON/progress output still comes from the target importer. The source worker can
+be stopped independently; requests claimed by a crashed worker are requeued after
+the relay timeout so a restarted worker can continue.
+
+#### Plugin-owned push sessions
+
+The WordPress plugin also exposes the same relay shape over an authenticated
+push-session API. This is the binding used when the remote WordPress site owns
+the target import instead of a CLI process owning a shared relay directory:
+
+1. `?reprint-push-api&endpoint=create` creates a target-owned session and stores
+   its relay files below the target site's uploads directory.
+2. `?reprint-push-api&endpoint=run&session_id=...` runs `ImportClient` on the
+   target site with `--transport=relay`, so the plugin emits the same
+   target-authored exporter requests as the CLI relay transport.
+3. A local source worker runs `relay-source` with `--relay-url` and
+   `--relay-session`; it polls the target plugin, calls the local exporter, and
+   posts response bodies/metadata back.
+4. `?reprint-push-api&endpoint=status&session_id=...` reports session state,
+   importer progress, and relay queue counts. `endpoint=abort` marks the session
+   aborted and writes error responses for pending requests so the target importer
+   unblocks.
+
+All push-session endpoints use the same HMAC headers as `?reprint-api`. The
+source worker may use separate secrets for the local exporter and the target
+push API; pass `--relay-secret` when they differ.
+
+Example source worker for a plugin-owned target session:
+
+```bash
+php reprint.phar relay-source "http://127.0.0.1:8888/?reprint-api" \
+  --secret=LOCAL_EXPORTER_TOKEN \
+  --relay-url="https://target.example.com/?reprint-push-api" \
+  --relay-session="$SESSION_ID" \
+  --relay-secret=TARGET_PUSH_TOKEN \
+  --state-dir=/tmp/reprint-source-state \
+  --fs-root=/tmp/reprint-source-state/fs \
+  --relay-allow-path=/absolute/source/path/wp-content/themes/my-theme \
+  --relay-idle-timeout=300
+```
+
+The initial plugin runner is intentionally low-level and experimental: by
+default it maps the source `:abspath:` to the target `ABSPATH`, uses the target
+site's database constants for `db-apply`, and allows an explicit overwrite of a
+non-empty target document root. Studio should put a product confirmation and any
+selective intent UI in front of this before using it against a valuable site.
+
 ## Composer packages
 
 The exporter and importer are published as separate Composer packages:
