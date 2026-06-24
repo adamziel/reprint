@@ -8,7 +8,7 @@ require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
 
 final class SqlSkipRowsProtocolTest extends TestCase
 {
-    public function testMapsPrefixedTableSuffixRuleToRowExclusion(): void
+    public function testMapsTableNameWithoutPrefixRuleToRowExclusion(): void
     {
         $this->assertSame(
             [
@@ -22,7 +22,7 @@ final class SqlSkipRowsProtocolTest extends TestCase
                 [
                     'skip_rows' => [
                         [
-                            'table_suffix' => 'postmeta',
+                            'table_name_without_prefix' => 'postmeta',
                             'column' => 'meta_key',
                             'value_base64' => base64_encode('_edit_lock'),
                         ],
@@ -72,7 +72,7 @@ final class SqlSkipRowsProtocolTest extends TestCase
                 [
                     'skip_rows' => json_encode([
                         [
-                            'table_suffix' => 'postmeta',
+                            'table_name_without_prefix' => 'postmeta',
                             'column' => 'meta_key',
                             'value_base64' => base64_encode('_edit_lock'),
                         ],
@@ -83,16 +83,16 @@ final class SqlSkipRowsProtocolTest extends TestCase
         );
     }
 
-    public function testRejectsTableSuffixWithoutTablePrefix(): void
+    public function testRejectsTableNameWithoutPrefixWhenTablePrefixIsMissing(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('table_suffix requires a table_prefix');
+        $this->expectExceptionMessage('table_name_without_prefix requires a table_prefix');
 
         sql_exclude_rows_from_config(
             [
                 'skip_rows' => [
                     [
-                        'table_suffix' => 'postmeta',
+                        'table_name_without_prefix' => 'postmeta',
                         'column' => 'meta_key',
                         'value_base64' => base64_encode('_edit_lock'),
                     ],
@@ -111,7 +111,7 @@ final class SqlSkipRowsProtocolTest extends TestCase
             [
                 'skip_rows' => [
                     [
-                        'table_suffix' => 'postmeta',
+                        'table_name_without_prefix' => 'postmeta',
                         'column' => 'meta_key',
                         'value_base64' => 'not valid base64!',
                     ],

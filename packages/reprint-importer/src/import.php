@@ -2492,7 +2492,7 @@ class ImportClient
              * Ask the exporter to omit source rows that should not enter the local clone.
              *
              * The protocol is intentionally data-shaped instead of exporter-defined
-             * tokens: table_suffix is resolved against the source site's table prefix,
+             * tokens: table_name_without_prefix is resolved against the source site's table prefix,
              * column is matched against the source table metadata, and value_base64 lets
              * the exporter compare with FROM_BASE64(...) without interpolating the raw
              * value into SQL. _edit_lock is ephemeral editor session state and would
@@ -2500,7 +2500,7 @@ class ImportClient
              */
             $params["skip_rows"] = [
                 [
-                    "table_suffix" => "postmeta",
+                    "table_name_without_prefix" => "postmeta",
                     "column" => "meta_key",
                     "value_base64" => base64_encode("_edit_lock"),
                 ],

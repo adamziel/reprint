@@ -3626,11 +3626,11 @@ function path_is_default_skipped(string $path): bool
  *
  * Rules are data, not exporter-known tokens. A client may provide:
  *
- *   skip_rows[0][table_suffix]=postmeta
+ *   skip_rows[0][table_name_without_prefix]=postmeta
  *   skip_rows[0][column]=meta_key
  *   skip_rows[0][value_base64]=X2VkaXRfbG9jaw==
  *
- * `table_suffix` is appended to the server-side WordPress table prefix. The
+ * `table_name_without_prefix` is appended to the server-side WordPress table prefix. The
  * prefix must come from WordPress; if it cannot be resolved, clients must use
  * explicit `table` instead. Values are base64-encoded so raw bytes never travel
  * as SQL text.
@@ -3662,9 +3662,9 @@ function sql_exclude_rows_from_config(array $config, ?string $table_prefix): arr
         }
 
         $has_table = isset($rule["table"]);
-        $has_suffix = isset($rule["table_suffix"]);
-        if ($has_table === $has_suffix) {
-            throw new InvalidArgumentException("skip_rows[{$index}] must include exactly one of table or table_suffix");
+        $has_table_name_without_prefix = isset($rule["table_name_without_prefix"]);
+        if ($has_table === $has_table_name_without_prefix) {
+            throw new InvalidArgumentException("skip_rows[{$index}] must include exactly one of table or table_name_without_prefix");
         }
         if (!isset($rule["column"], $rule["value_base64"])) {
             throw new InvalidArgumentException("skip_rows[{$index}] must include column and value_base64");
@@ -3676,14 +3676,14 @@ function sql_exclude_rows_from_config(array $config, ?string $table_prefix): arr
             throw new InvalidArgumentException("skip_rows[{$index}].value_base64 must be a string");
         }
 
-        if ($has_suffix) {
-            if (!is_string($rule["table_suffix"]) || $rule["table_suffix"] === "") {
-                throw new InvalidArgumentException("skip_rows[{$index}].table_suffix must be a non-empty string");
+        if ($has_table_name_without_prefix) {
+            if (!is_string($rule["table_name_without_prefix"]) || $rule["table_name_without_prefix"] === "") {
+                throw new InvalidArgumentException("skip_rows[{$index}].table_name_without_prefix must be a non-empty string");
             }
             if ($table_prefix === null || $table_prefix === "") {
-                throw new InvalidArgumentException("skip_rows[{$index}].table_suffix requires a table_prefix");
+                throw new InvalidArgumentException("skip_rows[{$index}].table_name_without_prefix requires a table_prefix");
             }
-            $table = $table_prefix . $rule["table_suffix"];
+            $table = $table_prefix . $rule["table_name_without_prefix"];
         } else {
             if (!is_string($rule["table"]) || $rule["table"] === "") {
                 throw new InvalidArgumentException("skip_rows[{$index}].table must be a non-empty string");
