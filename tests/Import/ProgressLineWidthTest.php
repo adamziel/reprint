@@ -75,7 +75,7 @@ class ProgressLineWidthTest extends TestCase
     public function testProgressBarTruncation(): void
     {
         $progress = $this->createProgress(60);
-        $bar = str_repeat("━", 10) . str_repeat("░", 10);
+        $bar = str_repeat("█", 10) . str_repeat("━", 10);
         $msg = "  \033[36m{$bar}\033[0m  Downloading — 1,234 / 43,378 entries \033[2m28%\033[0m";
         $result = $progress->truncate_for_terminal($msg);
         $this->assertLessThanOrEqual(60, $this->displayWidth($result),
@@ -83,10 +83,23 @@ class ProgressLineWidthTest extends TestCase
             $this->displayWidth($result) . ", max: 60. Output: " . $result);
     }
 
+    public function testProgressBarUsesBlockForDoneAndLineForRemaining(): void
+    {
+        $progress = $this->createProgress(80);
+
+        $result = $progress->render_progress_bar('Downloading — 10 / 20 entries', 0.5);
+
+        $this->assertStringContainsString(
+            str_repeat("█", 10) . str_repeat("━", 10),
+            $result,
+        );
+    }
+
     public function testUnicodeSpinnerWidth(): void
     {
         $progress = $this->createProgress(80);
         $this->assertEquals(1, $progress->display_width("⠋"));
+        $this->assertEquals(1, $progress->display_width("█"));
         $this->assertEquals(1, $progress->display_width("━"));
         $this->assertEquals(1, $progress->display_width("░"));
     }

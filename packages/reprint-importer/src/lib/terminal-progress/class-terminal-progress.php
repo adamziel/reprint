@@ -235,7 +235,7 @@ class TerminalProgress
 
     /**
      * Render a progress bar line:
-     *   ━━━━━━━━━━━━░░░░░░  Downloading files — 1,234 / 5,091 24%
+     *   ████████████━━━━━━━━  Downloading entries — 1,234 / 5,091 24%
      */
     public function render_progress_bar(string $label, float $fraction): string
     {
@@ -243,7 +243,7 @@ class TerminalProgress
         $bar_width = 20;
         $filled = (int) round($fraction * $bar_width);
         $empty = $bar_width - $filled;
-        $bar = str_repeat("━", $filled) . str_repeat("░", $empty);
+        $bar = str_repeat("█", $filled) . str_repeat("━", $empty);
         $pct = (int) round($fraction * 100);
         return "  \033[36m{$bar}\033[0m  {$label} \033[2m{$pct}%\033[0m";
     }
