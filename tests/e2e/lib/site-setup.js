@@ -84,7 +84,7 @@ export async function ensureWpTemplate() {
  * Write a full wp-config.php that WordPress/WP-CLI can load.
  * Includes wp-settings.php — required by wp core install.
  */
-function writeFullWpConfig(siteDir, dbHost, dbName, dbUser, dbPass) {
+function writeFullWpConfig(siteDir, dbHost, dbName, dbUser, dbPass, tablePrefix = 'wp_') {
     writeFileSync(join(siteDir, 'wp-config.php'), `<?php
 define('DB_HOST', '${dbHost}');
 define('DB_NAME', '${dbName}');
@@ -100,7 +100,7 @@ define('AUTH_SALT',        'e2e-test-salt-1');
 define('SECURE_AUTH_SALT', 'e2e-test-salt-2');
 define('LOGGED_IN_SALT',   'e2e-test-salt-3');
 define('NONCE_SALT',       'e2e-test-salt-4');
-$table_prefix = 'wp_';
+$table_prefix = '${tablePrefix}';
 if ( ! defined( 'ABSPATH' ) ) {
     define( 'ABSPATH', __DIR__ . '/' );
 }
@@ -110,15 +110,15 @@ require_once ABSPATH . 'wp-settings.php';
 
 /**
  * Write the minimal wp-config.php used by the export plugin.
- * Does NOT load wp-settings.php — the plugin reads DB creds directly.
+ * Does NOT load wp-settings.php — the plugin reads DB creds and table prefix directly.
  */
-function writeMinimalWpConfig(siteDir, dbHost, dbName, dbUser, dbPass) {
+function writeMinimalWpConfig(siteDir, dbHost, dbName, dbUser, dbPass, tablePrefix = 'wp_') {
     writeFileSync(join(siteDir, 'wp-config.php'), `<?php
 define('DB_HOST', '${dbHost}');
 define('DB_NAME', '${dbName}');
 define('DB_USER', '${dbUser}');
 define('DB_PASSWORD', '${dbPass}');
-$table_prefix = 'wp_';
+$table_prefix = '${tablePrefix}';
 `);
 }
 
@@ -176,6 +176,7 @@ export function createSampleFiles(siteDir) {
  *   files: 'sample' (default) | 'none'
  *   customDb: async (dbName, conn) => {} — adds extra tables on top of real WP tables
  *   wpConfig: { DB_USER: '...', ... } — override wp-config.php creds AFTER install
+ *   tablePrefix: 'wp_' — table prefix to write into wp-config.php before install
  *   afterCreate: async (siteDir, dbName) => {} — post-creation hook (dir is writable)
  *   afterPermissions: async (siteDir) => {} — runs after final chown/chmod (for chmod 000 etc.)
  */
@@ -224,6 +225,7 @@ export async function ensureSite(name, options = {}) {
     const filesOpt = options.files || 'sample';
     const port = REGISTRY.sites[name]?.port;
     const siteUrl = port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1';
+    const tablePrefix = options.tablePrefix || 'wp_';
 
     const log = (msg) => console.log(`  [${name}] ${msg}`);
     log(`Setting up site (db: ${dbName})`);
@@ -242,7 +244,7 @@ export async function ensureSite(name, options = {}) {
     mkdirSync(join(siteDir, 'test-data'), { recursive: true });
 
     // Write full wp-config.php with admin creds (needed for wp core install)
-    writeFullWpConfig(siteDir, DB_HOST, dbName, DB_USER, DB_PASS);
+    writeFullWpConfig(siteDir, DB_HOST, dbName, DB_USER, DB_PASS, tablePrefix);
 
     // Copy the built plugin bundle, including its bundled Composer vendor tree.
     cpSync(
@@ -297,7 +299,7 @@ export async function ensureSite(name, options = {}) {
         const wpDbPass = options.wpConfig.DB_PASSWORD || DB_PASS;
         const wpDbName = options.wpConfig.DB_NAME || dbName;
         const wpDbHost = options.wpConfig.DB_HOST || DB_HOST;
-        writeFullWpConfig(siteDir, wpDbHost, wpDbName, wpDbUser, wpDbPass);
+        writeFullWpConfig(siteDir, wpDbHost, wpDbName, wpDbUser, wpDbPass, tablePrefix);
     }
 
     // Create sample files (pure Node fs)

@@ -143,6 +143,51 @@ class BasicDumpTest extends MySQLDumpProducerTestBase
         $this->assertDatabasesEqual($this->pdo, $importPdo, ['employees']);
     }
 
+    public function testCanExcludeRowsByTableColumnAndValue(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE wp_postmeta (
+                meta_id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+                post_id BIGINT UNSIGNED NOT NULL,
+                meta_key VARCHAR(255),
+                meta_value LONGTEXT
+            )
+        ");
+
+        $this->pdo->exec("
+            INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES
+            (1, '_edit_lock', '1781114164:51814349'),
+            (1, '_thumbnail_id', '42'),
+            (2, NULL, 'kept')
+        ");
+
+        $sql = $this->getDumpSQL([
+            'exclude_rows' => [
+                [
+                    'table' => 'wp_postmeta',
+                    'column' => 'meta_key',
+                    'value' => '_edit_lock',
+                ],
+            ],
+        ]);
+
+        $this->assertStringContainsString(base64_encode('_thumbnail_id'), $sql);
+        $this->assertStringNotContainsString(base64_encode('_edit_lock'), $sql);
+
+        $importPdo = $this->executeDumpInNewDatabase($sql);
+        $rows = $importPdo
+            ->query('SELECT meta_key, meta_value FROM wp_postmeta ORDER BY meta_id')
+            ->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertSame(
+            [
+                ['meta_key' => '_thumbnail_id', 'meta_value' => '42'],
+                ['meta_key' => null, 'meta_value' => 'kept'],
+            ],
+            $rows
+        );
+    }
+
     public function testBatchSizeRespected(): void
     {
         $this->pdo->exec("
