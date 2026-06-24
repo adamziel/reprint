@@ -25,7 +25,7 @@ final class FilesPullStageCommand extends PullStageCommand
             $pull->runtime()->has_skipped_files_pending();
         $pull->record_files_state($options['filter'], $skipped_pending);
         $count = $pull->runtime()->index_count();
-        $summary = $count > 0 ? number_format($count) . " files" : null;
+        $summary = $count > 0 ? number_format($count) . " entries" : null;
         if ($skipped_pending) {
             $summary = $summary !== null
                 ? $summary . ", deferred files pending"

@@ -169,4 +169,69 @@ final class DownloadList
             "entries" => $entries,
         ];
     }
+
+    public static function count_batch_entries_through_cursor(
+        string $batch_file,
+        ?string $cursor
+    ): int {
+        $cursor_path = self::path_from_cursor($cursor);
+        if ($cursor_path === null || !is_file($batch_file)) {
+            return 0;
+        }
+
+        $raw = file_get_contents($batch_file);
+        if ($raw === false) {
+            return 0;
+        }
+
+        $paths = json_decode($raw, true);
+        if (!is_array($paths)) {
+            return 0;
+        }
+
+        $paths = array_values(array_filter(
+            $paths,
+            static fn($path): bool => is_string($path) && $path !== "",
+        ));
+        if (!in_array($cursor_path, $paths, true)) {
+            return 0;
+        }
+
+        sort($paths, SORT_STRING);
+
+        $low = 0;
+        $high = count($paths);
+        while ($low < $high) {
+            $mid = intdiv($low + $high, 2);
+            if (strcmp($paths[$mid], $cursor_path) <= 0) {
+                $low = $mid + 1;
+            } else {
+                $high = $mid;
+            }
+        }
+
+        return $low;
+    }
+
+    private static function path_from_cursor(?string $cursor): ?string
+    {
+        if ($cursor === null || $cursor === "") {
+            return null;
+        }
+
+        $decoded = base64_decode($cursor, true);
+        $json = $decoded !== false ? $decoded : $cursor;
+        $data = json_decode($json, true);
+        if (!is_array($data)) {
+            return null;
+        }
+
+        $encoded_path = $data["path"] ?? null;
+        if (!is_string($encoded_path) || $encoded_path === "") {
+            return null;
+        }
+
+        $path = base64_decode($encoded_path, true);
+        return is_string($path) && $path !== "" ? $path : null;
+    }
 }

@@ -142,9 +142,9 @@ final class CliFileSyncEventSubscriber implements EventPublisher
         $is_empty = (bool) ($payload['is_empty'] ?? false);
 
         if ($delta) {
-            $this->audit->record("START files-pull (delta) | index_files={$index_size}", true);
+            $this->audit->record("START files-pull (delta) | index_entries={$index_size}", true);
             $this->output->show_lifecycle_line("Starting files-pull (delta)\n");
-            $this->output->show_lifecycle_line("  Index contains: {$index_size} files\n");
+            $this->output->show_lifecycle_line("  Index contains: {$index_size} entries\n");
             $this->output->show_lifecycle_line("  Stage: index\n");
             $this->machine_events->emit([
                 'type' => 'lifecycle',
@@ -152,7 +152,8 @@ final class CliFileSyncEventSubscriber implements EventPublisher
                 'command' => 'files-pull',
                 'delta' => true,
                 'index_size' => $index_size,
-                'message' => "Starting files-pull (delta, {$index_size} files indexed)",
+                'entries_indexed' => $index_size,
+                'message' => "Starting files-pull (delta, {$index_size} entries indexed)",
             ], true);
             return;
         }
@@ -179,20 +180,21 @@ final class CliFileSyncEventSubscriber implements EventPublisher
         $index_size = (int) ($payload['index_size'] ?? 0);
 
         $this->audit->record(sprintf(
-            'RESUME files-pull | stage=%s | indexed_files=%d',
+            'RESUME files-pull | stage=%s | indexed_entries=%d',
             $stage,
             $index_size,
         ), true);
         $this->output->show_lifecycle_line("Resuming files-pull\n");
         $this->output->show_lifecycle_line("  Stage: {$stage}\n");
-        $this->output->show_lifecycle_line("  Already indexed: {$index_size} files\n");
+        $this->output->show_lifecycle_line("  Already indexed: {$index_size} entries\n");
         $this->machine_events->emit([
             'type' => 'lifecycle',
             'event' => 'resuming',
             'command' => 'files-pull',
             'stage' => $stage,
             'index_size' => $index_size,
-            'message' => "Resuming files-pull (stage: {$stage}, indexed: {$index_size} files)",
+            'entries_indexed' => $index_size,
+            'message' => "Resuming files-pull (stage: {$stage}, indexed: {$index_size} entries)",
         ], true);
     }
 
@@ -209,10 +211,10 @@ final class CliFileSyncEventSubscriber implements EventPublisher
 
         $this->output->clear_progress_line();
         $this->audit->record(
-            sprintf('files-pull already complete: %d files indexed%s', $index_size, $skipped_note),
+            sprintf('files-pull already complete: %d entries indexed%s', $index_size, $skipped_note),
             true,
         );
-        $this->output->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
+        $this->output->show_lifecycle_line("files-pull already complete: {$index_size} entries indexed\n");
         if ($has_skipped) {
             $this->output->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
         } else {
@@ -223,8 +225,9 @@ final class CliFileSyncEventSubscriber implements EventPublisher
             'event' => 'already_complete',
             'command' => 'files-pull',
             'files_indexed' => $index_size,
+            'entries_indexed' => $index_size,
             'has_skipped' => $has_skipped,
-            'message' => "files-pull already complete: {$index_size} files indexed",
+            'message' => "files-pull already complete: {$index_size} entries indexed",
         ], true);
     }
 
@@ -238,8 +241,8 @@ final class CliFileSyncEventSubscriber implements EventPublisher
         $label = $delta ? 'files-pull (delta)' : 'files-pull';
 
         $this->output->clear_progress_line();
-        $this->audit->record(sprintf('%s complete: %d files indexed', $label, $index_size), true);
-        $this->output->show_lifecycle_line("{$label} complete: {$index_size} files indexed\n");
+        $this->audit->record(sprintf('%s complete: %d entries indexed', $label, $index_size), true);
+        $this->output->show_lifecycle_line("{$label} complete: {$index_size} entries indexed\n");
         $this->output->show_lifecycle_line("Audit log: {$this->audit->path()}\n");
         $this->machine_events->emit([
             'type' => 'lifecycle',
@@ -247,8 +250,9 @@ final class CliFileSyncEventSubscriber implements EventPublisher
             'command' => 'files-pull',
             'delta' => $delta,
             'files_indexed' => $index_size,
+            'entries_indexed' => $index_size,
             'audit_log' => $this->audit->path(),
-            'message' => "{$label} complete: {$index_size} files indexed",
+            'message' => "{$label} complete: {$index_size} entries indexed",
         ], true);
     }
 
@@ -274,7 +278,7 @@ final class CliFileSyncEventSubscriber implements EventPublisher
         );
         $this->output->set_active_label(null);
         $this->output->show_progress_line(
-            'Downloading - 0 / ' . number_format($total) . ' files',
+            'Downloading - 0 / ' . number_format($total) . ' entries',
             0.0,
         );
     }

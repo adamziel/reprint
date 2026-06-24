@@ -80,6 +80,32 @@ final class ImportFetchListExecutorTest extends TestCase
         $this->assertNotNull($this->saved_states['fetch']->batch_file);
     }
 
+    public function testPartialBatchProgressIsSavedFromCursor(): void
+    {
+        $list = $this->write_list(['/a.txt', '/b.txt', '/c.txt']);
+        $checkpoint = FilesPullCheckpoint::fresh();
+        $executor = $this->make_executor(
+            function () use ($checkpoint): bool {
+                $cursor = json_encode([
+                    'phase' => 'streaming',
+                    'path' => base64_encode('/b.txt'),
+                    'bytes' => 0,
+                ]);
+                $this->assertIsString($cursor);
+                $checkpoint->fetch->cursor = base64_encode($cursor);
+
+                return false;
+            },
+            0,
+        );
+
+        $complete = $executor->run($list, 'fetch', $checkpoint);
+
+        $this->assertFalse($complete);
+        $this->assertSame(2, $executor->files_imported());
+        $this->assertSame(2, $this->saved_states['fetch']->batch_entries_done);
+    }
+
     public function testCountersAreAvailableAfterDownloadException(): void
     {
         $list = $this->write_list(['/a.txt', '/b.txt', '/c.txt']);
@@ -98,12 +124,15 @@ final class ImportFetchListExecutorTest extends TestCase
         $this->assertSame(0, $executor->download_list_done());
     }
 
-    private function make_executor(callable $download_batch): FetchListExecutor
+    private function make_executor(
+        callable $download_batch,
+        int $files_imported = 7
+    ): FetchListExecutor
     {
         return new FetchListExecutor(
             null,
             null,
-            7,
+            $files_imported,
             4 * 1024 * 1024,
             new class($download_batch) implements FetchBatchDownloader {
                 /** @var callable */

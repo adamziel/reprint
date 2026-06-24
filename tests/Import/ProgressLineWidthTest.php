@@ -76,7 +76,7 @@ class ProgressLineWidthTest extends TestCase
     {
         $progress = $this->createProgress(60);
         $bar = str_repeat("━", 10) . str_repeat("░", 10);
-        $msg = "  \033[36m{$bar}\033[0m  Downloading — 1,234 / 43,378 files \033[2m28%\033[0m";
+        $msg = "  \033[36m{$bar}\033[0m  Downloading — 1,234 / 43,378 entries \033[2m28%\033[0m";
         $result = $progress->truncate_for_terminal($msg);
         $this->assertLessThanOrEqual(60, $this->displayWidth($result),
             "Progress bar line exceeds terminal width. Display width: " .

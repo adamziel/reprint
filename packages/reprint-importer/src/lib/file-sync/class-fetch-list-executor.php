@@ -76,6 +76,10 @@ final class FetchListExecutor
         $next_offset = $fetch_checkpoint->next_offset;
         $cursor = $fetch_checkpoint->cursor;
         $batch_entries = $fetch_checkpoint->batch_entries;
+        $this->files_imported = max(
+            $this->files_imported,
+            $fetch_checkpoint->batch_entries_done,
+        );
 
         if ($batch_file === null || !file_exists($batch_file)) {
             $batch = DownloadList::prepare_batch(
@@ -96,11 +100,20 @@ final class FetchListExecutor
             $fetch_checkpoint->batch_file = $batch_file;
             $fetch_checkpoint->batch_entries = $batch_entries;
             $fetch_checkpoint->cursor = null;
+            $fetch_checkpoint->batch_entries_done = 0;
+            $this->files_imported = 0;
             $this->save_fetch_checkpoint($checkpoint, $state_key, $fetch_checkpoint);
         }
 
         $complete = $this->download_batch($batch_file, $cursor, $state_key);
         if (!$complete) {
+            $this->record_partial_batch_progress(
+                $checkpoint,
+                $state_key,
+                $fetch_checkpoint,
+                $batch_file,
+                $batch_entries,
+            );
             return false;
         }
 
@@ -119,9 +132,31 @@ final class FetchListExecutor
         $fetch_checkpoint->batch_file = null;
         $fetch_checkpoint->batch_entries = 0;
         $fetch_checkpoint->cursor = null;
+        $fetch_checkpoint->batch_entries_done = 0;
         $this->save_fetch_checkpoint($checkpoint, $state_key, $fetch_checkpoint);
 
         return $next_offset >= filesize($list_file);
+    }
+
+    private function record_partial_batch_progress(
+        FilesPullCheckpoint $checkpoint,
+        string $state_key,
+        FetchCheckpoint $fetch_checkpoint,
+        string $batch_file,
+        int $batch_entries
+    ): void {
+        $entries_done = DownloadList::count_batch_entries_through_cursor(
+            $batch_file,
+            $fetch_checkpoint->cursor,
+        );
+        $entries_done = min($entries_done, $batch_entries);
+        if ($entries_done <= $fetch_checkpoint->batch_entries_done) {
+            return;
+        }
+
+        $fetch_checkpoint->batch_entries_done = $entries_done;
+        $this->files_imported = max($this->files_imported, $entries_done);
+        $this->save_fetch_checkpoint($checkpoint, $state_key, $fetch_checkpoint);
     }
 
     private function download_batch(string $batch_file, ?string $cursor, string $state_key): bool

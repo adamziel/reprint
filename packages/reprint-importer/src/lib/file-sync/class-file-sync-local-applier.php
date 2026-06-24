@@ -330,18 +330,20 @@ final class FileSyncLocalApplier implements FileSyncStreamObserver, LocalFileCha
             ? $files_done / $files_total
             : null;
         $file_progress_message = $files_total !== null
-            ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
-            : sprintf("Downloading — %s files", number_format($files_done));
+            ? sprintf("Downloading — %s / %s entries", number_format($files_done), number_format($files_total))
+            : sprintf("Downloading — %s entries", number_format($files_done));
         $this->output->show_progress_line($file_progress_message, $file_fraction);
         $progress_record = [
             "type" => "file_progress",
             "files_done" => $files_done,
+            "entries_done" => $files_done,
             "path" => $path,
             "size" => $file_size,
             "message" => $file_progress_message,
         ];
         if ($this->download_list_total !== null) {
             $progress_record["files_total"] = $this->download_list_total;
+            $progress_record["entries_total"] = $this->download_list_total;
         }
         $this->output_progress($progress_record);
     }

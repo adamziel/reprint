@@ -9,19 +9,22 @@ final class FetchCheckpoint
     public ?string $batch_file;
     public int $batch_entries;
     public ?string $cursor;
+    public int $batch_entries_done;
 
     public function __construct(
         int $offset = 0,
         int $next_offset = 0,
         ?string $batch_file = null,
         int $batch_entries = 0,
-        ?string $cursor = null
+        ?string $cursor = null,
+        int $batch_entries_done = 0
     ) {
         $this->offset = $offset;
         $this->next_offset = $next_offset;
         $this->batch_file = $batch_file;
         $this->batch_entries = $batch_entries;
         $this->cursor = $cursor;
+        $this->batch_entries_done = $batch_entries_done;
     }
 
     public static function fresh(): self
@@ -41,6 +44,7 @@ final class FetchCheckpoint
             isset($data["cursor"]) && is_string($data["cursor"])
                 ? $data["cursor"]
                 : null,
+            (int) ($data["batch_entries_done"] ?? 0),
         );
     }
 
@@ -63,6 +67,7 @@ final class FetchCheckpoint
         $this->batch_file = null;
         $this->batch_entries = 0;
         $this->cursor = null;
+        $this->batch_entries_done = 0;
     }
 
     public function to_array(): array
@@ -73,6 +78,7 @@ final class FetchCheckpoint
             "batch_file" => $this->batch_file,
             "batch_entries" => $this->batch_entries,
             "cursor" => $this->cursor,
+            "batch_entries_done" => $this->batch_entries_done,
         ];
     }
 
