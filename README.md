@@ -407,7 +407,7 @@ wraps it differently:
 
 | Runtime | Output files | How runtime.php loads |
 |---------|-------------|----------------------|
-| `php-builtin` | `runtime.php`, `start.sh` | Used as the router script for `php -S` |
+| `php-builtin` | `runtime.php`, `runtime.prepend.php`, `start.sh` | `runtime.php` is the router script for `php -S`; `runtime.prepend.php` is a routing-free variant for hosts that own request dispatch and inject it via `auto_prepend_file` |
 | `nginx-fpm` | `runtime.php`, `nginx.conf` | Loaded via `auto_prepend_file` in `fastcgi_param PHP_VALUE` |
 
 The architecture separates source host detection from target runtime

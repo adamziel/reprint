@@ -3,14 +3,27 @@
  * Runtime applier for PHP's built-in development server.
  *
  * Writes:
- * 1. {output_dir}/runtime.php — constants, server vars, route handlers,
- *                                and CLI-server routing logic
- * 2. {output_dir}/start.sh    — shell script with the exact php -S command
+ * 1. {output_dir}/runtime.php         — constants, server vars, route
+ *                                        handlers, and CLI-server routing
+ * 2. {output_dir}/runtime.prepend.php — the same base layers WITHOUT the
+ *                                        routing tail, for hosts that own
+ *                                        request dispatch and inject it via
+ *                                        auto_prepend_file
+ * 3. {output_dir}/start.sh            — shell script with the exact php -S
+ *                                        command
  *
  * runtime.php is the router script passed to php -S. It defines constants,
  * runs route handlers, then handles request routing. PHP files are served
  * via require (not return false) so they execute in the same scope where
  * constants are already defined — no auto_prepend_file needed.
+ *
+ * runtime.prepend.php is for the inverse case: a host (an external php -S
+ * router, FPM, etc.) owns routing and only needs reprint's environment
+ * (constants + SQLite $wpdb shim + uploads proxy) injected ahead of each
+ * request via auto_prepend_file. It deliberately omits the routing tail,
+ * which would otherwise dispatch WordPress during the prepend phase and
+ * bypass the SQLite shim, falling back to MySQL ("Error establishing a
+ * database connection").
  *
  * The developer just runs: bash {output_dir}/start.sh
  */
@@ -23,14 +36,29 @@ class PhpBuiltinApplier implements RuntimeApplier
 
         $summary = [];
 
-        // 1. Write runtime.php (base layers + CLI-server routing)
+        // The base layers (constants, server vars, SQLite $wpdb shim,
+        // uploads proxy) are routing-free and safe to inject as an
+        // auto_prepend_file. The CLI-server routing tail is the only part
+        // that dispatches WordPress, so it must NOT appear in the prepend
+        // artifact — see runtime.prepend.php below.
+        $base = generate_runtime_php($manifest, $fs_root);
+
+        // 1. Write runtime.php (base layers + CLI-server routing). This is
+        //    the standalone router passed to `php -S` by start.sh.
         $runtime_path = $output_dir . '/runtime.php';
-        $runtime = generate_runtime_php($manifest, $fs_root);
-        $runtime .= $this->generate_cli_server_routing($options);
-        write_runtime_file($runtime_path, $runtime);
+        write_runtime_file($runtime_path, $base . $this->generate_cli_server_routing($options));
         $summary[] = "Wrote {$runtime_path}";
 
-        // 2. Write start.sh
+        // 2. Write runtime.prepend.php (base layers only, no routing tail).
+        //    For hosts that own request dispatch — an external `php -S`
+        //    router, FPM, etc. — and inject this via auto_prepend_file.
+        //    Dispatching WordPress from the routing tail during the prepend
+        //    phase would bypass the SQLite $wpdb shim and fall back to MySQL.
+        $prepend_path = $output_dir . '/runtime.prepend.php';
+        write_runtime_file($prepend_path, $base);
+        $summary[] = "Wrote {$prepend_path}";
+
+        // 3. Write start.sh
         $start_path = $output_dir . '/start.sh';
         $start_script = $this->generate_start_script($manifest, $fs_root, $runtime_path, $host, $port);
         write_runtime_file($start_path, $start_script);
@@ -51,8 +79,15 @@ class PhpBuiltinApplier implements RuntimeApplier
      * PHP file execution with PATH_INFO support, and WordPress
      * pretty-permalink fallback.
      *
-     * This code only runs under php -S (guarded by php_sapi_name check).
-     * It's appended to runtime.php after the base layers.
+     * This tail dispatches WordPress (require index.php) and runs
+     * unconditionally — there is no SAPI guard, and php_sapi_name() is
+     * 'cli-server' whether reprint owns the `php -S` router or an external
+     * one injects runtime.php as auto_prepend_file, so it could not
+     * distinguish them anyway. It is appended to runtime.php after the base
+     * layers and is correct only when reprint owns the server (start.sh →
+     * `php -S … runtime.php`). When a host owns request dispatch it must
+     * inject runtime.prepend.php (base layers only) instead, never this
+     * combined file.
      */
     private function generate_cli_server_routing(array $options): string
     {
