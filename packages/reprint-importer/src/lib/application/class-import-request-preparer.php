@@ -184,7 +184,7 @@ final class ImportRequestPreparer
 
         if (!class_exists(\Reprint\Exporter\Site_Export_HMAC_Client::class)) {
             throw new RuntimeException(
-                "Streaming exporter runtime not found. Run composer install before using --secret.",
+                "HMAC signing runtime not found. Run composer install, or rebuild the PHAR with the exporter package included.",
             );
         }
 

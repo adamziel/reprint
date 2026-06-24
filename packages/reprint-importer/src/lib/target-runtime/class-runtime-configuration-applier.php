@@ -222,6 +222,10 @@ final class RuntimeConfigurationApplier
             $manifest->constants['DB_HOST'] = $host_value;
             $manifest->has_db_constants = true;
         } elseif ($target_engine === 'sqlite') {
+            $db_name = $apply_state['target_db'] ?? 'sqlite_database';
+            if (!is_string($db_name) || $db_name === '') {
+                $db_name = 'sqlite_database';
+            }
             $sqlite_path = $apply_state['target_sqlite_path'] ?? null;
             if ($sqlite_path !== null && $sqlite_path !== '') {
                 $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
@@ -230,6 +234,8 @@ final class RuntimeConfigurationApplier
                 $db_dir = '{fs-root}/wp-content/database/';
                 $db_file = '.ht.sqlite';
             }
+            $manifest->constants['DB_NAME'] = $db_name;
+            $manifest->has_db_constants = true;
             $manifest->sqlite = [
                 'plugin_source' => resolve_sqlite_integration_plugin_path(),
                 'plugin_dir' => '',

@@ -160,4 +160,43 @@ class PullStartModeTest extends TestCase
             'start_runtime' => 'playground-cli',
         ]);
     }
+
+    public function testFailedStartRuntimeSurfacesErrorAndRemainsRetryable(): void
+    {
+        $runtimeDir = $this->stateDir . '/runtime';
+        mkdir($runtimeDir, 0755, true);
+        file_put_contents($runtimeDir . '/start.sh', "#!/usr/bin/env bash\nexit 7\n");
+
+        $pullCheckpoint = $this->stateDir . '/.reprint/pull/checkpoint.json';
+        mkdir(dirname($pullCheckpoint), 0755, true);
+        file_put_contents(
+            $pullCheckpoint,
+            json_encode([
+                'stage' => 'start',
+                'files_filter' => 'none',
+                'skipped_pending' => false,
+            ]),
+        );
+
+        $client = new Importer('http://example.invalid', $this->stateDir, $this->fsRoot);
+
+        try {
+            $client->run([
+                'command' => 'pull',
+                'runtime' => 'php-builtin',
+                'start_runtime' => 'php-builtin',
+                'output_dir' => $runtimeDir,
+            ]);
+            $this->fail('Expected failed start runtime to throw');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString(
+                'Local server exited with status 7',
+                $e->getMessage(),
+            );
+        }
+
+        $checkpoint = json_decode(file_get_contents($pullCheckpoint), true);
+        $this->assertSame('apply-runtime', $checkpoint['stage']);
+        $this->assertSame(7, $client->exit_code());
+    }
 }

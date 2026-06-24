@@ -103,6 +103,13 @@ class Pull
         $total = count($stages);
         $completed_stage = $this->checkpoint()->stage;
 
+        // Older versions persisted "start" before the launcher actually
+        // succeeded. Treat that ephemeral stage as retryable so rerunning pull
+        // starts the generated server instead of no-oping.
+        if ($completed_stage === 'start') {
+            $completed_stage = 'apply-runtime';
+        }
+
         // If the prior pull completed, prepare for a delta re-pull.
         if ($completed_stage === 'complete') {
             $this->prepare_repull();
@@ -531,10 +538,12 @@ class Pull
         $port = (int) ($options['port'] ?? 8881);
         $url = "http://{$host}:{$port}";
 
-        // Mark pull complete BEFORE the server blocks so killing the
-        // server (Ctrl-C) doesn't leave the pipeline mid-flight.
+        // Mark the import itself complete BEFORE the server blocks, but keep
+        // the durable pull stage at apply-runtime. Starting the server is
+        // ephemeral; if the child process exits or the user reruns pull, the
+        // correct behavior is to try launching start.sh again.
         $checkpoint = $this->checkpoint();
-        $checkpoint->stage = 'start';
+        $checkpoint->stage = 'apply-runtime';
         $this->client->set_run_status('complete');
         $this->client->save_pull_checkpoint($checkpoint);
 
@@ -557,7 +566,17 @@ class Pull
         ], true);
 
         passthru("bash " . escapeshellarg($start_sh), $exit_code);
+
+        if ($exit_code === 0 || $exit_code === 130 || $exit_code === 143) {
+            $this->client->set_exit_code($exit_code);
+            return;
+        }
+
         $this->client->set_exit_code($exit_code);
+        throw new RuntimeException(
+            "Local server exited with status {$exit_code}. " .
+            "Run `bash {$start_sh}` to see the server output and retry."
+        );
     }
 
     private function print_stage_header(string $stage): void

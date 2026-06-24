@@ -15,6 +15,20 @@ if (defined('REPRINT_IMPORTER_BOOTSTRAPPED')) {
 define('REPRINT_IMPORTER_BOOTSTRAPPED', true);
 
 $reprint_importer_lib_dir = __DIR__;
+$reprint_importer_exporter_src_dir = null;
+
+foreach ([
+    // Monorepo checkout and PHAR layout: packages/reprint-importer/src/lib -> packages/reprint-exporter/src.
+    $reprint_importer_lib_dir . '/../../../reprint-exporter/src',
+    // Root install layout: packages/reprint-importer/src/lib -> vendor/wp-php-toolkit/reprint-exporter/src.
+    $reprint_importer_lib_dir . '/../../../../vendor/wp-php-toolkit/reprint-exporter/src',
+] as $reprint_importer_exporter_src_candidate) {
+    if (is_dir($reprint_importer_exporter_src_candidate)) {
+        $reprint_importer_exporter_src_dir = $reprint_importer_exporter_src_candidate;
+        break;
+    }
+}
+unset($reprint_importer_exporter_src_candidate);
 
 $reprint_importer_kebab_case = static function (string $name): string {
     $special = [
@@ -114,6 +128,24 @@ $reprint_importer_load_mysql_parser = static function () use ($reprint_importer_
     $loaded = true;
 };
 
+$reprint_importer_require_exporter_file = static function (
+    string $symbol_name,
+    string $file
+) use ($reprint_importer_exporter_src_dir): void {
+    if ($reprint_importer_exporter_src_dir === null) {
+        return;
+    }
+
+    if (function_exists($symbol_name) || class_exists($symbol_name, false)) {
+        return;
+    }
+
+    $path = $reprint_importer_exporter_src_dir . '/' . $file;
+    if (is_file($path)) {
+        require_once $path;
+    }
+};
+
 spl_autoload_register(
     static function (string $class_name) use (
         $reprint_importer_class_file,
@@ -135,6 +167,12 @@ spl_autoload_register(
     },
     true,
     false
+);
+
+$reprint_importer_require_exporter_file('Reprint\\Exporter\\parse_size', 'utils.php');
+$reprint_importer_require_exporter_file(
+    'Reprint\\Exporter\\Site_Export_HMAC_Client',
+    'class-hmac-client.php'
 );
 
 if (!function_exists('Reprint\\Importer\\SQLite\\resolve_sqlite_integration_path')) {
@@ -165,8 +203,10 @@ if (!function_exists('Reprint\\Importer\\get_importer_version')) {
 
 unset(
     $reprint_importer_class_file,
+    $reprint_importer_exporter_src_dir,
     $reprint_importer_kebab_case,
     $reprint_importer_lib_dir,
     $reprint_importer_load_mysql_parser,
-    $reprint_importer_namespace_dir
+    $reprint_importer_namespace_dir,
+    $reprint_importer_require_exporter_file
 );

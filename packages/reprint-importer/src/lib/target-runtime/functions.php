@@ -233,7 +233,57 @@ function copy_sqlite_plugin(string $source_dir, string $output_dir): string
         copy_directory_recursive($source_dir, $target_dir);
     }
 
+    ensure_sqlite_database_driver($source_dir, $target_dir);
+
     return $target_dir;
+}
+
+/**
+ * Ensure the runtime plugin copy includes the mysql-on-sqlite driver.
+ *
+ * The upstream repository keeps the WordPress plugin package and the database
+ * driver package as siblings. Release zips include the driver at
+ * wp-includes/database, but a source checkout does not. Runtime generation can
+ * receive either shape, so normalize the copied runtime plugin to the release
+ * layout expected by wp-includes/sqlite/db.php.
+ */
+function ensure_sqlite_database_driver(string $source_dir, string $target_dir): void
+{
+    $target_database_dir = $target_dir . '/wp-includes/database';
+    if (
+        is_file($target_database_dir . '/version.php') &&
+        is_file($target_database_dir . '/load.php')
+    ) {
+        return;
+    }
+
+    $source_database_dir = resolve_sqlite_database_driver_source($source_dir);
+    if ($source_database_dir === null) {
+        throw new RuntimeException(
+            "sqlite-database-integration database driver not found for {$source_dir}. " .
+            "Run 'git submodule update --init' to fetch it.",
+        );
+    }
+
+    copy_directory_recursive($source_database_dir, $target_database_dir);
+}
+
+/**
+ * Resolve the source directory that should be copied to wp-includes/database.
+ */
+function resolve_sqlite_database_driver_source(string $source_dir): ?string
+{
+    foreach ([
+        $source_dir . '/wp-includes/database',
+        $source_dir . '/../mysql-on-sqlite/src',
+        $source_dir . '/packages/mysql-on-sqlite/src',
+    ] as $candidate) {
+        if (is_dir($candidate)) {
+            return $candidate;
+        }
+    }
+
+    return null;
 }
 
 /**

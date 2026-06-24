@@ -4,7 +4,8 @@
     "check-requirements": false,
 
     "directories": [
-        "packages/reprint-importer"
+        "packages/reprint-importer",
+        "packages/reprint-exporter"
     ],
 
     "finder": [
