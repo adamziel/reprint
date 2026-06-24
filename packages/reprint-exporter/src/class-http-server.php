@@ -114,28 +114,22 @@ final class Site_Export_HTTP_Server {
     }
 
     /**
-     * One-call convenience entry point: loads export.php, constructs
+     * One-call convenience entry point: loads the runtime bootstrap, constructs
      * the server, and dispatches the current request.
      *
      * Equivalent to:
      *
-     *     require_once __DIR__ . '/export.php';
+     *     require_once __DIR__ . '/bootstrap.php';
      *     $server = new Site_Export_HTTP_Server($options);
      *     $server->handle_request();
      *
-     * export.php is only required once. Callers that need to run CORS
+     * The bootstrap is only required once. Callers that need to run CORS
      * or their own authentication must do that before calling this method.
      *
      * @param array<string, mixed> $options Forwarded to the constructor.
      */
     public static function serve(array $options = []): void {
-        // REPRINT_EXPORTER_PROTOCOL_VERSION is defined by export.php — use it
-        // as a cheap sentinel to detect whether the runtime is already loaded.
-        // require_once would be safe either way, but this avoids re-running the
-        // stat() on hot paths.
-        if (!defined('REPRINT_EXPORTER_PROTOCOL_VERSION')) {
-            require_once __DIR__ . '/export.php';
-        }
+        require_once __DIR__ . '/bootstrap.php';
 
         $server = new self($options);
         $server->handle_request();
@@ -293,10 +287,6 @@ final class Site_Export_HTTP_Server {
      * @return array<string, ExportCommand>
      */
     private function default_handlers(): array {
-        if (!class_exists(ExportCommands::class)) {
-            require_once __DIR__ . '/commands/load.php';
-        }
-
         return ExportCommands::all();
     }
 

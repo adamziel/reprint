@@ -7,6 +7,14 @@ use PDO;
 use Throwable;
 use Reprint\Exporter\MySQLDumpProducer;
 use Reprint\Exporter\ResourceBudget;
+use function Reprint\Exporter\begin_multipart_stream;
+use function Reprint\Exporter\create_db_connection;
+use function Reprint\Exporter\E2E\call_hook;
+use function Reprint\Exporter\E2E\load_test_hooks_if_needed;
+use function Reprint\Exporter\emit_error_chunk;
+use function Reprint\Exporter\prepare_streaming_response;
+use function Reprint\Exporter\require_int_range;
+use function Reprint\Exporter\resolve_db_credentials;
 
 final class SqlChunkCommand extends BudgetedExportCommand
 {
@@ -97,9 +105,9 @@ final class SqlChunkCommand extends BudgetedExportCommand
     
         // E2E test hook: after gzip stream initialization
         if (getenv('SITE_EXPORT_TEST_MODE')) {
-            _e2e_load_test_hooks_if_needed($config);
+            load_test_hooks_if_needed($config);
             $hook_args = [$gz, $boundary];
-            _e2e_call_hook('test_hook_after_gzip_init', $hook_args);
+            call_hook('test_hook_after_gzip_init', $hook_args);
         }
     
         // -- Stream SQL fragments --
@@ -145,7 +153,7 @@ final class SqlChunkCommand extends BudgetedExportCommand
                 if (getenv('SITE_EXPORT_TEST_MODE')) {
                     $cursor_for_hook = $reader->get_reentrancy_cursor();
                     $hook_args = [&$sql, $cursor_for_hook];
-                    _e2e_call_hook('test_hook_before_sql_batch', $hook_args);
+                    call_hook('test_hook_before_sql_batch', $hook_args);
                 }
     
                 $cursor = $reader->get_reentrancy_cursor();
@@ -180,7 +188,7 @@ final class SqlChunkCommand extends BudgetedExportCommand
         // E2E test hook: before completion chunk
         if (getenv('SITE_EXPORT_TEST_MODE')) {
             $hook_args = [$status, $gz, $boundary];
-            _e2e_call_hook('test_hook_before_completion', $hook_args);
+            call_hook('test_hook_before_completion', $hook_args);
         }
     
         try {

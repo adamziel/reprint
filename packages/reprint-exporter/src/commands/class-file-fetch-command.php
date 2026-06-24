@@ -5,6 +5,10 @@ namespace Reprint\Exporter\Command;
 use InvalidArgumentException;
 use Reprint\Exporter\FileTreeProducer;
 use Reprint\Exporter\ResourceBudget;
+use function Reprint\Exporter\file_fetch_paths_should_gzip;
+use function Reprint\Exporter\require_int_range;
+use function Reprint\Exporter\resolve_directories;
+use function Reprint\Exporter\stream_file_producer;
 
 final class FileFetchCommand extends BudgetedExportCommand
 {

@@ -254,8 +254,7 @@ function _site_export_handle_api_request(array $options = []): void {
     $authenticate();
 
     // Ensure the Composer autoloader is loaded so Site_Export_HTTP_Server
-    // is resolvable. The class itself will require export.php on demand
-    // via serve() below.
+    // is resolvable. serve() loads the exporter runtime bootstrap below.
     if (_site_export_load_exporter_runtime() === null) {
         _site_export_error(
             500,

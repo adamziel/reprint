@@ -6,10 +6,10 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Tests \Reprint\Exporter\Site_Export_HTTP_Server::serve() — the one-call convenience
- * entry point that loads export.php, constructs the server, and
+ * entry point that loads the exporter runtime, constructs the server, and
  * dispatches the current request.
  *
- * Tests run in subprocesses because serve() requires export.php, which
+ * Tests run in subprocesses because serve() loads the runtime bootstrap, which
  * registers shutdown and error handlers at module level.
  */
 final class HttpServerServeTest extends TestCase
@@ -17,7 +17,7 @@ final class HttpServerServeTest extends TestCase
     private const CLASS_PATH = __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
     private const EXPORT_PATH = __DIR__ . '/../packages/reprint-exporter/src/export.php';
 
-    public function testServeLoadsExportPhpWhenNotYetLoaded(): void
+    public function testServeLoadsRuntimeWhenNotYetLoaded(): void
     {
         $script = <<<PHP
         \$_GET['endpoint'] = 'preflight';
@@ -25,7 +25,7 @@ final class HttpServerServeTest extends TestCase
 
         require '{$this->classPath()}';
 
-        // REPRINT_EXPORTER_PROTOCOL_VERSION is defined by export.php; it must
+        // REPRINT_EXPORTER_PROTOCOL_VERSION is defined by the runtime; it must
         // not exist before serve() is called.
         if (defined('REPRINT_EXPORTER_PROTOCOL_VERSION')) {
             echo "FAIL: export runtime loaded before serve()";
@@ -34,7 +34,7 @@ final class HttpServerServeTest extends TestCase
 
         \Reprint\Exporter\Site_Export_HTTP_Server::serve();
 
-        // serve() should have required export.php, which defines the protocol constant.
+        // serve() should have required the bootstrap, which defines the protocol constant.
         echo defined('REPRINT_EXPORTER_PROTOCOL_VERSION') ? "OK" : "FAIL: export runtime not loaded";
         PHP;
 

@@ -5,7 +5,20 @@ namespace Reprint\Exporter\Command;
 use InvalidArgumentException;
 use Throwable;
 use Reprint\Exporter\ResourceBudget;
+use function Reprint\Exporter\begin_multipart_stream;
+use function Reprint\Exporter\encode_index_batch;
+use function Reprint\Exporter\encode_index_stack;
+use function Reprint\Exporter\E2E\call_hook;
+use function Reprint\Exporter\E2E\load_test_hooks_if_needed;
+use function Reprint\Exporter\find_parents_symlinks;
 use function Reprint\Exporter\json_encode_or_throw;
+use function Reprint\Exporter\path_is_default_skipped;
+use function Reprint\Exporter\position_after_entry;
+use function Reprint\Exporter\prepare_streaming_response;
+use function Reprint\Exporter\require_int_range;
+use function Reprint\Exporter\resolve_directories;
+use function Reprint\Exporter\resolve_symlink_target;
+use function Reprint\Exporter\should_skip_index_root;
 
 final class FileIndexCommand extends BudgetedExportCommand
 {
@@ -328,9 +341,9 @@ final class FileIndexCommand extends BudgetedExportCommand
     
                 // E2E test hook: during directory scanning
                 if (getenv('SITE_EXPORT_TEST_MODE')) {
-                    _e2e_load_test_hooks_if_needed($config);
+                    load_test_hooks_if_needed($config);
                     $hook_args = [$current_real, &$entries];
-                    _e2e_call_hook('test_hook_during_dir_scan', $hook_args);
+                    call_hook('test_hook_during_dir_scan', $hook_args);
                 }
     
                 $filtered = [];
@@ -410,9 +423,9 @@ final class FileIndexCommand extends BudgetedExportCommand
                     if (count($batch_items) >= $batch_size) {
                         // E2E test hook: before index batch is emitted
                         if (getenv('SITE_EXPORT_TEST_MODE')) {
-                            _e2e_load_test_hooks_if_needed($config);
+                            load_test_hooks_if_needed($config);
                             $hook_args = [&$batch_items, $stack];
-                            _e2e_call_hook('test_hook_before_index_batch', $hook_args);
+                            call_hook('test_hook_before_index_batch', $hook_args);
                         }
     
                         $cursor_json = json_encode_or_throw(

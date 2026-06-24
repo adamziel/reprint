@@ -362,7 +362,7 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "ec271cfb3d2a4d119a190011986cef89a740e12b"
+                "reference": "2894df72a12a26efbe93fbea856d95e0fafd7d64"
             },
             "require": {
                 "php": ">=7.4",
@@ -392,7 +392,15 @@
                 ],
                 "files": [
                     "src/utils.php",
-                    "src/class-pdo-polyfill.php"
+                    "src/class-pdo-polyfill.php",
+                    "src/constants.php",
+                    "src/validation.php",
+                    "src/database.php",
+                    "src/e2e-hooks.php",
+                    "src/streaming.php",
+                    "src/filesystem.php",
+                    "src/file-index.php",
+                    "src/http.php"
                 ]
             },
             "license": [

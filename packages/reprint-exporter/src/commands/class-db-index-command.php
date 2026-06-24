@@ -5,7 +5,13 @@ namespace Reprint\Exporter\Command;
 use InvalidArgumentException;
 use PDO;
 use Reprint\Exporter\ResourceBudget;
+use function Reprint\Exporter\begin_multipart_stream;
+use function Reprint\Exporter\create_db_connection;
+use function Reprint\Exporter\emit_error_chunk;
 use function Reprint\Exporter\json_encode_or_throw;
+use function Reprint\Exporter\prepare_streaming_response;
+use function Reprint\Exporter\require_int_range;
+use function Reprint\Exporter\resolve_db_credentials;
 
 final class DbIndexCommand extends BudgetedExportCommand
 {

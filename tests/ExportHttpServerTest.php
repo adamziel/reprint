@@ -5,7 +5,6 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-resource-budget.php';
-require_once __DIR__ . '/../packages/reprint-exporter/src/commands/load.php';
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
 
 final class ExportHttpServerTest extends TestCase

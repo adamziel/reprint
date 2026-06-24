@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use function Reprint\Exporter\file_fetch_paths_should_gzip;
+use function Reprint\Exporter\path_extension_is_compressible;
 
 final class FileFetchCompressionTest extends TestCase
 {

@@ -30,7 +30,15 @@
         ],
         "files": [
             "src/utils.php",
-            "src/class-pdo-polyfill.php"
+            "src/class-pdo-polyfill.php",
+            "src/constants.php",
+            "src/validation.php",
+            "src/database.php",
+            "src/e2e-hooks.php",
+            "src/streaming.php",
+            "src/filesystem.php",
+            "src/file-index.php",
+            "src/http.php"
         ]
     }
 }

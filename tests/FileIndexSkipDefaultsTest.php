@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use function Reprint\Exporter\path_is_default_skipped;
 
 /**
  * Coverage for the default deny-list applied by FileIndexCommand.

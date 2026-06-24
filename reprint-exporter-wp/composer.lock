@@ -362,7 +362,7 @@
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-exporter",
-                "reference": "356e1d52a3b4b093e5bd9f868042ef78bd63849a"
+                "reference": "01c7b1eca807d278dc585cc11cc45ba86ba8c3c6"
             },
             "require": {
                 "php": ">=7.4",
@@ -384,6 +384,7 @@
                     "src/class-hmac-client.php",
                     "src/class-hmac-server.php",
                     "src/class-http-server.php",
+                    "src/commands",
                     "src/class-gzip-output-stream.php",
                     "src/class-resource-budget.php",
                     "src/class-sqlite-driver-pdo.php",
@@ -391,7 +392,15 @@
                 ],
                 "files": [
                     "src/utils.php",
-                    "src/class-pdo-polyfill.php"
+                    "src/class-pdo-polyfill.php",
+                    "src/constants.php",
+                    "src/validation.php",
+                    "src/database.php",
+                    "src/e2e-hooks.php",
+                    "src/streaming.php",
+                    "src/filesystem.php",
+                    "src/file-index.php",
+                    "src/http.php"
                 ]
             },
             "license": [

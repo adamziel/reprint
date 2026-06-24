@@ -6,7 +6,13 @@ use Exception;
 use InvalidArgumentException;
 use PDO;
 use Throwable;
+use function Reprint\Exporter\create_db_connection;
+use function Reprint\Exporter\detect_wp_roots;
+use function Reprint\Exporter\is_sqlite_site;
+use function Reprint\Exporter\normalize_path_list;
 use function Reprint\Exporter\parse_size;
+use function Reprint\Exporter\resolve_db_credentials;
+use function Reprint\Exporter\resolve_directories;
 
 final class PreflightCommand extends ExportCommand
 {
@@ -171,7 +177,7 @@ final class PreflightCommand extends ExportCommand
     
         $wp_paths = normalize_path_list(
             array_map(
-                fn($entry) => $entry["root"] ?? null,
+                fn($entry) => $entry["root"],
                 $wp_paths,
             ),
         );
