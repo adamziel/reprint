@@ -14,19 +14,7 @@ error_reporting(E_ALL);
 ini_set("display_errors", "stderr");
 ini_set("display_startup_errors", 1);
 
-// Load composer autoloader for wp-php-toolkit dependencies
-foreach ([
-    __DIR__ . '/../../../vendor/autoload.php',
-    __DIR__ . '/../../../autoload.php',
-    __DIR__ . '/../vendor/autoload.php',
-] as $autoloader) {
-    if (file_exists($autoloader)) {
-        require_once $autoloader;
-        break;
-    }
-}
-
-// Register local autoloading and load global helper functions/constants.
+// Load Composer autoloading, runtime helper functions, and importer bootstrap hooks.
 require_once __DIR__ . '/lib/bootstrap.php';
 
 register_shutdown_function(function () {

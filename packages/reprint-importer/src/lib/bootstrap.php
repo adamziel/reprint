@@ -2,11 +2,17 @@
 /**
  * Runtime bootstrap for the importer library.
  *
- * Composer classmaps package classes when installed, but src/import.php can
- * also be executed directly from a checkout. Register a deterministic local
- * autoloader with prepend=true so the checkout's classes win over any stale
- * vendor copy of this package.
+ * Composer owns importer class/function loading in normal installs. This file
+ * makes sure the Composer autoloader is available when src/import.php is
+ * executed directly, loads helper files for PHAR/package-path execution, and
+ * registers fallback autoload hooks for paths Composer does not know about in
+ * PHAR builds.
  */
+
+if (defined('REPRINT_IMPORTER_BOOTSTRAPPED')) {
+    return;
+}
+define('REPRINT_IMPORTER_BOOTSTRAPPED', true);
 
 $reprint_importer_lib_dir = __DIR__;
 
@@ -87,6 +93,12 @@ if (!class_exists('Composer\\Autoload\\ClassLoader', false)) {
     unset($reprint_importer_autoloader);
 }
 
+if (!class_exists('Composer\\Autoload\\ClassLoader', false)) {
+    throw new RuntimeException(
+        'Composer autoloader not found. Run composer install before running the importer.'
+    );
+}
+
 $reprint_importer_load_mysql_parser = static function () use ($reprint_importer_lib_dir): void {
     static $loaded = false;
     if ($loaded) {
@@ -122,7 +134,7 @@ spl_autoload_register(
         }
     },
     true,
-    true
+    false
 );
 
 if (!function_exists('Reprint\\Importer\\SQLite\\resolve_sqlite_integration_path')) {

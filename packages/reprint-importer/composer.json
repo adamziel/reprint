@@ -13,6 +13,15 @@
     },
     "autoload": {
         "files": [
+            "src/lib/sqlite/functions.php",
+            "src/lib/wp-stubs.php",
+            "src/lib/protocol/constants.php",
+            "src/lib/transport/curl-options.php",
+            "src/lib/host/functions.php",
+            "src/lib/target-runtime/route-handlers/wpcloud-thumbnail-generator.php",
+            "src/lib/target-runtime/route-handlers/remote-upload-proxy.php",
+            "src/lib/target-runtime/functions.php",
+            "src/lib/version.php",
             "src/lib/bootstrap.php"
         ],
         "classmap": [

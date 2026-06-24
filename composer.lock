@@ -410,7 +410,7 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-importer",
-                "reference": "530135f57632f6686962dd6d9687b8479726a2fc"
+                "reference": "753f070383582dbd415891f74cdba3fea3bb6ab0"
             },
             "require": {
                 "ext-pdo": "*",
@@ -426,6 +426,15 @@
             "type": "library",
             "autoload": {
                 "files": [
+                    "src/lib/sqlite/functions.php",
+                    "src/lib/wp-stubs.php",
+                    "src/lib/protocol/constants.php",
+                    "src/lib/transport/curl-options.php",
+                    "src/lib/host/functions.php",
+                    "src/lib/target-runtime/route-handlers/wpcloud-thumbnail-generator.php",
+                    "src/lib/target-runtime/route-handlers/remote-upload-proxy.php",
+                    "src/lib/target-runtime/functions.php",
+                    "src/lib/version.php",
                     "src/lib/bootstrap.php"
                 ],
                 "classmap": [
