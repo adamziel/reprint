@@ -669,6 +669,9 @@ class MySQLDumpProducer
             }
             $quoted_col = $this->quote_identifier($column);
             $encoded_value = base64_encode($rule["value"]);
+            // Preserve rows with NULL in the filtered column. In SQL, NULL <> value
+            // evaluates to UNKNOWN, so without the explicit IS NULL branch those rows
+            // would be filtered out even though they do not match the excluded value.
             $conditions[] = "{$quoted_col} IS NULL OR {$quoted_col} <> FROM_BASE64('{$encoded_value}')";
         }
         return $conditions;
