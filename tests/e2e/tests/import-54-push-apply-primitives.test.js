@@ -17,11 +17,21 @@ const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer'
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 
 function phpImporter(args) {
-    return execFileSync(PHP_BINARY, ['-n', IMPORTER_PATH, ...args], {
+    return execFileSync(PHP_BINARY, [IMPORTER_PATH, ...args], {
         encoding: 'utf-8',
         maxBuffer: 10 * 1024 * 1024,
         env: { ...process.env },
     });
+}
+
+
+function parseJsonOutput(output) {
+    const start = output.indexOf('{');
+    const end = output.lastIndexOf('}');
+    if (start === -1 || end === -1 || end < start) {
+        throw new Error(`No JSON object in output: ${output}`);
+    }
+    return JSON.parse(output.slice(start, end + 1));
 }
 
 describe('Import: Push apply primitives', () => {
@@ -69,7 +79,7 @@ describe('Import: Push apply primitives', () => {
     });
 
     it('plans, materializes, and applies a staged file push', () => {
-        const plan = JSON.parse(phpImporter([
+        const plan = parseJsonOutput(phpImporter([
             'files-plan',
             `--state-dir=${stateDir}`,
             `--fs-root=${fsRoot}`,
@@ -83,7 +93,7 @@ describe('Import: Push apply primitives', () => {
             'plugin'
         );
 
-        const materialize = JSON.parse(phpImporter([
+        const materialize = parseJsonOutput(phpImporter([
             'materialize-docroot',
             `--state-dir=${stateDir}`,
             `--fs-root=${fsRoot}`,
@@ -92,7 +102,7 @@ describe('Import: Push apply primitives', () => {
         assert.equal(materialize.status, 'complete');
         assert.ok(existsSync(join(stagedRoot, 'wp-content', 'plugins', 'foo', 'a.php')));
 
-        const apply = JSON.parse(phpImporter([
+        const apply = parseJsonOutput(phpImporter([
             'apply-staged-files',
             `--state-dir=${stateDir}`,
             `--staged-root=${stagedRoot}`,
