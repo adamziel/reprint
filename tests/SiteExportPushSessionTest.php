@@ -101,6 +101,30 @@ final class SiteExportPushSessionTest extends TestCase
         $this->assertFileDoesNotExist($sessionDir . '/relay/processing/req-body.json');
     }
 
+    public function testLateResponseBodyDoesNotOverwritePublishedBody(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        $firstBody = SITE_EXPORT_PUSH_BASE_DIR . '/first-body.bin';
+        $lateBody = SITE_EXPORT_PUSH_BASE_DIR . '/late-body.bin';
+        file_put_contents($firstBody, 'first');
+        file_put_contents($lateBody, 'late');
+
+        $first = _site_export_push_store_response_body($sessionId, 'req-body', $firstBody);
+        _site_export_push_store_response_metadata($sessionId, [
+            'request_id' => 'req-body',
+            'body_file' => '/source/tmp/body',
+        ]);
+        $late = _site_export_push_store_response_body($sessionId, 'req-body', $lateBody);
+
+        $this->assertTrue($first['published']);
+        $this->assertFalse($late['published']);
+        $this->assertSame('first', file_get_contents($sessionDir . '/relay/responses/req-body.body'));
+    }
+
     public function testAbortWritesErrorsForPendingAndProcessingRequests(): void
     {
         $created = _site_export_push_create_session([
@@ -118,6 +142,67 @@ final class SiteExportPushSessionTest extends TestCase
         $this->assertSame('Push session aborted.', _site_export_push_read_json_file($sessionDir . '/relay/responses/req-processing.json')['error']);
         $this->assertFileDoesNotExist($sessionDir . '/relay/requests/req-pending.json');
         $this->assertFileDoesNotExist($sessionDir . '/relay/processing/req-processing.json');
+    }
+
+    public function testCreateRejectsUnsupportedCommandsAndOptions(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Unsupported push command');
+
+        _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'apply-staged-files',
+        ]);
+    }
+
+    public function testCreateRejectsUnsupportedOptions(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Unsupported push option');
+
+        _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'options' => ['target_pass' => 'do-not-accept-db-passwords-from-api'],
+        ]);
+    }
+
+    public function testLateWorkerResponseDoesNotOverwriteAbortResponse(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        _site_export_push_write_json_file($sessionDir . '/relay/processing/req-processing.json', ['request_id' => 'req-processing']);
+        _site_export_push_abort_session($sessionId);
+
+        $stored = _site_export_push_store_response_metadata($sessionId, [
+            'request_id' => 'req-processing',
+            'endpoint' => 'preflight',
+            'kind' => 'json',
+            'json_result' => ['ok' => true],
+        ]);
+
+        $this->assertTrue($stored['ignored']);
+        $metadata = _site_export_push_read_json_file($sessionDir . '/relay/responses/req-processing.json');
+        $this->assertSame('Push session aborted.', $metadata['error']);
+    }
+
+    public function testRunSessionReportsRunningWhenAnotherRunnerOwnsTheLock(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $lock = _site_export_push_acquire_lock(_site_export_push_session_dir($sessionId) . '/run.lock', true);
+
+        try {
+            $status = _site_export_push_run_session($sessionId);
+        } finally {
+            _site_export_push_release_lock($lock);
+        }
+
+        $this->assertSame('running', $status['session']['status']);
     }
 
     private function recursiveDelete(string $dir): void

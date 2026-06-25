@@ -1025,6 +1025,9 @@ class ImportClient
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
     private const RELAY_PROTOCOL_VERSION = 1;
+    // File-fetch manifests contain path strings only. 8 MiB leaves room for
+    // hundreds of thousands of paths while still bounding the JSON decode.
+    private const RELAY_FILE_LIST_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
 
     /**
      * Exporter endpoints that a source-side relay worker may execute.
@@ -4141,6 +4144,10 @@ class ImportClient
             $options["target_root"] ?? null,
             "--target-root",
         );
+        $selected_files = $this->normalize_optional_absolute_path(
+            $options["selected_files"] ?? null,
+            "--selected-files",
+        );
         $exclude_patterns = $this->normalize_exclude_patterns($options["exclude"] ?? []);
         $allow_core_files = !empty($options["allow_core_files"]);
 
@@ -4156,6 +4163,10 @@ class ImportClient
                 throw new RuntimeException("Cannot open local index: {$this->index_file}");
             }
         }
+        $selected_writer = $selected_files !== null
+            ? $this->open_atomic_file_writer($selected_files)
+            : null;
+        $completed = false;
 
         try {
             $source_entry = $this->read_index_line($source);
@@ -4188,6 +4199,9 @@ class ImportClient
                     $allow_core_files,
                 );
                 $this->accumulate_files_plan_summary($summary, $entry);
+                if (!empty($entry["selected"]) && $selected_writer !== null) {
+                    $this->write_selected_file_entry($selected_writer["handle"], $entry);
+                }
 
                 if (!$first) {
                     echo ",\n";
@@ -4203,11 +4217,15 @@ class ImportClient
             echo "  ],\n";
             echo '  "summary": ' . json_encode($summary, JSON_UNESCAPED_SLASHES) . "\n";
             echo "}\n";
+            $completed = true;
         } finally {
             if ($last_synced) {
                 fclose($last_synced);
             }
             fclose($source);
+            if ($selected_writer !== null) {
+                $this->close_atomic_file_writer($selected_writer, $completed);
+            }
         }
     }
 
@@ -4228,6 +4246,10 @@ class ImportClient
         );
         $force = !empty($options["force"]);
         $symlink_mode = $options["symlink_mode"] ?? "copy-target";
+        $selected_files = $this->normalize_optional_absolute_path(
+            $options["selected_files"] ?? null,
+            "--selected-files",
+        );
         if (!in_array($symlink_mode, ["copy-target", "preserve", "skip"], true)) {
             throw new InvalidArgumentException(
                 "Invalid --symlink-mode value: {$symlink_mode}. Valid values: copy-target, preserve, skip",
@@ -4239,7 +4261,6 @@ class ImportClient
         }
 
         $this->require_preflight();
-        $entries = $this->build_docroot_materialization_entries($target);
         $stats = [
             "files" => 0,
             "directories" => 0,
@@ -4252,20 +4273,32 @@ class ImportClient
             throw new RuntimeException("Failed to create materialize target directory: {$target}");
         }
 
-        foreach ($entries as $entry) {
-            $this->copy_path_for_materialized_docroot(
-                $entry["source"],
-                $entry["target"],
+        if ($selected_files !== null) {
+            $this->for_each_selected_file_entry($selected_files, function (array $entry) use (
+                $target,
                 $force,
                 $symlink_mode,
-                $stats,
-            );
+                &$stats
+            ) {
+                $this->copy_selected_file_for_materialized_docroot($entry, $target, $force, $symlink_mode, $stats);
+            });
+        } else {
+            foreach ($this->build_docroot_materialization_entries($target) as $entry) {
+                $this->copy_path_for_materialized_docroot(
+                    $entry["source"],
+                    $entry["target"],
+                    $force,
+                    $symlink_mode,
+                    $stats,
+                );
+            }
         }
 
         $result = [
             "status" => "complete",
             "materialize_to" => $target,
             "fs_root" => $this->fs_root,
+            "selected_files" => $selected_files,
             "stats" => $stats,
         ];
         echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
@@ -4288,6 +4321,10 @@ class ImportClient
             $options["target_root"] ?? null,
             "--target-root",
         );
+        $selected_files = $this->normalize_optional_absolute_path(
+            $options["selected_files"] ?? null,
+            "--selected-files",
+        );
         $journal_file = $options["apply_journal"] ?? ($this->state_dir . "/.import-apply-files.json");
         $maintenance_file = $options["maintenance_file"] ?? null;
 
@@ -4298,7 +4335,9 @@ class ImportClient
             throw new RuntimeException("Target root does not exist: {$target_root}");
         }
 
-        $operations = $this->build_staged_file_apply_operations($staged_root, $target_root);
+        $operations = $selected_files !== null
+            ? $this->build_staged_file_apply_operations_from_selection($staged_root, $target_root, $selected_files)
+            : $this->build_staged_file_apply_operations($staged_root, $target_root);
         $journal = $this->read_apply_journal($journal_file);
         $started_maintenance = false;
         $applied = 0;
@@ -4772,6 +4811,32 @@ class ImportClient
         $stats["files"]++;
     }
 
+    private function copy_selected_file_for_materialized_docroot(
+        array $entry,
+        string $target_root,
+        bool $force,
+        string $symlink_mode,
+        array &$stats
+    ): void {
+        $source = $this->remote_path_to_local_path_within_import_root($entry["path"]);
+        if (!file_exists($source) && !is_link($source)) {
+            throw new RuntimeException("Selected source file is missing from fs root: {$entry["path"]}");
+        }
+        $target = $target_root . "/" . $entry["relative_path"];
+        if (($entry["type"] ?? null) === "directory") {
+            if (!is_dir($source) || is_link($source)) {
+                throw new RuntimeException("Selected manifest marked a non-directory as directory: {$entry["path"]}");
+            }
+            $this->remove_materialize_conflict($target, $force, $stats);
+            if (!is_dir($target) && !mkdir($target, 0755, true)) {
+                throw new RuntimeException("Failed to create selected directory: {$target}");
+            }
+            $stats["directories"]++;
+            return;
+        }
+        $this->copy_path_for_materialized_docroot($source, $target, $force, $symlink_mode, $stats);
+    }
+
     private function copy_symlink_for_materialized_docroot(
         string $source,
         string $target,
@@ -4883,6 +4948,125 @@ class ImportClient
         return $operations;
     }
 
+    private function build_staged_file_apply_operations_from_selection(
+        string $staged_root,
+        string $target_root,
+        string $selected_files
+    ): array {
+        $plugin_components = [];
+        $theme_components = [];
+        $asset_paths = [];
+        $loose_php_paths = [];
+
+        $this->for_each_selected_file_entry($selected_files, function (array $entry) use (
+            &$plugin_components,
+            &$theme_components,
+            &$asset_paths,
+            &$loose_php_paths
+        ) {
+            $relative_path = $entry["relative_path"];
+            $plugin_component = $this->component_relative_path_from_selection($relative_path, "wp-content/plugins/");
+            if ($plugin_component !== null) {
+                $plugin_components[$plugin_component]["paths"][$relative_path] = true;
+                return;
+            }
+            $theme_component = $this->component_relative_path_from_selection($relative_path, "wp-content/themes/");
+            if ($theme_component !== null) {
+                $theme_components[$theme_component]["paths"][$relative_path] = true;
+                return;
+            }
+            if (
+                $relative_path === "wp-content/uploads" ||
+                strpos($relative_path, "wp-content/uploads/") === 0 ||
+                $relative_path === "wp-content/fonts" ||
+                strpos($relative_path, "wp-content/fonts/") === 0
+            ) {
+                $asset_paths[$relative_path] = true;
+                return;
+            }
+            if (strpos($relative_path, "/") === false && substr($relative_path, -4) === ".php") {
+                $loose_php_paths[$relative_path] = true;
+            }
+        });
+
+        $operations = [];
+        foreach ($asset_paths as $relative_path => $_) {
+            $operations[] = $this->build_staged_apply_operation_for_relative_path(
+                $staged_root,
+                $target_root,
+                $relative_path,
+                "copy",
+            );
+        }
+        foreach ($plugin_components + $theme_components as $component_relative_path => $component) {
+            $operation = $this->build_staged_apply_operation_for_relative_path(
+                $staged_root,
+                $target_root,
+                $component_relative_path,
+                "swap",
+            );
+            if ($operation["type"] === "swap_directory") {
+                $paths = array_keys($component["paths"]);
+                sort($paths, SORT_STRING);
+                $operation["selected_relative_paths"] = $paths;
+                $operation["component_relative_path"] = $component_relative_path;
+                $operation["staged_root"] = $staged_root;
+            }
+            $operations[] = $operation;
+        }
+        foreach ($loose_php_paths as $relative_path => $_) {
+            $operations[] = $this->build_staged_apply_operation_for_relative_path(
+                $staged_root,
+                $target_root,
+                $relative_path,
+                "swap",
+            );
+        }
+
+        return $operations;
+    }
+
+    private function build_staged_apply_operation_for_relative_path(
+        string $staged_root,
+        string $target_root,
+        string $relative_path,
+        string $mode
+    ): array {
+        $source = $staged_root . "/" . $relative_path;
+        if (!file_exists($source) && !is_link($source)) {
+            throw new RuntimeException("Selected staged file is missing: {$relative_path}");
+        }
+        $target = $target_root . "/" . $relative_path;
+        $is_dir = is_dir($source) && !is_link($source);
+        if ($mode === "copy") {
+            return [
+                "type" => $is_dir ? "copy_directory" : "copy_file",
+                "source" => $source,
+                "target" => $target,
+            ];
+        }
+        return [
+            "type" => $is_dir ? "swap_directory" : "swap_file",
+            "source" => $source,
+            "target" => $target,
+            "prepared" => $target . ".new",
+            "backup" => $target . ".bak",
+        ];
+    }
+
+    private function component_relative_path_from_selection(string $relative_path, string $prefix): ?string
+    {
+        if (strpos($relative_path, $prefix) !== 0) {
+            return null;
+        }
+        $rest = substr($relative_path, strlen($prefix));
+        if ($rest === "") {
+            return null;
+        }
+        $component = explode("/", $rest, 2)[0];
+        return $prefix . $component;
+    }
+
     private function staged_file_operation_only_needs_cleanup(array $operation): bool
     {
         if (empty($operation["prepared"])) {
@@ -4911,9 +5095,6 @@ class ImportClient
             return;
         }
 
-        if (file_exists($operation["prepared"])) {
-            return;
-        }
         $stats = [
             "files" => 0,
             "directories" => 0,
@@ -4921,7 +5102,16 @@ class ImportClient
             "skipped_symlinks" => 0,
             "removed_conflicts" => 0,
         ];
-        if ($operation["type"] === "swap_directory" && is_dir($operation["target"]) && !is_link($operation["target"])) {
+        if (file_exists($operation["prepared"]) || is_link($operation["prepared"])) {
+            if (is_dir($operation["prepared"]) && !is_link($operation["prepared"])) {
+                $this->remove_directory_recursive($operation["prepared"]);
+            } elseif (!unlink($operation["prepared"])) {
+                throw new RuntimeException("Cannot remove stale prepared path: {$operation["prepared"]}");
+            }
+        }
+        if ($operation["type"] === "swap_directory" && !empty($operation["selected_relative_paths"])) {
+            $this->prepare_selected_staged_directory_operation($operation, $stats);
+        } elseif ($operation["type"] === "swap_directory" && is_dir($operation["target"]) && !is_link($operation["target"])) {
             $this->copy_path_for_materialized_docroot(
                 $operation["target"],
                 $operation["prepared"],
@@ -4938,6 +5128,46 @@ class ImportClient
             $this->copy_path_for_materialized_docroot(
                 $operation["source"],
                 $operation["prepared"],
+                true,
+                "copy-target",
+                $stats,
+            );
+        }
+    }
+
+    private function prepare_selected_staged_directory_operation(array $operation, array &$stats): void
+    {
+        if (is_dir($operation["target"]) && !is_link($operation["target"])) {
+            $this->copy_path_for_materialized_docroot(
+                $operation["target"],
+                $operation["prepared"],
+                true,
+                "copy-target",
+                $stats,
+            );
+        } elseif (!is_dir($operation["prepared"]) && !mkdir($operation["prepared"], 0755, true)) {
+            throw new RuntimeException("Failed to create prepared directory: {$operation["prepared"]}");
+        }
+
+        $component_relative_path = $operation["component_relative_path"];
+        foreach ($operation["selected_relative_paths"] as $relative_path) {
+            $source = $operation["staged_root"] . "/" . $relative_path;
+            if (!file_exists($source) && !is_link($source)) {
+                throw new RuntimeException("Selected staged file is missing: {$relative_path}");
+            }
+            $suffix = substr($relative_path, strlen($component_relative_path));
+            $target = $operation["prepared"] . $suffix;
+            if (is_dir($source) && !is_link($source) && $relative_path !== $component_relative_path) {
+                $this->remove_materialize_conflict($target, true, $stats);
+                if (!is_dir($target) && !mkdir($target, 0755, true)) {
+                    throw new RuntimeException("Failed to create selected directory: {$target}");
+                }
+                $stats["directories"]++;
+                continue;
+            }
+            $this->copy_path_for_materialized_docroot(
+                $source,
+                $target,
                 true,
                 "copy-target",
                 $stats,
@@ -5103,13 +5333,18 @@ class ImportClient
             fclose($in);
             throw new RuntimeException("Cannot open target file: {$tmp}");
         }
+        $copied = false;
         try {
             if (stream_copy_to_stream($in, $out) === false) {
                 throw new RuntimeException("Cannot copy file: {$source}");
             }
+            $copied = true;
         } finally {
             fclose($in);
             fclose($out);
+            if (!$copied) {
+                @unlink($tmp);
+            }
         }
         if (!rename($tmp, $target)) {
             @unlink($tmp);
@@ -5126,6 +5361,20 @@ class ImportClient
         return $this->normalize_required_absolute_dir($path, $option_name);
     }
 
+    private function normalize_optional_absolute_path($path, string $option_name): ?string
+    {
+        if ($path === null || $path === "") {
+            return null;
+        }
+        if (!is_string($path)) {
+            throw new InvalidArgumentException("{$option_name} must be a path string.");
+        }
+        if ($path[0] !== "/") {
+            $path = getcwd() . "/" . $path;
+        }
+        return $path;
+    }
+
     private function normalize_required_absolute_dir($path, string $option_name): string
     {
         if (!is_string($path) || $path === "") {
@@ -5135,6 +5384,116 @@ class ImportClient
             $path = getcwd() . "/" . $path;
         }
         return rtrim($path, "/");
+    }
+
+    private function open_atomic_file_writer(string $target): array
+    {
+        $parent = dirname($target);
+        if (!is_dir($parent) && !mkdir($parent, 0755, true)) {
+            throw new RuntimeException("Cannot create directory: {$parent}");
+        }
+        $tmp = $target . ".tmp-" . bin2hex(random_bytes(4));
+        $handle = fopen($tmp, "wb");
+        if (!$handle) {
+            throw new RuntimeException("Cannot write selected files manifest: {$tmp}");
+        }
+        return [
+            "target" => $target,
+            "tmp" => $tmp,
+            "handle" => $handle,
+        ];
+    }
+
+    private function close_atomic_file_writer(array $writer, bool $completed): void
+    {
+        if (is_resource($writer["handle"])) {
+            fclose($writer["handle"]);
+        }
+        if (!$completed) {
+            @unlink($writer["tmp"]);
+            return;
+        }
+        if (!rename($writer["tmp"], $writer["target"])) {
+            @unlink($writer["tmp"]);
+            throw new RuntimeException("Cannot publish selected files manifest: {$writer["target"]}");
+        }
+    }
+
+    private function write_selected_file_entry($handle, array $entry): void
+    {
+        $line = json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        $payload = $line === false ? false : $line . "\n";
+        $written = $payload === false ? false : fwrite($handle, $payload);
+        if ($payload === false || $written !== strlen($payload)) {
+            throw new RuntimeException("Cannot write selected files manifest entry.");
+        }
+    }
+
+    private function for_each_selected_file_entry(string $selected_files, callable $callback): void
+    {
+        $handle = fopen($selected_files, "rb");
+        if (!$handle) {
+            throw new RuntimeException("Cannot open selected files manifest: {$selected_files}");
+        }
+        try {
+            $line_number = 0;
+            while (($line = fgets($handle)) !== false) {
+                $line_number++;
+                $line = trim($line);
+                if ($line === "") {
+                    continue;
+                }
+                $entry = json_decode($line, true);
+                if (!is_array($entry)) {
+                    throw new RuntimeException("Invalid selected files manifest JSON on line {$line_number}.");
+                }
+                $normalized = $this->normalize_selected_file_entry($entry, $line_number);
+                if ($normalized !== null) {
+                    $callback($normalized);
+                }
+            }
+            if (!feof($handle)) {
+                throw new RuntimeException("Cannot read selected files manifest: {$selected_files}");
+            }
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    private function normalize_selected_file_entry(array $entry, int $line_number): ?array
+    {
+        if (isset($entry["selected"]) && empty($entry["selected"])) {
+            return null;
+        }
+        $operation = (string) ($entry["operation"] ?? "");
+        if (!in_array($operation, ["create", "update"], true)) {
+            return null;
+        }
+        $source_path = $entry["path"] ?? null;
+        $relative_path = $entry["relative_path"] ?? null;
+        if (!is_string($source_path) || !is_string($relative_path) || $relative_path === "") {
+            throw new RuntimeException("Invalid selected files manifest entry on line {$line_number}.");
+        }
+        assert_valid_path($source_path, "selected source path");
+        $this->assert_safe_relative_path($relative_path, "selected relative path");
+        return [
+            "path" => $source_path,
+            "relative_path" => $relative_path,
+            "operation" => $operation,
+            "type" => is_string($entry["type"] ?? null) ? $entry["type"] : null,
+        ];
+    }
+
+    private function assert_safe_relative_path(string $path, string $label): void
+    {
+        if ($path === "" || $path[0] === "/" || strpos($path, "\0") !== false) {
+            throw new InvalidArgumentException("{$label} must be a relative path: {$path}");
+        }
+        foreach (explode("/", $path) as $segment) {
+            if ($segment === "" || $segment === "." || $segment === "..") {
+                throw new InvalidArgumentException("{$label} must not contain empty or dot segments: {$path}");
+            }
+        }
     }
 
     private function map_source_path_to_docroot_relative_path(string $source_path): ?string
@@ -11169,25 +11528,35 @@ class ImportClient
                 $this->ensure_directory($dir, "remote relay work directory");
             }
 
+            $response = null;
             try {
-                $this->materialize_remote_relay_uploads($claim['uploads'] ?? [], $uploads_dir);
-                $response = $this->execute_relay_source_request($request, $responses_dir, $uploads_dir);
-            } catch (\Throwable $e) {
-                $response = [
-                    'request_id' => $request_id,
-                    'endpoint' => $request['endpoint'] ?? null,
-                    'kind' => $request['kind'] ?? null,
-                    'error' => $e->getMessage(),
-                    'created_at' => gmdate('c'),
-                ];
-                $this->audit_log("RELAY_SOURCE_REMOTE_ERROR | {$request_id} | " . $e->getMessage(), true);
-            }
+                try {
+                    $this->materialize_remote_relay_uploads($request, $uploads_dir);
+                    $response = $this->execute_relay_source_request($request, $responses_dir, $uploads_dir);
+                } catch (\Throwable $e) {
+                    $response = [
+                        'request_id' => $request_id,
+                        'endpoint' => $request['endpoint'] ?? null,
+                        'kind' => $request['kind'] ?? null,
+                        'error' => $e->getMessage(),
+                        'created_at' => gmdate('c'),
+                    ];
+                    $this->audit_log("RELAY_SOURCE_REMOTE_ERROR | {$request_id} | " . $e->getMessage(), true);
+                }
 
-            if (!empty($response['body_file']) && is_string($response['body_file'])) {
-                $this->relay_api_upload_response_body($request_id, $response['body_file']);
+                if (!empty($response['body_file']) && is_string($response['body_file'])) {
+                    $this->relay_api_upload_response_body($request_id, $response['body_file']);
+                }
+                $this->relay_api_json_request('response', $response);
+            } finally {
+                if (is_dir($work_dir)) {
+                    try {
+                        $this->remove_directory_recursive($work_dir);
+                    } catch (\Throwable $cleanup_error) {
+                        $this->audit_log("RELAY_SOURCE_REMOTE_CLEANUP_ERROR | {$request_id} | " . $cleanup_error->getMessage(), true);
+                    }
+                }
             }
-            $this->relay_api_json_request('response', $response);
-            $this->remove_directory_recursive($work_dir);
         }
     }
 
@@ -11204,23 +11573,74 @@ class ImportClient
         }
     }
 
-    private function materialize_remote_relay_uploads($uploads, string $uploads_dir): void
+    private function materialize_remote_relay_uploads(array $request, string $uploads_dir): void
     {
-        if (!is_array($uploads)) {
+        $post_data = isset($request['post_data']) && is_array($request['post_data'])
+            ? $request['post_data']
+            : [];
+        if (empty($post_data)) {
             return;
         }
-        foreach ($uploads as $name => $encoded) {
-            if (!is_string($name) || !is_string($encoded) || !preg_match('/^[A-Za-z0-9_.-]+$/', $name)) {
-                throw new RuntimeException('Invalid remote relay upload payload.');
+        foreach ($post_data as $field) {
+            if (!is_array($field) || ($field['type'] ?? null) !== 'file') {
+                continue;
             }
-            $decoded = base64_decode($encoded, true);
-            if ($decoded === false) {
-                throw new RuntimeException('Invalid remote relay upload encoding.');
+            $upload = isset($field['upload']) ? (string) $field['upload'] : '';
+            if ($upload === '' || !preg_match('/^[A-Za-z0-9_.-]+$/', $upload)) {
+                throw new RuntimeException('Invalid remote relay upload reference.');
             }
-            if (file_put_contents($uploads_dir . '/' . $name, $decoded) === false) {
-                throw new RuntimeException('Cannot write remote relay upload sidecar.');
+            $this->relay_api_download_request_upload($upload, $uploads_dir . '/' . $upload);
+        }
+    }
+
+    private function relay_api_download_request_upload(string $upload_name, string $target): void
+    {
+        $tmp = $target . '.tmp';
+        $out = fopen($tmp, 'wb');
+        if (!$out) {
+            throw new RuntimeException("Cannot create remote relay upload sidecar: {$tmp}");
+        }
+
+        $ch = curl_init($this->build_relay_api_url('request-upload', ['upload' => $upload_name]));
+        if ($ch === false) {
+            fclose($out);
+            @unlink($tmp);
+            throw new RuntimeException('Cannot initialize remote relay upload download.');
+        }
+        reprint_apply_curl_proxy_from_env($ch);
+        reprint_apply_curl_ca_bundle($ch);
+        curl_setopt_array($ch, [
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_TIMEOUT => 300,
+            CURLOPT_HTTPHEADER => [
+                'Accept: application/octet-stream',
+                ...$this->relay_hmac_client->get_curl_headers(''),
+            ],
+            CURLOPT_WRITEFUNCTION => function ($ch, $data) use ($out) {
+                $written = fwrite($out, $data);
+                return $written === strlen($data) ? strlen($data) : -1;
+            },
+        ]);
+
+        $ok = false;
+        try {
+            $result = curl_exec($ch);
+            if ($result === false) {
+                throw new RuntimeException('Remote relay upload download failed: ' . curl_error($ch));
+            }
+            $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($http_code < 200 || $http_code >= 300) {
+                throw new RuntimeException("Remote relay upload download returned HTTP {$http_code}.");
+            }
+            $ok = true;
+        } finally {
+            @curl_close($ch);
+            fclose($out);
+            if (!$ok) {
+                @unlink($tmp);
             }
         }
+        $this->rename_file_atomically($tmp, $target);
     }
 
     private function relay_api_json_request(string $endpoint, ?array $payload = null): array
@@ -11233,6 +11653,9 @@ class ImportClient
         }
 
         $ch = curl_init($this->build_relay_api_url($endpoint));
+        if ($ch === false) {
+            throw new RuntimeException('Cannot initialize remote relay API request.');
+        }
         reprint_apply_curl_proxy_from_env($ch);
         reprint_apply_curl_ca_bundle($ch);
 
@@ -11280,16 +11703,15 @@ class ImportClient
             throw new RuntimeException("Relay response body missing: {$body_file}");
         }
 
-        $body = file_get_contents($body_file);
-        if ($body === false) {
-            throw new RuntimeException("Cannot read relay response body: {$body_file}");
-        }
-        $content_hash = hash('sha256', $body);
+        $content_hash = $this->hash_file_streaming($body_file);
         $nonce = $this->relay_hmac_client->generate_nonce();
         $timestamp = $this->relay_hmac_client->get_timestamp();
         $signature = $this->relay_hmac_client->compute_signature($nonce, $timestamp, $content_hash);
 
         $ch = curl_init($this->build_relay_api_url('response-body', ['request_id' => $request_id]));
+        if ($ch === false) {
+            throw new RuntimeException('Cannot initialize remote relay body upload.');
+        }
         reprint_apply_curl_proxy_from_env($ch);
         reprint_apply_curl_ca_bundle($ch);
         curl_setopt_array($ch, [
@@ -11297,10 +11719,11 @@ class ImportClient
             CURLOPT_TIMEOUT => 300,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_POSTFIELDS => [
+                'body' => new \CURLFile($body_file, 'application/octet-stream', basename($body_file)),
+            ],
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'Content-Type: application/octet-stream',
                 "X-Auth-Signature: {$signature}",
                 "X-Auth-Nonce: {$nonce}",
                 "X-Auth-Timestamp: {$timestamp}",
@@ -11800,6 +12223,13 @@ class ImportClient
             throw new RuntimeException("Relay source rejected file_fetch request with unexpected POST fields.");
         }
         $file_list_path = $this->relay_upload_path_from_post_field($post_data["file_list"], $uploads_dir, "file_list");
+        $file_list_size = filesize($file_list_path);
+        if ($file_list_size === false || $file_list_size > self::RELAY_FILE_LIST_UPLOAD_MAX_BYTES) {
+            throw new RuntimeException("Relay source rejected oversized file_fetch file_list upload.");
+        }
+        // The file list is an importer-generated JSON manifest of path strings,
+        // not a streamed response body. Keep this decode bounded so a malicious
+        // target cannot turn relay validation into an unbounded memory sink.
         $raw = file_get_contents($file_list_path);
         $decoded = $raw !== false ? json_decode($raw, true) : null;
         if (!is_array($decoded)) {
@@ -12060,6 +12490,29 @@ class ImportClient
             fclose($in);
             fclose($out);
         }
+    }
+
+    private function hash_file_streaming(string $path): string
+    {
+        $in = fopen($path, "rb");
+        if (!$in) {
+            throw new RuntimeException("Cannot open file for hashing: {$path}");
+        }
+        $context = hash_init("sha256");
+        try {
+            while (!feof($in)) {
+                $chunk = fread($in, 1024 * 1024);
+                if ($chunk === false) {
+                    throw new RuntimeException("Cannot read file for hashing: {$path}");
+                }
+                if ($chunk !== "") {
+                    hash_update($context, $chunk);
+                }
+            }
+        } finally {
+            fclose($in);
+        }
+        return hash_final($context);
     }
 
     /**
@@ -14663,6 +15116,14 @@ if (
             'commands' => ['files-plan'],
         ],
         [
+            'name' => 'selected-files',
+            'type' => 'value',
+            'target' => 'selected_files',
+            'placeholder' => 'FILE',
+            'help' => 'JSONL selected-file manifest written by files-plan and consumed by materialize/apply',
+            'commands' => ['files-plan', 'materialize-docroot', 'apply-staged-files'],
+        ],
+        [
             'name' => 'materialize-to',
             'type' => 'value',
             'target' => 'materialize_to',
@@ -15372,33 +15833,21 @@ if (
             "short" => "Print changed files, policy, and writability as JSON",
             "usage" => "reprint files-plan --state-dir=DIR --fs-root=DIR [options]",
             "description" =>
-                "Reads the latest source file index and the previous synced
-" .
-                "file index, then prints a structured plan for pull or push UI:
-" .
-                "added/modified/deleted/unchanged status, materialized target
-" .
-                "path, WordPress area classification, default safety policy, and
-" .
-                "optional target writability checks. No network calls are made.
-" .
-                "
-" .
-                "Run preflight and files-index first to refresh the source
-" .
-                "path data and .import-remote-index.jsonl. Deleted files are
-" .
-                "reported but not selected by default because staged apply does
-" .
-                "not delete target files yet.
-",
+                "Reads the latest source file index and the previous synced\n" .
+                "file index, then prints a structured plan for pull or push UI:\n" .
+                "added/modified/deleted/unchanged status, materialized target\n" .
+                "path, WordPress area classification, default safety policy, and\n" .
+                "optional target writability checks. No network calls are made.\n" .
+                "\n" .
+                "Run preflight and files-index first to refresh the source\n" .
+                "path data and .import-remote-index.jsonl. Deleted files are\n" .
+                "reported but not selected by default because staged apply does\n" .
+                "not delete target files yet. Pass --selected-files to write the\n" .
+                "default selected entries as JSONL for materialize/apply.\n",
             "extra" =>
-                "Examples:
-" .
-                "  reprint files-plan --state-dir=./state --fs-root=./files \
-" .
-                "    --target-root=/srv/htdocs --exclude='wp-admin/**'
-",
+                "Examples:\n" .
+                "  reprint files-plan --state-dir=./state --fs-root=./files \\n" .
+                "    --target-root=/srv/htdocs --exclude='wp-admin/**'\n",
         ],
         "db-pull" => [
             "level" => "low",
@@ -15517,7 +15966,8 @@ if (
                 "\n" .
                 "Source symlinks are handled by --symlink-mode. The default,\n" .
                 "copy-target, copies the symlink target only when it stays inside\n" .
-                "--fs-root.\n",
+                "--fs-root. Pass --selected-files to materialize only the files\n" .
+                "selected in a files-plan JSONL manifest.\n",
             "extra" =>
                 "Examples:\n" .
                 "  reprint materialize-docroot --state-dir=./state --fs-root=./files \\\n" .
@@ -15534,7 +15984,8 @@ if (
                 "live unselected files, and swapped through .bak. Loose top-level\n" .
                 "PHP files use the same .new/.bak pattern. The apply journal\n" .
                 "stores only the current operation and phase; resume inspects\n" .
-                "the filesystem to converge.\n" .
+                "the filesystem to converge. Pass --selected-files to make the\n" .
+                "plan selection the source of truth for what staging may apply.\n" .
                 "\n" .
                 "This command is the shared apply primitive for future pull and\n" .
                 "push flows. It does not apply database changes.\n",

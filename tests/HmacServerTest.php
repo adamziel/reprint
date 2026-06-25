@@ -143,6 +143,15 @@ final class HmacServerTest extends TestCase
         }
     }
 
+    public function testPrecomputedContentHashVerifiesWithoutBody(): void
+    {
+        $body = str_repeat('large-response-body', 1024);
+        $headers = $this->buildHeadersForBody($body);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertNull($server->verify_content_hash($headers, hash('sha256', $body), 1700000001.0));
+    }
+
     private function buildHeadersForBody(
         string $body,
         string $timestamp = '1700000000.000000',

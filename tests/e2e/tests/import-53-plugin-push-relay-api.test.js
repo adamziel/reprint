@@ -25,6 +25,7 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
     beforeEach(async () => {
         tempDir = mkdtempSync(join(tmpdir(), 'reprint-push-relay-e2e-'));
         mkdirSync(join(tempDir, 'source', 'wp-content'), { recursive: true });
+        writeFileSync(join(tempDir, 'source', 'wp-content', 'file.txt'), 'source-file');
         writeFileSync(join(tempDir, 'request.json'), JSON.stringify({
             protocol: 1,
             request_id: 'req-preflight',
@@ -82,6 +83,56 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
         assert.equal(response.kind, 'json');
         assert.equal(response.json_result.json.ok, true);
     });
+
+    it('streams request upload sidecars and response bodies through the target API', () => {
+        const uploadName = 'req-file-file-list.upload';
+        writeFileSync(join(tempDir, 'request.json'), JSON.stringify({
+            protocol: 1,
+            request_id: 'req-file',
+            kind: 'stream',
+            endpoint: 'file_fetch',
+            cursor: null,
+            params: { directory: [join(tempDir, 'source')] },
+            post_data: {
+                file_list: {
+                    type: 'file',
+                    upload: uploadName,
+                    name: 'file_list',
+                    mime: 'application/json',
+                    size: 2,
+                },
+            },
+        }));
+        writeFileSync(join(tempDir, uploadName), JSON.stringify([
+            join(tempDir, 'source', 'wp-content', 'file.txt'),
+        ]));
+
+        execFileSync(PHP_BINARY, [
+            IMPORTER_PATH,
+            'relay-source',
+            `${baseUrl}?reprint-api`,
+            `--relay-url=${baseUrl}?reprint-push-api`,
+            '--relay-session=e2e-session',
+            '--relay-secret=target-secret',
+            `--state-dir=${join(tempDir, 'state')}`,
+            `--fs-root=${join(tempDir, 'state', 'fs-root')}`,
+            `--relay-allow-path=${join(tempDir, 'source')}`,
+            '--relay-idle-timeout=10',
+        ], {
+            timeout: 30000,
+            encoding: 'utf-8',
+            maxBuffer: 5 * 1024 * 1024,
+            env: { ...process.env },
+        });
+
+        const response = JSON.parse(readFileSync(join(tempDir, 'response.json'), 'utf-8'));
+        assert.equal(response.request_id, 'req-file');
+        assert.equal(response.endpoint, 'file_fetch');
+        assert.equal(response.kind, 'stream');
+        assert.equal(readFileSync(join(tempDir, 'response-body.bin'), 'utf-8'), `file-list:${JSON.stringify([
+            join(tempDir, 'source', 'wp-content', 'file.txt'),
+        ])}`);
+    });
 });
 
 function routerPhp(root) {
@@ -91,6 +142,12 @@ $root = ${encodedRoot};
 $source = $root . '/source';
 $endpoint = $_GET['endpoint'] ?? '';
 if (isset($_GET['reprint-api'])) {
+    if ($endpoint === 'file_fetch') {
+        header('Content-Type: application/octet-stream');
+        $fileList = $_FILES['file_list']['tmp_name'] ?? null;
+        echo 'file-list:' . ($fileList ? file_get_contents($fileList) : '');
+        return;
+    }
     header('Content-Type: application/json');
     echo json_encode([
         'ok' => true,
@@ -108,23 +165,45 @@ if (!isset($_GET['reprint-push-api'])) {
     return;
 }
 header('Content-Type: application/json');
-if ($endpoint === 'claim') {
-    if (is_file($root . '/response.json')) {
-        echo json_encode(['ok' => true, 'status' => 'complete', 'request' => null]);
+    if ($endpoint === 'claim') {
+        if (is_file($root . '/response.json')) {
+            echo json_encode(['ok' => true, 'status' => 'complete', 'request' => null]);
+            return;
+        }
+        if (is_file($root . '/request.json')) {
+            $request = json_decode(file_get_contents($root . '/request.json'), true);
+            rename($root . '/request.json', $root . '/processing.json');
+            $uploads = [];
+            foreach (($request['post_data'] ?? []) as $field) {
+                if (($field['type'] ?? '') === 'file') {
+                    $uploads[$field['upload']] = ['size' => filesize($root . '/' . $field['upload'])];
+                }
+            }
+            echo json_encode(['ok' => true, 'status' => 'running', 'request' => $request, 'uploads' => $uploads ?: new stdClass()]);
+            return;
+        }
+        echo json_encode(['ok' => true, 'status' => 'running', 'request' => null]);
         return;
     }
-    if (is_file($root . '/request.json')) {
-        $request = json_decode(file_get_contents($root . '/request.json'), true);
-        rename($root . '/request.json', $root . '/processing.json');
-        echo json_encode(['ok' => true, 'status' => 'running', 'request' => $request, 'uploads' => new stdClass()]);
+    if ($endpoint === 'request-upload') {
+        $upload = basename($_GET['upload'] ?? '');
+        header('Content-Type: application/octet-stream');
+        readfile($root . '/' . $upload);
         return;
     }
-    echo json_encode(['ok' => true, 'status' => 'running', 'request' => null]);
-    return;
-}
-if ($endpoint === 'response') {
-    $body = file_get_contents('php://input');
-    file_put_contents($root . '/response.json', $body);
+    if ($endpoint === 'response-body') {
+        $body = $_FILES['body']['tmp_name'] ?? null;
+        if ($body) {
+            copy($body, $root . '/response-body.bin');
+        } else {
+            file_put_contents($root . '/response-body.bin', file_get_contents('php://input'));
+        }
+        echo json_encode(['ok' => true]);
+        return;
+    }
+    if ($endpoint === 'response') {
+        $body = file_get_contents('php://input');
+        file_put_contents($root . '/response.json', $body);
     @unlink($root . '/processing.json');
     echo json_encode(['ok' => true]);
     return;

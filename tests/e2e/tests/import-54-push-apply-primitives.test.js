@@ -65,10 +65,12 @@ describe('Import: Push apply primitives', () => {
 
         writeFileSync(join(fsRoot, 'var', 'www', 'html', 'index.php'), '<?php // new');
         writeFileSync(join(fsRoot, 'var', 'www', 'html', 'wp-content', 'plugins', 'foo', 'a.php'), 'new-plugin');
+        writeFileSync(join(fsRoot, 'var', 'www', 'html', 'wp-content', 'plugins', 'foo', 'unselected.php'), 'new-unselected');
         writeFileSync(join(fsRoot, 'var', 'www', 'html', 'wp-content', 'uploads', '2026', 'image.jpg'), 'new-image');
         writeFileSync(join(targetRoot, 'index.php'), '<?php // old');
         writeFileSync(join(targetRoot, 'wp-content', 'plugins', 'foo', 'a.php'), 'old-plugin');
         writeFileSync(join(targetRoot, 'wp-content', 'plugins', 'foo', 'live-only.php'), 'live-only');
+        writeFileSync(join(targetRoot, 'wp-content', 'plugins', 'foo', 'unselected.php'), 'old-unselected');
         writeFileSync(join(targetRoot, 'wp-content', 'uploads', '2026', 'old.jpg'), 'old-image');
     });
 
@@ -84,6 +86,7 @@ describe('Import: Push apply primitives', () => {
             `--state-dir=${stateDir}`,
             `--fs-root=${fsRoot}`,
             `--target-root=${targetRoot}`,
+            `--selected-files=${join(root, 'selected-files.jsonl')}`,
         ]));
 
         assert.equal(plan.summary.total, 3);
@@ -98,9 +101,11 @@ describe('Import: Push apply primitives', () => {
             `--state-dir=${stateDir}`,
             `--fs-root=${fsRoot}`,
             `--materialize-to=${stagedRoot}`,
+            `--selected-files=${join(root, 'selected-files.jsonl')}`,
         ]));
         assert.equal(materialize.status, 'complete');
         assert.ok(existsSync(join(stagedRoot, 'wp-content', 'plugins', 'foo', 'a.php')));
+        assert.ok(!existsSync(join(stagedRoot, 'wp-content', 'plugins', 'foo', 'unselected.php')));
 
         const apply = parseJsonOutput(phpImporter([
             'apply-staged-files',
@@ -109,12 +114,14 @@ describe('Import: Push apply primitives', () => {
             `--target-root=${targetRoot}`,
             `--apply-journal=${join(stateDir, 'apply.json')}`,
             `--maintenance-file=${join(targetRoot, '.maintenance')}`,
+            `--selected-files=${join(root, 'selected-files.jsonl')}`,
         ]));
 
         assert.equal(apply.status, 'complete');
         assert.equal(readFileSync(join(targetRoot, 'index.php'), 'utf-8'), '<?php // new');
         assert.equal(readFileSync(join(targetRoot, 'wp-content', 'plugins', 'foo', 'a.php'), 'utf-8'), 'new-plugin');
         assert.equal(readFileSync(join(targetRoot, 'wp-content', 'plugins', 'foo', 'live-only.php'), 'utf-8'), 'live-only');
+        assert.equal(readFileSync(join(targetRoot, 'wp-content', 'plugins', 'foo', 'unselected.php'), 'utf-8'), 'old-unselected');
         assert.equal(readFileSync(join(targetRoot, 'wp-content', 'uploads', '2026', 'image.jpg'), 'utf-8'), 'new-image');
         assert.equal(readFileSync(join(targetRoot, 'wp-content', 'uploads', '2026', 'old.jpg'), 'utf-8'), 'old-image');
         assert.ok(!existsSync(join(stateDir, 'apply.json')), 'journal should be removed after successful apply');

@@ -177,6 +177,35 @@ class RelayTransportTest extends TestCase
         ], $postData, $uploadsDir);
     }
 
+    public function testRelaySourceRejectsOversizedFileFetchList(): void
+    {
+        $this->reflection->getProperty('relay_source_allowed_paths')->setValue($this->client, ['/srv/site']);
+        $validate = $this->reflection->getMethod('validate_relay_source_request');
+        $uploadsDir = $this->tempDir . '/relay/uploads-' . uniqid();
+        mkdir($uploadsDir, 0755, true);
+        $upload = 'oversized-file-list.upload';
+        $path = $uploadsDir . '/' . $upload;
+        $handle = fopen($path, 'wb');
+        $this->assertIsResource($handle);
+        fseek($handle, 8 * 1024 * 1024);
+        fwrite($handle, 'x');
+        fclose($handle);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('oversized file_fetch file_list');
+
+        $validate->invoke($this->client, 'file_fetch', 'stream', [
+            'directory' => ['/srv/site'],
+        ], [
+            'file_list' => [
+                'type' => 'file',
+                'upload' => $upload,
+                'name' => 'file_list',
+                'mime' => 'application/json',
+            ],
+        ], $uploadsDir);
+    }
+
     public function testRelayUploadPayloadsUseSidecarFilesInsteadOfJsonContents(): void
     {
         $uploadsDir = $this->tempDir . '/relay/uploads';

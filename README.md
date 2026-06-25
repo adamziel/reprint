@@ -207,26 +207,31 @@ php reprint.phar files-plan \
   --state-dir=./state \
   --fs-root=./files \
   --target-root=/srv/htdocs \
-  --exclude='wp-admin/**'
+  --exclude='wp-admin/**' \
+  --selected-files=./selected-files.jsonl
 
 # 2. Reassemble the raw fs-root into a real-file WordPress layout. This uses
 #    the same preflight path data as flat-docroot, but writes files/directories
-#    instead of Reprint layout symlinks.
+#    instead of Reprint layout symlinks. Pass the selected-files manifest so
+#    staging contains only the files Studio confirmed.
 php reprint.phar materialize-docroot \
   --state-dir=./state \
   --fs-root=./files \
-  --materialize-to=./staged-site
+  --materialize-to=./staged-site \
+  --selected-files=./selected-files.jsonl
 
 # 3. Apply the staged tree to a target document root. Uploads/fonts are copied
 #    before maintenance mode. Plugin/theme directories are prepared as .new
 #    trees, merged with live unselected files, and swapped through .bak while
 #    maintenance mode is enabled. Top-level loose PHP files use the same
-#    .new/.bak swap.
+#    .new/.bak swap. The same selected-files manifest remains the source of
+#    truth, so a full staged tree cannot accidentally broaden the apply.
 php reprint.phar apply-staged-files \
   --state-dir=./state \
   --staged-root=./staged-site \
   --target-root=/srv/htdocs \
-  --maintenance-file=/srv/htdocs/.maintenance
+  --maintenance-file=/srv/htdocs/.maintenance \
+  --selected-files=./selected-files.jsonl
 ```
 
 `files-plan` blocks WordPress core files and `wp-config.php` by default and
@@ -235,7 +240,9 @@ the host-specific caller has decided how to handle core upgrades. Deleted files
 are reported in the plan but are not selected by default yet because the staged
 file apply command does not delete target files. The staged apply journal stores
 only the current operation and phase, so interrupted runs can be resumed without
-writing one journal row per file.
+writing one journal row per file. `--selected-files` is a JSONL manifest of
+selected `files-plan.files[]` entries; Studio may rewrite that file after the
+user changes the selection, and both materialization and apply consume it.
 
 ## Composer packages
 
