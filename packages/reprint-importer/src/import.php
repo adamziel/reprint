@@ -1760,6 +1760,7 @@ class ImportClient
             "pull-db",
             "files-pull",
             "files-index",
+            "files-plan",
             "files-stats",
             "db-pull",
             "db-index",
@@ -1769,6 +1770,8 @@ class ImportClient
             "preflight",
             "preflight-assert",
             "flat-docroot",
+            "materialize-docroot",
+            "apply-staged-files",
             "apply-runtime",
             "relay-source",
         ];
@@ -2024,8 +2027,20 @@ class ImportClient
             $this->run_files_stats();
             return;
         }
+        if ($command === "files-plan") {
+            $this->run_files_plan($options);
+            return;
+        }
         if ($command === "flat-docroot") {
             $this->run_flat_document_root($options);
+            return;
+        }
+        if ($command === "materialize-docroot") {
+            $this->run_materialize_document_root($options);
+            return;
+        }
+        if ($command === "apply-staged-files") {
+            $this->run_apply_staged_files($options);
             return;
         }
         if ($command === "apply-runtime") {
@@ -4104,6 +4119,1163 @@ class ImportClient
 
         echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
     }
+
+    /**
+     * Print a structured file plan from the latest source index and the
+     * previously synced local index.
+     *
+     * This is intentionally a shared pull/push primitive: both flows need the
+     * same "what changed, where would it land, is it allowed/writable" answer
+     * before deciding whether to transfer or apply anything.
+     */
+    private function run_files_plan(array $options): void
+    {
+        if (!is_file($this->remote_index_file)) {
+            throw new RuntimeException(
+                "Cannot build files plan without .import-remote-index.jsonl. Run files-index first.",
+            );
+        }
+        $this->require_preflight();
+
+        $target_root = $this->normalize_optional_absolute_dir(
+            $options["target_root"] ?? null,
+            "--target-root",
+        );
+        $exclude_patterns = $this->normalize_exclude_patterns($options["exclude"] ?? []);
+        $allow_core_files = !empty($options["allow_core_files"]);
+
+        $source = fopen($this->remote_index_file, "r");
+        if (!$source) {
+            throw new RuntimeException("Cannot open remote index: {$this->remote_index_file}");
+        }
+        $last_synced = null;
+        if (is_file($this->index_file)) {
+            $last_synced = fopen($this->index_file, "r");
+            if (!$last_synced) {
+                fclose($source);
+                throw new RuntimeException("Cannot open local index: {$this->index_file}");
+            }
+        }
+
+        try {
+            $source_entry = $this->read_index_line($source);
+            $synced_entry = $this->read_index_line($last_synced);
+            $summary = [
+                "total" => 0,
+                "added" => 0,
+                "modified" => 0,
+                "deleted" => 0,
+                "unchanged" => 0,
+                "selected" => 0,
+                "excluded" => 0,
+                "blocked" => 0,
+                "non_writable" => 0,
+            ];
+
+            echo "{\n";
+            echo '  "version": 1,' . "\n";
+            echo '  "files": [' . "\n";
+
+            $first = true;
+            while ($source_entry !== null || $synced_entry !== null) {
+                $comparison = $this->compare_plan_index_entries($source_entry, $synced_entry);
+                $entry = $this->build_files_plan_entry(
+                    $comparison["status"],
+                    $comparison["source"],
+                    $comparison["last_synced"],
+                    $target_root,
+                    $exclude_patterns,
+                    $allow_core_files,
+                );
+                $this->accumulate_files_plan_summary($summary, $entry);
+
+                if (!$first) {
+                    echo ",\n";
+                }
+                echo "    " . json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+                $first = false;
+
+                $source_entry = $comparison["next_source"] ? $this->read_index_line($source) : $source_entry;
+                $synced_entry = $comparison["next_synced"] ? $this->read_index_line($last_synced) : $synced_entry;
+            }
+
+            echo "\n";
+            echo "  ],\n";
+            echo '  "summary": ' . json_encode($summary, JSON_UNESCAPED_SLASHES) . "\n";
+            echo "}\n";
+        } finally {
+            if ($last_synced) {
+                fclose($last_synced);
+            }
+            fclose($source);
+        }
+    }
+
+    /**
+     * Command: materialize-docroot
+     *
+     * Build a real-file document root from the raw fs-root layout. Unlike
+     * flat-docroot, this does not create Reprint layout symlinks. It is the
+     * shared staging primitive for safer pull and push: pull can materialize a
+     * runnable local tree, and push can materialize the tree that will later be
+     * applied to the remote site's host-specific target paths.
+     */
+    private function run_materialize_document_root(array $options): void
+    {
+        $target = $this->normalize_required_absolute_dir(
+            $options["materialize_to"] ?? null,
+            "--materialize-to",
+        );
+        $force = !empty($options["force"]);
+        $symlink_mode = $options["symlink_mode"] ?? "copy-target";
+        if (!in_array($symlink_mode, ["copy-target", "preserve", "skip"], true)) {
+            throw new InvalidArgumentException(
+                "Invalid --symlink-mode value: {$symlink_mode}. Valid values: copy-target, preserve, skip",
+            );
+        }
+
+        if (!is_dir($this->fs_root)) {
+            throw new RuntimeException("Fs root does not exist: {$this->fs_root}");
+        }
+
+        $this->require_preflight();
+        $entries = $this->build_docroot_materialization_entries($target);
+        $stats = [
+            "files" => 0,
+            "directories" => 0,
+            "symlinks" => 0,
+            "skipped_symlinks" => 0,
+            "removed_conflicts" => 0,
+        ];
+
+        if (!is_dir($target) && !mkdir($target, 0755, true)) {
+            throw new RuntimeException("Failed to create materialize target directory: {$target}");
+        }
+
+        foreach ($entries as $entry) {
+            $this->copy_path_for_materialized_docroot(
+                $entry["source"],
+                $entry["target"],
+                $force,
+                $symlink_mode,
+                $stats,
+            );
+        }
+
+        $result = [
+            "status" => "complete",
+            "materialize_to" => $target,
+            "fs_root" => $this->fs_root,
+            "stats" => $stats,
+        ];
+        echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+    }
+
+    /**
+     * Apply a staged, materialized document root to another document root.
+     *
+     * The journal is deliberately bounded to the current operation rather than
+     * one entry per file. Resume inspects the filesystem for that operation and
+     * converges it before moving on, keeping state small even for large pushes.
+     */
+    private function run_apply_staged_files(array $options): void
+    {
+        $staged_root = $this->normalize_required_absolute_dir(
+            $options["staged_root"] ?? null,
+            "--staged-root",
+        );
+        $target_root = $this->normalize_required_absolute_dir(
+            $options["target_root"] ?? null,
+            "--target-root",
+        );
+        $journal_file = $options["apply_journal"] ?? ($this->state_dir . "/.import-apply-files.json");
+        $maintenance_file = $options["maintenance_file"] ?? null;
+
+        if (!is_dir($staged_root)) {
+            throw new RuntimeException("Staged root does not exist: {$staged_root}");
+        }
+        if (!is_dir($target_root)) {
+            throw new RuntimeException("Target root does not exist: {$target_root}");
+        }
+
+        $operations = $this->build_staged_file_apply_operations($staged_root, $target_root);
+        $journal = $this->read_apply_journal($journal_file);
+        $started_maintenance = false;
+        $applied = 0;
+
+        try {
+            foreach ($operations as $operation) {
+                if ($this->staged_file_operation_only_needs_cleanup($operation)) {
+                    $this->write_apply_journal($journal_file, $operation, "cleaning");
+                    $this->cleanup_staged_file_operation($operation);
+                    $applied++;
+                    continue;
+                }
+
+                $this->write_apply_journal($journal_file, $operation, "preparing");
+                $this->prepare_staged_file_operation($operation);
+
+                if ($operation["type"] === "copy_directory" || $operation["type"] === "copy_file") {
+                    $applied++;
+                    continue;
+                }
+
+                if (!$started_maintenance) {
+                    $this->enter_apply_maintenance_mode($maintenance_file);
+                    $started_maintenance = $maintenance_file !== null;
+                }
+
+                $this->write_apply_journal($journal_file, $operation, "swapping");
+                $this->swap_prepared_file_operation($operation);
+
+                $this->write_apply_journal($journal_file, $operation, "cleaning");
+                $this->cleanup_staged_file_operation($operation);
+                $applied++;
+            }
+        } finally {
+            if ($started_maintenance) {
+                $this->leave_apply_maintenance_mode($maintenance_file);
+            }
+        }
+
+        $opcache_invalidated = $this->invalidate_opcache_for_staged_file_operations($operations);
+        if (file_exists($journal_file) && !unlink($journal_file)) {
+            throw new RuntimeException("Cannot remove apply journal: {$journal_file}");
+        }
+        echo json_encode([
+            "status" => "complete",
+            "operations" => count($operations),
+            "applied" => $applied,
+            "opcache_invalidated" => $opcache_invalidated,
+            "journal_recovered" => !empty($journal),
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+    }
+
+    private function compare_plan_index_entries(?array $source, ?array $last_synced): array
+    {
+        if ($source === null) {
+            return [
+                "status" => "deleted",
+                "source" => null,
+                "last_synced" => $last_synced,
+                "next_source" => false,
+                "next_synced" => true,
+            ];
+        }
+        if ($last_synced === null) {
+            return [
+                "status" => "added",
+                "source" => $source,
+                "last_synced" => null,
+                "next_source" => true,
+                "next_synced" => false,
+            ];
+        }
+
+        $cmp = strcmp($source["path"], $last_synced["path"]);
+        if ($cmp < 0) {
+            return [
+                "status" => "added",
+                "source" => $source,
+                "last_synced" => null,
+                "next_source" => true,
+                "next_synced" => false,
+            ];
+        }
+        if ($cmp > 0) {
+            return [
+                "status" => "deleted",
+                "source" => null,
+                "last_synced" => $last_synced,
+                "next_source" => false,
+                "next_synced" => true,
+            ];
+        }
+
+        $changed = $source["ctime"] !== $last_synced["ctime"] ||
+            $source["size"] !== $last_synced["size"] ||
+            $source["type"] !== $last_synced["type"];
+
+        return [
+            "status" => $changed ? "modified" : "unchanged",
+            "source" => $source,
+            "last_synced" => $last_synced,
+            "next_source" => true,
+            "next_synced" => true,
+        ];
+    }
+
+    private function build_files_plan_entry(
+        string $status,
+        ?array $source,
+        ?array $last_synced,
+        ?string $target_root,
+        array $exclude_patterns,
+        bool $allow_core_files
+    ): array {
+        $active = $source ?? $last_synced;
+        $source_path = $active["path"];
+        $relative_path = $this->map_source_path_to_docroot_relative_path($source_path);
+        $classification = $this->classify_docroot_relative_path($relative_path);
+        $operation = $this->files_plan_operation_for_status($status);
+        $policy = $this->files_plan_policy_for_entry($relative_path, $classification, $allow_core_files);
+        $excluded_by = $this->first_matching_exclude_pattern($source_path, $relative_path, $exclude_patterns);
+        $selection_reason = null;
+        $selected = in_array($operation, ["create", "update"], true) &&
+            $excluded_by === null &&
+            $policy["status"] !== "blocked";
+        if ($operation === "delete") {
+            $selection_reason = "delete-not-applied-by-staged-files";
+        } elseif ($operation === "none") {
+            $selection_reason = "unchanged";
+        } elseif ($excluded_by !== null) {
+            $selection_reason = "excluded";
+        } elseif ($policy["status"] === "blocked") {
+            $selection_reason = "blocked";
+        }
+        $target = $target_root !== null && $relative_path !== null
+            ? $target_root . "/" . $relative_path
+            : null;
+        $writability = $target !== null && $selected
+            ? $this->inspect_target_writability($target, $operation)
+            : ["writable" => null, "reason" => null];
+
+        if ($writability["writable"] === false) {
+            $selected = false;
+            $selection_reason = "non-writable";
+        }
+
+        return [
+            "path" => $source_path,
+            "relative_path" => $relative_path,
+            "target_path" => $target,
+            "status" => $status,
+            "operation" => $operation,
+            "type" => $active["type"] ?? null,
+            "size" => $source["size"] ?? null,
+            "previous_size" => $last_synced["size"] ?? null,
+            "classification" => $classification,
+            "selected" => $selected,
+            "selection_reason" => $selection_reason,
+            "excluded_by" => $excluded_by,
+            "policy" => $policy,
+            "writability" => $writability,
+        ];
+    }
+
+    private function accumulate_files_plan_summary(array &$summary, array $entry): void
+    {
+        $summary["total"]++;
+        if (isset($summary[$entry["status"]])) {
+            $summary[$entry["status"]]++;
+        }
+        if (!empty($entry["selected"])) {
+            $summary["selected"]++;
+        }
+        if ($entry["excluded_by"] !== null) {
+            $summary["excluded"]++;
+        }
+        if (($entry["policy"]["status"] ?? null) === "blocked") {
+            $summary["blocked"]++;
+        }
+        if (($entry["writability"]["writable"] ?? null) === false) {
+            $summary["non_writable"]++;
+        }
+    }
+
+    private function files_plan_operation_for_status(string $status): string
+    {
+        switch ($status) {
+            case "added":
+                return "create";
+            case "modified":
+                return "update";
+            case "deleted":
+                return "delete";
+            case "unchanged":
+            default:
+                return "none";
+        }
+    }
+
+    private function files_plan_policy_for_entry(?string $relative_path, array $classification, bool $allow_core_files): array
+    {
+        if ($relative_path === null) {
+            return [
+                "status" => "blocked",
+                "reason" => "outside-wordpress-layout",
+                "suggested_exclusion" => null,
+            ];
+        }
+
+        if ($relative_path === "wp-config.php") {
+            return [
+                "status" => "blocked",
+                "reason" => "wordpress-config",
+                "suggested_exclusion" => "wp-config.php",
+            ];
+        }
+
+        if (($classification["area"] ?? null) === "wordpress-core" && !$allow_core_files) {
+            return [
+                "status" => "blocked",
+                "reason" => "wordpress-core",
+                "suggested_exclusion" => $this->suggest_core_exclusion($relative_path),
+            ];
+        }
+
+        if (($classification["area"] ?? null) === "loose-php") {
+            return [
+                "status" => "warning",
+                "reason" => "loose-php",
+                "suggested_exclusion" => null,
+            ];
+        }
+
+        return [
+            "status" => "allowed",
+            "reason" => null,
+            "suggested_exclusion" => null,
+        ];
+    }
+
+    private function normalize_exclude_patterns($patterns): array
+    {
+        if (is_string($patterns)) {
+            $patterns = [$patterns];
+        }
+        if (!is_array($patterns)) {
+            return [];
+        }
+        return array_values(array_filter(array_map("strval", $patterns), function ($pattern) {
+            return $pattern !== "";
+        }));
+    }
+
+    private function first_matching_exclude_pattern(string $source_path, ?string $relative_path, array $patterns): ?string
+    {
+        foreach ($patterns as $pattern) {
+            if (fnmatch($pattern, $source_path) || ($relative_path !== null && fnmatch($pattern, $relative_path))) {
+                return $pattern;
+            }
+        }
+        return null;
+    }
+
+    private function inspect_target_writability(string $target_path, string $operation): array
+    {
+        $parent = is_dir($target_path) ? $target_path : dirname($target_path);
+        if ($operation === "create" && !file_exists($target_path)) {
+            $parent = $this->nearest_existing_parent($target_path);
+        }
+
+        if (!file_exists($parent)) {
+            return [
+                "writable" => false,
+                "reason" => "parent-missing",
+                "path" => $parent,
+            ];
+        }
+
+        if (!is_writable($parent)) {
+            return [
+                "writable" => false,
+                "reason" => "parent-not-writable",
+                "path" => $parent,
+            ];
+        }
+
+        if (($operation === "update" || $operation === "delete") && file_exists($target_path) && !is_writable($target_path)) {
+            return [
+                "writable" => false,
+                "reason" => "target-not-writable",
+                "path" => $target_path,
+            ];
+        }
+
+        return [
+            "writable" => true,
+            "reason" => null,
+            "path" => $target_path,
+        ];
+    }
+
+    private function nearest_existing_parent(string $path): string
+    {
+        $parent = dirname($path);
+        while ($parent !== "/" && !file_exists($parent)) {
+            $parent = dirname($parent);
+        }
+        return $parent;
+    }
+
+    private function build_docroot_materialization_entries(string $target_root): array
+    {
+        $paths = $this->get_preflight_wp_paths();
+        $abspath = $paths["abspath"];
+        if ($abspath === null) {
+            throw new RuntimeException(
+                "Cannot determine WordPress ABSPATH from preflight data. Run preflight first.",
+            );
+        }
+
+        $local_abspath = $this->fs_root . $abspath;
+        if (!is_dir($local_abspath)) {
+            throw new RuntimeException(
+                "WordPress ABSPATH directory not found in fs root: {$local_abspath} " .
+                    "(remote ABSPATH: {$abspath}). Has the file sync completed?",
+            );
+        }
+
+        $entries = [];
+        $wp_admin_detached = $paths["wp_admin_path"] !== null && $paths["wp_admin_path"] !== $abspath . "/wp-admin";
+        $wp_includes_detached = $paths["wp_includes_path"] !== null && $paths["wp_includes_path"] !== $abspath . "/wp-includes";
+        $content_detached = $paths["content_dir"] !== null && strpos($paths["content_dir"], $abspath . "/") !== 0;
+        $plugins_detached =
+            $paths["plugins_dir"] !== null &&
+            $paths["content_dir"] !== null &&
+            strpos($paths["plugins_dir"], $paths["content_dir"] . "/") !== 0;
+        $mu_plugins_detached =
+            $paths["mu_plugins_dir"] !== null &&
+            $paths["content_dir"] !== null &&
+            strpos($paths["mu_plugins_dir"], $paths["content_dir"] . "/") !== 0;
+        $uploads_detached =
+            $paths["uploads_basedir"] !== null &&
+            $paths["content_dir"] !== null &&
+            strpos($paths["uploads_basedir"], $paths["content_dir"] . "/") !== 0;
+        $need_exploded_content = $plugins_detached || $mu_plugins_detached || $uploads_detached;
+
+        $skip_from_abspath = [];
+        if ($content_detached || $need_exploded_content) {
+            $skip_from_abspath["wp-content"] = true;
+        }
+        if ($wp_admin_detached) {
+            $skip_from_abspath["wp-admin"] = true;
+        }
+        if ($wp_includes_detached) {
+            $skip_from_abspath["wp-includes"] = true;
+        }
+
+        foreach ($this->list_directory_entries($local_abspath) as $entry) {
+            if (isset($skip_from_abspath[$entry])) {
+                continue;
+            }
+            $entries[] = [
+                "source" => $local_abspath . "/" . $entry,
+                "target" => $target_root . "/" . $entry,
+            ];
+        }
+
+        if ($wp_admin_detached && $paths["wp_admin_path"] !== null) {
+            $entries[] = [
+                "source" => $this->fs_root . $paths["wp_admin_path"],
+                "target" => $target_root . "/wp-admin",
+            ];
+        }
+        if ($wp_includes_detached && $paths["wp_includes_path"] !== null) {
+            $entries[] = [
+                "source" => $this->fs_root . $paths["wp_includes_path"],
+                "target" => $target_root . "/wp-includes",
+            ];
+        }
+
+        $parent_wp_config = $this->fs_root . dirname($abspath) . "/wp-config.php";
+        if (file_exists($parent_wp_config)) {
+            $entries[] = [
+                "source" => $parent_wp_config,
+                "target" => $target_root . "/wp-config.php",
+            ];
+        }
+
+        if ($need_exploded_content && $paths["content_dir"] !== null) {
+            $content_target = $target_root . "/wp-content";
+            $skip_from_content = [];
+            if ($plugins_detached) {
+                $skip_from_content["plugins"] = true;
+            }
+            if ($mu_plugins_detached) {
+                $skip_from_content["mu-plugins"] = true;
+            }
+            if ($uploads_detached) {
+                $skip_from_content["uploads"] = true;
+            }
+
+            $content_source = $this->fs_root . $paths["content_dir"];
+            if (is_dir($content_source)) {
+                foreach ($this->list_directory_entries($content_source) as $entry) {
+                    if (isset($skip_from_content[$entry])) {
+                        continue;
+                    }
+                    $entries[] = [
+                        "source" => $content_source . "/" . $entry,
+                        "target" => $content_target . "/" . $entry,
+                    ];
+                }
+            }
+            foreach ([
+                "plugins" => $plugins_detached ? $paths["plugins_dir"] : null,
+                "mu-plugins" => $mu_plugins_detached ? $paths["mu_plugins_dir"] : null,
+                "uploads" => $uploads_detached ? $paths["uploads_basedir"] : null,
+            ] as $name => $source_path) {
+                if ($source_path !== null && is_dir($this->fs_root . $source_path)) {
+                    $entries[] = [
+                        "source" => $this->fs_root . $source_path,
+                        "target" => $content_target . "/" . $name,
+                    ];
+                }
+            }
+        } elseif ($content_detached && $paths["content_dir"] !== null) {
+            $entries[] = [
+                "source" => $this->fs_root . $paths["content_dir"],
+                "target" => $target_root . "/wp-content",
+            ];
+        }
+
+        return $entries;
+    }
+
+    private function copy_path_for_materialized_docroot(
+        string $source,
+        string $target,
+        bool $force,
+        string $symlink_mode,
+        array &$stats
+    ): void {
+        if (!file_exists($source) && !is_link($source)) {
+            return;
+        }
+
+        if (is_link($source)) {
+            $this->copy_symlink_for_materialized_docroot($source, $target, $force, $symlink_mode, $stats);
+            return;
+        }
+
+        $this->remove_materialize_conflict($target, $force, $stats);
+        if (is_dir($source)) {
+            if (!is_dir($target) && !mkdir($target, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$target}");
+            }
+            $stats["directories"]++;
+            foreach ($this->list_directory_entries($source) as $entry) {
+                $this->copy_path_for_materialized_docroot(
+                    $source . "/" . $entry,
+                    $target . "/" . $entry,
+                    $force,
+                    $symlink_mode,
+                    $stats,
+                );
+            }
+            return;
+        }
+
+        $this->copy_file_for_materialized_docroot($source, $target);
+        $stats["files"]++;
+    }
+
+    private function copy_symlink_for_materialized_docroot(
+        string $source,
+        string $target,
+        bool $force,
+        string $symlink_mode,
+        array &$stats
+    ): void {
+        if ($symlink_mode === "skip") {
+            $stats["skipped_symlinks"]++;
+            return;
+        }
+        $this->remove_materialize_conflict($target, $force, $stats);
+        if ($symlink_mode === "preserve") {
+            $link_target = readlink($source);
+            if ($link_target === false || !symlink($link_target, $target)) {
+                throw new RuntimeException("Failed to preserve symlink: {$target}");
+            }
+            $stats["symlinks"]++;
+            return;
+        }
+
+        $real_source = realpath($source);
+        if ($real_source === false) {
+            throw new RuntimeException("Cannot materialize broken symlink: {$source}");
+        }
+        $real_fs_root = realpath($this->fs_root);
+        if ($real_fs_root === false || !$this->path_is_equal_or_within($real_source, $real_fs_root)) {
+            throw new RuntimeException(
+                "Refusing to materialize symlink outside fs root: {$source} -> {$real_source}",
+            );
+        }
+        $this->copy_path_for_materialized_docroot($real_source, $target, $force, $symlink_mode, $stats);
+    }
+
+    private function remove_materialize_conflict(string $target, bool $force, array &$stats): void
+    {
+        if (!file_exists($target) && !is_link($target)) {
+            return;
+        }
+        if (!$force) {
+            throw new RuntimeException(
+                "Cannot materialize {$target}: path already exists. Use --force to replace it.",
+            );
+        }
+        if (is_dir($target) && !is_link($target)) {
+            $this->remove_directory_recursive($target);
+        } else {
+            if (!unlink($target)) {
+                throw new RuntimeException("Cannot remove conflicting path: {$target}");
+            }
+        }
+        $stats["removed_conflicts"]++;
+    }
+
+    private function build_staged_file_apply_operations(string $staged_root, string $target_root): array
+    {
+        $operations = [];
+        foreach (["wp-content/uploads", "wp-content/fonts"] as $relative_path) {
+            $source = $staged_root . "/" . $relative_path;
+            if (!file_exists($source) && !is_link($source)) {
+                continue;
+            }
+            $operations[] = [
+                "type" => is_dir($source) && !is_link($source) ? "copy_directory" : "copy_file",
+                "source" => $source,
+                "target" => $target_root . "/" . $relative_path,
+            ];
+        }
+
+        foreach (["plugins", "themes"] as $kind) {
+            $dir = $staged_root . "/wp-content/{$kind}";
+            if (!is_dir($dir)) {
+                continue;
+            }
+            foreach ($this->list_directory_entries($dir) as $entry) {
+                $source = $dir . "/" . $entry;
+                if (!is_dir($source) || is_link($source)) {
+                    continue;
+                }
+                $target = $target_root . "/wp-content/{$kind}/{$entry}";
+                $operations[] = [
+                    "type" => "swap_directory",
+                    "source" => $source,
+                    "target" => $target,
+                    "prepared" => $target . ".new",
+                    "backup" => $target . ".bak",
+                ];
+            }
+        }
+
+        foreach ($this->list_directory_entries($staged_root) as $entry) {
+            if ($entry === "wp-content") {
+                continue;
+            }
+            $source = $staged_root . "/" . $entry;
+            if (!is_file($source) || substr($entry, -4) !== ".php") {
+                continue;
+            }
+            $target = $target_root . "/" . $entry;
+            $operations[] = [
+                "type" => "swap_file",
+                "source" => $source,
+                "target" => $target,
+                "prepared" => $target . ".new",
+                "backup" => $target . ".bak",
+            ];
+        }
+
+        return $operations;
+    }
+
+    private function staged_file_operation_only_needs_cleanup(array $operation): bool
+    {
+        if (empty($operation["prepared"])) {
+            return false;
+        }
+        return file_exists($operation["target"]) &&
+            file_exists($operation["backup"]) &&
+            !file_exists($operation["prepared"]);
+    }
+
+    private function prepare_staged_file_operation(array $operation): void
+    {
+        if ($operation["type"] === "copy_directory" || $operation["type"] === "copy_file") {
+            $stats = [
+                "files" => 0,
+                "directories" => 0,
+                "symlinks" => 0,
+                "skipped_symlinks" => 0,
+                "removed_conflicts" => 0,
+            ];
+            $this->copy_path_overlay_for_staged_apply(
+                $operation["source"],
+                $operation["target"],
+                $stats,
+            );
+            return;
+        }
+
+        if (file_exists($operation["prepared"])) {
+            return;
+        }
+        $stats = [
+            "files" => 0,
+            "directories" => 0,
+            "symlinks" => 0,
+            "skipped_symlinks" => 0,
+            "removed_conflicts" => 0,
+        ];
+        if ($operation["type"] === "swap_directory" && is_dir($operation["target"]) && !is_link($operation["target"])) {
+            $this->copy_path_for_materialized_docroot(
+                $operation["target"],
+                $operation["prepared"],
+                true,
+                "copy-target",
+                $stats,
+            );
+            $this->copy_path_overlay_for_staged_apply(
+                $operation["source"],
+                $operation["prepared"],
+                $stats,
+            );
+        } else {
+            $this->copy_path_for_materialized_docroot(
+                $operation["source"],
+                $operation["prepared"],
+                true,
+                "copy-target",
+                $stats,
+            );
+        }
+    }
+
+    private function swap_prepared_file_operation(array $operation): void
+    {
+        if ($operation["type"] === "copy_directory" || $operation["type"] === "copy_file") {
+            return;
+        }
+        if (!file_exists($operation["prepared"])) {
+            return;
+        }
+        if (file_exists($operation["target"]) && !file_exists($operation["backup"])) {
+            if (!rename($operation["target"], $operation["backup"])) {
+                throw new RuntimeException("Cannot move live path to backup: {$operation["target"]}");
+            }
+        }
+        if (!file_exists($operation["target"])) {
+            if (!rename($operation["prepared"], $operation["target"])) {
+                throw new RuntimeException("Cannot move prepared path into place: {$operation["prepared"]}");
+            }
+        }
+    }
+
+    private function cleanup_staged_file_operation(array $operation): void
+    {
+        if (empty($operation["backup"])) {
+            return;
+        }
+        if (is_dir($operation["backup"]) && !is_link($operation["backup"])) {
+            $this->remove_directory_recursive($operation["backup"]);
+        } elseif (file_exists($operation["backup"]) || is_link($operation["backup"])) {
+            if (!unlink($operation["backup"])) {
+                throw new RuntimeException("Cannot remove backup path: {$operation["backup"]}");
+            }
+        }
+    }
+
+    private function read_apply_journal(string $journal_file): array
+    {
+        if (!is_file($journal_file)) {
+            return [];
+        }
+        $raw = file_get_contents($journal_file);
+        $decoded = $raw !== false ? json_decode($raw, true) : null;
+        if (!is_array($decoded)) {
+            throw new RuntimeException("Invalid apply journal JSON: {$journal_file}");
+        }
+        return $decoded;
+    }
+
+    private function write_apply_journal(string $journal_file, array $operation, string $phase): void
+    {
+        $this->write_json_file_atomically($journal_file, [
+            "phase" => $phase,
+            "operation" => [
+                "type" => $operation["type"],
+                "source" => $operation["source"],
+                "target" => $operation["target"],
+                "prepared" => $operation["prepared"] ?? null,
+                "backup" => $operation["backup"] ?? null,
+            ],
+            "updated_at" => gmdate("c"),
+        ]);
+    }
+
+    private function enter_apply_maintenance_mode(?string $maintenance_file): void
+    {
+        if ($maintenance_file === null) {
+            return;
+        }
+        $contents = "<?php\n" . '$upgrading = ' . time() . ";\n";
+        if (file_put_contents($maintenance_file, $contents) === false) {
+            throw new RuntimeException("Cannot enable maintenance mode at {$maintenance_file}");
+        }
+    }
+
+    private function leave_apply_maintenance_mode(?string $maintenance_file): void
+    {
+        if ($maintenance_file !== null && file_exists($maintenance_file)) {
+            if (!unlink($maintenance_file)) {
+                throw new RuntimeException("Cannot disable maintenance mode at {$maintenance_file}");
+            }
+        }
+    }
+
+    private function copy_path_overlay_for_staged_apply(string $source, string $target, array &$stats): void
+    {
+        if (!file_exists($source) && !is_link($source)) {
+            return;
+        }
+        if (is_dir($source) && !is_link($source) && is_dir($target) && !is_link($target)) {
+            foreach ($this->list_directory_entries($source) as $entry) {
+                $this->copy_path_overlay_for_staged_apply(
+                    $source . "/" . $entry,
+                    $target . "/" . $entry,
+                    $stats,
+                );
+            }
+            return;
+        }
+
+        $this->copy_path_for_materialized_docroot(
+            $source,
+            $target,
+            true,
+            "copy-target",
+            $stats,
+        );
+    }
+
+    private function invalidate_opcache_for_staged_file_operations(array $operations): int
+    {
+        if (!function_exists("opcache_invalidate")) {
+            return 0;
+        }
+
+        $count = 0;
+        foreach ($operations as $operation) {
+            $count += $this->invalidate_opcache_for_path($operation["target"]);
+        }
+        return $count;
+    }
+
+    private function invalidate_opcache_for_path(string $path): int
+    {
+        if (is_link($path)) {
+            return 0;
+        }
+        if (is_file($path)) {
+            if (substr($path, -4) !== ".php") {
+                return 0;
+            }
+            return @opcache_invalidate($path, true) ? 1 : 0;
+        }
+        if (!is_dir($path)) {
+            return 0;
+        }
+
+        $count = 0;
+        foreach ($this->list_directory_entries($path) as $entry) {
+            $count += $this->invalidate_opcache_for_path($path . "/" . $entry);
+        }
+        return $count;
+    }
+
+    private function copy_file_for_materialized_docroot(string $source, string $target): void
+    {
+        $parent = dirname($target);
+        if (!is_dir($parent) && !mkdir($parent, 0755, true)) {
+            throw new RuntimeException("Failed to create directory: {$parent}");
+        }
+        $in = fopen($source, "rb");
+        if (!$in) {
+            throw new RuntimeException("Cannot open source file: {$source}");
+        }
+        $tmp = $target . ".tmp-" . bin2hex(random_bytes(4));
+        $out = fopen($tmp, "wb");
+        if (!$out) {
+            fclose($in);
+            throw new RuntimeException("Cannot open target file: {$tmp}");
+        }
+        try {
+            if (stream_copy_to_stream($in, $out) === false) {
+                throw new RuntimeException("Cannot copy file: {$source}");
+            }
+        } finally {
+            fclose($in);
+            fclose($out);
+        }
+        if (!rename($tmp, $target)) {
+            @unlink($tmp);
+            throw new RuntimeException("Cannot publish copied file: {$target}");
+        }
+        @chmod($target, fileperms($source) & 0777);
+    }
+
+    private function normalize_optional_absolute_dir($path, string $option_name): ?string
+    {
+        if ($path === null || $path === "") {
+            return null;
+        }
+        return $this->normalize_required_absolute_dir($path, $option_name);
+    }
+
+    private function normalize_required_absolute_dir($path, string $option_name): string
+    {
+        if (!is_string($path) || $path === "") {
+            throw new InvalidArgumentException("{$option_name} is required.");
+        }
+        if ($path[0] !== "/") {
+            $path = getcwd() . "/" . $path;
+        }
+        return rtrim($path, "/");
+    }
+
+    private function map_source_path_to_docroot_relative_path(string $source_path): ?string
+    {
+        $paths = $this->get_preflight_wp_paths();
+        $mappings = [
+            "wp-content/plugins" => $paths["plugins_dir"],
+            "wp-content/mu-plugins" => $paths["mu_plugins_dir"],
+            "wp-content/uploads" => $paths["uploads_basedir"],
+            "wp-admin" => $paths["wp_admin_path"],
+            "wp-includes" => $paths["wp_includes_path"],
+            "wp-content" => $paths["content_dir"],
+            "" => $paths["abspath"],
+        ];
+
+        foreach ($mappings as $target_prefix => $source_prefix) {
+            if ($source_prefix === null) {
+                continue;
+            }
+            if ($source_path === $source_prefix) {
+                return $target_prefix;
+            }
+            if (strpos($source_path, $source_prefix . "/") === 0) {
+                $suffix = substr($source_path, strlen($source_prefix) + 1);
+                return $target_prefix === "" ? $suffix : $target_prefix . "/" . $suffix;
+            }
+        }
+
+        return null;
+    }
+
+    private function classify_docroot_relative_path(?string $relative_path): array
+    {
+        if ($relative_path === null) {
+            return ["area" => "outside-wordpress-layout"];
+        }
+        if (strpos($relative_path, "wp-content/plugins/") === 0) {
+            return [
+                "area" => "plugin",
+                "name" => explode("/", substr($relative_path, strlen("wp-content/plugins/")))[0] ?? null,
+            ];
+        }
+        if (strpos($relative_path, "wp-content/themes/") === 0) {
+            return [
+                "area" => "theme",
+                "name" => explode("/", substr($relative_path, strlen("wp-content/themes/")))[0] ?? null,
+            ];
+        }
+        if (strpos($relative_path, "wp-content/mu-plugins/") === 0) {
+            return ["area" => "mu-plugin"];
+        }
+        if (strpos($relative_path, "wp-content/uploads/") === 0) {
+            return ["area" => "uploads"];
+        }
+        if (strpos($relative_path, "wp-content/fonts/") === 0) {
+            return ["area" => "fonts"];
+        }
+        if (strpos($relative_path, "wp-admin/") === 0 || strpos($relative_path, "wp-includes/") === 0) {
+            return ["area" => "wordpress-core"];
+        }
+        if ($this->is_wordpress_core_root_file($relative_path)) {
+            return ["area" => "wordpress-core"];
+        }
+        if (substr($relative_path, -4) === ".php") {
+            return ["area" => "loose-php"];
+        }
+        if (strpos($relative_path, "wp-content/") === 0) {
+            return ["area" => "wp-content-other"];
+        }
+        return ["area" => "document-root"];
+    }
+
+    private function is_wordpress_core_root_file(string $relative_path): bool
+    {
+        if (strpos($relative_path, "/") !== false) {
+            return false;
+        }
+        $core_files = [
+            "license.txt" => true,
+            "readme.html" => true,
+            "xmlrpc.php" => true,
+        ];
+        return isset($core_files[$relative_path]) || preg_match('/^wp-[A-Za-z0-9_-]+\\.php$/', $relative_path) === 1;
+    }
+
+    private function suggest_core_exclusion(string $relative_path): string
+    {
+        if (strpos($relative_path, "wp-admin/") === 0) {
+            return "wp-admin/**";
+        }
+        if (strpos($relative_path, "wp-includes/") === 0) {
+            return "wp-includes/**";
+        }
+        return $relative_path;
+    }
+
+    private function get_preflight_wp_paths(): array
+    {
+        $preflight = $this->state["preflight"]["data"] ?? [];
+        $paths_urls = $preflight["database"]["wp"]["paths_urls"] ?? [];
+        $abspath = $this->clean_preflight_path($paths_urls["abspath"] ?? null);
+        $uploads = $paths_urls["uploads"] ?? [];
+
+        if ($abspath === null) {
+            $roots = $preflight["wp_detect"]["roots"] ?? [];
+            if (!empty($roots)) {
+                $abspath = $this->clean_preflight_path($roots[0]["path"] ?? null);
+            }
+        }
+
+        return [
+            "abspath" => $abspath,
+            "wp_admin_path" => $this->clean_preflight_path($paths_urls["wp_admin_path"] ?? ($abspath !== null ? $abspath . "/wp-admin" : null)),
+            "wp_includes_path" => $this->clean_preflight_path($paths_urls["wp_includes_path"] ?? ($abspath !== null ? $abspath . "/wp-includes" : null)),
+            "content_dir" => $this->clean_preflight_path($paths_urls["content_dir"] ?? ($abspath !== null ? $abspath . "/wp-content" : null)),
+            "plugins_dir" => $this->clean_preflight_path($paths_urls["plugins_dir"] ?? null),
+            "mu_plugins_dir" => $this->clean_preflight_path($paths_urls["mu_plugins_dir"] ?? null),
+            "uploads_basedir" => is_array($uploads) ? $this->clean_preflight_path($uploads["basedir"] ?? null) : null,
+        ];
+    }
+
+    private function path_is_equal_or_within(string $path, string $root): bool
+    {
+        $path = rtrim($path, "/");
+        $root = rtrim($root, "/");
+        return $path === $root || strpos($path, $root . "/") === 0;
+    }
+
+
+    private function list_directory_entries(string $dir): array
+    {
+        $entries = scandir($dir);
+        if ($entries === false) {
+            throw new RuntimeException("Failed to scan directory: {$dir}");
+        }
+        return array_values(array_filter($entries, function ($entry) {
+            return $entry !== "." && $entry !== "..";
+        }));
+    }
+
+
 
     /**
      * Prints host-facing import lifecycle metadata without mutating state.
@@ -13103,7 +14275,7 @@ if (
             'placeholder' => 'DIR',
             'help' => 'Directory where downloaded site files are written',
             'help_section' => 'required',
-            'commands' => ['apply-runtime'],
+            'commands' => ['apply-runtime', 'files-plan', 'materialize-docroot'],
             'aliases' => ['docroot'],
         ],
 
@@ -13463,8 +14635,73 @@ if (
             'name' => 'force',
             'type' => 'flag',
             'target' => 'force',
-            'help' => 'Remove conflicting non-symlink files and replace with symlinks',
-            'commands' => ['pull', 'flat-docroot'],
+            'help' => 'Remove conflicting target files/directories before writing',
+            'commands' => ['pull', 'flat-docroot', 'materialize-docroot'],
+        ],
+        [
+            'name' => 'target-root',
+            'type' => 'value',
+            'target' => 'target_root',
+            'placeholder' => 'DIR',
+            'help' => 'Target document root for writability checks or staged file apply',
+            'commands' => ['files-plan', 'apply-staged-files'],
+        ],
+        [
+            'name' => 'exclude',
+            'type' => 'value-or-next',
+            'target' => 'exclude',
+            'placeholder' => 'GLOB',
+            'repeatable' => true,
+            'help' => 'Exclude source or materialized relative paths from the files plan; repeatable',
+            'commands' => ['files-plan'],
+        ],
+        [
+            'name' => 'allow-core-files',
+            'type' => 'flag',
+            'target' => 'allow_core_files',
+            'help' => 'Allow WordPress core file operations in files-plan output',
+            'commands' => ['files-plan'],
+        ],
+        [
+            'name' => 'materialize-to',
+            'type' => 'value',
+            'target' => 'materialize_to',
+            'placeholder' => 'DIR',
+            'help' => 'Directory where materialize-docroot writes a real-file WordPress layout',
+            'commands' => ['materialize-docroot'],
+        ],
+        [
+            'name' => 'symlink-mode',
+            'type' => 'value',
+            'target' => 'symlink_mode',
+            'placeholder' => 'MODE',
+            'valid_values' => ['copy-target', 'preserve', 'skip'],
+            'help' => 'How materialize-docroot handles source symlinks (copy-target|preserve|skip)',
+            'commands' => ['materialize-docroot'],
+        ],
+        [
+            'name' => 'staged-root',
+            'type' => 'value',
+            'target' => 'staged_root',
+            'placeholder' => 'DIR',
+            'help' => 'Materialized staging document root to apply',
+            'commands' => ['apply-staged-files'],
+        ],
+        [
+            'name' => 'apply-journal',
+            'type' => 'value',
+            'target' => 'apply_journal',
+            'placeholder' => 'FILE',
+            'help' => 'Bounded current-operation apply journal path',
+            'commands' => ['apply-staged-files'],
+        ],
+        [
+            'name' => 'maintenance-file',
+            'type' => 'value',
+            'target' => 'maintenance_file',
+            'placeholder' => 'FILE',
+            'help' => 'Optional WordPress .maintenance file to create during swaps',
+            'commands' => ['apply-staged-files'],
         ],
 
         // ── apply-runtime options ────────────────────────────────
@@ -14130,6 +15367,39 @@ if (
                 "Requires a prior files-index or files-pull run.\n",
             "extra" => null,
         ],
+        "files-plan" => [
+            "level" => "low",
+            "short" => "Print changed files, policy, and writability as JSON",
+            "usage" => "reprint files-plan --state-dir=DIR --fs-root=DIR [options]",
+            "description" =>
+                "Reads the latest source file index and the previous synced
+" .
+                "file index, then prints a structured plan for pull or push UI:
+" .
+                "added/modified/deleted/unchanged status, materialized target
+" .
+                "path, WordPress area classification, default safety policy, and
+" .
+                "optional target writability checks. No network calls are made.
+" .
+                "
+" .
+                "Run preflight and files-index first to refresh the source
+" .
+                "path data and .import-remote-index.jsonl. Deleted files are
+" .
+                "reported but not selected by default because staged apply does
+" .
+                "not delete target files yet.
+",
+            "extra" =>
+                "Examples:
+" .
+                "  reprint files-plan --state-dir=./state --fs-root=./files \
+" .
+                "    --target-root=/srv/htdocs --exclude='wp-admin/**'
+",
+        ],
         "db-pull" => [
             "level" => "low",
             "short" => "Pull the database as a SQL dump (index + download)",
@@ -14235,6 +15505,41 @@ if (
                 "the command stops with an error unless --force is specified.\n",
             "extra" => null,
         ],
+        "materialize-docroot" => [
+            "level" => "low",
+            "short" => "Reassemble pulled files as real files/directories",
+            "usage" => "reprint materialize-docroot --state-dir=DIR --fs-root=DIR --materialize-to=DIR [options]",
+            "description" =>
+                "Creates a real-file WordPress document root from the raw fs-root\n" .
+                "layout using the same preflight paths as flat-docroot. This is\n" .
+                "the staging counterpart to flat-docroot: it avoids Reprint layout\n" .
+                "symlinks so a later apply step can swap directories/files safely.\n" .
+                "\n" .
+                "Source symlinks are handled by --symlink-mode. The default,\n" .
+                "copy-target, copies the symlink target only when it stays inside\n" .
+                "--fs-root.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  reprint materialize-docroot --state-dir=./state --fs-root=./files \\\n" .
+                "    --materialize-to=./staged-site --force\n",
+        ],
+        "apply-staged-files" => [
+            "level" => "low",
+            "short" => "Apply staged plugins/themes and loose PHP files with a bounded journal",
+            "usage" => "reprint apply-staged-files --state-dir=DIR --staged-root=DIR --target-root=DIR [options]",
+            "description" =>
+                "Applies a materialized staging tree into a target document root.\n" .
+                "Uploads and fonts are copied before maintenance mode. Plugin\n" .
+                "and theme directories are prepared as .new trees, merged with\n" .
+                "live unselected files, and swapped through .bak. Loose top-level\n" .
+                "PHP files use the same .new/.bak pattern. The apply journal\n" .
+                "stores only the current operation and phase; resume inspects\n" .
+                "the filesystem to converge.\n" .
+                "\n" .
+                "This command is the shared apply primitive for future pull and\n" .
+                "push flows. It does not apply database changes.\n",
+            "extra" => null,
+        ],
         "apply-runtime" => [
             "level" => "low",
             "short" => "Generate server config and prepare the site to run locally",
@@ -14326,10 +15631,10 @@ if (
         exit(0);
     }
 
-    // apply-runtime and import-metadata don't need a remote URL. Other
+    // Local planning/materialization commands don't need a remote URL. Other
     // local-only commands (db-domains, db-apply, etc.) still accept it for
     // CLI consistency and backward compatibility with existing callers.
-    $local_only_commands = ["apply-runtime", "import-metadata"];
+    $local_only_commands = ["apply-runtime", "import-metadata", "files-plan", "materialize-docroot", "apply-staged-files"];
     $is_local_only = in_array($command, $local_only_commands, true);
 
     if ($is_local_only) {
@@ -14363,7 +15668,8 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$fs_root && !$flat_document_root && $command !== "import-metadata") {
+    $commands_without_fs_root = ["import-metadata", "apply-staged-files"];
+    if (!$fs_root && !$flat_document_root && !in_array($command, $commands_without_fs_root, true)) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);

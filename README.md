@@ -193,6 +193,50 @@ site's database constants for `db-apply`, and allows an explicit overwrite of a
 non-empty target document root. Studio should put a product confirmation and any
 selective intent UI in front of this before using it against a valuable site.
 
+#### Push planning and staged file apply primitives
+
+The relay transport above keeps the target importer in charge of export
+requests. The following local commands are the lower-level filesystem pieces
+Studio can use to show a dry-run and then apply files with a shorter maintenance
+window:
+
+```bash
+# 1. After files-index, print changed/unchanged/deleted files, policy, and
+#    optional target writability in a Studio-friendly JSON shape.
+php reprint.phar files-plan \
+  --state-dir=./state \
+  --fs-root=./files \
+  --target-root=/srv/htdocs \
+  --exclude='wp-admin/**'
+
+# 2. Reassemble the raw fs-root into a real-file WordPress layout. This uses
+#    the same preflight path data as flat-docroot, but writes files/directories
+#    instead of Reprint layout symlinks.
+php reprint.phar materialize-docroot \
+  --state-dir=./state \
+  --fs-root=./files \
+  --materialize-to=./staged-site
+
+# 3. Apply the staged tree to a target document root. Uploads/fonts are copied
+#    before maintenance mode. Plugin/theme directories are prepared as .new
+#    trees, merged with live unselected files, and swapped through .bak while
+#    maintenance mode is enabled. Top-level loose PHP files use the same
+#    .new/.bak swap.
+php reprint.phar apply-staged-files \
+  --state-dir=./state \
+  --staged-root=./staged-site \
+  --target-root=/srv/htdocs \
+  --maintenance-file=/srv/htdocs/.maintenance
+```
+
+`files-plan` blocks WordPress core files and `wp-config.php` by default and
+marks loose top-level PHP files as warnings. Pass `--allow-core-files` only when
+the host-specific caller has decided how to handle core upgrades. Deleted files
+are reported in the plan but are not selected by default yet because the staged
+file apply command does not delete target files. The staged apply journal stores
+only the current operation and phase, so interrupted runs can be resumed without
+writing one journal row per file.
+
 ## Composer packages
 
 The exporter and importer are published as separate Composer packages:
@@ -802,7 +846,10 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 * `import-metadata` — Prints local pull lifecycle metadata as JSON, including `hasCompletedOnce`. Requires only `--state-dir`; no network calls are made.
+* `files-plan` — Prints a structured JSON plan for changed files, WordPress-area policy, selected/default-excluded status, and optional target writability checks.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
+* `materialize-docroot` — Reassemble pulled files into a standard WordPress directory layout as real files/directories instead of symlinks.
+* `apply-staged-files` — Apply a materialized staging tree to a target document root using copy-first assets, .new/.bak plugin/theme swaps, top-level PHP swaps, a bounded apply journal, and optional maintenance mode.
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
 All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
