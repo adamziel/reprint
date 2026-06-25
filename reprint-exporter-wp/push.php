@@ -57,11 +57,16 @@ function _site_export_handle_push_api_request(array $options = []): void {
                 return;
 
             case 'response-body':
-                _site_export_push_send_json(_site_export_push_store_response_body(
+                $body_file = _site_export_push_request_body_file('body');
+                $response = _site_export_push_store_response_body(
                     _site_export_push_require_session_id(),
                     _site_export_push_require_request_id(),
-                    _site_export_push_uploaded_file('body')
-                ));
+                    $body_file['path']
+                );
+                if ($body_file['cleanup']) {
+                    @unlink($body_file['path']);
+                }
+                _site_export_push_send_json($response);
                 return;
 
             case 'response':
@@ -132,6 +137,42 @@ function _site_export_push_uploaded_file(string $name): string {
         }
     }
     return $tmp_name;
+}
+
+function _site_export_push_request_body_file(string $name): array {
+    if (!empty($_FILES[$name]) && is_array($_FILES[$name])) {
+        return [
+            'path' => _site_export_push_uploaded_file($name),
+            'cleanup' => false,
+        ];
+    }
+
+    $tmp_file = tempnam(sys_get_temp_dir(), 'reprint-push-body-');
+    if ($tmp_file === false) {
+        throw new RuntimeException('Cannot create temporary relay response body.');
+    }
+
+    $input = fopen('php://input', 'rb');
+    $output = fopen($tmp_file, 'wb');
+    if (!is_resource($input) || !is_resource($output)) {
+        if (is_resource($input)) {
+            fclose($input);
+        }
+        if (is_resource($output)) {
+            fclose($output);
+        }
+        @unlink($tmp_file);
+        throw new RuntimeException('Cannot read relay response body.');
+    }
+
+    stream_copy_to_stream($input, $output);
+    fclose($input);
+    fclose($output);
+
+    return [
+        'path' => $tmp_file,
+        'cleanup' => true,
+    ];
 }
 
 function _site_export_push_create_session(array $payload): array {

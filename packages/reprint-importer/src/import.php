@@ -10108,10 +10108,11 @@ class ImportClient
             throw new RuntimeException("Relay response body missing: {$body_file}");
         }
 
-        $content_hash = hash_file('sha256', $body_file);
-        if ($content_hash === false) {
-            throw new RuntimeException("Cannot hash relay response body: {$body_file}");
+        $body = file_get_contents($body_file);
+        if ($body === false) {
+            throw new RuntimeException("Cannot read relay response body: {$body_file}");
         }
+        $content_hash = hash('sha256', $body);
         $nonce = $this->relay_hmac_client->generate_nonce();
         $timestamp = $this->relay_hmac_client->get_timestamp();
         $signature = $this->relay_hmac_client->compute_signature($nonce, $timestamp, $content_hash);
@@ -10124,11 +10125,10 @@ class ImportClient
             CURLOPT_TIMEOUT => 300,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => [
-                'body' => new \CURLFile($body_file, 'application/octet-stream', basename($body_file)),
-            ],
+            CURLOPT_POSTFIELDS => $body,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
+                'Content-Type: application/octet-stream',
                 "X-Auth-Signature: {$signature}",
                 "X-Auth-Nonce: {$nonce}",
                 "X-Auth-Timestamp: {$timestamp}",
