@@ -961,6 +961,8 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
+    private const SQLITE_DB_APPLY_BATCH_SIZE = 500;
+    private const SQLITE_DB_APPLY_PROGRESS_TABLE = '_reprint_db_apply_progress';
 
     /**
      * Maximum number of consecutive cURL timeouts with no cursor progress
@@ -5163,7 +5165,7 @@ class ImportClient
         $apply_state = $this->state["apply"] ?? $this->default_state()["apply"];
         $statements_executed = (int) ($apply_state["statements_executed"] ?? 0);
         $bytes_read = (int) ($apply_state["bytes_read"] ?? 0);
-        $is_resume = $current_status === "in_progress" && $statements_executed > 0;
+        $is_resume = in_array($current_status, ["in_progress", "partial"], true);
 
         if ($is_resume) {
             $this->audit_log(
@@ -5255,6 +5257,101 @@ class ImportClient
             false,
         );
 
+        $sqlite_write_marker = static function (int $statement_count, int $byte_offset): void {
+        };
+        $sqlite_read_marker = static function (): ?array {
+            return null;
+        };
+
+        if ($sqlite_prepared_pdo !== null) {
+            $sqlite_progress_table = '"' . str_replace('"', '""', self::SQLITE_DB_APPLY_PROGRESS_TABLE) . '"';
+            $sqlite_prepared_pdo->exec(
+                "CREATE TABLE IF NOT EXISTS {$sqlite_progress_table} (" .
+                "id INTEGER PRIMARY KEY CHECK (id = 1), " .
+                "statements_executed INTEGER NOT NULL, " .
+                "bytes_read INTEGER NOT NULL, " .
+                "updated_at TEXT NOT NULL" .
+                ")"
+            );
+
+            $sqlite_marker_statement = null;
+            $sqlite_write_marker = static function (
+                int $statement_count,
+                int $byte_offset
+            ) use ($sqlite_prepared_pdo, $sqlite_progress_table, &$sqlite_marker_statement): void {
+                if (!$sqlite_marker_statement instanceof PDOStatement) {
+                    $sqlite_marker_statement = $sqlite_prepared_pdo->prepare(
+                        "INSERT INTO {$sqlite_progress_table} (id, statements_executed, bytes_read, updated_at) " .
+                        "VALUES (1, :statements_executed, :bytes_read, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) " .
+                        "ON CONFLICT(id) DO UPDATE SET " .
+                        "statements_executed = excluded.statements_executed, " .
+                        "bytes_read = excluded.bytes_read, " .
+                        "updated_at = excluded.updated_at"
+                    );
+                    if (!$sqlite_marker_statement instanceof PDOStatement) {
+                        throw new RuntimeException('Failed to prepare SQLite db-apply progress marker statement.');
+                    }
+                }
+
+                $sqlite_marker_statement->bindValue(':statements_executed', $statement_count, PDO::PARAM_INT);
+                $sqlite_marker_statement->bindValue(':bytes_read', $byte_offset, PDO::PARAM_INT);
+                if ($sqlite_marker_statement->execute() === false) {
+                    throw new RuntimeException('Failed to update SQLite db-apply progress marker.');
+                }
+                $sqlite_marker_statement->closeCursor();
+            };
+
+            $sqlite_read_marker = static function () use ($sqlite_prepared_pdo, $sqlite_progress_table): ?array {
+                $row = $sqlite_prepared_pdo
+                    ->query("SELECT statements_executed, bytes_read FROM {$sqlite_progress_table} WHERE id = 1")
+                    ->fetch(PDO::FETCH_ASSOC);
+                if (!is_array($row)) {
+                    return null;
+                }
+
+                return [
+                    "statements_executed" => (int) $row["statements_executed"],
+                    "bytes_read" => (int) $row["bytes_read"],
+                ];
+            };
+
+            $marker = $sqlite_read_marker();
+            if ($is_resume && $marker !== null) {
+                if (
+                    $marker["statements_executed"] !== $statements_executed ||
+                    $marker["bytes_read"] !== $bytes_read
+                ) {
+                    $this->audit_log(
+                        sprintf(
+                            "SQLite db-apply progress reconciled | json_statements=%d | json_bytes=%d | marker_statements=%d | marker_bytes=%d",
+                            $statements_executed,
+                            $bytes_read,
+                            $marker["statements_executed"],
+                            $marker["bytes_read"],
+                        ),
+                        true,
+                    );
+                }
+                $statements_executed = $marker["statements_executed"];
+                $bytes_read = $marker["bytes_read"];
+                $this->state["apply"]["statements_executed"] = $statements_executed;
+                $this->state["apply"]["bytes_read"] = $bytes_read;
+                $this->save_state($this->state);
+            } elseif ($is_resume && ($statements_executed > 0 || $bytes_read > 0)) {
+                $sqlite_write_marker($statements_executed, $bytes_read);
+                $this->audit_log(
+                    sprintf(
+                        "SQLite db-apply progress marker initialized from JSON state | statements=%d | bytes_read=%d",
+                        $statements_executed,
+                        $bytes_read,
+                    ),
+                    true,
+                );
+            } else {
+                $sqlite_write_marker(0, 0);
+            }
+        }
+
         // Stream db.sql through the query stream and execute. Use the
         // fast strcspn-based parser by default; it self-falls-back to
         // WP_MySQL_Naive_Query_Stream if it ever fails to make progress
@@ -5287,9 +5384,12 @@ class ImportClient
         $sql_file_size = filesize($sql_file);
         $total_bytes_read = 0;
         $stmt_count = 0;
-        $skipped = 0;
         $save_every = 100;
         $stmts_since_save = 0;
+        $stmts_since_progress = 0;
+        $last_executed_bytes_read = $bytes_read;
+        $sqlite_batch_active = false;
+        $sqlite_batch_statements = 0;
 
         // Load pre-computed statement count from db-pull for progress reporting
         $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
@@ -5323,6 +5423,193 @@ class ImportClient
             "message" => "Applying SQL" . ($statements_total !== null ? " ({$statements_total} statements)" : ""),
         ]);
 
+        $save_apply_state = function (int $statement_count, int $byte_offset, ?string $status = null): void {
+            $this->state["apply"]["statements_executed"] = $statement_count;
+            $this->state["apply"]["bytes_read"] = $byte_offset;
+            if ($status !== null) {
+                $this->state["status"] = $status;
+            }
+            $this->save_state($this->state);
+        };
+
+        $emit_apply_progress = function () use (&$total_bytes_read, $sql_file_size, &$statements_executed, $statements_total): void {
+            $apply_fraction = $sql_file_size > 0
+                ? $total_bytes_read / $sql_file_size
+                : null;
+            $pct = $apply_fraction !== null ? round($apply_fraction * 100, 1) : 0;
+
+            $progress_message = sprintf(
+                "%s statements",
+                $statements_total === null
+                    ? number_format($statements_executed)
+                    : number_format($statements_executed) . " / " . number_format($statements_total),
+            );
+
+            $this->output_progress([
+                "phase" => "db-apply",
+                "statements_executed" => $statements_executed,
+                "bytes_read" => $total_bytes_read,
+                "bytes_total" => $sql_file_size,
+                "pct" => $pct,
+                "statements_total" => $statements_total,
+                "message" => $progress_message,
+            ]);
+
+            $this->progress->show_progress_line($progress_message, $apply_fraction);
+        };
+
+        $sqlite_skips_own_transaction_control = static function (string $query): bool {
+            $first_non_space = strspn($query, " \t\r\n\f\v");
+            if ($first_non_space >= strlen($query)) {
+                return false;
+            }
+
+            // Imports are mostly INSERTs. Only statements that could be a
+            // transaction/locking command, or a comment before one, pay for
+            // tokenization here.
+            $first_byte = $query[$first_non_space];
+            if (
+                stripos('BCSLRU', $first_byte) === false &&
+                $first_byte !== '/' &&
+                $first_byte !== '-' &&
+                $first_byte !== '#'
+            ) {
+                return false;
+            }
+
+            $tokens = [];
+            $lexer = new \WP_MySQL_Lexer($query);
+            while ($lexer->next_token()) {
+                $token = $lexer->get_token();
+                if (
+                    $token->id === \WP_MySQL_Lexer::WHITESPACE ||
+                    $token->id === \WP_MySQL_Lexer::COMMENT ||
+                    $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_START ||
+                    $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_END ||
+                    $token->id === \WP_MySQL_Lexer::EOF
+                ) {
+                    continue;
+                }
+
+                // Versioned MySQL comments lex their version tag before the
+                // executable statement, e.g. /*!40101 COMMIT */.
+                if (empty($tokens) && $first_byte === '/' && $token->id === \WP_MySQL_Lexer::INT_NUMBER) {
+                    continue;
+                }
+
+                $tokens[] = $token->id;
+                if (count($tokens) >= 2) {
+                    break;
+                }
+            }
+
+            $first_token = $tokens[0] ?? null;
+            if ($first_token === \WP_MySQL_Lexer::START_SYMBOL) {
+                return ($tokens[1] ?? null) === \WP_MySQL_Lexer::TRANSACTION_SYMBOL;
+            }
+
+            return in_array($first_token, [
+                \WP_MySQL_Lexer::BEGIN_SYMBOL,
+                \WP_MySQL_Lexer::COMMIT_SYMBOL,
+                \WP_MySQL_Lexer::ROLLBACK_SYMBOL,
+                \WP_MySQL_Lexer::LOCK_SYMBOL,
+                \WP_MySQL_Lexer::UNLOCK_SYMBOL,
+                \WP_MySQL_Lexer::SAVEPOINT_SYMBOL,
+                \WP_MySQL_Lexer::RELEASE_SYMBOL,
+            ], true);
+        };
+
+        $process_db_apply_query = function (string $query) use (
+            $pdo,
+            $stmt_rewriter,
+            &$sqlite_prepared_pdo,
+            &$sqlite_prepared_statement_cache,
+            &$sqlite_prepared_statement_cache_order,
+            $sqlite_write_marker,
+            &$sqlite_batch_active,
+            &$sqlite_batch_statements,
+            &$statements_executed,
+            &$last_executed_bytes_read,
+            &$stmts_since_save,
+            &$stmts_since_progress,
+            $save_every,
+            $query_stream,
+            $seek_offset,
+            $save_apply_state,
+            $emit_apply_progress,
+            $sqlite_skips_own_transaction_control,
+            &$stmt_count
+        ): void {
+            $query_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+
+            if ($sqlite_prepared_pdo !== null && !$sqlite_batch_active) {
+                $pdo->beginTransaction();
+                $sqlite_batch_active = true;
+            }
+
+            $executed_query = $query;
+            try {
+                // The SQLite wrapper batch owns transaction durability. MySQL
+                // dump transaction-control statements would otherwise commit
+                // the wrapper transaction without advancing the in-db marker.
+                if (
+                    $sqlite_prepared_pdo === null ||
+                    !$sqlite_skips_own_transaction_control($query)
+                ) {
+                    $this->execute_db_apply_query(
+                        $pdo,
+                        $query,
+                        $stmt_rewriter,
+                        $sqlite_prepared_pdo,
+                        $sqlite_prepared_statement_cache,
+                        $sqlite_prepared_statement_cache_order,
+                        $executed_query,
+                    );
+                }
+            } catch (PDOException $e) {
+                $this->audit_log(
+                    sprintf(
+                        "SQL ERROR | stmt=%d | %s | query=%.200s",
+                        $stmt_count,
+                        $e->getMessage(),
+                        $executed_query,
+                    ),
+                    true,
+                );
+                throw new RuntimeException(
+                    "SQL execution error at statement {$stmt_count}: " .
+                    $e->getMessage(),
+                );
+            }
+
+            $statements_executed++;
+            $last_executed_bytes_read = $query_bytes_read;
+            $stmts_since_progress++;
+
+            if ($sqlite_prepared_pdo !== null) {
+                $sqlite_batch_statements++;
+                if ($sqlite_batch_statements >= self::SQLITE_DB_APPLY_BATCH_SIZE) {
+                    $sqlite_write_marker($statements_executed, $last_executed_bytes_read);
+                    $pdo->commit();
+                    $sqlite_batch_active = false;
+                    $sqlite_batch_statements = 0;
+                    $save_apply_state($statements_executed, $last_executed_bytes_read);
+                    $stmts_since_save = 0;
+                }
+            } else {
+                $stmts_since_save++;
+                if ($stmts_since_save >= $save_every) {
+                    $save_apply_state($statements_executed, $last_executed_bytes_read);
+                    $stmts_since_save = 0;
+                }
+            }
+
+            if ($stmts_since_progress >= $save_every) {
+                $emit_apply_progress();
+                $stmts_since_progress = 0;
+            }
+        };
+
         try {
             $chunk_size = 64 * 1024; // 64KB read chunks
 
@@ -5350,76 +5637,11 @@ class ImportClient
                     // Skip already-executed statements on resume
                     if ($stmts_to_skip > 0) {
                         $stmts_to_skip--;
+                        $last_executed_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
                         continue;
                     }
 
-                    // Execute against target database
-                    $executed_query = $query;
-                    try {
-                        $this->execute_db_apply_query(
-                            $pdo,
-                            $query,
-                            $stmt_rewriter,
-                            $sqlite_prepared_pdo,
-                            $sqlite_prepared_statement_cache,
-                            $sqlite_prepared_statement_cache_order,
-                            $executed_query,
-                        );
-                    } catch (PDOException $e) {
-                        $this->audit_log(
-                            sprintf(
-                                "SQL ERROR | stmt=%d | %s | query=%.200s",
-                                $stmt_count,
-                                $e->getMessage(),
-                                $executed_query,
-                            ),
-                            true,
-                        );
-                        throw new RuntimeException(
-                            "SQL execution error at statement {$stmt_count}: " .
-                            $e->getMessage(),
-                        );
-                    }
-
-                    $statements_executed++;
-                    $stmts_since_save++;
-
-                    // Save state periodically. bytes_read is the file offset
-                    // right after the last extracted query — NOT total_bytes_read,
-                    // which includes bytes buffered in the query stream that haven't
-                    // formed a complete query yet. This ensures resumption starts at
-                    // the exact boundary between executed and un-executed queries.
-                    if ($stmts_since_save >= $save_every) {
-                        $this->state["apply"]["statements_executed"] = $statements_executed;
-                        $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                        $this->save_state($this->state);
-                        $stmts_since_save = 0;
-
-                        // Progress output
-                        $apply_fraction = $sql_file_size > 0
-                            ? $total_bytes_read / $sql_file_size
-                            : null;
-                        $pct = $apply_fraction !== null ? round($apply_fraction * 100, 1) : 0;
-
-                        $progress_message = sprintf(
-                            "%s statements",
-                            $statements_total === null
-                                ? number_format($statements_executed)
-                                : number_format($statements_executed) . " / " . number_format($statements_total),
-                        );
-
-                        $this->output_progress([
-                            "phase" => "db-apply",
-                            "statements_executed" => $statements_executed,
-                            "bytes_read" => $total_bytes_read,
-                            "bytes_total" => $sql_file_size,
-                            "pct" => $pct,
-                            "statements_total" => $statements_total,
-                            "message" => $progress_message,
-                        ]);
-
-                        $this->progress->show_progress_line($progress_message, $apply_fraction);
-                    }
+                    $process_db_apply_query($query);
                 }
             }
 
@@ -5431,45 +5653,25 @@ class ImportClient
 
                 if ($stmts_to_skip > 0) {
                     $stmts_to_skip--;
+                    $last_executed_bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
                     continue;
                 }
 
-                $executed_query = $query;
-                try {
-                    $this->execute_db_apply_query(
-                        $pdo,
-                        $query,
-                        $stmt_rewriter,
-                        $sqlite_prepared_pdo,
-                        $sqlite_prepared_statement_cache,
-                        $sqlite_prepared_statement_cache_order,
-                        $executed_query,
-                    );
-                } catch (PDOException $e) {
-                    $this->audit_log(
-                        sprintf(
-                            "SQL ERROR | stmt=%d | %s | query=%.200s",
-                            $stmt_count,
-                            $e->getMessage(),
-                            $executed_query,
-                        ),
-                        true,
-                    );
-                    throw new RuntimeException(
-                        "SQL execution error at statement {$stmt_count}: " .
-                        $e->getMessage(),
-                    );
-                }
+                $process_db_apply_query($query);
+            }
 
-                $statements_executed++;
+            if ($sqlite_prepared_pdo !== null && $sqlite_batch_active) {
+                $sqlite_write_marker($statements_executed, $last_executed_bytes_read);
+                $pdo->commit();
+                $sqlite_batch_active = false;
+                $sqlite_batch_statements = 0;
+                $save_apply_state($statements_executed, $last_executed_bytes_read);
+                $stmts_since_save = 0;
             }
 
             if ($this->shutdown_requested) {
                 // Save partial progress
-                $this->state["apply"]["statements_executed"] = $statements_executed;
-                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                $this->state["status"] = "partial";
-                $this->save_state($this->state);
+                $save_apply_state($statements_executed, $last_executed_bytes_read, "partial");
                 $this->audit_log(
                     sprintf(
                         "PARTIAL db-apply | %d statements executed",
@@ -5511,10 +5713,7 @@ class ImportClient
                 }
 
                 // Mark complete
-                $this->state["apply"]["statements_executed"] = $statements_executed;
-                $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                $this->state["status"] = "complete";
-                $this->save_state($this->state);
+                $save_apply_state($statements_executed, $last_executed_bytes_read, "complete");
 
                 $this->audit_log(
                     sprintf(
@@ -5538,6 +5737,17 @@ class ImportClient
                 }
                 $this->progress->show_lifecycle_line("db-apply complete ({$statements_executed} statements executed)\n");
             }
+        } catch (Throwable $e) {
+            if ($sqlite_prepared_pdo !== null && $sqlite_batch_active) {
+                try {
+                    $pdo->rollBack();
+                } catch (Throwable $_) {
+                    // The wrapper may already have rolled back after an execution error.
+                }
+                $sqlite_batch_active = false;
+                $sqlite_batch_statements = 0;
+            }
+            throw $e;
         } finally {
             fclose($sql_handle);
         }
