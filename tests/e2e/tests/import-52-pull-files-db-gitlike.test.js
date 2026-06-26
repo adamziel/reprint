@@ -106,20 +106,20 @@ describe('Import: pull-files git-pull-like sync', { timeout: 300000 }, () => {
     });
 
     it('re-running pull-files after remote changes updates, adds, and deletes files', () => {
-        writeRemoteFile('test-data/pull-files/marker.txt', 'round-2\n');
+        writeRemoteFile('test-data/pull-files/marker.txt', 'round-2 with changed size\n');
         writeRemoteFile('test-data/pull-files/added-after-first.txt', 'added in round 2\n');
         removeRemoteFile('test-data/pull-files/removed-after-first.txt');
 
         runPullFiles();
 
-        assert.equal(readFileSync(localPath('test-data/pull-files/marker.txt'), 'utf-8'), 'round-2\n');
+        assert.equal(readFileSync(localPath('test-data/pull-files/marker.txt'), 'utf-8'), 'round-2 with changed size\n');
         assert.equal(readFileSync(localPath('test-data/pull-files/added-after-first.txt'), 'utf-8'), 'added in round 2\n');
         assert.ok(!existsSync(localPath('test-data/pull-files/removed-after-first.txt')),
             'pull-files should delete files removed from the remote source');
     });
 
     it('an interrupted pull-files does not corrupt a later full pull', async () => {
-        writeRemoteFile('test-data/pull-files/marker.txt', 'round-3\n');
+        writeRemoteFile('test-data/pull-files/marker.txt', 'round-3 after interruption\n');
         writeHookState(site, { scan_count: 0 });
         writeTestHooks(site, [
             'function test_hook_during_dir_scan($dir, &$entries) {',
@@ -175,7 +175,7 @@ describe('Import: pull-files git-pull-like sync', { timeout: 300000 }, () => {
 
             const state = readJson(join(tempDir, '.import-state.json'));
             assert.equal(state.pull.stage, 'complete');
-            assert.equal(readFileSync(localPath('test-data/pull-files/marker.txt'), 'utf-8'), 'round-3\n');
+            assert.equal(readFileSync(localPath('test-data/pull-files/marker.txt'), 'utf-8'), 'round-3 after interruption\n');
         } finally {
             const cleanup = await createMysqlConnection();
             await cleanup.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
