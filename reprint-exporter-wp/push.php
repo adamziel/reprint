@@ -393,7 +393,8 @@ function _site_export_push_create_session(array $payload): array {
 }
 
 function _site_export_push_run_session(string $session_id): array {
-    $run_lock = _site_export_push_acquire_lock(_site_export_push_session_dir($session_id) . '/run.lock', false);
+    $session_dir = _site_export_push_session_dir($session_id);
+    $run_lock = _site_export_push_acquire_lock($session_dir . '/run.lock', false);
     if ($run_lock === null) {
         _site_export_push_mutate_session($session_id, function (array $session): array {
             if (($session['status'] ?? '') !== 'running' && ($session['status'] ?? '') !== 'aborted') {
@@ -411,7 +412,7 @@ function _site_export_push_run_session(string $session_id): array {
                 $session['status'] = 'running';
                 $session['started_at'] = $session['started_at'] ?? gmdate('c');
                 $session['updated_at'] = gmdate('c');
-                unset($session['error']);
+                unset($session['error'], $session['import_status_snapshot']);
             }
             return $session;
         });
@@ -419,46 +420,79 @@ function _site_export_push_run_session(string $session_id): array {
             return _site_export_push_session_status($session_id);
         }
 
+        $target_fs_root = _site_export_push_target_fs_root();
+        $import_options = _site_export_push_import_options($session, $session_dir);
+        $import_state_id = _site_export_push_import_state_id($session, $import_options, $target_fs_root);
+        $import_state_dir = _site_export_push_import_state_dir($import_state_id);
+        _site_export_push_ensure_dir($import_state_dir);
+        _site_export_push_mutate_session($session_id, function (array $session) use ($import_state_id): array {
+            $session['import_state_id'] = $import_state_id;
+            $session['updated_at'] = gmdate('c');
+            return $session;
+        });
+
+        $state_lock = null;
         try {
+            $state_lock = _site_export_push_acquire_lock($import_state_dir . '/state.lock', false);
+            if ($state_lock === null) {
+                throw new RuntimeException('Another push session is already using this target import state.');
+            }
+            @unlink($import_state_dir . '/.import-status.json');
+
             $output_buffer_started = ob_start();
             try {
                 _site_export_push_load_importer_runtime();
                 _site_export_push_define_importer_streams();
 
-                $session_dir = _site_export_push_session_dir($session_id);
                 $client = new ImportClient(
                     (string) $session['source_url'],
-                    $session_dir . '/import',
-                    _site_export_push_target_fs_root()
+                    $import_state_dir,
+                    $target_fs_root
                 );
-                $client->run(_site_export_push_import_options($session, $session_dir));
+                $client->run($import_options);
             } finally {
                 if ($output_buffer_started) {
                     ob_end_clean();
                 }
             }
 
-            $run_result = _site_export_push_importer_run_result($session_dir, (int) $client->exit_code);
-            _site_export_push_mutate_session($session_id, function (array $session) use ($run_result): array {
-                if (($session['status'] ?? '') !== 'aborted') {
-                    $session['status'] = $run_result['status'];
-                    if (isset($run_result['error'])) {
-                        $session['error'] = $run_result['error'];
+            $run_result = _site_export_push_importer_run_result($import_state_dir, (int) $client->exit_code);
+            $import_status_snapshot = _site_export_push_read_import_status($import_state_dir);
+            _site_export_push_mutate_session(
+                $session_id,
+                function (array $session) use ($run_result, $import_status_snapshot): array {
+                    if (($session['status'] ?? '') !== 'aborted') {
+                        $session['status'] = $run_result['status'];
+                        if (isset($run_result['error'])) {
+                            $session['error'] = $run_result['error'];
+                        }
+                        if ($import_status_snapshot !== null) {
+                            $session['import_status_snapshot'] = $import_status_snapshot;
+                        }
+                        $session['completed_at'] = gmdate('c');
+                        $session['updated_at'] = gmdate('c');
                     }
-                    $session['completed_at'] = gmdate('c');
-                    $session['updated_at'] = gmdate('c');
+                    return $session;
                 }
-                return $session;
-            });
+            );
         } catch (Throwable $e) {
-            _site_export_push_mutate_session($session_id, function (array $session) use ($e): array {
-                if (($session['status'] ?? '') !== 'aborted') {
-                    $session['status'] = 'error';
-                    $session['error'] = $e->getMessage();
-                    $session['updated_at'] = gmdate('c');
+            $import_status_snapshot = _site_export_push_read_import_status($import_state_dir);
+            _site_export_push_mutate_session(
+                $session_id,
+                function (array $session) use ($e, $import_status_snapshot): array {
+                    if (($session['status'] ?? '') !== 'aborted') {
+                        $session['status'] = 'error';
+                        $session['error'] = $e->getMessage();
+                        if ($import_status_snapshot !== null) {
+                            $session['import_status_snapshot'] = $import_status_snapshot;
+                        }
+                        $session['updated_at'] = gmdate('c');
+                    }
+                    return $session;
                 }
-                return $session;
-            });
+            );
+        } finally {
+            _site_export_push_release_lock($state_lock);
         }
     } finally {
         _site_export_push_release_lock($run_lock);
@@ -467,7 +501,7 @@ function _site_export_push_run_session(string $session_id): array {
     return _site_export_push_session_status($session_id);
 }
 
-function _site_export_push_importer_run_result(string $session_dir, int $exit_code): array {
+function _site_export_push_importer_run_result(string $import_state_dir, int $exit_code): array {
     if ($exit_code === 0) {
         return ['status' => 'complete'];
     }
@@ -476,9 +510,8 @@ function _site_export_push_importer_run_result(string $session_dir, int $exit_co
     }
 
     $error = "Reprint Importer exited with code {$exit_code}.";
-    $status_file = $session_dir . '/import/.import-status.json';
-    if (is_file($status_file)) {
-        $import_status = _site_export_push_read_json_file($status_file);
+    $import_status = _site_export_push_read_import_status($import_state_dir);
+    if ($import_status !== null) {
         foreach (['error', 'message'] as $key) {
             if (!empty($import_status[$key]) && is_string($import_status[$key])) {
                 $error = $import_status[$key];
@@ -703,10 +736,14 @@ function _site_export_push_abort_session(string $session_id): array {
 function _site_export_push_session_status(string $session_id): array {
     $session = _site_export_push_read_session($session_id);
     $session_dir = _site_export_push_session_dir($session_id);
+    $terminal = in_array($session['status'] ?? '', ['complete', 'partial', 'error', 'aborted'], true);
     $import_status = null;
-    $status_file = $session_dir . '/import/.import-status.json';
-    if (is_file($status_file)) {
-        $import_status = _site_export_push_read_json_file($status_file);
+    if ($terminal && isset($session['import_status_snapshot']) && is_array($session['import_status_snapshot'])) {
+        $import_status = $session['import_status_snapshot'];
+    } else {
+        $import_status = _site_export_push_read_import_status(
+            _site_export_push_import_state_dir_for_session($session, $session_dir)
+        );
     }
 
     return [
@@ -719,6 +756,68 @@ function _site_export_push_session_status(string $session_id): array {
             'responses' => count(glob($session_dir . '/relay/responses/*.json') ?: []),
         ],
     ];
+}
+
+function _site_export_push_import_state_id(array $session, array $import_options, string $target_fs_root): string {
+    // The persistent import state is scoped to the source/target relationship,
+    // not to a single relay session. Per-run controls such as relay_dir,
+    // relay_timeout, and only are intentionally omitted: --only already uses
+    // pull's selected-file diff/delete guards against the shared file index.
+    $state_options = [];
+    foreach ([
+        'deactivate_host_plugins',
+        'filter',
+        'follow_symlinks',
+        'fs_root_nonempty_behavior',
+        'include_caches',
+        'new_site_url',
+        'old_site_url',
+        'remap',
+        'skip_create_table',
+        'target_db',
+        'target_engine',
+        'target_host',
+        'target_port',
+        'target_sqlite_path',
+        'target_user',
+    ] as $key) {
+        if (array_key_exists($key, $import_options)) {
+            $state_options[$key] = $import_options[$key];
+        }
+    }
+
+    $scope = [
+        'version' => 1,
+        'source_url' => (string) ($session['source_url'] ?? ''),
+        'target_fs_root' => $target_fs_root,
+        'options' => $state_options,
+    ];
+    $json = json_encode($scope, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    if ($json === false) {
+        throw new RuntimeException('Cannot encode push import state scope.');
+    }
+
+    return substr(hash('sha256', $json), 0, 32);
+}
+
+function _site_export_push_import_state_dir(string $import_state_id): string {
+    return _site_export_push_base_dir() . '/states/' .
+        _site_export_push_validate_id($import_state_id, 'import_state_id');
+}
+
+function _site_export_push_import_state_dir_for_session(array $session, string $session_dir): string {
+    if (!empty($session['import_state_id']) && is_string($session['import_state_id'])) {
+        return _site_export_push_import_state_dir($session['import_state_id']);
+    }
+    return $session_dir . '/import';
+}
+
+function _site_export_push_read_import_status(string $import_state_dir): ?array {
+    $status_file = rtrim($import_state_dir, '/') . '/.import-status.json';
+    if (!is_file($status_file)) {
+        return null;
+    }
+    return _site_export_push_read_json_file($status_file);
 }
 
 function _site_export_push_import_options(array $session, string $session_dir): array {

@@ -283,22 +283,85 @@ final class SiteExportPushSessionTest extends TestCase
         $this->assertSame('running', $status['session']['status']);
     }
 
-    public function testImporterFailureExitCodeMarksSessionErrorFromImportStatus(): void
+    public function testImportStateIdIgnoresRelayAndOnlySelection(): void
+    {
+        $session = [
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'pull',
+            'options' => ['only' => [':wp-content:/themes'], 'relay_timeout' => 1],
+        ];
+        $sameSession = $session;
+        $sameSession['options'] = ['only' => [':wp-content:/plugins'], 'relay_timeout' => 99];
+
+        $first = _site_export_push_import_options($session, SITE_EXPORT_PUSH_BASE_DIR . '/session-a');
+        $second = _site_export_push_import_options($sameSession, SITE_EXPORT_PUSH_BASE_DIR . '/session-b');
+
+        $this->assertNotSame($first['relay_dir'], $second['relay_dir']);
+        $this->assertSame(
+            _site_export_push_import_state_id($session, $first, '/srv/target'),
+            _site_export_push_import_state_id($sameSession, $second, '/srv/target'),
+        );
+
+        $changed = $first;
+        $changed['remap'] = [['/source', '/other-target']];
+        $this->assertNotSame(
+            _site_export_push_import_state_id($session, $first, '/srv/target'),
+            _site_export_push_import_state_id($session, $changed, '/srv/target'),
+        );
+    }
+
+    public function testSessionStatusReadsPersistentImportStateAndKeepsTerminalSnapshot(): void
     {
         $created = _site_export_push_create_session([
             'source_url' => 'http://local.test/?reprint-api',
         ]);
-        $sessionDir = _site_export_push_session_dir($created['session_id']);
-        _site_export_push_write_json_file($sessionDir . '/import/.import-status.json', [
+        $sessionId = $created['session_id'];
+        $stateId = str_repeat('a', 32);
+        $stateDir = _site_export_push_import_state_dir($stateId);
+        _site_export_push_write_json_file($stateDir . '/.import-status.json', [
+            'status' => 'running',
+            'command' => 'files-pull',
+        ]);
+        _site_export_push_mutate_session($sessionId, function (array $session) use ($stateId): array {
+            $session['status'] = 'running';
+            $session['import_state_id'] = $stateId;
+            return $session;
+        });
+
+        $running = _site_export_push_session_status($sessionId);
+        $this->assertSame('running', $running['import_status']['status']);
+
+        _site_export_push_mutate_session($sessionId, function (array $session): array {
+            $session['status'] = 'complete';
+            $session['import_status_snapshot'] = ['status' => 'complete', 'command' => 'db-apply'];
+            return $session;
+        });
+        _site_export_push_write_json_file($stateDir . '/.import-status.json', [
+            'status' => 'running',
+            'command' => 'files-pull',
+        ]);
+
+        $complete = _site_export_push_session_status($sessionId);
+        $this->assertSame('complete', $complete['import_status']['status']);
+        $this->assertSame('db-apply', $complete['import_status']['command']);
+    }
+
+    public function testImporterFailureExitCodeMarksSessionErrorFromImportStatus(): void
+    {
+        _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $stateDir = SITE_EXPORT_PUSH_BASE_DIR . '/state-result';
+        _site_export_push_write_json_file($stateDir . '/.import-status.json', [
             'status' => 'error',
             'error' => 'Preflight failed',
         ]);
 
-        $this->assertSame(['status' => 'complete'], _site_export_push_importer_run_result($sessionDir, 0));
-        $this->assertSame(['status' => 'partial'], _site_export_push_importer_run_result($sessionDir, 2));
+        $this->assertSame(['status' => 'complete'], _site_export_push_importer_run_result($stateDir, 0));
+        $this->assertSame(['status' => 'partial'], _site_export_push_importer_run_result($stateDir, 2));
         $this->assertSame(
             ['status' => 'error', 'error' => 'Preflight failed'],
-            _site_export_push_importer_run_result($sessionDir, 1)
+            _site_export_push_importer_run_result($stateDir, 1)
         );
     }
 
