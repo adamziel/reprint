@@ -8,7 +8,7 @@ import { describe, it, beforeEach, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
@@ -36,6 +36,10 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
         baseUrl = `http://127.0.0.1:${port}/`;
         server = spawn(PHP_BINARY, ['-S', `127.0.0.1:${port}`, join(tempDir, 'router.php')], {
             stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+                ...process.env,
+                PHP_CLI_SERVER_WORKERS: process.env.PHP_CLI_SERVER_WORKERS || '4',
+            },
         });
         server.stderr.on('data', (chunk) => {
             serverOutput += chunk.toString();
@@ -111,12 +115,25 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
         );
     });
 
-    async function createPluginSession() {
+    it('run endpoint authors relay requests fulfilled by the source worker', async () => {
+        const session = await createPluginSession({ command: 'preflight' });
+        const runPromise = callPushApi('run', { sessionId: session.session_id });
+
+        await waitForRelayRequest(session.session_id, runPromise);
+        runRelaySource(session.session_id);
+
+        const status = await runPromise;
+        assert.equal(status.session.status, 'complete');
+        assert.equal(status.import_status.status, 'complete');
+        assert.equal(status.relay.responses, 1);
+    });
+
+    async function createPluginSession({ command = 'pull', options = {} } = {}) {
         return await callPushApi('create', {
             body: {
                 source_url: `${baseUrl}?reprint-api`,
-                command: 'pull',
-                options: {},
+                command,
+                options,
             },
         });
     }
@@ -136,6 +153,31 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
         const responsePath = join(sessionDir(sessionId), 'relay', 'responses', `${requestId}.json`);
         assert.ok(existsSync(responsePath), `Expected plugin response metadata at ${responsePath}\n${serverOutput}`);
         return JSON.parse(readFileSync(responsePath, 'utf-8'));
+    }
+
+    async function waitForRelayRequest(sessionId, runPromise) {
+        const deadline = Date.now() + 5000;
+        const requestsDir = join(sessionDir(sessionId), 'relay', 'requests');
+        const processingDir = join(sessionDir(sessionId), 'relay', 'processing');
+        while (Date.now() < deadline) {
+            const hasRequest = [requestsDir, processingDir].some((dir) => {
+                return existsSync(dir) && readdirSync(dir).some((name) => name.endsWith('.json'));
+            });
+            if (hasRequest) {
+                return;
+            }
+            const runStatus = await Promise.race([
+                runPromise.then((status) => ({ status }), (error) => ({ error })),
+                new Promise((resolve) => setTimeout(() => resolve(null), 50)),
+            ]);
+            if (runStatus !== null) {
+                throw new Error(
+                    'Plugin run finished before authoring a relay request: ' +
+                    JSON.stringify(runStatus)
+                );
+            }
+        }
+        throw new Error(`Timed out waiting for a plugin-authored relay request\n${serverOutput}`);
     }
 
     function sessionDir(sessionId) {
@@ -182,7 +224,12 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
             body: body === undefined ? undefined : requestBody,
         });
         const text = await response.text();
-        const json = JSON.parse(text);
+        let json;
+        try {
+            json = JSON.parse(text);
+        } catch (error) {
+            throw new Error(`Invalid push API JSON from ${endpoint}: ${text}`);
+        }
         assert.equal(response.status, 200, text);
         assert.equal(json.ok, true, text);
         return json;

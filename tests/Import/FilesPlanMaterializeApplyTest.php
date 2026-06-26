@@ -319,6 +319,45 @@ class FilesPlanMaterializeApplyTest extends TestCase
         ]);
     }
 
+    public function testApplyStagedFilesRejectsResumeWhenComponentSelectionChanges(): void
+    {
+        $staged = $this->tempDir . '/staged-resume-component-changed';
+        $target = $this->tempDir . '/target-resume-component-changed';
+        mkdir($staged . '/wp-content/plugins/foo', 0755, true);
+        mkdir($target . '/wp-content/plugins/foo.new', 0755, true);
+        mkdir($target . '/wp-content/plugins/foo.bak', 0755, true);
+        file_put_contents($staged . '/wp-content/plugins/foo/a.php', 'new-a');
+        file_put_contents($staged . '/wp-content/plugins/foo/b.php', 'new-b');
+        file_put_contents($target . '/wp-content/plugins/foo.new/a.php', 'new-a');
+        file_put_contents($target . '/wp-content/plugins/foo.bak/a.php', 'old-a');
+        $journal = $this->stateDir . '/resume-component-changed-apply.json';
+        file_put_contents($journal, json_encode([
+            'phase' => 'swapping',
+            'operation' => [
+                'type' => 'swap_directory',
+                'source' => $staged . '/wp-content/plugins/foo',
+                'target' => $target . '/wp-content/plugins/foo',
+                'prepared' => $target . '/wp-content/plugins/foo.new',
+                'backup' => $target . '/wp-content/plugins/foo.bak',
+                'selected_paths_fingerprint' => hash('sha256', 'wp-content/plugins/foo/a.php'),
+            ],
+        ]));
+        $selected = $this->tempDir . '/resume-component-changed-selected.jsonl';
+        $this->writeSelectedManifest($selected, [
+            ['/var/www/html/wp-content/plugins/foo/b.php', 'wp-content/plugins/foo/b.php', 'update', 'file'],
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('journaled operation is not selected');
+        $this->runJsonCommand([
+            'command' => 'apply-staged-files',
+            'staged_root' => $staged,
+            'target_root' => $target,
+            'apply_journal' => $journal,
+            'selected_files' => $selected,
+        ]);
+    }
+
     public function testApplyStagedFilesRejectsSelectedDirectoriesAndUnsupportedPaths(): void
     {
         $staged = $this->tempDir . '/staged-reject';

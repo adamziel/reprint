@@ -2602,13 +2602,26 @@ class ImportClient
     {
         $entry = $this->import_state()->preflight ?? null;
         if ($entry === null) {
+            if (defined('IMPORTER_WEB_ENTRY') && IMPORTER_WEB_ENTRY) {
+                throw new RuntimeException("No preflight data available.");
+            }
             echo "No preflight data available.\n";
             exit(1);
         }
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
         echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
+        $this->state["command"] = "preflight";
+        $this->state["status"] = $ok ? "complete" : "error";
+        $this->state["stage"] = null;
+        $this->save_state($this->state);
         $this->write_status_file($ok ? null : "Preflight failed");
+        if (defined('IMPORTER_WEB_ENTRY') && IMPORTER_WEB_ENTRY) {
+            if (!$ok) {
+                $this->exit_code = 1;
+            }
+            return;
+        }
         exit($ok ? 0 : 1);
     }
 
@@ -5171,6 +5184,8 @@ class ImportClient
                 $paths = array_keys($component["paths"]);
                 sort($paths, SORT_STRING);
                 $operation["selected_relative_paths"] = $paths;
+                $operation["selected_paths_fingerprint"] =
+                    $this->selected_relative_paths_fingerprint($paths);
                 $operation["component_relative_path"] = $component_relative_path;
                 $operation["staged_root"] = $staged_root;
             }
@@ -5405,7 +5420,7 @@ class ImportClient
 
     private function apply_operation_matches_journal_operation(array $operation, array $journal_operation): bool
     {
-        foreach (["type", "source", "target", "prepared", "backup"] as $key) {
+        foreach (["type", "source", "target", "prepared", "backup", "selected_paths_fingerprint"] as $key) {
             if (($operation[$key] ?? null) !== ($journal_operation[$key] ?? null)) {
                 return false;
             }
@@ -5423,9 +5438,15 @@ class ImportClient
                 "target" => $operation["target"],
                 "prepared" => $operation["prepared"] ?? null,
                 "backup" => $operation["backup"] ?? null,
+                "selected_paths_fingerprint" => $operation["selected_paths_fingerprint"] ?? null,
             ],
             "updated_at" => gmdate("c"),
         ]);
+    }
+
+    private function selected_relative_paths_fingerprint(array $paths): string
+    {
+        return hash("sha256", implode("\0", $paths));
     }
 
     private function enter_apply_maintenance_mode(?string $maintenance_file): void

@@ -43,9 +43,12 @@ function _site_export_handle_push_api_request(array $options = []): void {
     try {
         $endpoint = isset($_GET['endpoint']) ? (string) $_GET['endpoint'] : '';
         if ($endpoint === 'response-body') {
+            $claimed_content_hash = _site_export_push_authenticate_claimed_content_hash($authenticate);
             $body_file = _site_export_push_request_body_file('body');
             try {
-                _site_export_push_authenticate_body_file($body_file['path'], $authenticate);
+                if ($claimed_content_hash !== null) {
+                    _site_export_push_verify_body_file_hash($body_file['path'], $claimed_content_hash);
+                }
                 _site_export_push_send_json(_site_export_push_store_response_body(
                     _site_export_push_require_session_id(),
                     _site_export_push_require_request_id(),
@@ -208,13 +211,24 @@ function _site_export_push_request_body_file(string $name): array {
     ];
 }
 
-function _site_export_push_authenticate_body_file(string $body_file, callable $authenticate): void {
+function _site_export_push_authenticate_claimed_content_hash(callable $authenticate): ?string {
     if ($authenticate !== '_site_export_default_authenticate') {
         $authenticate();
-        return;
+        return null;
     }
 
-    $content_hash = _site_export_push_hash_file_streaming($body_file);
+    $content_hash = _site_export_push_request_header('X-Auth-Content-Hash') ?? '';
+    _site_export_push_verify_content_hash($content_hash);
+    return $content_hash;
+}
+
+function _site_export_push_verify_body_file_hash(string $body_file, string $claimed_content_hash): void {
+    if (!hash_equals($claimed_content_hash, _site_export_push_hash_file_streaming($body_file))) {
+        _site_export_push_error(403, 'Content hash mismatch: body was modified in transit');
+    }
+}
+
+function _site_export_push_verify_content_hash(string $content_hash): void {
     if (!class_exists('Site_Export_HMAC_Server') && function_exists('_site_export_load_exporter_runtime')) {
         _site_export_load_exporter_runtime();
     }
@@ -225,6 +239,17 @@ function _site_export_push_authenticate_body_file(string $body_file, callable $a
         _site_export_push_error(503, 'Reprint Exporter authentication runtime is incomplete.');
     }
 
+    $secret = _site_export_push_shared_secret();
+    $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+    $auth_error = method_exists($server, 'verify_global_content_hash')
+        ? $server->verify_global_content_hash($content_hash)
+        : 'Reprint Exporter runtime is incomplete. Rebuild the plugin with the latest wp-php-toolkit/reprint-exporter.';
+    if ($auth_error !== null) {
+        _site_export_push_error(403, $auth_error);
+    }
+}
+
+function _site_export_push_shared_secret(): string {
     if (_site_export_has_secret_file()) {
         $secret = _site_export_get_file_secret();
         if (empty($secret)) {
@@ -237,14 +262,25 @@ function _site_export_push_authenticate_body_file(string $body_file, callable $a
     if (empty($secret) || !is_string($secret)) {
         _site_export_push_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Reprint Exporter.');
     }
+    return $secret;
+}
 
-    $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
-    $auth_error = method_exists($server, 'verify_global_content_hash')
-        ? $server->verify_global_content_hash($content_hash)
-        : 'Reprint Exporter runtime is incomplete. Rebuild the plugin with the latest wp-php-toolkit/reprint-exporter.';
-    if ($auth_error !== null) {
-        _site_export_push_error(403, $auth_error);
+function _site_export_push_request_header(string $name): ?string {
+    if (function_exists('getallheaders')) {
+        $headers = getallheaders();
+        if (is_array($headers)) {
+            foreach ($headers as $key => $value) {
+                if (is_string($value) && strcasecmp((string) $key, $name) === 0) {
+                    return $value;
+                }
+            }
+        }
     }
+
+    $server_key = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
+    return isset($_SERVER[$server_key]) && is_string($_SERVER[$server_key])
+        ? $_SERVER[$server_key]
+        : null;
 }
 
 function _site_export_push_hash_file_streaming(string $path): string {
@@ -393,16 +429,23 @@ function _site_export_push_run_session(string $session_id): array {
         }
 
         try {
-            _site_export_push_load_importer_runtime();
-            _site_export_push_define_importer_streams();
+            $output_buffer_started = ob_start();
+            try {
+                _site_export_push_load_importer_runtime();
+                _site_export_push_define_importer_streams();
 
-            $session_dir = _site_export_push_session_dir($session_id);
-            $client = new ImportClient(
-                (string) $session['source_url'],
-                $session_dir . '/import',
-                _site_export_push_target_fs_root()
-            );
-            $client->run(_site_export_push_import_options($session, $session_dir));
+                $session_dir = _site_export_push_session_dir($session_id);
+                $client = new ImportClient(
+                    (string) $session['source_url'],
+                    $session_dir . '/import',
+                    _site_export_push_target_fs_root()
+                );
+                $client->run(_site_export_push_import_options($session, $session_dir));
+            } finally {
+                if ($output_buffer_started) {
+                    ob_end_clean();
+                }
+            }
 
             _site_export_push_mutate_session($session_id, function (array $session) use ($client): array {
                 if (($session['status'] ?? '') !== 'aborted') {
@@ -704,9 +747,9 @@ function _site_export_push_load_importer_runtime(): void {
     $plugin_dir = _site_export_push_plugin_dir();
     $repo_root = dirname($plugin_dir);
     $candidates = [
+        $repo_root . '/packages/reprint-importer/src/import.php',
         $plugin_dir . 'vendor/wp-php-toolkit/reprint-importer/src/import.php',
         $repo_root . '/vendor/wp-php-toolkit/reprint-importer/src/import.php',
-        $repo_root . '/packages/reprint-importer/src/import.php',
     ];
 
     foreach ($candidates as $candidate) {
