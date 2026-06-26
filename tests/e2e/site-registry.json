@@ -130,6 +130,12 @@
     },
     "edit-locks": {
       "port": 8122
+    },
+    "pull-files-gitlike": {
+      "port": 8123
+    },
+    "pull-db-gitlike": {
+      "port": 8124
     }
   }
 }

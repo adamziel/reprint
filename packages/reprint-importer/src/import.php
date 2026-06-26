@@ -1751,10 +1751,13 @@ class ImportClient
                 if ($command === "pull") {
                     $this->pull->abort();
                 } else {
-                    $this->handle_abort([
-                        "pull-files" => "files-download",
-                        "pull-db" => "db-download",
-                    ][$command]);
+                    if ($command === "pull-files") {
+                        $this->handle_abort("files-download");
+                    } else {
+                        $this->handle_abort("db-download");
+                        $this->handle_abort("db-apply");
+                    }
+                    $this->pull->clear_pipeline_state($command);
                 }
                 return;
             }
@@ -10886,6 +10889,16 @@ class ImportClient
                 "skipped_pending" => false,
                 "has_completed_once" => false,
             ],
+            "pull_files" => [
+                "stage" => null,
+                "files_filter" => null,
+                "skipped_pending" => false,
+                "has_completed_once" => false,
+            ],
+            "pull_db" => [
+                "stage" => null,
+                "has_completed_once" => false,
+            ],
         ];
     }
 
@@ -11716,7 +11729,7 @@ if (
             'target' => 'sql_output',
             'placeholder' => 'MODE',
             'help' => 'Output mode: file (default), stdout, mysql',
-            'commands' => ['pull-db', 'db-download'],
+            'commands' => ['db-download'],
         ],
         [
             'name' => 'mysql-host',
@@ -11724,7 +11737,7 @@ if (
             'target' => 'mysql_host',
             'placeholder' => 'HOST',
             'help' => 'MySQL host (default: 127.0.0.1, for --sql-output=mysql)',
-            'commands' => ['pull-db', 'db-download'],
+            'commands' => ['db-download'],
         ],
         [
             'name' => 'mysql-port',
@@ -11732,7 +11745,7 @@ if (
             'target' => 'mysql_port',
             'placeholder' => 'PORT',
             'help' => 'MySQL port (default: 3306, for --sql-output=mysql)',
-            'commands' => ['pull-db', 'db-download'],
+            'commands' => ['db-download'],
         ],
         [
             'name' => 'mysql-user',
@@ -11740,7 +11753,7 @@ if (
             'target' => 'mysql_user',
             'placeholder' => 'USER',
             'help' => 'MySQL user (default: root, for --sql-output=mysql)',
-            'commands' => ['pull-db', 'db-download'],
+            'commands' => ['db-download'],
         ],
         [
             'name' => 'mysql-password',
@@ -11748,7 +11761,7 @@ if (
             'target' => 'mysql_password',
             'placeholder' => 'PASS',
             'help' => 'MySQL password (or set MYSQL_PASSWORD env)',
-            'commands' => ['pull-db', 'db-download'],
+            'commands' => ['db-download'],
         ],
         [
             'name' => 'mysql-database',
@@ -11756,7 +11769,7 @@ if (
             'target' => 'mysql_database',
             'placeholder' => 'DB',
             'help' => 'MySQL database (required for --sql-output=mysql)',
-            'commands' => ['pull-db', 'db-download'],
+            'commands' => ['db-download'],
         ],
 
         // ── db-apply options ─────────────────────────────────────
@@ -11766,7 +11779,7 @@ if (
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
             'help' => 'Target database engine: mysql (default) or sqlite',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-host',
@@ -11774,7 +11787,7 @@ if (
             'target' => 'target_host',
             'placeholder' => 'HOST',
             'help' => 'Target MySQL host (default: 127.0.0.1)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-port',
@@ -11783,7 +11796,7 @@ if (
             'placeholder' => 'PORT',
             'cast' => 'int',
             'help' => 'Target MySQL port (default: 3306)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-user',
@@ -11791,7 +11804,7 @@ if (
             'target' => 'target_user',
             'placeholder' => 'USER',
             'help' => 'Target MySQL user (required for mysql)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-pass',
@@ -11799,7 +11812,7 @@ if (
             'target' => 'target_pass',
             'placeholder' => 'PASS',
             'help' => 'Target MySQL password',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-db',
@@ -11807,7 +11820,7 @@ if (
             'target' => 'target_db',
             'placeholder' => 'NAME',
             'help' => 'Target DB name (required for mysql, optional for sqlite)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-sqlite-path',
@@ -11815,7 +11828,7 @@ if (
             'target' => 'target_sqlite_path',
             'placeholder' => 'PATH',
             'help' => 'Target SQLite database file (default: <wp-content>/database/.ht.sqlite)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'rewrite-url',
@@ -11823,7 +11836,7 @@ if (
             'target' => 'rewrite_url',
             'pair_args' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'new-site-url',
@@ -11831,7 +11844,7 @@ if (
             'target' => 'new_site_url',
             'placeholder' => 'URL',
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'remap',

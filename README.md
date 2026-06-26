@@ -634,8 +634,8 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 ```
 
 * `pull` — Pull the full site. Runs `preflight`, `files-download`, and `db-download`, then adds `db-apply`, `flat-docroot`, `apply-runtime`, and runtime start stages when their options are set.
-* `pull-files` — Pull only files. Runs `preflight` and then delegates to `files-download`, including its filtering and delta-sync behavior.
-* `pull-db` — Pull only the database. Runs `preflight` and then delegates to `db-download`, including `--sql-output` and MySQL streaming options.
+* `pull-files` — Pull only files. Runs `preflight` and `files-download`, looping through partial transfers until the local files match the remote site. Re-running performs a delta pull.
+* `pull-db` — Pull only the database. Runs `preflight`, `db-download`, and `db-apply`, looping through partial transfers/applies until the target database is up to date. Use `db-download` directly for `--sql-output=stdout` or `--sql-output=mysql`.
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
 * `files-download` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
@@ -648,4 +648,4 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-download`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-download` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `pull-files` and `files-download`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `pull-db`, `db-download`, and `db-index`, it clears the database output/apply progress so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
