@@ -8,11 +8,9 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    assertTreesMatch,
-    assertFileCount, assertSiteMirror,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, assertTreesMatch, assertFileCount,
+    assertSiteMirror, fsRootDir, readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -56,10 +54,10 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
     });
 
     it('state shows complete', () => {
-        const stateFile = join(tempDir, '.import-state.json');
+        const stateFile = runStateFile(tempDir);
         assert.ok(existsSync(stateFile), 'Expected state file to exist');
 
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        const state = readImporterState(tempDir);
         assert.equal(state.status, 'complete', 'Expected status to be complete');
     });
 

@@ -9,10 +9,9 @@ import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    hashDirectory, assertTreesMatch,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, hashDirectory, assertTreesMatch,
+    fsRootDir, readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -94,8 +93,8 @@ describe('Import: Delta Sync with Deletions', () => {
     });
 
     it('state shows complete after delta', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        const stateFile = runStateFile(tempDir);
+        const state = readImporterState(tempDir);
         assert.equal(state.status, 'complete');
     });
 });

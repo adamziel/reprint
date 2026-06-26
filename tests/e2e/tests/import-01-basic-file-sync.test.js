@@ -7,11 +7,9 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    assertTreesMatch,
-    assertFileCount, assertSiteMirror,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, assertTreesMatch, assertFileCount,
+    assertSiteMirror, fsRootDir, readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -40,9 +38,9 @@ describe('Import: Basic File Sync', () => {
     });
 
     it('state file shows complete', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        const stateFile = runStateFile(tempDir);
+        assert.ok(existsSync(stateFile), 'Expected .reprint/run.json to exist');
+        const state = readImporterState(tempDir);
         assert.equal(state.command, 'files-pull');
         assert.equal(state.status, 'complete');
     });
@@ -107,8 +105,8 @@ describe('Import: Basic File Sync', () => {
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const stateFile = join(tempDir, '.import-state.json');
-        const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+        const stateFile = runStateFile(tempDir);
+        const state = readImporterState(tempDir);
         assert.equal(state.status, 'complete');
     });
 });

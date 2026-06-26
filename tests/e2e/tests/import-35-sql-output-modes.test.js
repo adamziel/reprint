@@ -7,9 +7,9 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    getDbName, compareDatabases, createMysqlConnection,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, getDbName, compareDatabases,
+    createMysqlConnection, readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -114,9 +114,9 @@ describe('Import: SQL Output Modes', () => {
         });
 
         it('state file records sql_output mode', () => {
-            const stateFile = join(tempDir, '.import-state.json');
+            const stateFile = runStateFile(tempDir);
             assert.ok(existsSync(stateFile), 'Expected state file to exist');
-            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            const state = readImporterState(tempDir);
             assert.equal(state.sql_output, 'mysql',
                 `Expected sql_output=mysql in state, got ${state.sql_output}`);
         });

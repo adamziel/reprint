@@ -77,7 +77,6 @@ final class ImportContext
         $this->run_states = new RunStateRepository(
             $this->store,
             $this->paths,
-            $this->path_codec,
             $this->audit_logger(),
         );
         $this->shutdown = new ShutdownState();

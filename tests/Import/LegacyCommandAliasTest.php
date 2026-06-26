@@ -4,6 +4,8 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Application\Importer;
+use Reprint\Importer\Session\PreflightCheckpoint;
+use Reprint\Importer\Session\StatePathCodec;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -66,13 +68,9 @@ class LegacyCommandAliasTest extends TestCase
     {
         $client = new Importer('http://fake.invalid', $this->stateDir, $this->fs_root);
 
-        // Write a preflight so commands that require it don't bail early.
-        file_put_contents(
-            $this->stateDir . '/.reprint/run.json',
-            json_encode([
-                "preflight" => ["data" => ["ok" => true], "http_code" => 200],
-            ]),
-        );
+        $this->writePreflightCheckpoint([
+            "preflight" => ["data" => ["ok" => true], "http_code" => 200],
+        ]);
 
         try {
             $client->run(["command" => $legacy_name]);
@@ -99,6 +97,24 @@ class LegacyCommandAliasTest extends TestCase
             'flat-document-root → flat-docroot' => ['flat-document-root', 'flat-docroot'],
             'flatten-docroot → flat-docroot' => ['flatten-docroot', 'flat-docroot'],
         ];
+    }
+
+    private function writePreflightCheckpoint(array $state): void
+    {
+        $dir = $this->stateDir . '/.reprint/preflight';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        $codec = new StatePathCodec();
+        $checkpoint = PreflightCheckpoint::from_array($state);
+        file_put_contents(
+            $dir . '/checkpoint.json',
+            json_encode(
+                $checkpoint->to_persisted_array([$codec, 'encode_preflight_data_paths']),
+                JSON_PRETTY_PRINT,
+            ),
+        );
     }
 
     /**

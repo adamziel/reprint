@@ -1,6 +1,6 @@
 /**
  * Test 25: State File Corruption via import.php
- * Tests importer behavior when .import-state.json is corrupted or contains
+ * Tests importer behavior when .reprint/run.json is corrupted or contains
  * unexpected data. Verifies the importer recovers gracefully.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -8,10 +8,9 @@ import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    assertTreesMatch, readAuditLog,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, assertTreesMatch, readAuditLog,
+    fsRootDir, readImporterState, writeRunState
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -32,7 +31,7 @@ describe('Import: State Corruption', () => {
         beforeAll(() => {
             tempDir = createTempDir('e2e-state-corrupt-json');
             // Write invalid JSON to state file
-            writeFileSync(join(tempDir, '.import-state.json'), '{invalid json here!!!');
+            writeRunState(tempDir, '{invalid json here!!!');
         });
 
         afterAll(() => {
@@ -46,8 +45,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0 (graceful recovery)\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, '.import-state.json');
-            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            const state = readImporterState(tempDir);
             assert.equal(state.status, 'complete');
         });
 
@@ -59,10 +57,10 @@ describe('Import: State Corruption', () => {
             );
         });
 
-        it('corrupt state file was renamed', () => {
-            const files = require('node:fs').readdirSync(tempDir);
-            const corruptFiles = files.filter(f => f.includes('.corrupt.'));
-            assert.ok(corruptFiles.length > 0, 'Expected corrupt state file to be renamed');
+        it('corrupt state file was overwritten with valid run state', () => {
+            const state = readImporterState(tempDir);
+            assert.equal(state.command, 'files-pull');
+            assert.equal(state.status, 'complete');
         });
 
         it('files match source after recovery', () => {
@@ -77,10 +75,10 @@ describe('Import: State Corruption', () => {
         beforeAll(() => {
             tempDir = createTempDir('e2e-state-wrong-cmd');
             // Write valid state but for a different command
-            writeFileSync(join(tempDir, '.import-state.json'), JSON.stringify({
+            writeRunState(tempDir, {
                 command: 'db-sync',
                 status: 'complete',
-            }));
+            });
         });
 
         afterAll(() => {
@@ -94,8 +92,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, '.import-state.json');
-            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            const state = readImporterState(tempDir);
             assert.equal(state.command, 'files-pull', 'Expected command to be updated');
             assert.equal(state.status, 'complete');
         });
@@ -107,11 +104,11 @@ describe('Import: State Corruption', () => {
         beforeAll(() => {
             tempDir = createTempDir('e2e-state-restart');
             // Write a partial state to simulate interrupted transfer
-            writeFileSync(join(tempDir, '.import-state.json'), JSON.stringify({
+            writeRunState(tempDir, {
                 command: 'files-sync',
                 status: 'in_progress',
                 cursor: 'some-old-cursor',
-            }));
+            });
         });
 
         afterAll(() => {
@@ -125,8 +122,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0 with --abort\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, '.import-state.json');
-            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            const state = readImporterState(tempDir);
             assert.notEqual(state.status, 'in_progress', 'Expected status to be cleared');
             assert.ok(!state.cursor, 'Expected cursor to be cleared');
         });
@@ -137,8 +133,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, '.import-state.json');
-            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            const state = readImporterState(tempDir);
             assert.equal(state.status, 'complete');
         });
 

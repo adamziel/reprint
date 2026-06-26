@@ -11,9 +11,9 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir, compareDatabases, createMysqlConnection, getDbName,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, fsRootDir, compareDatabases,
+    createMysqlConnection, getDbName, readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -84,9 +84,9 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
     });
 
     it('state records deferred files in the pull metadata', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        const stateFile = runStateFile(tempDir);
+        assert.ok(existsSync(stateFile), 'Expected .reprint/run.json to exist');
+        const state = readImporterState(tempDir);
         assert.equal(state.pull.stage, 'complete');
         assert.equal(state.pull.files_filter, 'essential-files');
         assert.equal(state.pull.skipped_pending, true);

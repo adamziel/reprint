@@ -11,30 +11,25 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, readCheckpoint, writeCheckpoint
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Protocol Version Mismatch', () => {
     const site = 'basic';
     let tempDir;
-    const stateFileName = '.import-state.json';
 
     function importUrl() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    function stateFilePath() {
-        return join(tempDir, stateFileName);
-    }
-
     function readState() {
-        return JSON.parse(readFileSync(stateFilePath(), 'utf-8'));
+        return readCheckpoint(tempDir, 'preflight');
     }
 
     function writeState(state) {
-        writeFileSync(stateFilePath(), JSON.stringify(state, null, 2));
+        writeCheckpoint(tempDir, 'preflight', state);
     }
 
     beforeAll(async () => {

@@ -11,8 +11,8 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir, readAuditLog,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, readAuditLog, readImporterState
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -39,7 +39,7 @@ describe('Import: Runtime files', () => {
     });
 
     it('preflight state contains ini_get_all with core PHP directives', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = readImporterState(tempDir);
         const iniAll = state.preflight?.data?.runtime?.ini_get_all;
         assert.ok(iniAll && typeof iniAll === 'object', 'runtime.ini_get_all should be an object');
 
@@ -55,7 +55,7 @@ describe('Import: Runtime files', () => {
     });
 
     it('ini_get_all includes auto_prepend_file and auto_append_file directives', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = readImporterState(tempDir);
         const iniAll = state.preflight?.data?.runtime?.ini_get_all;
 
         // These directives should always be present in ini_get_all,

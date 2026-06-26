@@ -22,10 +22,9 @@ import { execSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    readAuditLog,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, readAuditLog, fsRootDir,
+    readImporterState
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -213,7 +212,7 @@ describe('Import: Follow Symlinks', () => {
     });
 
     it('state shows complete', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = readImporterState(tempDir);
         assert.equal(state.status, 'complete');
         assert.equal(state.follow_symlinks, true, 'follow_symlinks should be persisted in state');
     });

@@ -6,6 +6,8 @@ use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Application\ImportServices;
 use Reprint\Importer\Application\UseCase\FlatDocrootHandler;
 use Reprint\Importer\Application\Importer;
+use Reprint\Importer\Session\PreflightCheckpoint;
+use Reprint\Importer\Session\StatePathCodec;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -137,9 +139,36 @@ class FlatDocrootWpConfigTest extends TestCase
 
     private function writeState(array $state): void
     {
+        $this->writePreflightCheckpoint($state);
+        unset(
+            $state['preflight'],
+            $state['remote_protocol_version'],
+            $state['remote_protocol_min_version'],
+            $state['version'],
+            $state['webhost'],
+        );
+
         file_put_contents(
             $this->stateDir . '/.reprint/run.json',
             json_encode($state, JSON_PRETTY_PRINT),
+        );
+    }
+
+    private function writePreflightCheckpoint(array $state): void
+    {
+        $dir = $this->stateDir . '/.reprint/preflight';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        $codec = new StatePathCodec();
+        $checkpoint = PreflightCheckpoint::from_array($state);
+        file_put_contents(
+            $dir . '/checkpoint.json',
+            json_encode(
+                $checkpoint->to_persisted_array([$codec, 'encode_preflight_data_paths']),
+                JSON_PRETTY_PRINT,
+            ),
         );
     }
 

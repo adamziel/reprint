@@ -9,13 +9,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    assertTreesMatch,
-    readAuditLog,
-    writeTestHooks, removeTestHooks,
-    writeHookState, readHookState, clearHookState,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, assertTreesMatch, readAuditLog,
+    writeTestHooks, removeTestHooks, writeHookState, readHookState,
+    clearHookState, fsRootDir, readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -81,8 +78,8 @@ describe('Import: Request Cutoff', () => {
         });
         assert.equal(result.exitCode, 0, `Expected exit 0 on resume\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const stateFile = join(tempDir, '.import-state.json');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        const stateFile = runStateFile(tempDir);
+        const state = readImporterState(tempDir);
         assert.equal(state.status, 'complete', `Expected complete status, got ${state.status}`);
     });
 

@@ -13,9 +13,8 @@ import { existsSync, lstatSync, readlinkSync, readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, fsRootDir, readImporterState
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -221,8 +220,7 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
     });
 
     it('state stores path fields in base64 form', () => {
-        const statePath = join(tempDir, '.import-state.json');
-        const state = JSON.parse(readFileSync(statePath, 'utf-8'));
+        const state = readImporterState(tempDir);
 
         assert.equal(typeof state.diff.local_after, 'string', 'Expected diff.local_after to be persisted');
         assert.ok(

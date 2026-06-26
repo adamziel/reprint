@@ -11,10 +11,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    assertTreesMatch, assertSiteMirror,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, assertTreesMatch, assertSiteMirror,
     fsRootDir, compareDatabases, createMysqlConnection, getDbName,
+    readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -64,9 +64,9 @@ describe('Import: Pull Basic', { timeout: 180000 }, () => {
     });
 
     it('state shows pull complete', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        const stateFile = runStateFile(tempDir);
+        assert.ok(existsSync(stateFile), 'Expected .reprint/run.json to exist');
+        const state = readImporterState(tempDir);
         assert.equal(state.pull.stage, 'complete');
     });
 
@@ -98,7 +98,7 @@ describe('Import: Pull Basic', { timeout: 180000 }, () => {
         assert.equal(result.exitCode, 0,
             `Expected exit 0 on re-pull, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = readImporterState(tempDir);
         assert.equal(state.pull.stage, 'complete');
     });
 });

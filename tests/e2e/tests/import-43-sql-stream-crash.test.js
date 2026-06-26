@@ -20,12 +20,11 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    getDbName, compareDatabases, createMysqlConnection,
-    readAuditLog,
-    writeTestHooks, removeTestHooks,
-    writeHookState, readHookState, clearHookState,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, getDbName, compareDatabases,
+    createMysqlConnection, readAuditLog, writeTestHooks, removeTestHooks,
+    writeHookState, readHookState, clearHookState, readImporterState,
+    runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -130,9 +129,9 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
             // the entire response and no multipart chunks reached the
             // client before the crash — in that case resume starts from
             // scratch, which is correct.
-            const stateFile = join(tempDir, '.import-state.json');
+            const stateFile = runStateFile(tempDir);
             assert.ok(existsSync(stateFile), 'Expected state file to exist');
-            const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+            const state = readImporterState(tempDir);
             assert.equal(state.status, 'partial',
                 `Expected status=partial, got ${state.status}`);
         });

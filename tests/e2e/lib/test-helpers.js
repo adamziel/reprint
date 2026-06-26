@@ -220,6 +220,105 @@ export function fsRootDir(outputDir) {
 }
 
 /**
+ * Return the importer state root for a given output directory.
+ */
+export function stateRootDir(outputDir) {
+    return join(outputDir, '.reprint');
+}
+
+/**
+ * Return the importer run-state file path for a given output directory.
+ */
+export function runStateFile(outputDir) {
+    return join(stateRootDir(outputDir), 'run.json');
+}
+
+/**
+ * Return a command checkpoint file path for a given output directory.
+ */
+export function checkpointFile(outputDir, checkpointName) {
+    return join(stateRootDir(outputDir), checkpointName, 'checkpoint.json');
+}
+
+function readJsonIfExists(path, fallback = {}) {
+    try {
+        if (!existsSync(path)) {
+            return fallback;
+        }
+        return JSON.parse(readFileSync(path, 'utf-8'));
+    } catch (_) {
+        return fallback;
+    }
+}
+
+/**
+ * Write importer run state for tests that intentionally seed or corrupt state.
+ */
+export function writeRunState(outputDir, state) {
+    mkdirSync(stateRootDir(outputDir), { recursive: true });
+    writeFileSync(
+        runStateFile(outputDir),
+        typeof state === 'string' ? state : JSON.stringify(state),
+    );
+}
+
+/**
+ * Read a raw command checkpoint.
+ */
+export function readCheckpoint(outputDir, checkpointName) {
+    return readJsonIfExists(checkpointFile(outputDir, checkpointName));
+}
+
+/**
+ * Write a raw command checkpoint.
+ */
+export function writeCheckpoint(outputDir, checkpointName, state) {
+    mkdirSync(join(stateRootDir(outputDir), checkpointName), { recursive: true });
+    writeFileSync(checkpointFile(outputDir, checkpointName), JSON.stringify(state, null, 2));
+}
+
+/**
+ * Read importer state from the current .reprint layout.
+ *
+ * This is an e2e assertion convenience over the current checkpoint files.
+ */
+export function readImporterState(outputDir) {
+    const run = readJsonIfExists(runStateFile(outputDir));
+    const preflight = readCheckpoint(outputDir, 'preflight');
+    const pull = readCheckpoint(outputDir, 'pull');
+    const filesPull = readCheckpoint(outputDir, 'files-pull');
+    const dbPull = readCheckpoint(outputDir, 'db-pull');
+    const dbApply = readCheckpoint(outputDir, 'db-apply');
+    const runtime = readCheckpoint(outputDir, 'runtime');
+
+    return {
+        ...run,
+        preflight: preflight.preflight ?? null,
+        remote_protocol_version: preflight.remote_protocol_version ?? null,
+        remote_protocol_min_version: preflight.remote_protocol_min_version ?? null,
+        version: preflight.version ?? null,
+        webhost: preflight.webhost ?? null,
+        pull: {
+            stage: null,
+            files_filter: null,
+            skipped_pending: false,
+            ...pull,
+        },
+        index: { cursor: filesPull.index_cursor ?? null },
+        diff: filesPull.diff ?? {},
+        fetch: filesPull.fetch ?? {},
+        fetch_skipped: filesPull.fetch_skipped ?? {},
+        current_file: filesPull.current_file ?? null,
+        current_file_bytes: filesPull.current_file_bytes ?? null,
+        db_index: dbPull.db_index ?? {},
+        cursor: dbPull.cursor ?? null,
+        sql_bytes: dbPull.sql_bytes ?? null,
+        apply: dbApply,
+        runtime,
+    };
+}
+
+/**
  * Run the importer CLI.
  * @param {string} url - Export URL
  * @param {string} outputDir - Local output directory (state files live here; fs-root is outputDir/fs-root)
@@ -273,15 +372,10 @@ export function runImporter(url, outputDir, command, options = {}) {
     // Non-preflight commands require a prior preflight run.
     // Automatically run one if the state file doesn't already have preflight data.
     if (command !== 'preflight' && command !== 'preflight-assert' && options.skipPreflight !== true) {
-        const stateFile = join(outputDir, '.import-state.json');
         let needsPreflight = true;
-        try {
-            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-            if (state.preflight && state.preflight.data) {
-                needsPreflight = false;
-            }
-        } catch (_) {
-            // No state file or invalid JSON — need preflight
+        const preflight = readCheckpoint(outputDir, 'preflight');
+        if (preflight.preflight?.data) {
+            needsPreflight = false;
         }
         if (needsPreflight) {
             const preflightResult = runImporterOnce('preflight');

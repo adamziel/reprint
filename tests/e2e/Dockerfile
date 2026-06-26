@@ -7,7 +7,7 @@ ENV PHP_VERSION=8.2
 
 # Base packages
 RUN apt-get update -qq && apt-get install -y \
-    software-properties-common curl jq sudo gnupg2 xxd \
+    software-properties-common curl jq sudo gnupg2 unzip xxd \
     && rm -rf /var/lib/apt/lists/*
 
 # PHP

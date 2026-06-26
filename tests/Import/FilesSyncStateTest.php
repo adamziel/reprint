@@ -15,6 +15,7 @@ use Reprint\Importer\Application\Importer;
 use Reprint\Importer\Output\BufferedImportOutput;
 use Reprint\Importer\Observability\NullMachineEventEmitter;
 use Reprint\Importer\Protocol\StreamingContext;
+use Reprint\Importer\Session\PreflightCheckpoint;
 use Reprint\Importer\Session\StatePathCodec;
 use Reprint\Importer\Session\VolatileFileTracker;
 
@@ -37,7 +38,7 @@ class FilesSyncStateTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->tempDir = sys_get_temp_dir() . '/import-state-test-' . uniqid();
+        $this->tempDir = sys_get_temp_dir() . '/files-sync-state-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
         $this->fs_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
@@ -126,15 +127,42 @@ class FilesSyncStateTest extends TestCase
             "max_allowed_packet" => null,
         ];
         $run_state = array_merge($defaults, $state);
+        $this->writePreflightCheckpoint($run_state);
 
         if (($run_state["command"] ?? null) === "files-pull") {
             $this->writeFilesPullCheckpoint($this->filesPullCheckpointFromState($run_state));
         }
 
-        unset($run_state["cursor"], $run_state["stage"]);
+        unset(
+            $run_state["cursor"],
+            $run_state["stage"],
+            $run_state["preflight"],
+            $run_state["remote_protocol_version"],
+            $run_state["remote_protocol_min_version"],
+            $run_state["version"],
+            $run_state["webhost"],
+        );
         file_put_contents(
             $this->stateDir . '/.reprint/run.json',
             json_encode($run_state, JSON_PRETTY_PRINT),
+        );
+    }
+
+    private function writePreflightCheckpoint(array $state): void
+    {
+        $dir = $this->stateDir . '/.reprint/preflight';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        $codec = new StatePathCodec();
+        $checkpoint = PreflightCheckpoint::from_array($state);
+        file_put_contents(
+            $dir . '/checkpoint.json',
+            json_encode(
+                $checkpoint->to_persisted_array([$codec, 'encode_preflight_data_paths']),
+                JSON_PRETTY_PRINT,
+            ),
         );
     }
 

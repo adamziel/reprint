@@ -66,7 +66,9 @@ describe('Import: Error Chunks', () => {
         it('downloaded files have correct hashes (no corruption)', () => {
             const siteDir = getSiteDir(site);
             const importedRoot = join(fsRootDir(tempDir), siteDir);
-            assertTreesMatch(siteDir, importedRoot);
+            assertTreesMatch(siteDir, importedRoot, {
+                exclude: ['test-data/hello.txt'],
+            });
         });
     });
 

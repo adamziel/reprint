@@ -13,9 +13,9 @@ import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir, PHP_BINARY,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, fsRootDir, PHP_BINARY,
+    readImporterState
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -71,7 +71,7 @@ describe('Import: Playground CLI runtime', () => {
         assert.equal(result.exitCode, 0,
             `files-sync failed (exit ${result.exitCode})\nstderr: ${result.stderr}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = readImporterState(tempDir);
         assert.equal(state.status, 'complete');
     });
 

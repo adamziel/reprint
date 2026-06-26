@@ -8,9 +8,9 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    writeTestHooks, removeTestHooks, readAuditLog,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, writeTestHooks, removeTestHooks,
+    readAuditLog, readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -87,9 +87,9 @@ describe('Import: Gzip Corruption', () => {
             // Same as above: must not hang. Either succeeds (partial data OK)
             // or fails with a clear error.
             if (result.exitCode === 0) {
-                const stateFile = join(tempDir, '.import-state.json');
+                const stateFile = runStateFile(tempDir);
                 if (existsSync(stateFile)) {
-                    const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+                    const state = readImporterState(tempDir);
                     assert.ok(
                         state.status === 'complete' || state.status === 'in_progress',
                         `Expected valid status, got: ${state.status}`

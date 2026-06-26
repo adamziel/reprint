@@ -24,11 +24,10 @@ import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    writeTestHooks, removeTestHooks,
-    writeHookState, clearHookState,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, writeTestHooks, removeTestHooks,
+    writeHookState, clearHookState, fsRootDir, readImporterState,
+    runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -136,9 +135,9 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
     });
 
     it('state records current_file and current_file_bytes for resume', () => {
-        const stateFile = join(tempDir, '.import-state.json');
+        const stateFile = runStateFile(tempDir);
         assert.ok(existsSync(stateFile), 'Expected import state file to exist');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        const state = readImporterState(tempDir);
         assert.ok(state.current_file, 'Expected state.current_file to be set after a mid-file crash');
         assert.ok(typeof state.current_file_bytes === 'number' && state.current_file_bytes > 0,
             `Expected state.current_file_bytes > 0, got ${state.current_file_bytes}`);
@@ -157,8 +156,8 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
         assert.equal(result.exitCode, 0,
             `Expected resume to complete\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
 
-        const stateFile = join(tempDir, '.import-state.json');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        const stateFile = runStateFile(tempDir);
+        const state = readImporterState(tempDir);
         assert.equal(state.status, 'complete', `Expected status=complete after resume, got ${state.status}`);
     });
 

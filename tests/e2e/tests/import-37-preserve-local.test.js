@@ -37,10 +37,9 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    readAuditLog,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, readAuditLog, fsRootDir,
+    readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -253,8 +252,8 @@ describe('Import: --preserve-local', () => {
         });
 
         it('state shows complete with preserve_local persisted', () => {
-            const stateFile = join(tempDir, '.import-state.json');
-            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            const stateFile = runStateFile(tempDir);
+            const state = readImporterState(tempDir);
             assert.equal(state.status, 'complete');
             assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
         });
@@ -426,7 +425,7 @@ describe('Import: --preserve-local', () => {
         });
 
         it('state preserves preserve_local across resume cycles', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            const state = readImporterState(tempDir);
             assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
         });
     });

@@ -378,11 +378,16 @@ class Pull
 
         foreach ([
             $paths->sql_file(),
+            $paths->table_stats_file(),
             $paths->domains_file(),
+            $paths->sql_stats_file(),
             $paths->remote_index_file(),
             $paths->download_list_file(),
             $paths->skipped_download_list_file(),
             $paths->files_pull_checkpoint_file(),
+            $paths->db_pull_checkpoint_file(),
+            $paths->db_apply_checkpoint_file(),
+            $paths->runtime_checkpoint_file(),
         ] as $path) {
             if (file_exists($path)) {
                 @unlink($path);

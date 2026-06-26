@@ -9,10 +9,9 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    assertTreesMatch, readAuditLog,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, assertTreesMatch, readAuditLog,
+    fsRootDir, readImporterState, runStateFile
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -53,10 +52,10 @@ describe('Import: Permission Errors', () => {
         });
 
         it('readable files are downloaded and match source', () => {
-            // hashDirectory skips unreadable files on both sides,
-            // so this verifies all readable files match exactly
             const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
-            assertTreesMatch(getSiteDir(site), importedRoot);
+            assertTreesMatch(getSiteDir(site), importedRoot, {
+                exclude: ['test-data/unreadable.txt', 'test-data/unreadable-dir'],
+            });
         });
 
         it('audit log records error for unreadable files', () => {
@@ -116,8 +115,8 @@ INSERT INTO wp_secret_table VALUES (1, 'top secret');
         });
 
         it('state shows complete', () => {
-            const stateFile = join(tempDir, '.import-state.json');
-            const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+            const stateFile = runStateFile(tempDir);
+            const state = readImporterState(tempDir);
             assert.equal(state.status, 'complete');
         });
 

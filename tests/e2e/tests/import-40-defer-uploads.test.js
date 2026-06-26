@@ -14,10 +14,9 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-    runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    assertTreesMatch, readAuditLog,
-    fsRootDir,
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl,
+    getSiteSecret, getSiteDir, assertTreesMatch, readAuditLog,
+    fsRootDir, readImporterState
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -80,7 +79,7 @@ describe('Import: --filter', () => {
         });
 
         it('state shows complete with filter persisted', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            const state = readImporterState(tempDir);
             assert.equal(state.command, 'files-pull');
             assert.equal(state.status, 'complete');
             assert.equal(state.filter, 'essential-files');
@@ -169,7 +168,7 @@ describe('Import: --filter', () => {
         });
 
         it('state preserves filter across resume cycles', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            const state = readImporterState(tempDir);
             assert.equal(state.filter, 'essential-files');
             assert.equal(state.status, 'complete');
         });
