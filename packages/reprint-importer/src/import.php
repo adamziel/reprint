@@ -4359,16 +4359,24 @@ class ImportClient
         // the new selection would skip the stranded prepared/backup paths and
         // then delete the only recovery hint.
         $this->assert_apply_journal_matches_operations($journal, $operations);
+        $journal_operation = !empty($journal) && isset($journal["operation"]) && is_array($journal["operation"])
+            ? $journal["operation"]
+            : null;
         $started_maintenance = false;
         $applied = 0;
 
         try {
             foreach ($operations as $operation) {
-                if ($this->staged_file_operation_only_needs_cleanup($operation)) {
+                $is_journaled_operation = $journal_operation !== null &&
+                    $this->apply_operation_matches_journal_operation($operation, $journal_operation);
+                if ($is_journaled_operation && $this->staged_file_operation_only_needs_cleanup($operation)) {
                     $this->write_apply_journal($journal_file, $operation, "cleaning");
                     $this->cleanup_staged_file_operation($operation);
                     $applied++;
                     continue;
+                }
+                if (!$is_journaled_operation) {
+                    $this->assert_staged_file_operation_has_no_swap_scratch_conflicts($operation);
                 }
 
                 $this->write_apply_journal($journal_file, $operation, "preparing");
@@ -5251,6 +5259,21 @@ class ImportClient
         return file_exists($operation["target"]) &&
             file_exists($operation["backup"]) &&
             !file_exists($operation["prepared"]);
+    }
+
+    private function assert_staged_file_operation_has_no_swap_scratch_conflicts(array $operation): void
+    {
+        foreach (["prepared", "backup"] as $key) {
+            if (empty($operation[$key])) {
+                continue;
+            }
+            $path = $operation[$key];
+            if (file_exists($path) || is_link($path)) {
+                throw new RuntimeException(
+                    "Cannot start apply-staged-files: swap scratch path already exists: {$path}. Restore the matching apply journal or remove the scratch path manually.",
+                );
+            }
+        }
     }
 
     private function prepare_staged_file_operation(array $operation): void

@@ -438,9 +438,13 @@ function _site_export_push_run_session(string $session_id): array {
                 }
             }
 
-            _site_export_push_mutate_session($session_id, function (array $session) use ($client): array {
+            $run_result = _site_export_push_importer_run_result($session_dir, (int) $client->exit_code);
+            _site_export_push_mutate_session($session_id, function (array $session) use ($run_result): array {
                 if (($session['status'] ?? '') !== 'aborted') {
-                    $session['status'] = $client->exit_code === 0 ? 'complete' : 'partial';
+                    $session['status'] = $run_result['status'];
+                    if (isset($run_result['error'])) {
+                        $session['error'] = $run_result['error'];
+                    }
                     $session['completed_at'] = gmdate('c');
                     $session['updated_at'] = gmdate('c');
                 }
@@ -461,6 +465,32 @@ function _site_export_push_run_session(string $session_id): array {
     }
 
     return _site_export_push_session_status($session_id);
+}
+
+function _site_export_push_importer_run_result(string $session_dir, int $exit_code): array {
+    if ($exit_code === 0) {
+        return ['status' => 'complete'];
+    }
+    if ($exit_code === 2) {
+        return ['status' => 'partial'];
+    }
+
+    $error = "Reprint Importer exited with code {$exit_code}.";
+    $status_file = $session_dir . '/import/.import-status.json';
+    if (is_file($status_file)) {
+        $import_status = _site_export_push_read_json_file($status_file);
+        foreach (['error', 'message'] as $key) {
+            if (!empty($import_status[$key]) && is_string($import_status[$key])) {
+                $error = $import_status[$key];
+                break;
+            }
+        }
+    }
+
+    return [
+        'status' => 'error',
+        'error' => $error,
+    ];
 }
 
 function _site_export_push_claim_request(string $session_id): array {

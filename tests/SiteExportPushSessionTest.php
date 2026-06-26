@@ -283,6 +283,25 @@ final class SiteExportPushSessionTest extends TestCase
         $this->assertSame('running', $status['session']['status']);
     }
 
+    public function testImporterFailureExitCodeMarksSessionErrorFromImportStatus(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionDir = _site_export_push_session_dir($created['session_id']);
+        _site_export_push_write_json_file($sessionDir . '/import/.import-status.json', [
+            'status' => 'error',
+            'error' => 'Preflight failed',
+        ]);
+
+        $this->assertSame(['status' => 'complete'], _site_export_push_importer_run_result($sessionDir, 0));
+        $this->assertSame(['status' => 'partial'], _site_export_push_importer_run_result($sessionDir, 2));
+        $this->assertSame(
+            ['status' => 'error', 'error' => 'Preflight failed'],
+            _site_export_push_importer_run_result($sessionDir, 1)
+        );
+    }
+
     private function recursiveDelete(string $dir): void
     {
         if (!is_dir($dir)) {

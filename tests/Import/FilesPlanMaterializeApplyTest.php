@@ -281,6 +281,66 @@ class FilesPlanMaterializeApplyTest extends TestCase
         $this->assertFileDoesNotExist($target . '/.maintenance');
     }
 
+    public function testApplyStagedFilesRejectsPreexistingBackupScratchPathWithoutJournal(): void
+    {
+        $staged = $this->tempDir . '/staged-preexisting-backup';
+        $target = $this->tempDir . '/target-preexisting-backup';
+        mkdir($staged . '/wp-content/plugins/foo', 0755, true);
+        mkdir($target . '/wp-content/plugins/foo', 0755, true);
+        mkdir($target . '/wp-content/plugins/foo.bak', 0755, true);
+        file_put_contents($staged . '/wp-content/plugins/foo/a.php', 'new-plugin');
+        file_put_contents($target . '/wp-content/plugins/foo/a.php', 'old-plugin');
+        file_put_contents($target . '/wp-content/plugins/foo.bak/a.php', 'preexisting-backup');
+        $selected = $this->tempDir . '/apply-preexisting-backup-selected.jsonl';
+        $this->writeSelectedManifest($selected, [
+            ['/var/www/html/wp-content/plugins/foo/a.php', 'wp-content/plugins/foo/a.php', 'update', 'file'],
+        ]);
+
+        try {
+            $this->runJsonCommand([
+                'command' => 'apply-staged-files',
+                'staged_root' => $staged,
+                'target_root' => $target,
+                'selected_files' => $selected,
+            ]);
+            $this->fail('Expected pre-existing backup scratch path rejection.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('swap scratch path already exists', $e->getMessage());
+        }
+        $this->assertSame('old-plugin', file_get_contents($target . '/wp-content/plugins/foo/a.php'));
+        $this->assertSame('preexisting-backup', file_get_contents($target . '/wp-content/plugins/foo.bak/a.php'));
+    }
+
+    public function testApplyStagedFilesRejectsPreexistingPreparedScratchPathWithoutJournal(): void
+    {
+        $staged = $this->tempDir . '/staged-preexisting-prepared';
+        $target = $this->tempDir . '/target-preexisting-prepared';
+        mkdir($staged . '/wp-content/plugins/foo', 0755, true);
+        mkdir($target . '/wp-content/plugins/foo', 0755, true);
+        mkdir($target . '/wp-content/plugins/foo.new', 0755, true);
+        file_put_contents($staged . '/wp-content/plugins/foo/a.php', 'new-plugin');
+        file_put_contents($target . '/wp-content/plugins/foo/a.php', 'old-plugin');
+        file_put_contents($target . '/wp-content/plugins/foo.new/a.php', 'preexisting-prepared');
+        $selected = $this->tempDir . '/apply-preexisting-prepared-selected.jsonl';
+        $this->writeSelectedManifest($selected, [
+            ['/var/www/html/wp-content/plugins/foo/a.php', 'wp-content/plugins/foo/a.php', 'update', 'file'],
+        ]);
+
+        try {
+            $this->runJsonCommand([
+                'command' => 'apply-staged-files',
+                'staged_root' => $staged,
+                'target_root' => $target,
+                'selected_files' => $selected,
+            ]);
+            $this->fail('Expected pre-existing prepared scratch path rejection.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('swap scratch path already exists', $e->getMessage());
+        }
+        $this->assertSame('old-plugin', file_get_contents($target . '/wp-content/plugins/foo/a.php'));
+        $this->assertSame('preexisting-prepared', file_get_contents($target . '/wp-content/plugins/foo.new/a.php'));
+    }
+
     public function testApplyStagedFilesRejectsResumeWhenSelectionNoLongerContainsJournaledOperation(): void
     {
         $staged = $this->tempDir . '/staged-resume-changed';
