@@ -116,6 +116,57 @@ class PullBridgeFakeClient extends PullFilterFakeClient
     }
 }
 
+class PullRetryFakeClient extends PullFilterFakeClient
+{
+    public int $files_sync_calls = 0;
+    public int $db_sync_calls = 0;
+    private bool $partial_files_once;
+    private bool $partial_db_once;
+
+    public function __construct(
+        string $state_dir,
+        string $fs_root,
+        bool $partial_files_once,
+        bool $partial_db_once
+    ) {
+        $this->partial_files_once = $partial_files_once;
+        $this->partial_db_once = $partial_db_once;
+        parent::__construct($state_dir, $fs_root, false);
+    }
+
+    public function run_files_sync(): void
+    {
+        $this->files_sync_calls++;
+        if ($this->partial_files_once && $this->files_sync_calls === 1) {
+            $this->mutate_state(function (array $state) {
+                $state["command"] = "files-pull";
+                $state["status"] = "partial";
+                $state["stage"] = "fetch";
+                return $state;
+            });
+            return;
+        }
+
+        parent::run_files_sync();
+    }
+
+    public function run_db_sync(): void
+    {
+        $this->db_sync_calls++;
+        if ($this->partial_db_once && $this->db_sync_calls === 1) {
+            $this->mutate_state(function (array $state) {
+                $state["command"] = "db-pull";
+                $state["status"] = "partial";
+                $state["stage"] = "sql";
+                return $state;
+            });
+            return;
+        }
+
+        parent::run_db_sync();
+    }
+}
+
 /**
  * Tests for pull-level file filtering.
  */
@@ -172,6 +223,16 @@ class PullFilterOptionTest extends TestCase
         return json_decode(
             file_get_contents($this->stateDir . '/.import-state.json'),
             true,
+        );
+    }
+
+    private function writePreflightState(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
         );
     }
 
@@ -238,6 +299,61 @@ class PullFilterOptionTest extends TestCase
         $this->assertTrue($state["pull"]["has_completed_once"]);
         $this->assertSame('none', $state["filter"]);
         $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
+    }
+
+    public function testPullFilesCommandUsesPullFileStage(): void
+    {
+        $this->writePreflightState();
+        $client = $this->makeClient(true);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-files",
+            "filter" => "essential-files",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame('essential-files', $state["pull"]["files_filter"]);
+        $this->assertTrue($state["pull"]["skipped_pending"]);
+        $this->assertSame('essential-files', $state["filter"]);
+    }
+
+    public function testPullFilesCommandRetriesPartialFilesPull(): void
+    {
+        $this->writePreflightState();
+        $client = new PullRetryFakeClient($this->stateDir, $this->fs_root, true, false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-files",
+            "filter" => "none",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(2, $client->files_sync_calls);
+        $this->assertSame('complete', $state["status"]);
+        $this->assertSame('none', $state["pull"]["files_filter"]);
+        $this->assertSame(0, $client->exit_code);
+    }
+
+    public function testPullDbCommandRetriesPartialDbPull(): void
+    {
+        $this->writePreflightState();
+        $client = new PullRetryFakeClient($this->stateDir, $this->fs_root, false, true);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-db",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(2, $client->db_sync_calls);
+        $this->assertSame('complete', $state["status"]);
+        $this->assertFileExists($this->stateDir . '/db.sql');
+        $this->assertSame(0, $client->exit_code);
     }
 
     public function testPullDerivesFlatDocumentRootFromFlattenTo(): void

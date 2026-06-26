@@ -1517,7 +1517,7 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: files-pull, files-index, db-pull, db-index, preflight, preflight-assert
+     *   - command: Required. One of: pull, pull-files, pull-db, files-pull, files-index, db-pull, db-index, preflight, preflight-assert
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      */
@@ -1556,6 +1556,8 @@ class ImportClient
 
         $valid_commands = [
             "pull",
+            "pull-files",
+            "pull-db",
             "files-pull",
             "files-index",
             "files-stats",
@@ -1620,11 +1622,11 @@ class ImportClient
         if (isset($options["filter"])) {
             $next = $options["filter"];
             if (
-                $command === "pull" &&
+                in_array($command, ["pull", "pull-files"], true) &&
                 !in_array($next, ["none", "essential-files"], true)
             ) {
                 throw new InvalidArgumentException(
-                    "Invalid --filter value for pull: {$next}. " .
+                    "Invalid --filter value for {$command}: {$next}. " .
                         "Valid values: none, essential-files",
                 );
             }
@@ -1835,11 +1837,15 @@ class ImportClient
         if ($abort) {
             // @TODO: Co-locate abort for each command with the run_*() method
             //        for that command.
-            $this->handle_abort($command);
+            $abort_command = [
+                "pull-files" => "files-pull",
+                "pull-db" => "db-pull",
+            ][$command] ?? $command;
+            $this->handle_abort($abort_command);
             return;
         }
 
-        if ($command === "files-pull") {
+        if ($command === "files-pull" || $command === "pull-files") {
             $this->assert_files_remap_consistent();
         }
 
@@ -1854,6 +1860,10 @@ class ImportClient
                     $this->run_files_sync();
                     break;
 
+                case "pull-files":
+                    $this->pull->run_pull_files($options);
+                    break;
+
                 case "files-index":
                     $this->run_files_index();
                     break;
@@ -1861,6 +1871,11 @@ class ImportClient
                 case "db-pull":
                     $this->run_db_sync();
                     break;
+
+                case "pull-db":
+                    $this->pull->run_pull_db();
+                    break;
+
                 case "db-index":
                     $this->run_db_index();
                     break;
@@ -11545,7 +11560,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'abort',
@@ -11553,7 +11568,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
         ],
         [
             'name' => 'verbose',
@@ -11562,7 +11577,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11571,7 +11586,7 @@ if (
             'flag_value' => false,
             'help' => 'Do not follow symlinks pointing outside root directories',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull'],
+            'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
             'name' => 'follow-symlinks',
@@ -11588,7 +11603,7 @@ if (
             'placeholder' => 'MODE',
             'help' => 'What to do when fs root is non-empty (error|preserve-local)',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull'],
+            'commands' => ['pull', 'pull-files', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
         ],
         [
@@ -11598,7 +11613,7 @@ if (
             'flag_value' => true,
             'help' => 'Include generated caches, VCS metadata, OS junk and editor scratch files (skipped by default)',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull', 'files-index'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index'],
         ],
         [
             'name' => 'adaptive',
@@ -11645,8 +11660,8 @@ if (
             'target' => 'filter',
             'placeholder' => 'MODE',
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
-            'help' => 'Filter which files to download (pull: none|essential-files; files-pull also supports skipped-earlier)',
-            'commands' => ['pull', 'files-pull'],
+            'help' => 'Filter which files to download (pull/pull-files: none|essential-files; files-pull also supports skipped-earlier)',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
             'name' => 'extra-directory',
@@ -11654,7 +11669,7 @@ if (
             'target' => 'extra_directory',
             'placeholder' => 'DIR',
             'help' => 'Additional remote directory to include in the export',
-            'commands' => ['files-pull', 'files-index'],
+            'commands' => ['pull-files', 'files-pull', 'files-index'],
         ],
 
         // ── db-pull options ──────────────────────────────────────
@@ -11665,7 +11680,7 @@ if (
             'placeholder' => 'SIZE',
             'cast' => 'size',
             'help' => 'Client max_allowed_packet (e.g. 16M, 64M)',
-            'commands' => ['db-pull'],
+            'commands' => ['pull-db', 'db-pull'],
         ],
         [
             'name' => 'sql-output',
@@ -11673,7 +11688,7 @@ if (
             'target' => 'sql_output',
             'placeholder' => 'MODE',
             'help' => 'Output mode: file (default), stdout, mysql',
-            'commands' => ['db-pull'],
+            'commands' => ['pull-db', 'db-pull'],
         ],
         [
             'name' => 'mysql-host',
@@ -11681,7 +11696,7 @@ if (
             'target' => 'mysql_host',
             'placeholder' => 'HOST',
             'help' => 'MySQL host (default: 127.0.0.1, for --sql-output=mysql)',
-            'commands' => ['db-pull'],
+            'commands' => ['pull-db', 'db-pull'],
         ],
         [
             'name' => 'mysql-port',
@@ -11689,7 +11704,7 @@ if (
             'target' => 'mysql_port',
             'placeholder' => 'PORT',
             'help' => 'MySQL port (default: 3306, for --sql-output=mysql)',
-            'commands' => ['db-pull'],
+            'commands' => ['pull-db', 'db-pull'],
         ],
         [
             'name' => 'mysql-user',
@@ -11697,7 +11712,7 @@ if (
             'target' => 'mysql_user',
             'placeholder' => 'USER',
             'help' => 'MySQL user (default: root, for --sql-output=mysql)',
-            'commands' => ['db-pull'],
+            'commands' => ['pull-db', 'db-pull'],
         ],
         [
             'name' => 'mysql-password',
@@ -11705,7 +11720,7 @@ if (
             'target' => 'mysql_password',
             'placeholder' => 'PASS',
             'help' => 'MySQL password (or set MYSQL_PASSWORD env)',
-            'commands' => ['db-pull'],
+            'commands' => ['pull-db', 'db-pull'],
         ],
         [
             'name' => 'mysql-database',
@@ -11713,7 +11728,7 @@ if (
             'target' => 'mysql_database',
             'placeholder' => 'DB',
             'help' => 'MySQL database (required for --sql-output=mysql)',
-            'commands' => ['db-pull'],
+            'commands' => ['pull-db', 'db-pull'],
         ],
 
         // ── db-apply options ─────────────────────────────────────
@@ -11797,7 +11812,7 @@ if (
             'pair_args' => 'SOURCE TARGET',
             'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
                 '(a :fs-root: path or an absolute path within --fs-root); repeatable',
-            'commands' => ['files-pull'],
+            'commands' => ['pull-files', 'files-pull'],
         ],
         [
             'name' => 'only',
@@ -11807,7 +11822,7 @@ if (
             'repeatable' => true,
             'help' => 'Restrict the files-pull command to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
                 'repeat for several. Default pulls everything',
-            'commands' => ['files-pull'],
+            'commands' => ['pull-files', 'files-pull'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
@@ -12079,7 +12094,7 @@ if (
             echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
         }
         echo "\n";
-        echo "Low-level commands (used by pull internally):\n";
+        echo "Low-level commands:\n";
         foreach ($low as $name => $info) {
             echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
         }
@@ -12283,8 +12298,8 @@ if (
     // The Options: section itself is generated from $option_defs so that
     // every declared option for a command is guaranteed to appear.
     // High-level commands are the ones most users will use. Low-level
-    // commands are the building blocks that pull composes internally —
-    // useful for scripting and hosting platform integrations.
+    // commands expose the individual resumable transfer primitives for
+    // scripting and hosting platform integrations.
     $command_info = [
         "pull" => [
             "level" => "high",
@@ -12338,6 +12353,45 @@ if (
                 "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --runtime=playground-cli --start-runtime=none --output-dir=./runtime\n",
+        ],
+        "pull-files" => [
+            "level" => "high",
+            "short" => "Download files with pull's retrying file stage",
+            "description" =>
+                "Runs the same file-download stage used by pull.\n" .
+                "\n" .
+                "It delegates to files-pull, retries automatically on server\n" .
+                "timeouts, and records whether an essential-files run deferred\n" .
+                "the skipped file tail for a later files-pull --filter=skipped-earlier.\n" .
+                "\n" .
+                "Requires a prior preflight, like the lower-level files-pull command.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  reprint pull-files https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
+                "\n" .
+                "  reprint pull-files https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --filter=essential-files\n",
+        ],
+        "pull-db" => [
+            "level" => "high",
+            "short" => "Download the database with pull's retrying database stage",
+            "description" =>
+                "Runs the same database-download stage used by pull.\n" .
+                "\n" .
+                "It delegates to db-pull, retries automatically on server timeouts,\n" .
+                "and prints the same SQL dump summary as the full pull pipeline.\n" .
+                "\n" .
+                "Requires a prior preflight, like the lower-level db-pull command.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  reprint pull-db https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
+                "\n" .
+                "  reprint pull-db https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --sql-output=stdout\n",
         ],
         "install-exporter" => [
             "level" => "high",

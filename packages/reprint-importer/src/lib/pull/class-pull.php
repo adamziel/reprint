@@ -191,30 +191,11 @@ class Pull
                 break;
 
             case 'files-pull':
-                $this->run_until_complete(function () {
-                    $this->client->run_files_sync();
-                });
-                $skipped_pending =
-                    $options['filter'] === 'essential-files' &&
-                    $this->client->has_skipped_files_pending();
-                $this->client->set_pull_files_state($options['filter'], $skipped_pending);
-                $count = $this->client->index_count();
-                $summary = $count > 0 ? number_format($count) . " files" : null;
-                if ($skipped_pending) {
-                    $summary = $summary !== null
-                        ? $summary . ", deferred files pending"
-                        : "deferred files pending";
-                }
-                $this->print_done($stage, $summary);
+                $this->run_pull_files($options);
                 break;
 
             case 'db-pull':
-                $this->run_until_complete(function () {
-                    $this->client->run_db_sync();
-                });
-                $sql_file = $this->client->state_dir . "/db.sql";
-                $size = file_exists($sql_file) ? $this->format_bytes(filesize($sql_file)) : null;
-                $this->print_done($stage, $size);
+                $this->run_pull_db();
                 break;
 
             case 'db-apply':
@@ -240,6 +221,37 @@ class Pull
                 $this->start_server($options);
                 break;
         }
+    }
+
+    public function run_pull_files(array $options): void
+    {
+        $options = $this->validate_and_default_pull_files_options($options, 'pull-files');
+
+        $this->run_until_complete(function () {
+            $this->client->run_files_sync();
+        });
+        $skipped_pending =
+            $options['filter'] === 'essential-files' &&
+            $this->client->has_skipped_files_pending();
+        $this->client->set_pull_files_state($options['filter'], $skipped_pending);
+        $count = $this->client->index_count();
+        $summary = $count > 0 ? number_format($count) . " files" : null;
+        if ($skipped_pending) {
+            $summary = $summary !== null
+                ? $summary . ", deferred files pending"
+                : "deferred files pending";
+        }
+        $this->print_done('files-pull', $summary);
+    }
+
+    public function run_pull_db(): void
+    {
+        $this->run_until_complete(function () {
+            $this->client->run_db_sync();
+        });
+        $sql_file = $this->client->state_dir . "/db.sql";
+        $size = file_exists($sql_file) ? $this->format_bytes(filesize($sql_file)) : null;
+        $this->print_done('db-pull', $size);
     }
 
     /**
@@ -332,15 +344,7 @@ class Pull
             $options['output_dir'] = $this->client->state_dir . '/runtime';
         }
 
-        if (!isset($options['filter'])) {
-            $options['filter'] = $this->client->state['filter'] ?? 'none';
-        }
-        if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
-            throw new InvalidArgumentException(
-                "Invalid --filter value for pull: {$options['filter']}. " .
-                "Valid values: none, essential-files"
-            );
-        }
+        $options = $this->validate_and_default_pull_files_options($options, 'pull');
 
         // When --flatten-to produces a flattened document root, the
         // apply-runtime stage must target that flattened directory rather
@@ -352,6 +356,20 @@ class Pull
             $options['flat_document_root'] = $options['flatten_to'];
         }
 
+        return $options;
+    }
+
+    private function validate_and_default_pull_files_options(array $options, string $command): array
+    {
+        if (!isset($options['filter'])) {
+            $options['filter'] = $this->client->state['filter'] ?? 'none';
+        }
+        if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
+            throw new InvalidArgumentException(
+                "Invalid --filter value for {$command}: {$options['filter']}. " .
+                "Valid values: none, essential-files"
+            );
+        }
         return $options;
     }
 
