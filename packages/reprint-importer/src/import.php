@@ -4459,10 +4459,16 @@ class ImportClient
         $operation = $this->files_plan_operation_for_status($status);
         $policy = $this->files_plan_policy_for_entry($relative_path, $classification, $allow_core_files);
         $excluded_by = $this->first_matching_exclude_pattern($source_path, $relative_path, $exclude_patterns);
+        $apply_supported = $this->files_plan_entry_supported_by_staged_apply(
+            $relative_path,
+            $classification,
+            $active["type"] ?? null,
+        );
         $selection_reason = null;
         $selected = in_array($operation, ["create", "update"], true) &&
             $excluded_by === null &&
-            $policy["status"] !== "blocked";
+            $policy["status"] !== "blocked" &&
+            $apply_supported;
         if ($operation === "delete") {
             $selection_reason = "delete-not-applied-by-staged-files";
         } elseif ($operation === "none") {
@@ -4471,6 +4477,8 @@ class ImportClient
             $selection_reason = "excluded";
         } elseif ($policy["status"] === "blocked") {
             $selection_reason = "blocked";
+        } elseif (!$apply_supported) {
+            $selection_reason = $this->files_plan_staged_apply_selection_reason($active["type"] ?? null);
         }
         $target = $target_root !== null && $relative_path !== null
             ? $target_root . "/" . $relative_path
@@ -4576,6 +4584,27 @@ class ImportClient
             "reason" => null,
             "suggested_exclusion" => null,
         ];
+    }
+
+    private function files_plan_entry_supported_by_staged_apply(?string $relative_path, array $classification, $type): bool
+    {
+        if ($relative_path === null || $this->is_selected_file_directory_type($type)) {
+            return false;
+        }
+        return in_array($classification["area"] ?? null, [
+            "plugin",
+            "theme",
+            "uploads",
+            "fonts",
+            "loose-php",
+        ], true);
+    }
+
+    private function files_plan_staged_apply_selection_reason($type): string
+    {
+        return $this->is_selected_file_directory_type($type)
+            ? "directory-not-applied-by-staged-files"
+            : "not-applied-by-staged-files";
     }
 
     private function normalize_exclude_patterns($patterns): array
@@ -4823,7 +4852,7 @@ class ImportClient
             throw new RuntimeException("Selected source file is missing from fs root: {$entry["path"]}");
         }
         $target = $target_root . "/" . $entry["relative_path"];
-        if (($entry["type"] ?? null) === "directory") {
+        if ($this->is_selected_file_directory_type($entry["type"] ?? null) || (is_dir($source) && !is_link($source))) {
             if (!is_dir($source) || is_link($source)) {
                 throw new RuntimeException("Selected manifest marked a non-directory as directory: {$entry["path"]}");
             }
@@ -4957,14 +4986,27 @@ class ImportClient
         $theme_components = [];
         $asset_paths = [];
         $loose_php_paths = [];
+        $directory_paths = [];
+        $unsupported_paths = [];
 
         $this->for_each_selected_file_entry($selected_files, function (array $entry) use (
             &$plugin_components,
             &$theme_components,
             &$asset_paths,
-            &$loose_php_paths
+            &$loose_php_paths,
+            &$directory_paths,
+            &$unsupported_paths
         ) {
             $relative_path = $entry["relative_path"];
+            if ($this->is_selected_file_directory_type($entry["type"] ?? null)) {
+                $directory_paths[] = $relative_path;
+                return;
+            }
+            $classification = $this->classify_docroot_relative_path($relative_path);
+            if (!$this->files_plan_entry_supported_by_staged_apply($relative_path, $classification, $entry["type"] ?? null)) {
+                $unsupported_paths[] = $relative_path;
+                return;
+            }
             $plugin_component = $this->component_relative_path_from_selection($relative_path, "wp-content/plugins/");
             if ($plugin_component !== null) {
                 $plugin_components[$plugin_component]["paths"][$relative_path] = true;
@@ -4988,6 +5030,17 @@ class ImportClient
                 $loose_php_paths[$relative_path] = true;
             }
         });
+
+        if (!empty($directory_paths)) {
+            throw new RuntimeException(
+                "Selected files manifest includes directory entries, but apply-staged-files only applies file entries: {$directory_paths[0]}",
+            );
+        }
+        if (!empty($unsupported_paths)) {
+            throw new RuntimeException(
+                "Selected files manifest includes paths apply-staged-files cannot apply yet: {$unsupported_paths[0]}",
+            );
+        }
 
         $operations = [];
         foreach ($asset_paths as $relative_path => $_) {
@@ -5482,6 +5535,11 @@ class ImportClient
             "operation" => $operation,
             "type" => is_string($entry["type"] ?? null) ? $entry["type"] : null,
         ];
+    }
+
+    private function is_selected_file_directory_type($type): bool
+    {
+        return $type === "dir" || $type === "directory";
     }
 
     private function assert_safe_relative_path(string $path, string $label): void

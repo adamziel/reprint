@@ -35,7 +35,11 @@ class FilesPlanMaterializeApplyTest extends TestCase
         mkdir($targetRoot . '/wp-content/plugins/foo', 0755, true);
         $this->writeIndex('.import-remote-index.jsonl', [
             ['/var/www/html/index.php', 2, 1, 'file'],
+            ['/var/www/html/robots.txt', 2, 1, 'file'],
             ['/var/www/html/wp-admin/admin.php', 2, 5, 'file'],
+            ['/var/www/html/wp-content/cache/item.txt', 2, 1, 'file'],
+            ['/var/www/html/wp-content/mu-plugins/mu.php', 2, 1, 'file'],
+            ['/var/www/html/wp-content/plugins/foo', 2, 0, 'dir'],
             ['/var/www/html/wp-content/plugins/foo/a.php', 2, 10, 'file'],
         ]);
         $this->writeIndex('.import-index.jsonl', [
@@ -50,7 +54,7 @@ class FilesPlanMaterializeApplyTest extends TestCase
             'selected_files' => $selected,
         ]);
 
-        $this->assertSame(4, $plan['summary']['total']);
+        $this->assertSame(8, $plan['summary']['total']);
         $this->assertSame(1, $plan['summary']['blocked']);
         $byPath = [];
         foreach ($plan['files'] as $file) {
@@ -59,9 +63,21 @@ class FilesPlanMaterializeApplyTest extends TestCase
 
         $this->assertSame('loose-php', $byPath['index.php']['classification']['area']);
         $this->assertSame('warning', $byPath['index.php']['policy']['status']);
+        $this->assertSame('document-root', $byPath['robots.txt']['classification']['area']);
+        $this->assertFalse($byPath['robots.txt']['selected']);
+        $this->assertSame('not-applied-by-staged-files', $byPath['robots.txt']['selection_reason']);
         $this->assertSame('wordpress-core', $byPath['wp-admin/admin.php']['classification']['area']);
         $this->assertFalse($byPath['wp-admin/admin.php']['selected']);
         $this->assertSame('wordpress-core', $byPath['wp-admin/admin.php']['policy']['reason']);
+        $this->assertSame('wp-content-other', $byPath['wp-content/cache/item.txt']['classification']['area']);
+        $this->assertFalse($byPath['wp-content/cache/item.txt']['selected']);
+        $this->assertSame('not-applied-by-staged-files', $byPath['wp-content/cache/item.txt']['selection_reason']);
+        $this->assertSame('mu-plugin', $byPath['wp-content/mu-plugins/mu.php']['classification']['area']);
+        $this->assertFalse($byPath['wp-content/mu-plugins/mu.php']['selected']);
+        $this->assertSame('not-applied-by-staged-files', $byPath['wp-content/mu-plugins/mu.php']['selection_reason']);
+        $this->assertSame('plugin', $byPath['wp-content/plugins/foo']['classification']['area']);
+        $this->assertFalse($byPath['wp-content/plugins/foo']['selected']);
+        $this->assertSame('directory-not-applied-by-staged-files', $byPath['wp-content/plugins/foo']['selection_reason']);
         $this->assertSame('modified', $byPath['wp-content/plugins/foo/a.php']['status']);
         $this->assertSame('plugin', $byPath['wp-content/plugins/foo/a.php']['classification']['area']);
         $this->assertSame('deleted', $byPath['wp-content/plugins/foo/old.php']['status']);
@@ -80,10 +96,12 @@ class FilesPlanMaterializeApplyTest extends TestCase
         file_put_contents($this->fsRoot . '/var/www/html/index.php', '<?php // index');
         file_put_contents($this->fsRoot . '/var/www/html/wp-admin/admin.php', 'admin');
         file_put_contents($this->fsRoot . '/var/www/html/wp-content/plugins/foo/a.php', 'plugin');
+        file_put_contents($this->fsRoot . '/var/www/html/wp-content/plugins/foo/unselected.php', 'unselected');
         symlink('a.php', $this->fsRoot . '/var/www/html/wp-content/plugins/foo/linked.php');
         $selected = $this->tempDir . '/materialize-selected.jsonl';
         $this->writeSelectedManifest($selected, [
             ['/var/www/html/index.php', 'index.php', 'update', 'file'],
+            ['/var/www/html/wp-content/plugins/foo', 'wp-content/plugins/foo', 'update', 'dir'],
             ['/var/www/html/wp-content/plugins/foo/a.php', 'wp-content/plugins/foo/a.php', 'update', 'file'],
             ['/var/www/html/wp-content/plugins/foo/linked.php', 'wp-content/plugins/foo/linked.php', 'update', 'file'],
         ]);
@@ -105,6 +123,7 @@ class FilesPlanMaterializeApplyTest extends TestCase
         $this->assertFalse(is_link($materialized . '/wp-content/plugins/foo/linked.php'));
         $this->assertSame('plugin', file_get_contents($materialized . '/wp-content/plugins/foo/a.php'));
         $this->assertSame('plugin', file_get_contents($materialized . '/wp-content/plugins/foo/linked.php'));
+        $this->assertFileDoesNotExist($materialized . '/wp-content/plugins/foo/unselected.php');
     }
 
     public function testApplyStagedFilesSwapsPluginThemeAndLoosePhpWithBoundedJournal(): void
@@ -188,12 +207,58 @@ class FilesPlanMaterializeApplyTest extends TestCase
         $this->assertFileDoesNotExist($target . '/.maintenance');
     }
 
+    public function testApplyStagedFilesRejectsSelectedDirectoriesAndUnsupportedPaths(): void
+    {
+        $staged = $this->tempDir . '/staged-reject';
+        $target = $this->tempDir . '/target-reject';
+        mkdir($staged . '/wp-content/plugins/foo', 0755, true);
+        mkdir($target . '/wp-content/plugins/foo', 0755, true);
+        file_put_contents($staged . '/wp-content/plugins/foo/unselected.php', 'new-unselected');
+        file_put_contents($target . '/wp-content/plugins/foo/unselected.php', 'old-unselected');
+        $selectedDirectory = $this->tempDir . '/apply-selected-dir.jsonl';
+        $this->writeSelectedManifest($selectedDirectory, [
+            ['/var/www/html/wp-content/plugins/foo', 'wp-content/plugins/foo', 'update', 'dir'],
+        ]);
+
+        try {
+            $this->runJsonCommand([
+                'command' => 'apply-staged-files',
+                'staged_root' => $staged,
+                'target_root' => $target,
+                'selected_files' => $selectedDirectory,
+            ]);
+            $this->fail('Expected selected directory rejection.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('directory entries', $e->getMessage());
+        }
+        $this->assertSame('old-unselected', file_get_contents($target . '/wp-content/plugins/foo/unselected.php'));
+
+        $selectedUnsupported = $this->tempDir . '/apply-selected-unsupported.jsonl';
+        $this->writeSelectedManifest($selectedUnsupported, [
+            ['/var/www/html/robots.txt', 'robots.txt', 'update', 'file'],
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('cannot apply yet');
+        $this->runJsonCommand([
+            'command' => 'apply-staged-files',
+            'staged_root' => $staged,
+            'target_root' => $target,
+            'selected_files' => $selectedUnsupported,
+        ]);
+    }
+
     private function runJsonCommand(array $options): array
     {
         $client = new \ImportClient('http://example.test/?reprint-api', $this->stateDir, $this->fsRoot);
         ob_start();
-        $client->run($options);
-        $output = ob_get_clean();
+        try {
+            $client->run($options);
+            $output = ob_get_clean();
+        } catch (\Throwable $e) {
+            ob_end_clean();
+            throw $e;
+        }
         $decoded = json_decode($output, true);
         $this->assertIsArray($decoded, $output);
         return $decoded;
