@@ -10812,6 +10812,8 @@ class ImportClient
             "follow_symlinks" => true,
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
+            "files_pipeline_owner" => null,
+            "db_pipeline_owner" => null,
             "max_allowed_packet" => null,
             "files_remap_fingerprint" => null,
             "files_pull_only_fingerprint" => null,
@@ -10954,12 +10956,14 @@ class ImportClient
         }
         $apply = array_intersect_key($apply, $defaults["apply"]);
         $state["apply"] = array_merge($defaults["apply"], $apply);
-        $pull = $state["pull"] ?? [];
-        if (!is_array($pull)) {
-            $pull = [];
+        foreach (["pull", "pull_files", "pull_db"] as $key) {
+            $pipeline = $state[$key] ?? [];
+            if (!is_array($pipeline)) {
+                $pipeline = [];
+            }
+            $pipeline = array_intersect_key($pipeline, $defaults[$key]);
+            $state[$key] = array_merge($defaults[$key], $pipeline);
         }
-        $pull = array_intersect_key($pull, $defaults["pull"]);
-        $state["pull"] = array_merge($defaults["pull"], $pull);
         return $state;
     }
 

@@ -334,6 +334,7 @@ class Pull
                 break;
 
             case 'files-download':
+                $this->prepare_files_stage_for_pipeline($command);
                 $options = $this->validate_and_default_pull_files_options($options, 'files-download');
                 $this->client->prepare_files_download_options($options);
 
@@ -355,6 +356,7 @@ class Pull
                 break;
 
             case 'db-download':
+                $this->prepare_db_stage_for_pipeline($command);
                 $this->run_until_complete(function () {
                     $this->client->run_db_sync();
                 });
@@ -388,6 +390,99 @@ class Pull
         }
 
         return true;
+    }
+
+    private function prepare_files_stage_for_pipeline(string $command): void
+    {
+        $owner = $this->client->state['files_pipeline_owner'] ?? null;
+        $state_command = $this->client->state['command'] ?? null;
+        $state_status = $this->client->state['status'] ?? null;
+        $needs_reset =
+            ($owner !== null && $owner !== $command) ||
+            ($owner === null && $state_command === 'files-download' && $state_status === 'complete');
+
+        if ($needs_reset) {
+            $state_dir = $this->client->state_dir;
+            $defaults = $this->client->default_state();
+            $this->client->mutate_state(function (array $state) use ($defaults, $command) {
+                $state['command'] = null;
+                $state['status'] = null;
+                $state['cursor'] = null;
+                $state['stage'] = null;
+                $state['current_file'] = null;
+                $state['current_file_bytes'] = null;
+                $state['diff'] = $defaults['diff'];
+                $state['index'] = $defaults['index'];
+                $state['fetch'] = $defaults['fetch'];
+                $state['fetch_skipped'] = $defaults['fetch_skipped'];
+                $state['files_pipeline_owner'] = $command;
+                return $state;
+            });
+
+            foreach ([
+                $state_dir . "/.import-remote-index.jsonl",
+                $state_dir . "/.import-download-list.jsonl",
+                $state_dir . "/.import-download-list-skipped.jsonl",
+            ] as $path) {
+                if (file_exists($path)) {
+                    @unlink($path);
+                }
+            }
+            return;
+        }
+
+        if ($owner !== $command) {
+            $this->client->mutate_state(function (array $state) use ($command) {
+                $state['files_pipeline_owner'] = $command;
+                return $state;
+            });
+        }
+    }
+
+    private function prepare_db_stage_for_pipeline(string $command): void
+    {
+        $owner = $this->client->state['db_pipeline_owner'] ?? null;
+        $state_command = $this->client->state['command'] ?? null;
+        $state_status = $this->client->state['status'] ?? null;
+        $needs_reset =
+            ($owner !== null && $owner !== $command) ||
+            ($owner === null && in_array($state_command, ['db-download', 'db-apply'], true) && $state_status === 'complete');
+
+        if ($needs_reset) {
+            $state_dir = $this->client->state_dir;
+            $defaults = $this->client->default_state();
+            $this->client->mutate_state(function (array $state) use ($defaults, $command) {
+                $state['command'] = null;
+                $state['status'] = null;
+                $state['cursor'] = null;
+                $state['stage'] = null;
+                $state['consecutive_timeouts'] = 0;
+                $state['sql_bytes'] = null;
+                $state['db_index'] = $defaults['db_index'];
+                $state['apply'] = $defaults['apply'];
+                $state['sql_output'] = null;
+                $state['db_pipeline_owner'] = $command;
+                return $state;
+            });
+
+            foreach ([
+                $state_dir . "/db.sql",
+                $state_dir . "/db-tables.jsonl",
+                $state_dir . "/.import-domains.json",
+            ] as $path) {
+                if (file_exists($path)) {
+                    @unlink($path);
+                }
+            }
+            return;
+        }
+
+        if ($owner !== $command) {
+            $this->client->mutate_state(function (array $state) use ($command) {
+                $state['db_pipeline_owner'] = $command;
+                return $state;
+            });
+        }
     }
 
     private function normalize_stage_name(?string $stage): ?string
