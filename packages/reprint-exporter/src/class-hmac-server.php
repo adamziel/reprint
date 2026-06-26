@@ -55,18 +55,103 @@ final class Site_Export_HMAC_Server {
     }
 
     /**
-     * Validate all cheap authentication inputs before reading request bodies.
+     * Verify the signed content hash before the request body is available.
      *
-     * Large multipart uploads can live on slow disks. More importantly, unauthenticated
-     * callers should not be able to force the server to hash those files before the
-     * request has passed timestamp, nonce, and signature checks.
+     * This verifies the timestamp, nonce, and HMAC signature over the claimed
+     * content hash. Callers that stream large bodies can then hash the body and
+     * compare it with the returned content hash without duplicating header parsing.
+     *
+     * @return array{error:?string,content_hash:?string}
+     */
+    public function verify_signed_content_hash(array $headers, ?float $now = null): array {
+        $auth = $this->collect_auth_headers($headers);
+        $auth_error = $this->verify_auth_headers($auth, $now);
+        if ($auth_error !== null) {
+            return [
+                'error' => $auth_error,
+                'content_hash' => null,
+            ];
+        }
+
+        return [
+            'error' => null,
+            'content_hash' => $auth['content_hash'],
+        ];
+    }
+
+    /**
+     * Validate authentication inputs before reading request bodies.
      */
     private function verify_content_hash_callback(array $headers, callable $received_content_hash, ?float $now = null): ?string {
-        $signature = $this->get_header($headers, 'X-Auth-Signature');
-        $nonce = $this->get_header($headers, 'X-Auth-Nonce');
-        $timestamp = $this->get_header($headers, 'X-Auth-Timestamp');
-        $signed_content_hash = $this->get_header($headers, 'X-Auth-Content-Hash');
+        $auth = $this->collect_auth_headers($headers);
+        $auth_error = $this->verify_auth_headers($auth, $now);
+        if ($auth_error !== null) {
+            return $auth_error;
+        }
 
+        try {
+            $actual_content_hash = $received_content_hash();
+        } catch (RuntimeException $e) {
+            return $e->getMessage();
+        }
+
+        if (!hash_equals($auth['content_hash'], $actual_content_hash)) {
+            return 'Content hash mismatch: body was modified in transit';
+        }
+
+        return null;
+    }
+
+    /**
+     * Verify the current PHP request when the caller streamed php://input to disk.
+     */
+    public function verify_global_content_hash(string $received_content_hash, ?float $now = null): ?string {
+        return $this->verify_content_hash($this->collect_global_headers(), $received_content_hash, $now);
+    }
+
+    /**
+     * Verify the current PHP request's signed content hash before reading its body.
+     *
+     * @return array{error:?string,content_hash:?string}
+     */
+    public function verify_global_signed_content_hash(?float $now = null): array {
+        return $this->verify_signed_content_hash($this->collect_global_headers(), $now);
+    }
+
+    /**
+     * Verify the current PHP request using superglobals.
+     *
+     * Returns null on success, or an error string on failure.
+     */
+    public function verify_globals(?float $now = null): ?string {
+        $body = file_get_contents('php://input');
+        if ($body === false) {
+            $body = '';
+        }
+
+        return $this->verify($this->collect_global_headers(), $body, $_FILES, $now);
+    }
+
+    private function collect_auth_headers(array $headers): array {
+        return [
+            'signature' => $this->get_header($headers, 'X-Auth-Signature'),
+            'nonce' => $this->get_header($headers, 'X-Auth-Nonce'),
+            'timestamp' => $this->get_header($headers, 'X-Auth-Timestamp'),
+            'content_hash' => $this->get_header($headers, 'X-Auth-Content-Hash'),
+        ];
+    }
+
+    /**
+     * Large multipart uploads can live on slow disks. More importantly,
+     * unauthenticated callers should not be able to force the server to hash
+     * those files before the request has passed timestamp, nonce, and signature
+     * checks.
+     */
+    private function verify_auth_headers(array $auth, ?float $now = null): ?string {
+        $signature = $auth['signature'];
+        $nonce = $auth['nonce'];
+        $timestamp = $auth['timestamp'];
+        $signed_content_hash = $auth['content_hash'];
         if ($signature === null || $signature === '') {
             return 'Missing X-Auth-Signature header';
         }
@@ -105,38 +190,7 @@ final class Site_Export_HMAC_Server {
             return 'HMAC signature verification failed';
         }
 
-        try {
-            $actual_content_hash = $received_content_hash();
-        } catch (RuntimeException $e) {
-            return $e->getMessage();
-        }
-
-        if (!hash_equals($signed_content_hash, $actual_content_hash)) {
-            return 'Content hash mismatch: body was modified in transit';
-        }
-
         return null;
-    }
-
-    /**
-     * Verify the current PHP request when the caller streamed php://input to disk.
-     */
-    public function verify_global_content_hash(string $received_content_hash, ?float $now = null): ?string {
-        return $this->verify_content_hash($this->collect_global_headers(), $received_content_hash, $now);
-    }
-
-    /**
-     * Verify the current PHP request using superglobals.
-     *
-     * Returns null on success, or an error string on failure.
-     */
-    public function verify_globals(?float $now = null): ?string {
-        $body = file_get_contents('php://input');
-        if ($body === false) {
-            $body = '';
-        }
-
-        return $this->verify($this->collect_global_headers(), $body, $_FILES, $now);
     }
 
     private function collect_global_headers(): array {

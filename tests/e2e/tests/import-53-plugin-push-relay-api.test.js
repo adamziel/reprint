@@ -38,6 +38,9 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: {
                 ...process.env,
+                // The plugin run request blocks while the source worker calls
+                // back into this same test server, so a single built-in-server
+                // worker would deadlock the relay loop.
                 PHP_CLI_SERVER_WORKERS: process.env.PHP_CLI_SERVER_WORKERS || '4',
             },
         });
@@ -262,6 +265,7 @@ define('ABSPATH', $root . '/target/');
 define('SITE_EXPORT_PLUGIN_DIR', $projectRoot . '/reprint-exporter-wp/');
 define('SITE_EXPORT_SECRET_FILE', $root . '/secret.php');
 define('SITE_EXPORT_PUSH_BASE_DIR', $root . '/push-sessions');
+define('SITE_EXPORT_PUSH_DEV_IMPORTER_RUNTIME', $projectRoot . '/packages/reprint-importer/src/import.php');
 require_once $projectRoot . '/packages/reprint-exporter/src/class-hmac-client.php';
 require_once $projectRoot . '/packages/reprint-exporter/src/class-hmac-server.php';
 require_once $projectRoot . '/reprint-exporter-wp/lib.php';

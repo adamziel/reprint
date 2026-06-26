@@ -2594,9 +2594,8 @@ class ImportClient
     /**
      * Command: preflight
      *
-     * Prints the full preflight response as pretty-printed JSON to stdout.
-     * The preflight itself already ran in run_preflight() — this just
-     * outputs the stored result.
+     * Updates preflight status after run_preflight().
+     * CLI callers also receive the full preflight response on stdout.
      */
     private function run_preflight_report(): void
     {
@@ -2608,8 +2607,6 @@ class ImportClient
             echo "No preflight data available.\n";
             exit(1);
         }
-        // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
-        echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
         $this->state["command"] = "preflight";
         $this->state["status"] = $ok ? "complete" : "error";
@@ -2622,6 +2619,8 @@ class ImportClient
             }
             return;
         }
+        // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
+        echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         exit($ok ? 0 : 1);
     }
 

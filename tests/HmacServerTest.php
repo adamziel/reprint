@@ -152,6 +152,18 @@ final class HmacServerTest extends TestCase
         $this->assertNull($server->verify_content_hash($headers, hash('sha256', $body), 1700000001.0));
     }
 
+    public function testSignedContentHashVerifiesBeforeBodyIsAvailable(): void
+    {
+        $body = str_repeat('large-response-body', 1024);
+        $headers = $this->buildHeadersForBody($body);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $result = $server->verify_signed_content_hash($headers, 1700000001.0);
+
+        $this->assertNull($result['error']);
+        $this->assertSame(hash('sha256', $body), $result['content_hash']);
+    }
+
     public function testInvalidSignatureDoesNotReadUploadedFiles(): void
     {
         $headers = $this->buildHeadersForBody('signed-body');

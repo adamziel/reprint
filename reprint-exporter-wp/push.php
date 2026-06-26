@@ -217,9 +217,7 @@ function _site_export_push_authenticate_claimed_content_hash(callable $authentic
         return null;
     }
 
-    $content_hash = _site_export_push_request_header('X-Auth-Content-Hash') ?? '';
-    _site_export_push_verify_content_hash($content_hash);
-    return $content_hash;
+    return _site_export_push_verify_signed_content_hash();
 }
 
 function _site_export_push_verify_body_file_hash(string $body_file, string $claimed_content_hash): void {
@@ -228,7 +226,24 @@ function _site_export_push_verify_body_file_hash(string $body_file, string $clai
     }
 }
 
-function _site_export_push_verify_content_hash(string $content_hash): void {
+function _site_export_push_verify_signed_content_hash(): string {
+    $server = _site_export_push_hmac_server();
+    $verification = method_exists($server, 'verify_global_signed_content_hash')
+        ? $server->verify_global_signed_content_hash()
+        : [
+            'error' => 'Reprint Exporter runtime is incomplete. Rebuild the plugin with the latest wp-php-toolkit/reprint-exporter.',
+            'content_hash' => null,
+        ];
+    if (!empty($verification['error'])) {
+        _site_export_push_error(403, (string) $verification['error']);
+    }
+    if (empty($verification['content_hash']) || !is_string($verification['content_hash'])) {
+        _site_export_push_error(403, 'Missing X-Auth-Content-Hash header');
+    }
+    return $verification['content_hash'];
+}
+
+function _site_export_push_hmac_server(): Site_Export_HMAC_Server {
     if (!class_exists('Site_Export_HMAC_Server') && function_exists('_site_export_load_exporter_runtime')) {
         _site_export_load_exporter_runtime();
     }
@@ -240,13 +255,7 @@ function _site_export_push_verify_content_hash(string $content_hash): void {
     }
 
     $secret = _site_export_push_shared_secret();
-    $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
-    $auth_error = method_exists($server, 'verify_global_content_hash')
-        ? $server->verify_global_content_hash($content_hash)
-        : 'Reprint Exporter runtime is incomplete. Rebuild the plugin with the latest wp-php-toolkit/reprint-exporter.';
-    if ($auth_error !== null) {
-        _site_export_push_error(403, $auth_error);
-    }
+    return new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
 }
 
 function _site_export_push_shared_secret(): string {
@@ -263,24 +272,6 @@ function _site_export_push_shared_secret(): string {
         _site_export_push_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Reprint Exporter.');
     }
     return $secret;
-}
-
-function _site_export_push_request_header(string $name): ?string {
-    if (function_exists('getallheaders')) {
-        $headers = getallheaders();
-        if (is_array($headers)) {
-            foreach ($headers as $key => $value) {
-                if (is_string($value) && strcasecmp((string) $key, $name) === 0) {
-                    return $value;
-                }
-            }
-        }
-    }
-
-    $server_key = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
-    return isset($_SERVER[$server_key]) && is_string($_SERVER[$server_key])
-        ? $_SERVER[$server_key]
-        : null;
 }
 
 function _site_export_push_hash_file_streaming(string $path): string {
@@ -746,10 +737,20 @@ function _site_export_push_load_importer_runtime(): void {
 
     $plugin_dir = _site_export_push_plugin_dir();
     $repo_root = dirname($plugin_dir);
+    // Tests and source checkouts can opt into the checked-out importer without
+    // changing the packaged plugin's default preference for its bundled vendor.
+    if (defined('SITE_EXPORT_PUSH_DEV_IMPORTER_RUNTIME') && constant('SITE_EXPORT_PUSH_DEV_IMPORTER_RUNTIME') !== '') {
+        $dev_runtime = (string) constant('SITE_EXPORT_PUSH_DEV_IMPORTER_RUNTIME');
+        if (is_file($dev_runtime)) {
+            require_once $dev_runtime;
+            return;
+        }
+        throw new RuntimeException("Configured Reprint Importer runtime does not exist: {$dev_runtime}");
+    }
     $candidates = [
-        $repo_root . '/packages/reprint-importer/src/import.php',
         $plugin_dir . 'vendor/wp-php-toolkit/reprint-importer/src/import.php',
         $repo_root . '/vendor/wp-php-toolkit/reprint-importer/src/import.php',
+        $repo_root . '/packages/reprint-importer/src/import.php',
     ];
 
     foreach ($candidates as $candidate) {
