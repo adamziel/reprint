@@ -14,6 +14,7 @@ class PullFilterFakeClient extends \ImportClient
     public int $files_sync_calls = 0;
     public int $db_sync_calls = 0;
     public int $db_apply_calls = 0;
+    public ?array $db_apply_options = null;
     public array $call_order = array();
     public array $progress_events = array();
 
@@ -109,6 +110,7 @@ class PullFilterFakeClient extends \ImportClient
     public function run_db_apply(array $options): void
     {
         ++$this->db_apply_calls;
+        $this->db_apply_options = $options;
         $this->call_order[] = 'db-apply';
         $this->mutate_state(function (array $state) {
             $state["command"] = "db-apply";
@@ -388,5 +390,47 @@ class PullFilterOptionTest extends TestCase
         $state = $this->readState();
         $this->assertSame('complete', $state["pull"]["stage"]);
         $this->assertSame('essential-files', $state["filter"]);
+    }
+
+    public function testPullDbDefaultsToSqliteApplyTarget(): void
+    {
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-db",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(array('preflight', 'db-download', 'db-apply'), $client->call_order);
+        $this->assertSame('complete', $state["pull_db"]["stage"]);
+        $this->assertSame('sqlite', $client->db_apply_options["target_engine"] ?? null);
+        $this->assertSame('file', $client->db_apply_options["sql_output"] ?? null);
+    }
+
+    public function testPullDbRejectsStdoutSqlOutputBeforeDownloading(): void
+    {
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull-db",
+                "sql_output" => "stdout",
+            ]);
+            $this->fail('Expected pull-db --sql-output=stdout to be rejected');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString(
+                'Use db-download directly for --sql-output=stdout',
+                $e->getMessage(),
+            );
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertSame(0, $client->preflight_calls);
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertFileDoesNotExist($this->stateDir . '/db.sql');
     }
 }

@@ -622,6 +622,43 @@ class Pull
             );
         }
         $options['sql_output'] = 'file';
+
+        if (empty($options['target_engine'])) {
+            $has_mysql_target =
+                !empty($options['target_host']) ||
+                !empty($options['target_port']) ||
+                !empty($options['target_user']) ||
+                !empty($options['target_pass']);
+            $has_sqlite_target = !empty($options['target_sqlite_path']);
+            if ($has_sqlite_target || (!$has_mysql_target && empty($options['target_db']))) {
+                $options['target_engine'] = 'sqlite';
+            }
+        }
+
+        if (!empty($options['target_engine'])) {
+            $engine = strtolower($options['target_engine']);
+            if (!in_array($engine, ['mysql', 'sqlite'], true)) {
+                throw new InvalidArgumentException(
+                    "Invalid --target-engine value: {$options['target_engine']}. " .
+                    "Valid engines: mysql, sqlite"
+                );
+            }
+            $options['target_engine'] = $engine;
+        }
+
+        if (($options['target_engine'] ?? 'mysql') === 'mysql') {
+            if (empty($options['target_user'])) {
+                throw new InvalidArgumentException(
+                    "--target-user is required for MySQL database import."
+                );
+            }
+            if (empty($options['target_db'])) {
+                throw new InvalidArgumentException(
+                    "--target-db is required for MySQL database import."
+                );
+            }
+        }
+
         return $options;
     }
 

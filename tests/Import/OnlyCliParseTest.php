@@ -325,4 +325,13 @@ PHP, var_export($requestsLog, true)));
         $this->assertStringContainsString('"status":"aborted"', $output);
         $this->assertStringNotContainsString('path "custom"', $output);
     }
+
+    public function testPullDbHelpOnlyShowsSupportedExamples(): void
+    {
+        $output = $this->runCli(array('pull-db', '--help'));
+
+        $this->assertStringContainsString('default local SQLite database', $output);
+        $this->assertStringContainsString('--target-engine=mysql --target-user=root --target-db=wp_local', $output);
+        $this->assertStringNotContainsString("\n    --sql-output=stdout", $output);
+    }
 }

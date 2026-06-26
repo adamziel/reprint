@@ -11782,7 +11782,7 @@ if (
             'type' => 'value',
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
-            'help' => 'Target database engine: mysql (default) or sqlite',
+            'help' => 'Target database engine: mysql or sqlite (pull/pull-db default to sqlite)',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
@@ -12426,17 +12426,20 @@ if (
                 "Runs the same database-download stage used by pull.\n" .
                 "\n" .
                 "It runs preflight, delegates to db-download, retries automatically on server timeouts,\n" .
-                "and prints the same SQL dump summary as the full pull pipeline.\n" .
+                "and then runs db-apply. Without an explicit target database, it imports into\n" .
+                "the default SQLite database under the downloaded wp-content directory.\n" .
                 "\n" .
-                "Use db-download directly only when preflight has already been cached.\n",
+                "Use db-download directly when you need --sql-output=stdout or --sql-output=mysql.\n",
             "extra" =>
                 "Examples:\n" .
+                "  # Download and apply to the default local SQLite database:\n" .
                 "  reprint pull-db https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
                 "\n" .
+                "  # Download and apply to a local MySQL database:\n" .
                 "  reprint pull-db https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
-                "    --sql-output=stdout\n",
+                "    --target-engine=mysql --target-user=root --target-db=wp_local\n",
         ],
         "install-exporter" => [
             "level" => "high",
