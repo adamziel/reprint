@@ -9,6 +9,7 @@ require_once __DIR__ . '/../../importer/import.php';
 class PullFilterFakeClient extends \ImportClient
 {
     private bool $create_skipped_list;
+    public int $preflight_calls = 0;
 
     public function __construct(string $state_dir, string $fs_root, bool $create_skipped_list)
     {
@@ -35,6 +36,7 @@ class PullFilterFakeClient extends \ImportClient
 
     public function run_preflight(): void
     {
+        $this->preflight_calls++;
         $this->mutate_state(function (array $state) {
             $state["preflight"] = [
                 "http_code" => 200,
@@ -67,7 +69,7 @@ class PullFilterFakeClient extends \ImportClient
         }
 
         $this->mutate_state(function (array $state) {
-            $state["command"] = "files-pull";
+            $state["command"] = "files-download";
             $state["status"] = "complete";
             $state["stage"] = null;
             return $state;
@@ -78,7 +80,7 @@ class PullFilterFakeClient extends \ImportClient
     {
         file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
         $this->mutate_state(function (array $state) {
-            $state["command"] = "db-pull";
+            $state["command"] = "db-download";
             $state["status"] = "complete";
             $state["stage"] = null;
             return $state;
@@ -139,7 +141,7 @@ class PullRetryFakeClient extends PullFilterFakeClient
         $this->files_sync_calls++;
         if ($this->partial_files_once && $this->files_sync_calls === 1) {
             $this->mutate_state(function (array $state) {
-                $state["command"] = "files-pull";
+                $state["command"] = "files-download";
                 $state["status"] = "partial";
                 $state["stage"] = "fetch";
                 return $state;
@@ -155,7 +157,7 @@ class PullRetryFakeClient extends PullFilterFakeClient
         $this->db_sync_calls++;
         if ($this->partial_db_once && $this->db_sync_calls === 1) {
             $this->mutate_state(function (array $state) {
-                $state["command"] = "db-pull";
+                $state["command"] = "db-download";
                 $state["status"] = "partial";
                 $state["stage"] = "sql";
                 return $state;
@@ -303,7 +305,6 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullFilesCommandUsesPullFileStage(): void
     {
-        $this->writePreflightState();
         $client = $this->makeClient(true);
 
         ob_start();
@@ -317,9 +318,10 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('essential-files', $state["pull"]["files_filter"]);
         $this->assertTrue($state["pull"]["skipped_pending"]);
         $this->assertSame('essential-files', $state["filter"]);
+        $this->assertSame(1, $client->preflight_calls);
     }
 
-    public function testPullFilesCommandRetriesPartialFilesPull(): void
+    public function testPullFilesCommandRetriesPartialFilesDownload(): void
     {
         $this->writePreflightState();
         $client = new PullRetryFakeClient($this->stateDir, $this->fs_root, true, false);
@@ -338,9 +340,8 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame(0, $client->exit_code);
     }
 
-    public function testPullDbCommandRetriesPartialDbPull(): void
+    public function testPullDbCommandRetriesPartialDbDownload(): void
     {
-        $this->writePreflightState();
         $client = new PullRetryFakeClient($this->stateDir, $this->fs_root, false, true);
 
         ob_start();
@@ -354,6 +355,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('complete', $state["status"]);
         $this->assertFileExists($this->stateDir . '/db.sql');
         $this->assertSame(0, $client->exit_code);
+        $this->assertSame(1, $client->preflight_calls);
     }
 
     public function testPullDerivesFlatDocumentRootFromFlattenTo(): void
@@ -378,15 +380,15 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame($flatten_to, $client->apply_runtime_options["flat_document_root"]);
     }
 
-    public function testRepullAfterSkippedEarlierTailUsesCompletedFilesPullState(): void
+    public function testRepullAfterSkippedEarlierTailUsesCompletedFilesDownloadState(): void
     {
-        // The deferred "skipped-earlier" tail belongs to a files-pull that
+        // The deferred "skipped-earlier" tail belongs to a files-download that
         // has finished. Once that lifecycle state is truthful, a completed
         // pull can delta re-pull without bypassing the mid-flight guard.
         file_put_contents(
             $this->stateDir . '/.import-state.json',
             json_encode([
-                "command" => "files-pull",
+                "command" => "files-download",
                 "status" => "complete",
                 "stage" => null,
                 "filter" => "skipped-earlier",

@@ -2,7 +2,7 @@
  * Test 47: Pull — Multiple Requests Per Phase
  *
  * Runs `reprint pull` with --max-exec=1 to force very short server
- * execution times. Each phase (files-pull, db-pull) requires many
+ * execution times. Each phase (files-download, db-download) requires many
  * HTTP requests to complete. The pull command's internal retry loop
  * handles all the partial responses transparently, and the final
  * result matches the source.

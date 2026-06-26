@@ -7,9 +7,9 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Test files-pull state transitions and preserve-local diff behavior.
+ * Test files-download state transitions and preserve-local diff behavior.
  *
- * A completed files-pull should refuse to re-run without --abort.
+ * A completed files-download should refuse to re-run without --abort.
  * After --abort, the next run should start fresh (not "already complete").
  * In preserve-local mode, previously-synced files that changed remotely
  * must still be re-downloaded (not skipped).
@@ -153,12 +153,12 @@ class FilesSyncStateTest extends TestCase
     // ---------------------------------------------------------------
 
     /**
-     * A completed files-pull should refuse to re-run.
+     * A completed files-download should refuse to re-run.
      */
     public function testCompletedFilesSyncRefusesToRerun()
     {
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "complete",
         ]);
 
@@ -169,17 +169,17 @@ class FilesSyncStateTest extends TestCase
 
         $state = $this->readState();
         $this->assertEquals("complete", $state["status"]);
-        $this->assertEquals("files-pull", $state["command"]);
+        $this->assertEquals("files-download", $state["command"]);
     }
 
     /**
-     * The deferred skipped-files tail reopens a completed files-pull, and a
+     * The deferred skipped-files tail reopens a completed files-download, and a
      * successful tail must restore the completed status before returning.
      */
     public function testSkippedEarlierTailRestoresCompletedStatus()
     {
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "complete",
             "stage" => null,
             "filter" => "essential-files",
@@ -199,14 +199,14 @@ class FilesSyncStateTest extends TestCase
 
         ob_start();
         $client->run([
-            "command" => "files-pull",
+            "command" => "files-download",
             "filter" => "skipped-earlier",
         ]);
         ob_end_clean();
 
         $state = $this->readState();
         $this->assertEquals("complete", $state["status"]);
-        $this->assertEquals("files-pull", $state["command"]);
+        $this->assertEquals("files-download", $state["command"]);
         $this->assertNull($state["stage"]);
         $this->assertEquals("skipped-earlier", $state["filter"]);
         $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
@@ -221,14 +221,14 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "complete",
         ]);
 
         [$client, $reflection] = $this->prepareClient();
 
         $abortMethod = $reflection->getMethod('handle_abort');
-        $abortMethod->invoke($client, 'files-pull');
+        $abortMethod->invoke($client, 'files-download');
 
         $state = $this->readState();
         $this->assertNotEquals(
@@ -248,13 +248,13 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "complete",
         ]);
 
         // Step 1: abort
         [$client, $reflection] = $this->prepareClient();
-        $reflection->getMethod('handle_abort')->invoke($client, 'files-pull');
+        $reflection->getMethod('handle_abort')->invoke($client, 'files-download');
 
         // Step 2: new client, try run_files_sync
         [$client2, $reflection2] = $this->prepareClient();
@@ -271,7 +271,7 @@ class FilesSyncStateTest extends TestCase
             $state["status"],
             "After abort + re-run, the sync should start fresh, not report 'already complete'",
         );
-        $this->assertEquals("files-pull", $state["command"]);
+        $this->assertEquals("files-download", $state["command"]);
     }
 
     // ---------------------------------------------------------------
@@ -301,7 +301,7 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($localFile, 'old content');
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "diff",
         ]);
@@ -339,7 +339,7 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($localFile, 'local drop-in');
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "diff",
         ]);
@@ -375,7 +375,7 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($localFile, 'old content');
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "fetch",
         ]);

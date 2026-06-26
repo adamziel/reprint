@@ -1118,7 +1118,7 @@ class ImportClient
     private $fs_root_nonempty_behavior = 'error';
 
     /**
-     * Controls which files are downloaded during files-pull.
+     * Controls which files are downloaded during files-download.
      *
      *   "none"             — download everything (default)
      *   "essential-files"  — skip uploads, download only code/config/themes/plugins
@@ -1141,7 +1141,7 @@ class ImportClient
 
     /**
      * @var array<int,string> Resolved `--only` file paths: a list of real source
-     * absolute path prefixes the files-pull command is restricted to. Empty = full sync
+     * absolute path prefixes the files-download command is restricted to. Empty = full sync
      * (every detected root).
      */
     private $pull_only_files_with_path_prefixes = [];
@@ -1479,7 +1479,7 @@ class ImportClient
             true,
         );
 
-        $this->progress->show_lifecycle_line("{$count} file(s) changed during sync and need re-syncing (run files-pull again):\n");
+        $this->progress->show_lifecycle_line("{$count} file(s) changed during sync and need re-syncing (run files-download again):\n");
 
         foreach ($files as $path => $changes) {
             $suffix = $changes >= 3
@@ -1494,7 +1494,7 @@ class ImportClient
                 "type" => "volatile_files",
                 "files" => $files,
                 "count" => $count,
-                "message" => "{$count} file(s) changed during sync and need re-syncing (run files-pull again)",
+                "message" => "{$count} file(s) changed during sync and need re-syncing (run files-download again)",
             ],
             true,
         );
@@ -1517,7 +1517,7 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: pull, pull-files, pull-db, files-pull, files-index, db-pull, db-index, preflight, preflight-assert
+     *   - command: Required. One of: pull, pull-files, pull-db, files-download, files-index, db-download, db-index, preflight, preflight-assert
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      */
@@ -1541,8 +1541,10 @@ class ImportClient
 
         // Apply legacy command aliases so callers using old names still work.
         static $command_aliases = [
-            "files-sync" => "files-pull",
-            "db-sync" => "db-pull",
+            "files-pull" => "files-download",
+            "db-pull" => "db-download",
+            "files-sync" => "files-download",
+            "db-sync" => "db-download",
             "flat-document-root" => "flat-docroot",
             "flatten-docroot" => "flat-docroot",
         ];
@@ -1558,10 +1560,10 @@ class ImportClient
             "pull",
             "pull-files",
             "pull-db",
-            "files-pull",
+            "files-download",
             "files-index",
             "files-stats",
-            "db-pull",
+            "db-download",
             "db-index",
             "db-domains",
             "db-apply",
@@ -1744,13 +1746,30 @@ class ImportClient
 
         // pull orchestrates the full pipeline (preflight → files → db → apply)
         // internally, so it must run before the normal command dispatch.
-        if ($command === "pull") {
+        if (in_array($command, ["pull", "pull-files", "pull-db"], true)) {
             if ($abort) {
-                $this->pull->abort();
+                if ($command === "pull") {
+                    $this->pull->abort();
+                } else {
+                    $this->handle_abort([
+                        "pull-files" => "files-download",
+                        "pull-db" => "db-download",
+                    ][$command]);
+                }
                 return;
             }
             try {
-                $this->pull->run($options);
+                switch ($command) {
+                    case "pull":
+                        $this->pull->run($options);
+                        break;
+                    case "pull-files":
+                        $this->pull->run_pull_files($options);
+                        break;
+                    case "pull-db":
+                        $this->pull->run_pull_db();
+                        break;
+                }
             } catch (\Exception $e) {
                 $this->output_progress([
                     "status" => "error",
@@ -1816,19 +1835,8 @@ class ImportClient
         // All other commands require a prior preflight run.
         $this->require_preflight();
 
-        // Resolve the `--remap` rules (requires preflight to be available first)
-        $remap_raw = $options["remap"] ?? [];
-        if (!empty($remap_raw)) {
-            $this->remap_rules = $this->resolve_remap($remap_raw);
-        }
-
-        // Resolve the `--only` file path prefixes (also requires preflight).
-        $only_raw = $options["only"] ?? [];
-        if (is_string($only_raw)) {
-            $only_raw = [$only_raw];
-        }
-        if (!empty($only_raw)) {
-            $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
+        if ($command === "files-download") {
+            $this->prepare_files_download_options($options);
         }
 
         // Handle --abort: clear state for the command and exit immediately.
@@ -1838,15 +1846,11 @@ class ImportClient
             // @TODO: Co-locate abort for each command with the run_*() method
             //        for that command.
             $abort_command = [
-                "pull-files" => "files-pull",
-                "pull-db" => "db-pull",
+                "pull-files" => "files-download",
+                "pull-db" => "db-download",
             ][$command] ?? $command;
             $this->handle_abort($abort_command);
             return;
-        }
-
-        if ($command === "files-pull" || $command === "pull-files") {
-            $this->assert_files_remap_consistent();
         }
 
         // Dispatch to appropriate command handler
@@ -1856,24 +1860,16 @@ class ImportClient
                     $this->run_preflight_assert();
                     return;
 
-                case "files-pull":
+                case "files-download":
                     $this->run_files_sync();
-                    break;
-
-                case "pull-files":
-                    $this->pull->run_pull_files($options);
                     break;
 
                 case "files-index":
                     $this->run_files_index();
                     break;
 
-                case "db-pull":
+                case "db-download":
                     $this->run_db_sync();
-                    break;
-
-                case "pull-db":
-                    $this->pull->run_pull_db();
                     break;
 
                 case "db-index":
@@ -1901,6 +1897,26 @@ class ImportClient
         }
     }
 
+    public function prepare_files_download_options(array $options): void
+    {
+        // Resolve the `--remap` rules (requires preflight to be available first)
+        $remap_raw = $options["remap"] ?? [];
+        if (!empty($remap_raw)) {
+            $this->remap_rules = $this->resolve_remap($remap_raw);
+        }
+
+        // Resolve the `--only` file path prefixes (also requires preflight).
+        $only_raw = $options["only"] ?? [];
+        if (is_string($only_raw)) {
+            $only_raw = [$only_raw];
+        }
+        if (!empty($only_raw)) {
+            $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
+        }
+
+        $this->assert_files_remap_consistent();
+    }
+
     /**
      * Handle --abort for any command: clear relevant state and exit.
      *
@@ -1910,14 +1926,21 @@ class ImportClient
      */
     private function handle_abort(string $command): void
     {
+        $command = [
+            "files-pull" => "files-download",
+            "db-pull" => "db-download",
+            "files-sync" => "files-download",
+            "db-sync" => "db-download",
+        ][$command] ?? $command;
+
         switch ($command) {
-            case "files-pull":
+            case "files-download":
                 // Clear sync progress (cursor, stage, status) and transient
                 // files, but keep the local index and downloaded files intact.
-                // This way the next `files-pull` sees a completed local index
+                // This way the next `files-download` sees a completed local index
                 // and runs a delta sync rather than re-downloading everything.
                 $this->audit_log(
-                    "RESTART | Clearing files-pull progress (keeping local index and files)",
+                    "RESTART | Clearing files-download progress (keeping local index and files)",
                     true,
                 );
                 $this->reset_state();
@@ -1975,9 +1998,9 @@ class ImportClient
                 $this->save_state($this->state);
                 break;
 
-            case "db-pull":
+            case "db-download":
                 $this->audit_log(
-                    "RESTART | Clearing db-pull state",
+                    "RESTART | Clearing db-download state",
                     true,
                 );
                 $this->reset_state();
@@ -1988,7 +2011,7 @@ class ImportClient
                     if (file_exists($sql_file)) {
                         unlink($sql_file);
                         $this->audit_log(
-                            "FILE DELETE | {$sql_file} | abort db-pull",
+                            "FILE DELETE | {$sql_file} | abort db-download",
                         );
                     }
                 }
@@ -1996,14 +2019,14 @@ class ImportClient
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
-                        "FILE DELETE | {$tables_file} | abort db-pull",
+                        "FILE DELETE | {$tables_file} | abort db-download",
                     );
                 }
                 $domains_file = $this->state_dir . "/.import-domains.json";
                 if (file_exists($domains_file)) {
                     unlink($domains_file);
                     $this->audit_log(
-                        "FILE DELETE | {$domains_file} | abort db-pull",
+                        "FILE DELETE | {$domains_file} | abort db-download",
                     );
                 }
                 break;
@@ -2636,12 +2659,12 @@ class ImportClient
     }
 
     /**
-     * Command: files-pull
+     * Command: files-download
      *
      * Unified file synchronization that auto-detects initial vs delta mode:
-     * - No prior completed files-pull → initial mode (index all, fetch all)
-     * - Prior completed files-pull → delta mode (re-index, diff, fetch changes)
-     * - In-progress files-pull → resume from saved state
+     * - No prior completed files-download → initial mode (index all, fetch all)
+     * - Prior completed files-download → delta mode (re-index, diff, fetch changes)
+     * - In-progress files-download → resume from saved state
      *
      * Both modes share the same pipeline: index → diff → fetch.
      */
@@ -2649,11 +2672,11 @@ class ImportClient
     {
         $state_command = $this->state["command"] ?? null;
         $current_status =
-            $state_command === "files-pull"
+            $state_command === "files-download"
                 ? $this->state["status"] ?? null
                 : null;
         $has_progress =
-            $state_command === "files-pull" &&
+            $state_command === "files-download" &&
             $current_status !== null &&
             $current_status !== "complete";
 
@@ -2673,18 +2696,18 @@ class ImportClient
                 if (!$has_skipped) {
                     throw new RuntimeException(
                         "--filter=skipped-earlier was requested but there is no skipped file list. " .
-                            "Run files-pull with --filter=essential-files first.",
+                            "Run files-download with --filter=essential-files first.",
                     );
                 }
                 $this->audit_log(
-                    "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
+                    "FETCH SKIPPED | files-download was complete — downloading previously skipped files",
                     true,
                 );
                 $this->progress->show_lifecycle_line("Downloading previously skipped files\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
-                    "command" => "files-pull",
+                    "command" => "files-download",
                     "stage" => "fetch-skipped",
                     "message" => "Downloading previously skipped files",
                 ], true);
@@ -2693,7 +2716,7 @@ class ImportClient
                 $this->state["files_pull_only_fingerprint"] = $this->files_pull_only_fingerprint();
                 $this->save_state($this->state);
                 $this->run_files_sync_pipeline();
-                // The deferred tail reopens a completed files-pull. Once the
+                // The deferred tail reopens a completed files-download. Once the
                 // tail finishes, restore the completed status so later filter
                 // changes are judged against the actual lifecycle state.
                 if (($this->state["status"] ?? null) === "partial") {
@@ -2711,11 +2734,11 @@ class ImportClient
                 ? " (some files were skipped — re-run with --filter=skipped-earlier to download them)"
                 : "";
             $this->audit_log(
-                sprintf("files-pull already complete: %d files indexed%s", $index_size, $skipped_note),
+                sprintf("files-download already complete: %d files indexed%s", $index_size, $skipped_note),
                 true,
             );
 
-            $this->progress->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
+            $this->progress->show_lifecycle_line("files-download already complete: {$index_size} files indexed\n");
             if ($has_skipped) {
                 $this->progress->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
             } else {
@@ -2724,10 +2747,10 @@ class ImportClient
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "already_complete",
-                "command" => "files-pull",
+                "command" => "files-download",
                 "files_indexed" => $index_size,
                 "has_skipped" => $has_skipped,
-                "message" => "files-pull already complete: {$index_size} files indexed",
+                "message" => "files-download already complete: {$index_size} files indexed",
             ], true);
             return;
         }
@@ -2738,7 +2761,7 @@ class ImportClient
         if ($this->filter === "skipped-earlier") {
             throw new RuntimeException(
                 "--filter=skipped-earlier was requested but there is no completed sync with skipped files. " .
-                    "Run files-pull with --filter=essential-files first.",
+                    "Run files-download with --filter=essential-files first.",
             );
         }
 
@@ -2768,23 +2791,23 @@ class ImportClient
             $stage = $this->state["stage"] ?? "index";
             $this->audit_log(
                 sprintf(
-                    "RESUME files-pull | stage=%s | indexed_files=%d",
+                    "RESUME files-download | stage=%s | indexed_files=%d",
                     $stage,
                     $index_size,
                 ),
                 true,
             );
 
-            $this->progress->show_lifecycle_line("Resuming files-pull\n");
+            $this->progress->show_lifecycle_line("Resuming files-download\n");
             $this->progress->show_lifecycle_line("  Stage: {$stage}\n");
             $this->progress->show_lifecycle_line("  Already indexed: {$index_size} files\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
-                "command" => "files-pull",
+                "command" => "files-download",
                 "stage" => $stage,
                 "index_size" => $index_size,
-                "message" => "Resuming files-pull (stage: {$stage}, indexed: {$index_size} files)",
+                "message" => "Resuming files-download (stage: {$stage}, indexed: {$index_size} files)",
             ], true);
         } else {
             // Starting fresh — validate that target directory is empty.
@@ -2797,7 +2820,7 @@ class ImportClient
                 );
             }
 
-            $this->state["command"] = "files-pull";
+            $this->state["command"] = "files-download";
             $this->state["status"] = "in_progress";
             $this->state["stage"] = "index";
             $this->state["files_pull_only_fingerprint"] = $this->files_pull_only_fingerprint();
@@ -2812,38 +2835,38 @@ class ImportClient
                 $index_size = $this->index_count();
 
                 $this->audit_log(
-                    "START files-pull (delta) | index_files={$index_size}",
+                    "START files-download (delta) | index_files={$index_size}",
                     true,
                 );
 
-                $this->progress->show_lifecycle_line("Starting files-pull (delta)\n");
+                $this->progress->show_lifecycle_line("Starting files-download (delta)\n");
                 $this->progress->show_lifecycle_line("  Index contains: {$index_size} files\n");
                 $this->progress->show_lifecycle_line("  Stage: index\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
-                    "command" => "files-pull",
+                    "command" => "files-download",
                     "delta" => true,
                     "index_size" => $index_size,
-                    "message" => "Starting files-pull (delta, {$index_size} files indexed)",
+                    "message" => "Starting files-download (delta, {$index_size} files indexed)",
                 ], true);
             } else {
                 $this->audit_log(
-                    "START files-pull ({$this->fs_root_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
+                    "START files-download ({$this->fs_root_nonempty_behavior} mode, ".($is_empty ? 'empty directory' : 'non-empty directory').")",
                     true,
                 );
 
-                $this->progress->show_lifecycle_line("Starting files-pull\n");
+                $this->progress->show_lifecycle_line("Starting files-download\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
-                    "command" => "files-pull",
-                    "message" => "Starting files-pull",
+                    "command" => "files-download",
+                    "message" => "Starting files-download",
                 ], true);
             }
         }
 
-        $this->state["command"] = "files-pull";
+        $this->state["command"] = "files-download";
         $this->state["status"] = "in_progress";
         $this->save_state($this->state);
 
@@ -2859,7 +2882,7 @@ class ImportClient
 
         $this->progress->clear_progress_line();
         $index_size = $this->index_count();
-        $label = $is_delta ? "files-pull (delta)" : "files-pull";
+        $label = $is_delta ? "files-download (delta)" : "files-download";
 
         $this->audit_log(
             sprintf("%s complete: %d files indexed", $label, $index_size),
@@ -2871,7 +2894,7 @@ class ImportClient
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
-            "command" => "files-pull",
+            "command" => "files-download",
             "delta" => $is_delta,
             "files_indexed" => $index_size,
             "audit_log" => $this->audit_log,
@@ -3532,7 +3555,7 @@ class ImportClient
     }
 
     /**
-     * Command: db-pull
+     * Command: db-download
      *
      * Rules:
      * - Stream next portion of SQL from last saved cursor
@@ -3546,10 +3569,10 @@ class ImportClient
         $sql_file = $this->state_dir . "/db.sql";
 
         $has_progress =
-            $state_command === "db-pull" &&
+            $state_command === "db-download" &&
             ($this->state["status"] ?? null) === "in_progress";
         $current_status =
-            $state_command === "db-pull"
+            $state_command === "db-download"
                 ? $this->state["status"] ?? null
                 : null;
 
@@ -3559,16 +3582,16 @@ class ImportClient
                 $sql_exists = file_exists($sql_file);
                 if ($sql_exists) {
                     throw new RuntimeException(
-                        "db-pull already completed and db.sql exists. Use --abort flag to start over.",
+                        "db-download already completed and db.sql exists. Use --abort flag to start over.",
                     );
                 } else {
                     throw new RuntimeException(
-                        "db-pull marked complete but db.sql is missing. Use --abort flag to re-sync.",
+                        "db-download marked complete but db.sql is missing. Use --abort flag to re-sync.",
                     );
                 }
             } else {
                 throw new RuntimeException(
-                    "db-pull already completed. Use --abort flag to start over.",
+                    "db-download already completed. Use --abort flag to start over.",
                 );
             }
         }
@@ -3577,7 +3600,7 @@ class ImportClient
             $stage = $this->state["stage"] ?? "db-index";
             $this->audit_log(
                 sprintf(
-                    "RESUME db-pull | stage=%s | cursor=%s",
+                    "RESUME db-download | stage=%s | cursor=%s",
                     $stage,
                     !empty($this->state["cursor"])
                         ? substr($this->state["cursor"], 0, 20) . "..."
@@ -3586,17 +3609,17 @@ class ImportClient
                 true,
             );
 
-            $this->progress->show_lifecycle_line("Resuming db-pull (stage: {$stage})\n");
+            $this->progress->show_lifecycle_line("Resuming db-download (stage: {$stage})\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
-                "command" => "db-pull",
+                "command" => "db-download",
                 "stage" => $stage,
-                "message" => "Resuming db-pull (stage: {$stage})",
+                "message" => "Resuming db-download (stage: {$stage})",
             ], true);
         } else {
             // Starting fresh
-            $this->state["command"] = "db-pull";
+            $this->state["command"] = "db-download";
             $this->state["status"] = "in_progress";
             $this->state["cursor"] = null;
             $this->state["stage"] = "db-index";
@@ -3604,18 +3627,18 @@ class ImportClient
             $this->state["db_index"] = $this->default_state()["db_index"];
             $this->save_state($this->state);
 
-            $this->audit_log("START db-pull", true);
+            $this->audit_log("START db-download", true);
 
-            $this->progress->show_lifecycle_line("Starting db-pull\n");
+            $this->progress->show_lifecycle_line("Starting db-download\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
-                "command" => "db-pull",
-                "message" => "Starting db-pull",
+                "command" => "db-download",
+                "message" => "Starting db-download",
             ], true);
         }
 
-        $this->state["command"] = "db-pull";
+        $this->state["command"] = "db-download";
         $this->save_state($this->state);
 
         // Stage 1: db-index (table metadata for progress estimation)
@@ -3636,7 +3659,7 @@ class ImportClient
 
             $tables = (int) ($this->state["db_index"]["tables"] ?? 0);
             $this->audit_log(
-                sprintf("db-pull db-index stage complete: %d tables", $tables),
+                sprintf("db-download db-index stage complete: %d tables", $tables),
             );
 
             // Transition to sql stage
@@ -3663,9 +3686,9 @@ class ImportClient
         $this->state["status"] = "complete";
         $this->save_state($this->state);
 
-        $this->audit_log("db-pull complete", true);
+        $this->audit_log("db-download complete", true);
 
-        $this->progress->show_lifecycle_line("db-pull complete\n");
+        $this->progress->show_lifecycle_line("db-download complete\n");
         if ($this->sql_output_mode === "file") {
             $this->progress->show_lifecycle_line("SQL file: {$sql_file}\n");
         } elseif ($this->sql_output_mode === "stdout") {
@@ -3677,10 +3700,10 @@ class ImportClient
         $db_sync_complete = [
             "type" => "lifecycle",
             "event" => "complete",
-            "command" => "db-pull",
+            "command" => "db-download",
             "sql_output_mode" => $this->sql_output_mode,
             "audit_log" => $this->audit_log,
-            "message" => "db-pull complete",
+            "message" => "db-download complete",
         ];
         if ($this->sql_output_mode === "file") {
             $db_sync_complete["sql_file"] = $sql_file;
@@ -3705,7 +3728,7 @@ class ImportClient
         $sql_file = $this->state_dir . "/db.sql";
 
         if (file_exists($domains_file)) {
-            // Fast path: domains were already discovered during db-pull
+            // Fast path: domains were already discovered during db-download
             $domains = json_decode(file_get_contents($domains_file), true);
             if (!is_array($domains)) {
                 throw new RuntimeException(
@@ -3713,7 +3736,7 @@ class ImportClient
                 );
             }
         } elseif (file_exists($sql_file)) {
-            // Scan db.sql for domains using the same pipeline as db-pull
+            // Scan db.sql for domains using the same pipeline as db-download
             $query_stream = new \WP_MySQL_Naive_Query_Stream();
             $domain_collector = new \DomainCollector();
 
@@ -3754,7 +3777,7 @@ class ImportClient
             );
         } else {
             throw new RuntimeException(
-                "No domain data found. Run db-pull first, or place a db.sql file in {$this->state_dir}.",
+                "No domain data found. Run db-download first, or place a db.sql file in {$this->state_dir}.",
             );
         }
 
@@ -4229,7 +4252,7 @@ class ImportClient
      * missing locally.
      *
      * The proxy is active in two cases:
-     * - files-pull is still incomplete
+     * - files-download is still incomplete
      * - a prior --filter=essential-files run left skipped uploads on disk
      */
     private function maybe_enable_remote_upload_proxy(RuntimeManifest $manifest, array $preflight_data): void
@@ -4257,7 +4280,7 @@ class ImportClient
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
             "condition" => "file_not_found",
-            "description" => "Proxy missing uploads from the source site until files-pull completes",
+            "description" => "Proxy missing uploads from the source site until files-download completes",
         ];
         $this->audit_log(
             "APPLY-RUNTIME | enabled remote upload proxy ({$base_url})",
@@ -4268,7 +4291,7 @@ class ImportClient
     /**
      * Decide whether runtime should proxy missing uploads from the source.
      *
-     * Once files-pull is fully complete and no skipped uploads remain, the
+     * Once files-download is fully complete and no skipped uploads remain, the
      * proxy is disabled so requests are served only from local files.
      */
     private function should_enable_remote_upload_proxy(): bool
@@ -4280,7 +4303,7 @@ class ImportClient
             return true;
         }
 
-        if (($this->state["command"] ?? null) !== "files-pull") {
+        if (($this->state["command"] ?? null) !== "files-download") {
             return false;
         }
 
@@ -5122,7 +5145,7 @@ class ImportClient
         $sql_file = $this->state_dir . "/db.sql";
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
-                "db.sql not found in {$this->state_dir}. Run db-pull first.",
+                "db.sql not found in {$this->state_dir}. Run db-download first.",
             );
         }
 
@@ -5306,7 +5329,7 @@ class ImportClient
         $save_every = 100;
         $stmts_since_save = 0;
 
-        // Load pre-computed statement count from db-pull for progress reporting
+        // Load pre-computed statement count from db-download for progress reporting
         $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
         $statements_total = null;
         if (file_exists($sql_stats_file)) {
@@ -6418,7 +6441,7 @@ class ImportClient
                 strcmp($local["path"], $remote["path"]) < 0
             ) {
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
-                // The local files index ends up being a union across files-pull --only runs.
+                // The local files index ends up being a union across files-download --only runs.
                 if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
                     $this->delete_local_file_path($local["path"]);
                     $this->delete_index_entry($local["path"]);
@@ -8439,7 +8462,7 @@ class ImportClient
         if ($previous !== null && $previous !== $fingerprint) {
             throw new RuntimeException(
                 "Cannot change --remap rules while reusing the same files index. " .
-                    "Use the original --remap rules, or use a new --state-dir for a fresh files-pull.",
+                    "Use the original --remap rules, or use a new --state-dir for a fresh files-download.",
             );
         }
 
@@ -8463,13 +8486,13 @@ class ImportClient
     }
 
     /**
-     * Refuse to resume a files-pull after changing --only.
+     * Refuse to resume a files-download after changing --only.
      *
      * The in-progress remote index cursor/file was built from one directory[]
      * allowlist. Switching the selected source path prefixes mid-resume would
      * mix indexes from different traversals. Completed runs are allowed to use
      * different --only prefixes because the local index is intentionally a union
-     * across files-pull --only runs.
+     * across files-download --only runs.
      */
     private function assert_files_pull_only_unchanged_while_resuming(bool $has_progress): void
     {
@@ -8482,8 +8505,8 @@ class ImportClient
 
         if ($previous !== null && $previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change --only while resuming files-pull. " .
-                    "Use the original --only values, or use --abort to start a new files-pull.",
+                "Cannot change --only while resuming files-download. " .
+                    "Use the original --only values, or use --abort to start a new files-download.",
             );
         }
 
@@ -8593,7 +8616,7 @@ class ImportClient
 
     /**
      * Resolve raw `--only` sources into a deduped list of real source absolute
-     * prefixes selected for files-pull. Each source is a `:token:` template (e.g.
+     * prefixes selected for files-download. Each source is a `:token:` template (e.g.
      * `:wp-content:`, `:wp-uploads:`) or a raw absolute path,
      * resolved through the same source token table (wp_source_path_tokens)
      * as --remap.
@@ -8615,7 +8638,7 @@ class ImportClient
             $prefixes[$resolved] = true;
 
             // Selecting content_dir with --only also pulls in any plugins, mu-plugins,
-            // or uploads directory outside WP_CONTENT_DIR so files-pull enumerates it too.
+            // or uploads directory outside WP_CONTENT_DIR so files-download enumerates it too.
             if ($resolved === $source_tokens["wp-content"]) {
                 foreach ($this->content_directories_outside_wp_content($source_tokens) as $source) {
                     $prefixes[$source] = true;
@@ -8624,7 +8647,7 @@ class ImportClient
         }
 
         // Drop any prefix already covered by a broader one (e.g. wp-content and wp-content/plugins)
-        // A files-pull --only run doesn't need to walk the same subtree twice.
+        // A files-download --only run doesn't need to walk the same subtree twice.
         $sources = array_keys($prefixes);
         $minimal = [];
         foreach ($sources as $path) {
@@ -9627,7 +9650,7 @@ class ImportClient
      */
     private function get_export_directories(): array
     {
-        // With --only, files-pull should enumerate only the selected source path
+        // With --only, files-download should enumerate only the selected source path
         // prefixes. Do not add the default roots, remap sources, document root, or
         // auto-prepend/append directories below.
         if (!empty($this->pull_only_files_with_path_prefixes)) {
@@ -10852,7 +10875,7 @@ class ImportClient
                 "state" => [],
             ],
             // Pull pipeline state — tracks progress through the composite
-            // preflight → files-pull → db-pull → db-apply → ... pipeline.
+            // preflight → files-download → db-download → db-apply → ... pipeline.
             // "stage" is the last completed stage name, or "complete".
             "pull" => [
                 "stage" => null,
@@ -11188,8 +11211,10 @@ class ImportClient
 
         // Migrate legacy command names from older state files.
         static $legacy_commands = [
-            "files-sync" => "files-pull",
-            "db-sync" => "db-pull",
+            "files-pull" => "files-download",
+            "db-pull" => "db-download",
+            "files-sync" => "files-download",
+            "db-sync" => "db-download",
             "flat-document-root" => "flat-docroot",
         ];
         $state_cmd = $state["command"] ?? null;
@@ -11560,7 +11585,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-download', 'files-index', 'db-download', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'abort',
@@ -11568,7 +11593,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-download', 'files-index', 'db-download', 'db-index', 'db-apply'],
         ],
         [
             'name' => 'verbose',
@@ -11577,7 +11602,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-download', 'files-index', 'db-download', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11586,7 +11611,7 @@ if (
             'flag_value' => false,
             'help' => 'Do not follow symlinks pointing outside root directories',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'files-pull'],
+            'commands' => ['pull', 'pull-files', 'files-download'],
         ],
         [
             'name' => 'follow-symlinks',
@@ -11603,7 +11628,7 @@ if (
             'placeholder' => 'MODE',
             'help' => 'What to do when fs root is non-empty (error|preserve-local)',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'files-pull'],
+            'commands' => ['pull', 'pull-files', 'files-download'],
             'aliases' => ['on-docroot-nonempty'],
         ],
         [
@@ -11613,7 +11638,7 @@ if (
             'flag_value' => true,
             'help' => 'Include generated caches, VCS metadata, OS junk and editor scratch files (skipped by default)',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index'],
+            'commands' => ['pull', 'pull-files', 'files-download', 'files-index'],
         ],
         [
             'name' => 'adaptive',
@@ -11653,15 +11678,15 @@ if (
             'commands' => [],
         ],
 
-        // ── files-pull options ───────────────────────────────────
+        // ── files-download options ───────────────────────────────────
         [
             'name' => 'filter',
             'type' => 'value',
             'target' => 'filter',
             'placeholder' => 'MODE',
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
-            'help' => 'Filter which files to download (pull/pull-files: none|essential-files; files-pull also supports skipped-earlier)',
-            'commands' => ['pull', 'pull-files', 'files-pull'],
+            'help' => 'Filter which files to download (pull/pull-files: none|essential-files; files-download also supports skipped-earlier)',
+            'commands' => ['pull', 'pull-files', 'files-download'],
         ],
         [
             'name' => 'extra-directory',
@@ -11669,10 +11694,10 @@ if (
             'target' => 'extra_directory',
             'placeholder' => 'DIR',
             'help' => 'Additional remote directory to include in the export',
-            'commands' => ['pull-files', 'files-pull', 'files-index'],
+            'commands' => ['pull-files', 'files-download', 'files-index'],
         ],
 
-        // ── db-pull options ──────────────────────────────────────
+        // ── db-download options ──────────────────────────────────────
         [
             'name' => 'max-allowed-packet',
             'type' => 'value',
@@ -11680,7 +11705,7 @@ if (
             'placeholder' => 'SIZE',
             'cast' => 'size',
             'help' => 'Client max_allowed_packet (e.g. 16M, 64M)',
-            'commands' => ['pull-db', 'db-pull'],
+            'commands' => ['pull-db', 'db-download'],
         ],
         [
             'name' => 'sql-output',
@@ -11688,7 +11713,7 @@ if (
             'target' => 'sql_output',
             'placeholder' => 'MODE',
             'help' => 'Output mode: file (default), stdout, mysql',
-            'commands' => ['pull-db', 'db-pull'],
+            'commands' => ['pull-db', 'db-download'],
         ],
         [
             'name' => 'mysql-host',
@@ -11696,7 +11721,7 @@ if (
             'target' => 'mysql_host',
             'placeholder' => 'HOST',
             'help' => 'MySQL host (default: 127.0.0.1, for --sql-output=mysql)',
-            'commands' => ['pull-db', 'db-pull'],
+            'commands' => ['pull-db', 'db-download'],
         ],
         [
             'name' => 'mysql-port',
@@ -11704,7 +11729,7 @@ if (
             'target' => 'mysql_port',
             'placeholder' => 'PORT',
             'help' => 'MySQL port (default: 3306, for --sql-output=mysql)',
-            'commands' => ['pull-db', 'db-pull'],
+            'commands' => ['pull-db', 'db-download'],
         ],
         [
             'name' => 'mysql-user',
@@ -11712,7 +11737,7 @@ if (
             'target' => 'mysql_user',
             'placeholder' => 'USER',
             'help' => 'MySQL user (default: root, for --sql-output=mysql)',
-            'commands' => ['pull-db', 'db-pull'],
+            'commands' => ['pull-db', 'db-download'],
         ],
         [
             'name' => 'mysql-password',
@@ -11720,7 +11745,7 @@ if (
             'target' => 'mysql_password',
             'placeholder' => 'PASS',
             'help' => 'MySQL password (or set MYSQL_PASSWORD env)',
-            'commands' => ['pull-db', 'db-pull'],
+            'commands' => ['pull-db', 'db-download'],
         ],
         [
             'name' => 'mysql-database',
@@ -11728,7 +11753,7 @@ if (
             'target' => 'mysql_database',
             'placeholder' => 'DB',
             'help' => 'MySQL database (required for --sql-output=mysql)',
-            'commands' => ['pull-db', 'db-pull'],
+            'commands' => ['pull-db', 'db-download'],
         ],
 
         // ── db-apply options ─────────────────────────────────────
@@ -11812,7 +11837,7 @@ if (
             'pair_args' => 'SOURCE TARGET',
             'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
                 '(a :fs-root: path or an absolute path within --fs-root); repeatable',
-            'commands' => ['pull-files', 'files-pull'],
+            'commands' => ['pull-files', 'files-download'],
         ],
         [
             'name' => 'only',
@@ -11820,9 +11845,9 @@ if (
             'target' => 'only',
             'placeholder' => 'SOURCE',
             'repeatable' => true,
-            'help' => 'Restrict the files-pull command to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
+            'help' => 'Restrict the files-download command to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
                 'repeat for several. Default pulls everything',
-            'commands' => ['pull-files', 'files-pull'],
+            'commands' => ['pull-files', 'files-download'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
@@ -12360,11 +12385,11 @@ if (
             "description" =>
                 "Runs the same file-download stage used by pull.\n" .
                 "\n" .
-                "It delegates to files-pull, retries automatically on server\n" .
+                "It runs preflight, delegates to files-download, retries automatically on server\n" .
                 "timeouts, and records whether an essential-files run deferred\n" .
-                "the skipped file tail for a later files-pull --filter=skipped-earlier.\n" .
+                "the skipped file tail for a later files-download --filter=skipped-earlier.\n" .
                 "\n" .
-                "Requires a prior preflight, like the lower-level files-pull command.\n",
+                "Use files-download directly only when preflight has already been cached.\n",
             "extra" =>
                 "Examples:\n" .
                 "  reprint pull-files https://example.com \\\n" .
@@ -12380,10 +12405,10 @@ if (
             "description" =>
                 "Runs the same database-download stage used by pull.\n" .
                 "\n" .
-                "It delegates to db-pull, retries automatically on server timeouts,\n" .
+                "It runs preflight, delegates to db-download, retries automatically on server timeouts,\n" .
                 "and prints the same SQL dump summary as the full pull pipeline.\n" .
                 "\n" .
-                "Requires a prior preflight, like the lower-level db-pull command.\n",
+                "Use db-download directly only when preflight has already been cached.\n",
             "extra" =>
                 "Examples:\n" .
                 "  reprint pull-db https://example.com \\\n" .
@@ -12434,7 +12459,7 @@ if (
                 "Prints a PASS/FAIL summary and exits 0 if all checks pass, 1 if not.\n",
             "extra" => null,
         ],
-        "files-pull" => [
+        "files-download" => [
             "level" => "low",
             "short" => "Pull all files (initial) or only changes (delta)",
             "description" =>
@@ -12489,10 +12514,10 @@ if (
                 "  - Files not yet downloaded and their combined size\n" .
                 "\n" .
                 "Output is JSON with 'indexed' and 'pending' sections.\n" .
-                "Requires a prior files-index or files-pull run.\n",
+                "Requires a prior files-index or files-download run.\n",
             "extra" => null,
         ],
-        "db-pull" => [
+        "db-download" => [
             "level" => "low",
             "short" => "Pull the database as a SQL dump (index + download)",
             "description" =>
@@ -12512,7 +12537,7 @@ if (
             "description" =>
                 "Fetches table metadata (name, estimated rows, data size) from\n" .
                 "the remote server and writes it to --state-dir/db-tables.jsonl.\n" .
-                "Useful for planning before a full db-pull.\n",
+                "Useful for planning before a full db-download.\n",
             "extra" =>
                 "Output files:\n" .
                 "  db-tables.jsonl  One JSON object per table\n",
@@ -12523,7 +12548,7 @@ if (
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
                 "\n" .
-                "If .import-domains.json exists (cached by db-pull), it is read\n" .
+                "If .import-domains.json exists (cached by db-download), it is read\n" .
                 "directly. Otherwise, db.sql is scanned and the result is cached\n" .
                 "for future calls. No network calls.\n" .
                 "\n" .
@@ -12647,8 +12672,10 @@ if (
 
     // Legacy command names that still work on the CLI.
     $command_aliases = [
-        "files-sync" => "files-pull",
-        "db-sync" => "db-pull",
+        "files-pull" => "files-download",
+        "db-pull" => "db-download",
+        "files-sync" => "files-download",
+        "db-sync" => "db-download",
         "flat-document-root" => "flat-docroot",
         "flatten-docroot" => "flat-docroot",
     ];

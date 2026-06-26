@@ -81,10 +81,10 @@ class OnlyFilesPathPrefixTest extends TestCase
         return hash('sha256', json_encode($prefixes, JSON_UNESCAPED_SLASHES));
     }
 
-    private function writeFilesPullState(array $state): void
+    private function writeFilesDownloadState(array $state): void
     {
         $defaults = array(
-            'command' => 'files-pull',
+            'command' => 'files-download',
             'status' => 'in_progress',
             'stage' => 'diff',
             'preflight' => array(
@@ -114,7 +114,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         );
     }
 
-    private function runFilesPullWithOnly(array $only): void
+    private function runFilesDownloadWithOnly(array $only): void
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
         $output = fopen('php://temp', 'w');
@@ -125,7 +125,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
         try {
             $c->run(array(
-                'command' => 'files-pull',
+                'command' => 'files-download',
                 'only' => $only,
             ));
         } finally {
@@ -224,7 +224,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->assertFalse($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/var/www/html/wp-content.bak/x')));
     }
 
-    public function testChangingOnlyPrefixesWhileResumingFilesPullIsRejected(): void
+    public function testChangingOnlyPrefixesWhileResumingFilesDownloadIsRejected(): void
     {
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
 
@@ -235,11 +235,11 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --only while resuming files-pull');
+        $this->expectExceptionMessage('Cannot change --only while resuming files-download');
         $this->call($c, 'assert_files_pull_only_unchanged_while_resuming', array(true));
     }
 
-    public function testChangingOnlyPrefixesAfterCompletedFilesPullIsAllowed(): void
+    public function testChangingOnlyPrefixesAfterCompletedFilesDownloadIsAllowed(): void
     {
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
 
@@ -251,25 +251,25 @@ class OnlyFilesPathPrefixTest extends TestCase
     }
 
 
-    public function testRunRejectsChangingOnlyPrefixesWhileFilesPullIsInProgress(): void
+    public function testRunRejectsChangingOnlyPrefixesWhileFilesDownloadIsInProgress(): void
     {
-        $this->writeFilesPullState(array(
+        $this->writeFilesDownloadState(array(
             'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --only while resuming files-pull');
-        $this->runFilesPullWithOnly(array(':wp-uploads:'));
+        $this->expectExceptionMessage('Cannot change --only while resuming files-download');
+        $this->runFilesDownloadWithOnly(array(':wp-uploads:'));
     }
 
-    public function testRunAllowsSameOnlyPrefixesWhileFilesPullIsInProgress(): void
+    public function testRunAllowsSameOnlyPrefixesWhileFilesDownloadIsInProgress(): void
     {
         file_put_contents($this->stateDir . '/.import-remote-index.jsonl', '');
-        $this->writeFilesPullState(array(
+        $this->writeFilesDownloadState(array(
             'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
-        $this->runFilesPullWithOnly(array(':wp-content:/plugins'));
+        $this->runFilesDownloadWithOnly(array(':wp-content:/plugins'));
 
         $state = $this->readState();
         $this->assertSame('complete', $state['status'] ?? null);
@@ -279,14 +279,14 @@ class OnlyFilesPathPrefixTest extends TestCase
         );
     }
 
-    public function testRunRecordsOnlyFingerprintForLegacyInProgressFilesPullState(): void
+    public function testRunRecordsOnlyFingerprintForLegacyInProgressFilesDownloadState(): void
     {
         file_put_contents($this->stateDir . '/.import-remote-index.jsonl', '');
-        $this->writeFilesPullState(array(
+        $this->writeFilesDownloadState(array(
             'files_pull_only_fingerprint' => null,
         ));
 
-        $this->runFilesPullWithOnly(array(':wp-content:/plugins'));
+        $this->runFilesDownloadWithOnly(array(':wp-content:/plugins'));
 
         $state = $this->readState();
         $this->assertSame(
@@ -295,15 +295,15 @@ class OnlyFilesPathPrefixTest extends TestCase
         );
     }
 
-    public function testRunAllowsChangingOnlyPrefixesAfterCompletedFilesPull(): void
+    public function testRunAllowsChangingOnlyPrefixesAfterCompletedFilesDownload(): void
     {
-        $this->writeFilesPullState(array(
+        $this->writeFilesDownloadState(array(
             'status' => 'complete',
             'stage' => null,
             'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
-        $this->runFilesPullWithOnly(array(':wp-uploads:'));
+        $this->runFilesDownloadWithOnly(array(':wp-uploads:'));
 
         $state = $this->readState();
         $this->assertSame('complete', $state['status'] ?? null);

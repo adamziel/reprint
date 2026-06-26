@@ -9,7 +9,7 @@
  * Emits a markdown table to stdout, appends to $GITHUB_STEP_SUMMARY, and
  * writes a JSON artifact to bench-results.json.
  *
- * Stages timed: preflight, files-pull, db-pull, db-apply, apply-runtime.
+ * Stages timed: preflight, files-download, db-download, db-apply, apply-runtime.
  *
  * Note: each stage runs in a fresh PHP process to keep timings comparable
  * with how the importer is run in production (resumable, single-stage).
@@ -36,7 +36,7 @@ const FILE_BENCH_SIZE = FILE_BENCH_SIZE_MB * 1024 * 1024;
 const FILE_BENCH_TUNED_CHUNK_SIZE = 16 * 1024 * 1024;
 const FILE_BENCH_RELATIVE_PATH = `test-data/bench-random-${FILE_BENCH_SIZE_MB}mb.bin`;
 const IMPORT_DB = 'e2e_bench_pull';
-// Seed enough posts/postmeta to make db-pull and db-apply dominate wall-clock
+// Seed enough posts/postmeta to make db-download and db-apply dominate wall-clock
 // (the default WP install has ~1 post). Mirrors the dataset shape used in
 // Automattic/studio#3248: ~320k posts and ~720k postmeta rows.
 const SEED_POSTS = Number(process.env.BENCH_SEED_POSTS || 320_007);
@@ -258,7 +258,7 @@ function proofFailureResult(stage, start, proof, details) {
 
 function runPlaygroundSqliteDbPullBenchmark() {
     const start = performance.now();
-    const stateDir = join(tmpdir(), `bench-playground-sqlite-db-pull-${Date.now()}`);
+    const stateDir = join(tmpdir(), `bench-playground-sqlite-db-download-${Date.now()}`);
     mkdirSync(stateDir, { recursive: true });
     mkdirSync(fsRootDir(stateDir), { recursive: true });
 
@@ -268,22 +268,22 @@ function runPlaygroundSqliteDbPullBenchmark() {
     );
     const proof = runNativeMysqlParserProof({ requireParser: false });
     const baseDetails = {
-        condition: 'db-pull in PHP.wasm',
+        condition: 'db-download in PHP.wasm',
         runtime: `php.wasm ${PLAYGROUND_PHP_VERSION}`,
         wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
     };
     if (!proof.ok) {
-        return proofFailureResult('playground-sqlite-db-pull', start, proof, baseDetails);
+        return proofFailureResult('playground-sqlite-db-download', start, proof, baseDetails);
     }
 
-    const result = runStage('db-pull', stateDir, [], {
+    const result = runStage('db-download', stateDir, [], {
         phpBinary: PLAYGROUND_PHP_BINARY,
         env: playgroundPhpEnv(),
     });
 
     return {
         ...result,
-        stage: 'playground-sqlite-db-pull',
+        stage: 'playground-sqlite-db-download',
         details: {
             ...baseDetails,
             ...proof.details,
@@ -302,8 +302,8 @@ function runPlaygroundSqliteDbApplyBenchmark() {
         'playground sqlite benchmark preflight',
     );
     requireBenchStageOk(
-        runStage('db-pull', stateDir),
-        'playground sqlite benchmark db-pull',
+        runStage('db-download', stateDir),
+        'playground sqlite benchmark db-download',
     );
     const proof = runNativeMysqlParserProof({ requireParser: true });
     const baseDetails = {
@@ -459,7 +459,7 @@ register_shutdown_function(function () {
 
     const baseArgs = [
         IMPORTER_PATH,
-        'files-pull',
+        'files-download',
         url,
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
@@ -494,12 +494,12 @@ register_shutdown_function(function () {
                 peakMemory = Math.max(peakMemory, Number(readFileSync(peakFile, 'utf-8')) || 0);
             }
             return {
-                stage: 'files-pull-large-part-peak-memory',
+                stage: 'files-download-large-part-peak-memory',
                 elapsedMs: performance.now() - start,
                 attempts,
                 ok: true,
                 details: {
-                    condition: 'files-pull large multipart file part',
+                    condition: 'files-download large multipart file part',
                     file: fmtBytes(statSync(filePath).size),
                     chunk_size: fmtBytes(FILE_BENCH_TUNED_CHUNK_SIZE),
                     peak_memory: fmtBytes(peakMemory),
@@ -515,7 +515,7 @@ register_shutdown_function(function () {
                 continue;
             }
             return {
-                stage: 'files-pull-large-part-peak-memory',
+                stage: 'files-download-large-part-peak-memory',
                 elapsedMs: performance.now() - start,
                 attempts,
                 ok: false,
@@ -523,7 +523,7 @@ register_shutdown_function(function () {
                 stderr: (lastErr.stderr || '').toString().slice(-2000),
                 stdout: (lastErr.stdout || '').toString().slice(-2000),
                 details: {
-                    condition: 'files-pull large multipart file part',
+                    condition: 'files-download large multipart file part',
                     file: fmtBytes(statSync(filePath).size),
                     chunk_size: fmtBytes(FILE_BENCH_TUNED_CHUNK_SIZE),
                     peak_memory: fmtBytes(peakMemory),
@@ -628,8 +628,8 @@ async function main() {
 
     const stages = [
         { name: 'preflight', extra: [] },
-        { name: 'files-pull', extra: [] },
-        { name: 'db-pull', extra: [] },
+        { name: 'files-download', extra: [] },
+        { name: 'db-download', extra: [] },
         { name: 'db-apply', extra: dbApplyArgs },
         // apply-runtime is local-only; it doesn't take a remote URL.
         { name: 'apply-runtime', extra: runtimeArgs, includeUrl: false },
@@ -648,8 +648,8 @@ async function main() {
         }
     }
 
-    if (shouldRun('playground-sqlite-db-pull')) {
-        console.log('-> playground-sqlite-db-pull');
+    if (shouldRun('playground-sqlite-db-download')) {
+        console.log('-> playground-sqlite-db-download');
         const playgroundSqlitePull = runPlaygroundSqliteDbPullBenchmark();
         results.push(playgroundSqlitePull);
         console.log(`   ${playgroundSqlitePull.ok ? 'ok' : 'FAIL'} in ${fmtMs(playgroundSqlitePull.elapsedMs)} (${fmtDetails(playgroundSqlitePull.details)})`);
@@ -708,7 +708,7 @@ async function main() {
         console.log(`   ${binaryCompressionFetch.ok ? 'ok' : 'FAIL'} in ${fmtMs(binaryCompressionFetch.elapsedMs)} (${fmtDetails(binaryCompressionFetch.details)})`);
     }
 
-    if (shouldRun('files-pull-large-part-peak-memory')) {
+    if (shouldRun('files-download-large-part-peak-memory')) {
         if (!fileBench) {
             console.log(`Provisioning site: ${FILE_BENCH_SITE}`);
             fileBench = await ensureFileBenchSite();
@@ -717,7 +717,7 @@ async function main() {
         mkdirSync(filePullStateDir, { recursive: true });
         mkdirSync(fsRootDir(filePullStateDir), { recursive: true });
         runPreflightForSite(fileBench.site, filePullStateDir);
-        console.log('-> files-pull-large-part-peak-memory');
+        console.log('-> files-download-large-part-peak-memory');
         const largePartPull = runFilePullWithPeakMemory({
             site: fileBench.site,
             stateDir: filePullStateDir,

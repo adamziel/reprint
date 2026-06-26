@@ -6,7 +6,7 @@
  * Each step retries automatically on server timeouts (exit code 2). If
  * the process is interrupted, re-running pull resumes from the last
  * completed step. Like `git pull` composes fetch + merge, this composes
- * preflight → files-pull → db-pull → db-apply → flat-docroot →
+ * preflight → files-download → db-download → db-apply → flat-docroot →
  * apply-runtime → start.
  *
  * The class holds a reference to ImportClient because each stage
@@ -28,7 +28,7 @@ class Pull
     /**
      * Determine the pipeline stages based on the provided options.
      *
-     * Always: preflight → files-pull → db-pull.
+     * Always: preflight → files-download → db-download.
      * Adds db-apply when a database target is configured, flat-docroot
      * when --flatten-to is set, apply-runtime when --runtime is set,
      * and start when the selected start runtime can be launched
@@ -36,7 +36,7 @@ class Pull
      */
     public function stages(array $options): array
     {
-        $stages = ['preflight', 'files-pull', 'db-pull'];
+        $stages = ['preflight', 'files-download', 'db-download'];
         $has_db_target =
             !empty($options['target_db']) ||
             !empty($options['target_engine']) ||
@@ -68,8 +68,8 @@ class Pull
     {
         switch ($stage) {
             case 'preflight':     return 'Connecting';
-            case 'files-pull':    return 'Pulling files';
-            case 'db-pull':       return 'Pulling database';
+            case 'files-download':    return 'Pulling files';
+            case 'db-download':       return 'Pulling database';
             case 'db-apply':      return 'Importing database';
             case 'flat-docroot':  return 'Flattening layout';
             case 'apply-runtime': return 'Preparing runtime';
@@ -92,6 +92,7 @@ class Pull
         $total = count($stages);
         $state = $this->client->state;
         $completed_stage = $state['pull']['stage'] ?? null;
+        $completed_stage = $this->normalize_stage_name($completed_stage);
 
         // If the prior pull completed, prepare for a delta re-pull.
         if ($completed_stage === 'complete') {
@@ -178,6 +179,29 @@ class Pull
         ], true);
     }
 
+    /**
+     * Run the file-only pull pipeline.
+     */
+    public function run_pull_files(array $options): void
+    {
+        $this->normalize_url();
+        $this->progress->enable_quiet_lifecycle();
+
+        $options = $this->validate_and_default_pull_files_options($options, 'pull-files');
+        $this->run_partial_pipeline('pull-files', ['preflight', 'files-download'], $options);
+    }
+
+    /**
+     * Run the database-only pull pipeline.
+     */
+    public function run_pull_db(): void
+    {
+        $this->normalize_url();
+        $this->progress->enable_quiet_lifecycle();
+
+        $this->run_partial_pipeline('pull-db', ['preflight', 'db-download'], []);
+    }
+
     private function run_stage(string $stage, array $options, int $step, int $total): void
     {
         switch ($stage) {
@@ -190,12 +214,33 @@ class Pull
                 $this->print_done($stage, $this->preflight_summary());
                 break;
 
-            case 'files-pull':
-                $this->run_pull_files($options);
+            case 'files-download':
+                $options = $this->validate_and_default_pull_files_options($options, 'files-download');
+
+                $this->run_until_complete(function () {
+                    $this->client->run_files_sync();
+                });
+                $skipped_pending =
+                    $options['filter'] === 'essential-files' &&
+                    $this->client->has_skipped_files_pending();
+                $this->client->set_pull_files_state($options['filter'], $skipped_pending);
+                $count = $this->client->index_count();
+                $summary = $count > 0 ? number_format($count) . " files" : null;
+                if ($skipped_pending) {
+                    $summary = $summary !== null
+                        ? $summary . ", deferred files pending"
+                        : "deferred files pending";
+                }
+                $this->print_done($stage, $summary);
                 break;
 
-            case 'db-pull':
-                $this->run_pull_db();
+            case 'db-download':
+                $this->run_until_complete(function () {
+                    $this->client->run_db_sync();
+                });
+                $sql_file = $this->client->state_dir . "/db.sql";
+                $size = file_exists($sql_file) ? $this->format_bytes(filesize($sql_file)) : null;
+                $this->print_done($stage, $size);
                 break;
 
             case 'db-apply':
@@ -223,35 +268,52 @@ class Pull
         }
     }
 
-    public function run_pull_files(array $options): void
+    private function run_partial_pipeline(string $command, array $stages, array $options): void
     {
-        $options = $this->validate_and_default_pull_files_options($options, 'pull-files');
+        $host = parse_url($this->client->remote_url, PHP_URL_HOST) ?? $this->client->remote_url;
+        $bold = "\033[1m";
+        $r = "\033[0m";
+        $this->progress->print_line("\n{$bold}" . ucfirst(str_replace('-', ' ', $command)) . " from {$host}{$r}\n");
 
-        $this->run_until_complete(function () {
-            $this->client->run_files_sync();
-        });
-        $skipped_pending =
-            $options['filter'] === 'essential-files' &&
-            $this->client->has_skipped_files_pending();
-        $this->client->set_pull_files_state($options['filter'], $skipped_pending);
-        $count = $this->client->index_count();
-        $summary = $count > 0 ? number_format($count) . " files" : null;
-        if ($skipped_pending) {
-            $summary = $summary !== null
-                ? $summary . ", deferred files pending"
-                : "deferred files pending";
+        $this->client->output_progress([
+            "type" => "lifecycle",
+            "event" => "starting",
+            "command" => $command,
+            "stages" => $stages,
+            "resume_from" => 0,
+            "message" => "Starting {$command}",
+        ], true);
+
+        $total = count($stages);
+        foreach ($stages as $i => $stage) {
+            $this->print_stage_header($stage);
+            try {
+                if ($stage === 'files-download') {
+                    $this->client->prepare_files_download_options($options);
+                }
+                $this->run_stage($stage, $options, $i + 1, $total);
+            } catch (\Exception $e) {
+                $this->report_failure($stage, $stages, $i, $e);
+                throw $e;
+            }
         }
-        $this->print_done('files-pull', $summary);
+
+        $this->client->output_progress([
+            "type" => "lifecycle",
+            "event" => "complete",
+            "command" => $command,
+            "stages" => $stages,
+            "message" => "{$command} complete",
+        ], true);
     }
 
-    public function run_pull_db(): void
+    private function normalize_stage_name(?string $stage): ?string
     {
-        $this->run_until_complete(function () {
-            $this->client->run_db_sync();
-        });
-        $sql_file = $this->client->state_dir . "/db.sql";
-        $size = file_exists($sql_file) ? $this->format_bytes(filesize($sql_file)) : null;
-        $this->print_done('db-pull', $size);
+        static $legacy_stages = [
+            'files-pull' => 'files-download',
+            'db-pull' => 'db-download',
+        ];
+        return $stage !== null ? ($legacy_stages[$stage] ?? $stage) : null;
     }
 
     /**
@@ -418,7 +480,7 @@ class Pull
     /**
      * Reset sub-command state for a delta re-pull.
      *
-     * Keeps the local file index (so files-pull runs in delta mode) and
+     * Keeps the local file index (so files-download runs in delta mode) and
      * preflight data, but clears everything else and deletes db.sql /
      * the remote index so the next pull re-fetches them.
      */

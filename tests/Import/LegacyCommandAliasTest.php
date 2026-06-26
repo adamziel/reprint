@@ -7,7 +7,8 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Smoke test: old command names (files-sync, db-sync, flat-document-root)
+ * Smoke test: old command names (files-pull, db-pull, files-sync,
+ * db-sync, flat-document-root)
  * must continue to work via the alias table and state migration.
  */
 class LegacyCommandAliasTest extends TestCase
@@ -92,8 +93,10 @@ class LegacyCommandAliasTest extends TestCase
     public static function legacyCommandProvider(): array
     {
         return [
-            'files-sync → files-pull' => ['files-sync', 'files-pull'],
-            'db-sync → db-pull' => ['db-sync', 'db-pull'],
+            'files-pull → files-download' => ['files-pull', 'files-download'],
+            'db-pull → db-download' => ['db-pull', 'db-download'],
+            'files-sync → files-download' => ['files-sync', 'files-download'],
+            'db-sync → db-download' => ['db-sync', 'db-download'],
             'flat-document-root → flat-docroot' => ['flat-document-root', 'flat-docroot'],
             'flatten-docroot → flat-docroot' => ['flatten-docroot', 'flat-docroot'],
         ];
@@ -127,8 +130,10 @@ class LegacyCommandAliasTest extends TestCase
     public static function legacyStateProvider(): array
     {
         return [
-            'files-sync → files-pull' => ['files-sync', 'files-pull'],
-            'db-sync → db-pull' => ['db-sync', 'db-pull'],
+            'files-pull → files-download' => ['files-pull', 'files-download'],
+            'db-pull → db-download' => ['db-pull', 'db-download'],
+            'files-sync → files-download' => ['files-sync', 'files-download'],
+            'db-sync → db-download' => ['db-sync', 'db-download'],
             'flat-document-root → flat-docroot' => ['flat-document-root', 'flat-docroot'],
         ];
     }

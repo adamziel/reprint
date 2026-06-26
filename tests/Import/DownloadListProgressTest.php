@@ -143,7 +143,7 @@ class DownloadListProgressTest extends TestCase
         $listFile = $this->writeDownloadList(100);
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "fetch",
         ]);
@@ -168,7 +168,7 @@ class DownloadListProgressTest extends TestCase
         $offset = $this->byteOffsetAfterLines($listFile, 40);
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "fetch",
             "fetch" => [
@@ -202,7 +202,7 @@ class DownloadListProgressTest extends TestCase
         $pastEnd = filesize($listFile) + 1000;
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "fetch",
             "fetch" => [
@@ -236,7 +236,7 @@ class DownloadListProgressTest extends TestCase
 
         // First invocation at offset 30
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "fetch",
             "fetch" => ["offset" => $offset30, "next_offset" => $offset30, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
@@ -253,7 +253,7 @@ class DownloadListProgressTest extends TestCase
 
         // Second invocation at offset 60
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "fetch",
             "fetch" => ["offset" => $offset60, "next_offset" => $offset60, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
@@ -280,7 +280,7 @@ class DownloadListProgressTest extends TestCase
         $offset20 = $this->byteOffsetAfterLines($skippedList, 20);
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "fetch-skipped",
             "fetch_skipped" => ["offset" => $offset20, "next_offset" => $offset20, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
@@ -316,7 +316,7 @@ class DownloadListProgressTest extends TestCase
         $listFile = $this->writeDownloadList(10);
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "fetch",
         ]);
@@ -341,7 +341,7 @@ class DownloadListProgressTest extends TestCase
         $offset40 = $this->byteOffsetAfterLines($listFile, 40);
 
         $this->writeState([
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "fetch",
             "fetch" => ["offset" => $offset40, "next_offset" => $offset40, "batch_file" => null, "batch_entries" => 0, "cursor" => null],

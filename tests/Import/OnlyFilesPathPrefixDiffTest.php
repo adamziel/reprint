@@ -102,7 +102,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
     private function prepareClient(array $pull_only_files_with_path_prefixes): array
     {
         $defaults = [
-            "command" => "files-pull",
+            "command" => "files-download",
             "status" => "in_progress",
             "stage" => "diff",
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
@@ -128,7 +128,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         // Local index (sorted): an unselected entry, a matched selected file,
         // and a selected orphan absent from the --only remote index. The
         // delete drains must reconcile only within the --only file prefixes, so the local index
-        // accumulates as a union across files-pull --only runs.
+        // accumulates as a union across files-download --only runs.
         $this->writeIndex('.import-index.jsonl',
             $this->indexLine('/wp-config.php', 1000, 10)               // unselected
             . $this->indexLine('/wp-content/keep.txt', 1000, 10)       // matched

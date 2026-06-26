@@ -81,7 +81,7 @@ describe('Import: --filter', () => {
 
         it('state shows complete with filter persisted', () => {
             const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-            assert.equal(state.command, 'files-pull');
+            assert.equal(state.command, 'files-download');
             assert.equal(state.status, 'complete');
             assert.equal(state.filter, 'essential-files');
         });

@@ -43,7 +43,7 @@ describe('Import: Basic File Sync', () => {
         const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.command, 'files-pull');
+        assert.equal(state.command, 'files-download');
         assert.equal(state.status, 'complete');
     });
 

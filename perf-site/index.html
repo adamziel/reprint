@@ -69,8 +69,8 @@
                     <th>Message</th>
                     <th class="num">Total</th>
                     <th class="num">preflight</th>
-                    <th class="num">files-pull</th>
-                    <th class="num">db-pull</th>
+                    <th class="num">files-download</th>
+                    <th class="num">db-download</th>
                     <th class="num">db-apply</th>
                     <th class="num">apply-runtime</th>
                 </tr>
@@ -83,11 +83,11 @@
 <p class="meta" id="footer"></p>
 
 <script>
-const STAGES = ['preflight', 'files-pull', 'db-pull', 'db-apply', 'apply-runtime'];
+const STAGES = ['preflight', 'files-download', 'db-download', 'db-apply', 'apply-runtime'];
 const COLORS = {
     'preflight': '#1f77b4',
-    'files-pull': '#2ca02c',
-    'db-pull': '#ff7f0e',
+    'files-download': '#2ca02c',
+    'db-download': '#ff7f0e',
     'db-apply': '#d62728',
     'apply-runtime': '#9467bd',
 };
@@ -192,8 +192,8 @@ async function load() {
             <td>${escapeHtml(e.message).slice(0, 80)}</td>
             <td class="num">${fmtMs(total)}</td>
             <td class="num">${fmtMs(byStage['preflight'])}</td>
-            <td class="num">${fmtMs(byStage['files-pull'])}</td>
-            <td class="num">${fmtMs(byStage['db-pull'])}</td>
+            <td class="num">${fmtMs(byStage['files-download'])}</td>
+            <td class="num">${fmtMs(byStage['db-download'])}</td>
             <td class="num">${fmtMs(byStage['db-apply'])}</td>
             <td class="num">${fmtMs(byStage['apply-runtime'])}</td>
         `;

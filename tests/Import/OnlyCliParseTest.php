@@ -72,6 +72,21 @@ class OnlyCliParseTest extends TestCase
         return shell_exec($cmd . ' 2>&1') ?? '';
     }
 
+    private function decodeLastJsonLine(string $output): ?array
+    {
+        $lines = array_reverse(preg_split('/\R/', trim($output)) ?: []);
+        foreach ($lines as $line) {
+            if ($line === '' || $line[0] !== '{') {
+                continue;
+            }
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+        return null;
+    }
+
 
     private function findUnusedPort(): int
     {
@@ -190,13 +205,13 @@ PHP, var_export($requestsLog, true)));
         // Both forms fail later (unreachable host) but must not be rejected as
         // an unknown option.
         $equals = $this->runCli(array_merge(
-            array('files-pull', 'http://fake.invalid/?site-export-api', '--only=:wp-content:', '--only=:wp-uploads:/2025'),
+            array('files-download', 'http://fake.invalid/?site-export-api', '--only=:wp-content:', '--only=:wp-uploads:/2025'),
             $tail
         ));
         $this->assertStringNotContainsString('Unknown option', $equals);
 
         $space = $this->runCli(array_merge(
-            array('files-pull', 'http://fake.invalid/?site-export-api', '--only', ':wp-content:', '--only', ':wp-uploads:/2025'),
+            array('files-download', 'http://fake.invalid/?site-export-api', '--only', ':wp-content:', '--only', ':wp-uploads:/2025'),
             $tail
         ));
         $this->assertStringNotContainsString('Unknown option', $space);
@@ -212,7 +227,7 @@ PHP, var_export($requestsLog, true)));
         $this->writePreflightState();
 
         $output = $this->runCli(array(
-            'files-pull',
+            'files-download',
             'http://fake.invalid/?site-export-api',
             '--only',
             ':abspath:/wp-admin',
@@ -223,7 +238,7 @@ PHP, var_export($requestsLog, true)));
             '--fs-root=' . $this->tempDir . '/fs',
         ));
 
-        $result = json_decode($output, true);
+        $result = $this->decodeLastJsonLine($output);
         $this->assertSame(
             'Cannot resolve token ":abspath:": not available in preflight data. Run preflight first.',
             $result['error'] ?? null
@@ -231,7 +246,7 @@ PHP, var_export($requestsLog, true)));
         $this->assertStringNotContainsString('"status":"aborted"', $output);
     }
 
-    public function testRepeatedOnlyOptionsAreUsedByFilesPull(): void
+    public function testRepeatedOnlyOptionsAreUsedByFilesDownload(): void
     {
         $this->writePreflightState(true);
 
@@ -239,7 +254,7 @@ PHP, var_export($requestsLog, true)));
         $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
 
         $output = $this->runCli(array(
-            'files-pull',
+            'files-download',
             $remoteUrl,
             '--only',
             ':wp-content:/plugins',
@@ -261,7 +276,7 @@ PHP, var_export($requestsLog, true)));
             }
         }
 
-        $this->assertNotNull($fileIndexRequest, "files-pull should request file_index. Output:\n{$output}");
+        $this->assertNotNull($fileIndexRequest, "files-download should request file_index. Output:\n{$output}");
         $this->assertSame(array(
             '/var/www/html/wp-content/plugins',
             '/var/www/html/wp-content/uploads/2025',
@@ -276,7 +291,7 @@ PHP, var_export($requestsLog, true)));
         $this->writePreflightState();
 
         $output = $this->runCli(array(
-            'files-pull',
+            'files-download',
             'http://fake.invalid/?site-export-api',
             '--only',
             ':wp-content:/plugins,custom',

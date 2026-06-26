@@ -123,8 +123,8 @@ describe('Import: skip remote post edit locks', { timeout: 300000 }, () => {
         }
     });
 
-    it('db-pull imports everything except prefixed postmeta _edit_lock rows', () => {
-        const result = runImporter(importUrl(), tempDir, 'db-pull', {
+    it('db-download imports everything except prefixed postmeta _edit_lock rows', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-download', {
             secret: getSiteSecret(site),
             timeout: 120000,
             wallTimeout: 300000,
@@ -142,7 +142,7 @@ describe('Import: skip remote post edit locks', { timeout: 300000 }, () => {
             ],
         });
         assert.equal(result.exitCode, 0,
-            `Expected db-pull exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+            `Expected db-download exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
 
     it('omits only the exact _edit_lock rows from the source-prefixed postmeta table', async () => {

@@ -104,7 +104,7 @@ class ImportMetadataTest extends TestCase
     public function testImportMetadataDoesNotTreatCompletedSubcommandAsCompletedPull(): void
     {
         $this->writeState([
-            'command' => 'files-pull',
+            'command' => 'files-download',
             'status' => 'complete',
         ]);
 

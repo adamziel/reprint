@@ -96,7 +96,7 @@ describe('Import: State Corruption', () => {
 
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-            assert.equal(state.command, 'files-pull', 'Expected command to be updated');
+            assert.equal(state.command, 'files-download', 'Expected command to be updated');
             assert.equal(state.status, 'complete');
         });
     });

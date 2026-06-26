@@ -6,5 +6,5 @@
 # This PR loads the Rust wp_mysql_parser PHP.wasm extension for the PR side
 # and leaves it disabled for the trunk baseline. Both sides use the same
 # direct PHP.wasm runner so the wall-time delta isolates the extension.
-playground-sqlite-db-pull
+playground-sqlite-db-download
 playground-sqlite-db-apply

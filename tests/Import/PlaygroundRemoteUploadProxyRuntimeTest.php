@@ -30,7 +30,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
         $this->stateFile = $stateDir . '/.import-state.json';
         $this->skippedFile = $stateDir . '/.import-download-list-skipped.jsonl';
-        file_put_contents($this->stateFile, "{\"command\":\"files-pull\",\"status\":\"partial\"}\n");
+        file_put_contents($this->stateFile, "{\"command\":\"files-download\",\"status\":\"partial\"}\n");
         file_put_contents($this->skippedFile, "{\"path\":\"/wp-content/uploads/test.jpg\"}\n");
     }
 
