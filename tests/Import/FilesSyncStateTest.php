@@ -282,8 +282,8 @@ class FilesSyncStateTest extends TestCase
      * In preserve-local mode, a file that is in the local index and changed
      * remotely (different ctime) must be added to the download list.
      *
-     * Preserve-local protects pre-existing local files, not files we
-     * previously synced. A changed file in the local index is ours to update.
+     * Preserve-local protects files changed locally after their last sync.
+     * A clean indexed file is ours to update when the remote version changes.
      */
     public function testDeltaDiffRedownloadsChangedIndexedFile()
     {
@@ -295,10 +295,11 @@ class FilesSyncStateTest extends TestCase
         $remoteIndex = $this->stateDir . '/.import-remote-index.jsonl';
         file_put_contents($remoteIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 2000, 250));
 
-        // The file exists locally (downloaded during the initial sync)
+        // The file exists locally exactly as recorded in the last local index.
         $localFile = $this->fs_root . '/wp-content/themes/flavor/style.css';
         mkdir(dirname($localFile), 0755, true);
-        file_put_contents($localFile, 'old content');
+        file_put_contents($localFile, str_repeat('x', 200));
+        touch($localFile, 1000);
 
         $this->writeState([
             "command" => "files-download",

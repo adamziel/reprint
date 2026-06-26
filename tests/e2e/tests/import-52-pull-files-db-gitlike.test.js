@@ -124,7 +124,7 @@ describe('Import: pull-files git-pull-like sync', { timeout: 300000 }, () => {
         assert.equal(readFileSync(localPath('test-data/pull-files/local-conflict.txt'), 'utf-8'), 'locally edited content\n');
         const conflicts = readJsonLines(join(tempDir, '.import-local-conflicts.jsonl'));
         assert.ok(conflicts.some((conflict) => (
-            conflict.path === 'test-data/pull-files/local-conflict.txt' &&
+            conflict.path === remotePath('test-data/pull-files/local-conflict.txt') &&
             conflict.action === 'overwrite' &&
             conflict.resolution === 'preserve-local'
         )), 'pull-files should report a structured local conflict');
