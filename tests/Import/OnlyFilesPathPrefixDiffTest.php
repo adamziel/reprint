@@ -67,13 +67,16 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
     }
 
     /** Create a local file under fs_root for a (source-absolute) index path. */
-    private function seedLocalFile(string $path, string $contents = "x"): string
+    private function seedLocalFile(string $path, string $contents = "x", ?int $mtime = null): string
     {
         $full = $this->fs_root . $path;
         if (!is_dir(dirname($full))) {
             mkdir(dirname($full), 0755, true);
         }
         file_put_contents($full, $contents);
+        if ($mtime !== null) {
+            touch($full, $mtime);
+        }
         return $full;
     }
 
@@ -138,9 +141,9 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             $this->indexLine('/wp-content/keep.txt', 1000, 10)
         );
 
-        $unselected = $this->seedLocalFile('/wp-config.php');
-        $this->seedLocalFile('/wp-content/keep.txt');
-        $orphan = $this->seedLocalFile('/wp-content/old/orphan.txt');
+        $unselected = $this->seedLocalFile('/wp-config.php', str_repeat('x', 10), 1000);
+        $this->seedLocalFile('/wp-content/keep.txt', str_repeat('x', 10), 1000);
+        $orphan = $this->seedLocalFile('/wp-content/old/orphan.txt', str_repeat('x', 10), 1000);
 
         [$client, $r] = $this->prepareClient(['/wp-content']);
         $r->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
