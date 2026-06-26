@@ -238,6 +238,63 @@ class RelayTransportTest extends TestCase
         $this->assertSame("�", $decoded['body_preview']);
     }
 
+    public function testRemoteRelayResponseBodyUploadUsesRawPostBody(): void
+    {
+        if (!function_exists('proc_open')) {
+            $this->markTestSkipped('proc_open is required to start the local capture server.');
+        }
+
+        $recordFile = $this->tempDir . '/capture.json';
+        $router = $this->tempDir . '/capture-router.php';
+        file_put_contents($router, <<<'PHP'
+<?php
+$body = file_get_contents('php://input');
+$headers = function_exists('getallheaders') ? getallheaders() : [];
+$content_hash = $headers['X-Auth-Content-Hash'] ?? ($_SERVER['HTTP_X_AUTH_CONTENT_HASH'] ?? '');
+file_put_contents(getenv('RECORD_FILE'), json_encode([
+    'method' => $_SERVER['REQUEST_METHOD'] ?? null,
+    'content_type' => $_SERVER['CONTENT_TYPE'] ?? null,
+    'content_length' => isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : null,
+    'content_hash' => $content_hash,
+    'body_hash' => hash('sha256', $body),
+    'files' => count($_FILES),
+]));
+header('Content-Type: application/json');
+echo json_encode(['ok' => true]);
+PHP);
+
+        $bodyFile = $this->tempDir . '/response.body';
+        file_put_contents($bodyFile, str_repeat('raw-response-body', 1024));
+        $port = $this->findFreePort();
+        $process = $this->startPhpServer($port, $router, $recordFile);
+
+        try {
+            $this->reflection->getProperty('relay_url')->setValue(
+                $this->client,
+                "http://127.0.0.1:{$port}/?reprint-push-api",
+            );
+            $this->reflection->getProperty('relay_session')->setValue($this->client, 'session-test');
+            $this->reflection->getProperty('relay_hmac_client')->setValue(
+                $this->client,
+                new \Site_Export_HMAC_Client('secret'),
+            );
+
+            $upload = $this->reflection->getMethod('relay_api_upload_response_body');
+            $upload->invoke($this->client, 'req-test', $bodyFile);
+
+            $record = json_decode(file_get_contents($recordFile), true);
+            $this->assertSame('POST', $record['method']);
+            $this->assertSame('application/octet-stream', $record['content_type']);
+            $this->assertSame(filesize($bodyFile), $record['content_length']);
+            $this->assertSame(hash_file('sha256', $bodyFile), $record['content_hash']);
+            $this->assertSame(hash_file('sha256', $bodyFile), $record['body_hash']);
+            $this->assertSame(0, $record['files']);
+        } finally {
+            proc_terminate($process);
+            proc_close($process);
+        }
+    }
+
     public function testExpiredProcessingRequestsAreRequeued(): void
     {
         $requestsDir = $this->tempDir . '/relay/requests';
@@ -325,6 +382,50 @@ class RelayTransportTest extends TestCase
         ]);
 
         return [$payload, $uploadsDir];
+    }
+
+    private function findFreePort(): int
+    {
+        $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        if (!is_resource($socket)) {
+            throw new \RuntimeException("Cannot find free port: {$errstr}");
+        }
+        $name = stream_socket_get_name($socket, false);
+        fclose($socket);
+        return (int) substr((string) $name, strrpos((string) $name, ':') + 1);
+    }
+
+    private function startPhpServer(int $port, string $router, string $recordFile)
+    {
+        $command = sprintf(
+            '%s -d display_startup_errors=0 -S 127.0.0.1:%d %s',
+            escapeshellarg(PHP_BINARY),
+            $port,
+            escapeshellarg($router),
+        );
+        $process = proc_open($command, [
+            0 => ['file', '/dev/null', 'r'],
+            1 => ['file', $this->tempDir . '/server.out', 'a'],
+            2 => ['file', $this->tempDir . '/server.err', 'a'],
+        ], $pipes, $this->tempDir, [
+            'RECORD_FILE' => $recordFile,
+        ]);
+        if (!is_resource($process)) {
+            throw new \RuntimeException('Cannot start PHP capture server.');
+        }
+
+        for ($i = 0; $i < 50; $i++) {
+            $socket = @fsockopen('127.0.0.1', $port);
+            if (is_resource($socket)) {
+                fclose($socket);
+                return $process;
+            }
+            usleep(100000);
+        }
+
+        proc_terminate($process);
+        proc_close($process);
+        throw new \RuntimeException('PHP capture server did not start.');
     }
 
     private function recursiveDelete(string $dir): void

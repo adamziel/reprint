@@ -11768,7 +11768,17 @@ class ImportClient
         );
         $last_work_at = time();
         while (!$this->shutdown_requested) {
-            $claim = $this->relay_api_json_request('claim');
+            try {
+                $claim = $this->relay_api_json_request('claim');
+            } catch (RuntimeException $e) {
+                // A final claim can race with the target applying the last
+                // response and briefly returning 500s before status becomes
+                // terminal. Treat only a confirmed terminal session as success.
+                if ($this->remote_relay_session_is_terminal_after_claim_failure()) {
+                    return;
+                }
+                throw $e;
+            }
             if (empty($claim['ok'])) {
                 throw new RuntimeException((string) ($claim['error'] ?? 'Remote relay claim failed.'));
             }
@@ -11843,6 +11853,29 @@ class ImportClient
                 }
             }
         }
+    }
+
+    private function remote_relay_session_is_terminal_after_claim_failure(): bool
+    {
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            if ($attempt > 0) {
+                usleep(250000);
+            }
+            try {
+                $status = $this->relay_api_json_request('status');
+            } catch (RuntimeException $status_error) {
+                continue;
+            }
+            $session = isset($status['session']) && is_array($status['session'])
+                ? $status['session']
+                : null;
+            $session_status = (string) ($session['status'] ?? ($status['status'] ?? ''));
+            if (in_array($session_status, ['complete', 'aborted', 'error'], true)) {
+                $this->audit_log("RELAY_SOURCE_REMOTE | target session {$session_status}", true);
+                return true;
+            }
+        }
+        return false;
     }
 
     private function require_remote_relay_config(): void
@@ -11992,38 +12025,53 @@ class ImportClient
         $nonce = $this->relay_hmac_client->generate_nonce();
         $timestamp = $this->relay_hmac_client->get_timestamp();
         $signature = $this->relay_hmac_client->compute_signature($nonce, $timestamp, $content_hash);
+        $body_size = filesize($body_file);
+        if ($body_size === false) {
+            throw new RuntimeException("Cannot stat relay response body: {$body_file}");
+        }
+        $body_handle = fopen($body_file, 'rb');
+        if (!is_resource($body_handle)) {
+            throw new RuntimeException("Cannot open relay response body: {$body_file}");
+        }
 
         $ch = curl_init($this->build_relay_api_url('response-body', ['request_id' => $request_id]));
         if ($ch === false) {
+            fclose($body_handle);
             throw new RuntimeException('Cannot initialize remote relay body upload.');
         }
         reprint_apply_curl_proxy_from_env($ch);
         reprint_apply_curl_ca_bundle($ch);
-        curl_setopt_array($ch, [
-            CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_TIMEOUT => 300,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => [
-                'body' => new \CURLFile($body_file, 'application/octet-stream', basename($body_file)),
-            ],
-            CURLOPT_HTTPHEADER => [
-                'Accept: application/json',
-                "X-Auth-Signature: {$signature}",
-                "X-Auth-Nonce: {$nonce}",
-                "X-Auth-Timestamp: {$timestamp}",
-                "X-Auth-Content-Hash: {$content_hash}",
-            ],
-        ]);
 
-        $response_body = curl_exec($ch);
-        if ($response_body === false) {
-            $error = curl_error($ch);
+        try {
+            curl_setopt_array($ch, [
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_TIMEOUT => 300,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CUSTOMREQUEST => 'POST',
+                CURLOPT_UPLOAD => true,
+                CURLOPT_INFILE => $body_handle,
+                CURLOPT_INFILESIZE => $body_size,
+                CURLOPT_HTTPHEADER => [
+                    'Accept: application/json',
+                    'Content-Type: application/octet-stream',
+                    "X-Auth-Signature: {$signature}",
+                    "X-Auth-Nonce: {$nonce}",
+                    "X-Auth-Timestamp: {$timestamp}",
+                    "X-Auth-Content-Hash: {$content_hash}",
+                ],
+            ]);
+
+            $response_body = curl_exec($ch);
+            if ($response_body === false) {
+                $error = curl_error($ch);
+                throw new RuntimeException("Remote relay body upload failed: {$error}");
+            }
+            $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        } finally {
             curl_close($ch);
-            throw new RuntimeException("Remote relay body upload failed: {$error}");
+            fclose($body_handle);
         }
-        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+
         $decoded = json_decode((string) $response_body, true);
         if ($http_code < 200 || $http_code >= 300 || !is_array($decoded) || empty($decoded['ok'])) {
             $message = is_array($decoded) ? ($decoded['error'] ?? null) : null;
