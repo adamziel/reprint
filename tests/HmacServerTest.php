@@ -152,6 +152,20 @@ final class HmacServerTest extends TestCase
         $this->assertNull($server->verify_content_hash($headers, hash('sha256', $body), 1700000001.0));
     }
 
+    public function testInvalidSignatureDoesNotReadUploadedFiles(): void
+    {
+        $headers = $this->buildHeadersForBody('signed-body');
+        $headers['X-Auth-Signature'] = str_repeat('0', 64);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'HMAC signature verification failed',
+            $server->verify($headers, 'ignored-body', [
+                'bad_upload' => ['tmp_name' => __DIR__],
+            ], 1700000001.0)
+        );
+    }
+
     private function buildHeadersForBody(
         string $body,
         string $timestamp = '1700000000.000000',

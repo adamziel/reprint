@@ -215,6 +215,57 @@ final class SiteExportPushSessionTest extends TestCase
         $this->assertFileDoesNotExist($sessionDir . '/relay/processing/req-race.json');
     }
 
+    public function testHeartbeatRefreshesProcessingRequestLease(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        $processingFile = $sessionDir . '/relay/processing/req-heartbeat.json';
+        _site_export_push_write_json_file($processingFile, ['request_id' => 'req-heartbeat']);
+        touch($processingFile, time() - SITE_EXPORT_PUSH_REQUEST_LEASE - 5);
+        clearstatcache(true, $processingFile);
+        $before = filemtime($processingFile);
+
+        $heartbeat = _site_export_push_heartbeat_request($sessionId, [
+            'request_id' => 'req-heartbeat',
+        ]);
+
+        clearstatcache(true, $processingFile);
+        $this->assertTrue($heartbeat['ok']);
+        $this->assertSame('created', $heartbeat['status']);
+        $this->assertGreaterThan($before, filemtime($processingFile));
+    }
+
+    public function testHeartbeatReportsMissingProcessingRequest(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+
+        $heartbeat = _site_export_push_heartbeat_request($created['session_id'], [
+            'request_id' => 'req-missing',
+        ]);
+
+        $this->assertFalse($heartbeat['ok']);
+        $this->assertSame('Relay request is no longer processing.', $heartbeat['error']);
+    }
+
+    public function testHeartbeatDoesNotCreateMissingProcessingRequest(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionDir = _site_export_push_session_dir($created['session_id']);
+
+        _site_export_push_heartbeat_request($created['session_id'], [
+            'request_id' => 'req-missing',
+        ]);
+
+        $this->assertFileDoesNotExist($sessionDir . '/relay/processing/req-missing.json');
+    }
+
     public function testRunSessionReportsRunningWhenAnotherRunnerOwnsTheLock(): void
     {
         $created = _site_export_push_create_session([

@@ -1025,6 +1025,7 @@ class ImportClient
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
     private const RELAY_PROTOCOL_VERSION = 1;
+    private const RELAY_HEARTBEAT_INTERVAL = 10;
     // File-fetch manifests contain path strings only. 8 MiB leaves room for
     // hundreds of thousands of paths while still bounding the JSON decode.
     private const RELAY_FILE_LIST_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
@@ -4488,8 +4489,8 @@ class ImportClient
         $target = $target_root !== null && $relative_path !== null
             ? $target_root . "/" . $relative_path
             : null;
-        $writability = $target !== null && $selected
-            ? $this->inspect_target_writability($target, $operation)
+        $writability = $target_root !== null && $selected
+            ? $this->inspect_files_plan_apply_writability($target_root, $relative_path, $classification, $operation)
             : ["writable" => null, "reason" => null];
 
         if ($writability["writable"] === false) {
@@ -4671,6 +4672,89 @@ class ImportClient
             "reason" => null,
             "path" => $target_path,
         ];
+    }
+
+    private function inspect_files_plan_apply_writability(
+        string $target_root,
+        ?string $relative_path,
+        array $classification,
+        string $operation
+    ): array {
+        if ($relative_path === null) {
+            return ["writable" => null, "reason" => null];
+        }
+
+        $area = $classification["area"] ?? null;
+        if ($area === "plugin") {
+            $component = $this->component_relative_path_from_selection($relative_path, "wp-content/plugins/");
+            if ($component !== null) {
+                return $this->inspect_staged_swap_writability($target_root . "/" . $component);
+            }
+        }
+        if ($area === "theme") {
+            $component = $this->component_relative_path_from_selection($relative_path, "wp-content/themes/");
+            if ($component !== null) {
+                return $this->inspect_staged_swap_writability($target_root . "/" . $component);
+            }
+        }
+
+        return $this->inspect_target_writability($target_root . "/" . $relative_path, $operation);
+    }
+
+    private function inspect_staged_swap_writability(string $target_path): array
+    {
+        $parent = dirname($target_path);
+        if (!file_exists($parent)) {
+            return [
+                "writable" => false,
+                "reason" => "parent-missing",
+                "path" => $parent,
+            ];
+        }
+        if (!is_writable($parent)) {
+            return [
+                "writable" => false,
+                "reason" => "parent-not-writable",
+                "path" => $parent,
+            ];
+        }
+
+        foreach ([$target_path, $target_path . ".new", $target_path . ".bak"] as $path) {
+            $writability = $this->inspect_existing_tree_writability($path);
+            if ($writability["writable"] === false) {
+                return $writability;
+            }
+        }
+
+        return [
+            "writable" => true,
+            "reason" => null,
+            "path" => $target_path,
+        ];
+    }
+
+    private function inspect_existing_tree_writability(string $path): array
+    {
+        if (!file_exists($path) && !is_link($path)) {
+            return ["writable" => null, "reason" => null];
+        }
+        if (!is_writable($path)) {
+            return [
+                "writable" => false,
+                "reason" => "target-not-writable",
+                "path" => $path,
+            ];
+        }
+        if (!is_dir($path) || is_link($path)) {
+            return ["writable" => true, "reason" => null, "path" => $path];
+        }
+        foreach ($this->list_directory_entries($path) as $entry) {
+            $writability = $this->inspect_existing_tree_writability($path . "/" . $entry);
+            if ($writability["writable"] === false) {
+                return $writability;
+            }
+        }
+        return ["writable" => true, "reason" => null, "path" => $path];
     }
 
     private function nearest_existing_parent(string $path): string
@@ -11452,8 +11536,9 @@ class ImportClient
 
         $requests_dir = $relay_dir . "/requests";
         $responses_dir = $relay_dir . "/responses";
+        $processing_dir = $relay_dir . "/processing";
         $uploads_dir = $relay_dir . "/uploads";
-        foreach ([$requests_dir, $responses_dir, $uploads_dir] as $dir) {
+        foreach ([$requests_dir, $responses_dir, $processing_dir, $uploads_dir] as $dir) {
             $this->ensure_directory($dir, "relay directory");
         }
 
@@ -11479,12 +11564,12 @@ class ImportClient
         );
 
         $response_file = $responses_dir . "/{$request_id}.json";
-        $deadline = time() + $this->relay_timeout;
         while (!file_exists($response_file)) {
             if ($this->shutdown_requested) {
                 throw new RuntimeException("Shutdown requested");
             }
-            if (time() >= $deadline) {
+            $processing_file = $processing_dir . "/{$request_id}.json";
+            if (time() - $this->relay_request_last_activity($request_file, $processing_file) >= $this->relay_timeout) {
                 throw new RuntimeException("Timed out waiting for relay response {$request_id}");
             }
             $this->progress->tick_spinner();
@@ -11497,6 +11582,18 @@ class ImportClient
         }
 
         return $response;
+    }
+
+    private function relay_request_last_activity(string $request_file, string $processing_file): int
+    {
+        $last_activity = 0;
+        foreach ([$request_file, $processing_file] as $file) {
+            $mtime = is_file($file) ? filemtime($file) : false;
+            if ($mtime !== false) {
+                $last_activity = max($last_activity, $mtime);
+            }
+        }
+        return $last_activity;
     }
 
     /**
@@ -11552,7 +11649,16 @@ class ImportClient
             $request = null;
             try {
                 $request = $this->read_json_file($request_file, "relay request {$request_id}");
-                $response = $this->execute_relay_source_request($request, $responses_dir, $uploads_dir);
+                $response = $this->execute_relay_source_request(
+                    $request,
+                    $responses_dir,
+                    $uploads_dir,
+                    function () use ($request_file): void {
+                        if (!$this->touch_existing_file($request_file)) {
+                            throw new RuntimeException("Relay request lease is no longer refreshable.");
+                        }
+                    }
+                );
             } catch (\Throwable $e) {
                 $response = [
                     "request_id" => $request_id,
@@ -11564,7 +11670,12 @@ class ImportClient
                 $this->audit_log("RELAY_SOURCE_ERROR | {$request_id} | " . $e->getMessage(), true);
             }
 
-            $this->write_json_file_atomically($responses_dir . "/{$request_id}.json", $response);
+            if (!$this->publish_relay_response_once($responses_dir, $request_id, $response)) {
+                if (!empty($response["body_file"]) && is_string($response["body_file"])) {
+                    @unlink($response["body_file"]);
+                }
+                $this->audit_log("RELAY_SOURCE | ignored duplicate response {$request_id}", true);
+            }
             if (!@unlink($request_file) && file_exists($request_file)) {
                 throw new RuntimeException("Cannot remove processed relay request: {$request_file}");
             }
@@ -11587,7 +11698,11 @@ class ImportClient
             );
         }
 
-        $this->audit_log("RELAY_SOURCE_REMOTE | started | source={$this->remote_url} target={$this->relay_url} session={$this->relay_session}", true);
+        $this->audit_log(
+            "RELAY_SOURCE_REMOTE | started | source={$this->remote_url} " .
+                "target={$this->relay_url} session={$this->relay_session}",
+            true,
+        );
         $last_work_at = time();
         while (!$this->shutdown_requested) {
             $claim = $this->relay_api_json_request('claim');
@@ -11613,7 +11728,9 @@ class ImportClient
 
             $last_work_at = time();
             $request_id = (string) ($request['request_id'] ?? '');
-            $work_dir = $this->state_dir . '/.relay-remote-' . preg_replace('/[^A-Za-z0-9_.-]/', '_', $request_id);
+            $work_dir = $this->state_dir . '/.relay-remote-' .
+                preg_replace('/[^A-Za-z0-9_.-]/', '_', $request_id) .
+                '-' . bin2hex(random_bytes(4));
             $responses_dir = $work_dir . '/responses';
             $uploads_dir = $work_dir . '/uploads';
             foreach ([$responses_dir, $uploads_dir] as $dir) {
@@ -11624,7 +11741,20 @@ class ImportClient
             try {
                 try {
                     $this->materialize_remote_relay_uploads($request, $uploads_dir);
-                    $response = $this->execute_relay_source_request($request, $responses_dir, $uploads_dir);
+                    $response = $this->execute_relay_source_request(
+                        $request,
+                        $responses_dir,
+                        $uploads_dir,
+                        function () use ($request_id): void {
+                            $heartbeat = $this->relay_api_json_request('heartbeat', ['request_id' => $request_id]);
+                            if (empty($heartbeat['ok'])) {
+                                throw new RuntimeException((string) ($heartbeat['error'] ?? 'Remote relay heartbeat failed.'));
+                            }
+                            if (($heartbeat['status'] ?? '') === 'aborted') {
+                                throw new RuntimeException('Remote push session aborted.');
+                            }
+                        }
+                    );
                 } catch (\Throwable $e) {
                     $response = [
                         'request_id' => $request_id,
@@ -11853,7 +11983,12 @@ class ImportClient
     /**
      * Executes one relay ExportRequest against the source exporter.
      */
-    private function execute_relay_source_request(array $request, string $responses_dir, string $uploads_dir): array
+    private function execute_relay_source_request(
+        array $request,
+        string $responses_dir,
+        string $uploads_dir,
+        ?callable $heartbeat = null
+    ): array
     {
         $request_id = (string) ($request["request_id"] ?? "");
         $kind = (string) ($request["kind"] ?? "");
@@ -11896,8 +12031,8 @@ class ImportClient
             ];
         }
 
-        $body_file = $responses_dir . "/{$request_id}.body";
-        $result = $this->execute_relay_source_stream_request($url, $post_data, $uploads_dir, $body_file);
+        $body_file = $responses_dir . "/{$request_id}." . bin2hex(random_bytes(4)) . ".body";
+        $result = $this->execute_relay_source_stream_request($url, $post_data, $uploads_dir, $body_file, $heartbeat);
         $result["request_id"] = $request_id;
         $result["endpoint"] = $endpoint;
         $result["kind"] = $kind;
@@ -12036,7 +12171,8 @@ class ImportClient
         string $url,
         ?array $post_data,
         string $uploads_dir,
-        string $body_file
+        string $body_file,
+        ?callable $heartbeat = null
     ): array {
         $this->reset_curl_state();
         $ch = curl_init($url);
@@ -12067,17 +12203,48 @@ class ImportClient
         $response_headers = [];
         $bytes_received = 0;
         $body_preview = "";
+        $last_heartbeat = microtime(true);
+        $heartbeat_error = null;
+        $emit_heartbeat = function () use ($heartbeat, &$last_heartbeat, &$heartbeat_error): bool {
+            if ($heartbeat === null) {
+                return true;
+            }
+            $now = microtime(true);
+            if ($now - $last_heartbeat < self::RELAY_HEARTBEAT_INTERVAL) {
+                return true;
+            }
+            try {
+                $heartbeat();
+                $last_heartbeat = $now;
+                return true;
+            } catch (\Throwable $e) {
+                $heartbeat_error = $e;
+                return false;
+            }
+        };
         $options = [
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_LOW_SPEED_LIMIT => 1,
             CURLOPT_LOW_SPEED_TIME => 300,
             CURLOPT_ENCODING => "gzip, deflate",
+            CURLOPT_NOPROGRESS => false,
+            CURLOPT_PROGRESSFUNCTION => function ($ch, $dl_total, $dl_now, $ul_total, $ul_now) use ($emit_heartbeat) {
+                return $emit_heartbeat() ? 0 : 1;
+            },
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (&$response_headers) {
                 $this->capture_response_header_line($response_headers, $header_line);
                 return strlen($header_line);
             },
-            CURLOPT_WRITEFUNCTION => function ($ch, $data) use ($body_handle, &$bytes_received, &$body_preview) {
+            CURLOPT_WRITEFUNCTION => function ($ch, $data) use (
+                $body_handle,
+                &$bytes_received,
+                &$body_preview,
+                $emit_heartbeat
+            ) {
+                if (!$emit_heartbeat()) {
+                    return -1;
+                }
                 $written = fwrite($body_handle, $data);
                 if ($written !== strlen($data)) {
                     return -1;
@@ -12099,6 +12266,9 @@ class ImportClient
         $result = curl_exec($ch);
         $elapsed = microtime(true) - $start;
         try {
+            if ($heartbeat_error !== null) {
+                throw new RuntimeException("Relay heartbeat failed: " . $heartbeat_error->getMessage());
+            }
             $this->check_curl_error($ch);
             $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
             $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
@@ -12152,6 +12322,68 @@ class ImportClient
             }
         }
         return null;
+    }
+
+    private function publish_relay_response_once(string $responses_dir, string $request_id, array $response): bool
+    {
+        $this->ensure_directory($responses_dir, "relay response directory");
+        $lock = $this->acquire_file_lock($responses_dir . "/{$request_id}.lock", true);
+        try {
+            $response_file = $responses_dir . "/{$request_id}.json";
+            if (is_file($response_file)) {
+                return false;
+            }
+            $this->write_json_file_atomically($response_file, $response);
+            return true;
+        } finally {
+            $this->release_file_lock($lock);
+        }
+    }
+
+    private function touch_existing_file(string $path): bool
+    {
+        // touch() creates missing files, which would resurrect an already
+        // requeued or aborted relay lease. Compare the inode before and after
+        // so a heartbeat can only refresh the processing file it observed.
+        clearstatcache(true, $path);
+        $inode = is_file($path) ? fileinode($path) : false;
+        if ($inode === false) {
+            return false;
+        }
+        if (!touch($path)) {
+            return false;
+        }
+        clearstatcache(true, $path);
+        if (fileinode($path) !== $inode) {
+            if (is_file($path) && filesize($path) === 0) {
+                @unlink($path);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private function acquire_file_lock(string $path, bool $wait)
+    {
+        $this->ensure_directory(dirname($path), "lock directory");
+        $handle = fopen($path, "c");
+        if (!is_resource($handle)) {
+            throw new RuntimeException("Cannot open lock file: {$path}");
+        }
+        $operation = LOCK_EX | ($wait ? 0 : LOCK_NB);
+        if (!flock($handle, $operation)) {
+            fclose($handle);
+            return null;
+        }
+        return $handle;
+    }
+
+    private function release_file_lock($handle): void
+    {
+        if (is_resource($handle)) {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
     }
 
     /**

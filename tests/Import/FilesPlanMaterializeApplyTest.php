@@ -89,6 +89,42 @@ class FilesPlanMaterializeApplyTest extends TestCase
         $this->assertSame('wp-content/plugins/foo/a.php', json_decode($selectedLines[1], true)['relative_path']);
     }
 
+    public function testFilesPlanChecksPluginComponentSwapWritability(): void
+    {
+        $targetRoot = $this->tempDir . '/target-non-writable-component';
+        mkdir($targetRoot . '/wp-content/plugins/foo', 0755, true);
+        file_put_contents($targetRoot . '/wp-content/plugins/foo/a.php', 'old-plugin');
+        $this->writeIndex('.import-remote-index.jsonl', [
+            ['/var/www/html/wp-content/plugins/foo/a.php', 2, 10, 'file'],
+        ]);
+        $this->writeIndex('.import-index.jsonl', [
+            ['/var/www/html/wp-content/plugins/foo/a.php', 1, 8, 'file'],
+        ]);
+
+        chmod($targetRoot . '/wp-content/plugins', 0555);
+        try {
+            if (is_writable($targetRoot . '/wp-content/plugins')) {
+                $this->markTestSkipped('Current user can write to chmod 0555 directories.');
+            }
+            $selected = $this->tempDir . '/non-writable-component-selected.jsonl';
+            $plan = $this->runJsonCommand([
+                'command' => 'files-plan',
+                'target_root' => $targetRoot,
+                'selected_files' => $selected,
+            ]);
+        } finally {
+            chmod($targetRoot . '/wp-content/plugins', 0755);
+        }
+
+        $entry = $plan['files'][0];
+        $this->assertSame('wp-content/plugins/foo/a.php', $entry['relative_path']);
+        $this->assertFalse($entry['selected']);
+        $this->assertSame('non-writable', $entry['selection_reason']);
+        $this->assertSame('parent-not-writable', $entry['writability']['reason']);
+        $this->assertSame($targetRoot . '/wp-content/plugins', $entry['writability']['path']);
+        $this->assertSame('', file_get_contents($selected));
+    }
+
     public function testMaterializeDocrootCopiesRealFilesFromFsRootLayout(): void
     {
         mkdir($this->fsRoot . '/var/www/html/wp-admin', 0755, true);

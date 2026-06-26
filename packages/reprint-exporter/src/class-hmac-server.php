@@ -29,7 +29,13 @@ final class Site_Export_HMAC_Server {
      * contents rather than $body so multipart uploads verify consistently.
      */
     public function verify(array $headers = [], ?string $body = null, array $files = [], ?float $now = null): ?string {
-        return $this->verify_content_hash($headers, $this->compute_received_content_hash($body, $files), $now);
+        return $this->verify_content_hash_callback(
+            $headers,
+            function () use ($body, $files): string {
+                return $this->compute_received_content_hash($body, $files);
+            },
+            $now
+        );
     }
 
     /**
@@ -39,6 +45,23 @@ final class Site_Export_HMAC_Server {
      * timestamp, nonce, content-hash, and HMAC checks as verify().
      */
     public function verify_content_hash(array $headers, string $received_content_hash, ?float $now = null): ?string {
+        return $this->verify_content_hash_callback(
+            $headers,
+            function () use ($received_content_hash): string {
+                return $received_content_hash;
+            },
+            $now
+        );
+    }
+
+    /**
+     * Validate all cheap authentication inputs before reading request bodies.
+     *
+     * Large multipart uploads can live on slow disks. More importantly, unauthenticated
+     * callers should not be able to force the server to hash those files before the
+     * request has passed timestamp, nonce, and signature checks.
+     */
+    private function verify_content_hash_callback(array $headers, callable $received_content_hash, ?float $now = null): ?string {
         $signature = $this->get_header($headers, 'X-Auth-Signature');
         $nonce = $this->get_header($headers, 'X-Auth-Nonce');
         $timestamp = $this->get_header($headers, 'X-Auth-Timestamp');
@@ -82,7 +105,7 @@ final class Site_Export_HMAC_Server {
             return 'HMAC signature verification failed';
         }
 
-        if (!hash_equals($signed_content_hash, $received_content_hash)) {
+        if (!hash_equals($signed_content_hash, $received_content_hash())) {
             return 'Content hash mismatch: body was modified in transit';
         }
 

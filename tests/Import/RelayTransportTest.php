@@ -256,6 +256,62 @@ class RelayTransportTest extends TestCase
         $this->assertFileDoesNotExist($requestsDir . '/req-old.json');
     }
 
+    public function testRelayRequestActivityUsesProcessingHeartbeat(): void
+    {
+        $requestsDir = $this->tempDir . '/relay/requests';
+        $processingDir = $this->tempDir . '/relay/processing';
+        mkdir($requestsDir, 0755, true);
+        mkdir($processingDir, 0755, true);
+        $requestFile = $requestsDir . '/req-heartbeat.json';
+        $processingFile = $processingDir . '/req-heartbeat.json';
+        file_put_contents($requestFile, '{}');
+        file_put_contents($processingFile, '{}');
+        touch($requestFile, time() - 600);
+        touch($processingFile, time() - 10);
+
+        $lastActivity = $this->reflection->getMethod('relay_request_last_activity')->invoke(
+            $this->client,
+            $requestFile,
+            $processingFile,
+        );
+
+        $this->assertSame(filemtime($processingFile), $lastActivity);
+    }
+
+    public function testRelayResponsePublishingKeepsFirstMetadataAndBody(): void
+    {
+        $responsesDir = $this->tempDir . '/relay/responses';
+        mkdir($responsesDir, 0755, true);
+        $firstBody = $this->tempDir . '/first.body';
+        $lateBody = $this->tempDir . '/late.body';
+        file_put_contents($firstBody, 'first');
+        file_put_contents($lateBody, 'late');
+        $publish = $this->reflection->getMethod('publish_relay_response_once');
+
+        $firstPublished = $publish->invoke($this->client, $responsesDir, 'req-once', [
+            'request_id' => 'req-once',
+            'body_file' => $firstBody,
+        ]);
+        $latePublished = $publish->invoke($this->client, $responsesDir, 'req-once', [
+            'request_id' => 'req-once',
+            'body_file' => $lateBody,
+        ]);
+
+        $metadata = json_decode(file_get_contents($responsesDir . '/req-once.json'), true);
+        $this->assertTrue($firstPublished);
+        $this->assertFalse($latePublished);
+        $this->assertSame($firstBody, $metadata['body_file']);
+    }
+
+    public function testHeartbeatTouchDoesNotCreateMissingLease(): void
+    {
+        $lease = $this->tempDir . '/relay/processing/missing.json';
+        $touch = $this->reflection->getMethod('touch_existing_file');
+
+        $this->assertFalse($touch->invoke($this->client, $lease));
+        $this->assertFileDoesNotExist($lease);
+    }
+
     private function createRelayFileListPayload(array $paths): array
     {
         $uploadsDir = $this->tempDir . '/relay/uploads-' . uniqid();

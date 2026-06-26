@@ -80,6 +80,13 @@ function _site_export_handle_push_api_request(array $options = []): void {
                 );
                 return;
 
+            case 'heartbeat':
+                _site_export_push_send_json(_site_export_push_heartbeat_request(
+                    _site_export_push_require_session_id(),
+                    _site_export_push_read_json_body()
+                ));
+                return;
+
             case 'response':
                 _site_export_push_send_json(_site_export_push_store_response_metadata(
                     _site_export_push_require_session_id(),
@@ -501,6 +508,48 @@ function _site_export_push_stream_request_upload(string $session_id, string $upl
     exit;
 }
 
+function _site_export_push_heartbeat_request(string $session_id, array $payload): array {
+    $request_id = isset($payload['request_id']) ? _site_export_push_validate_id((string) $payload['request_id'], 'request_id') : '';
+    if ($request_id === '') {
+        throw new RuntimeException('Heartbeat metadata is missing request_id.');
+    }
+
+    $session_dir = _site_export_push_session_dir($session_id);
+    $processing_file = $session_dir . '/relay/processing/' . $request_id . '.json';
+
+    return _site_export_push_with_session_lock($session_id, function (array $session) use (
+        $session_dir,
+        $processing_file,
+        $request_id
+    ): array {
+        if (($session['status'] ?? '') === 'aborted') {
+            _site_export_push_publish_response_metadata_once($session_dir . '/relay/responses', $request_id, [
+                'request_id' => $request_id,
+                'error' => 'Push session aborted.',
+                'created_at' => gmdate('c'),
+            ]);
+            if (is_file($processing_file)) {
+                @unlink($processing_file);
+            }
+            return ['ok' => true, 'request_id' => $request_id, 'status' => 'aborted'];
+        }
+
+        if (!_site_export_push_touch_existing_file($processing_file)) {
+            return [
+                'ok' => false,
+                'request_id' => $request_id,
+                'error' => 'Relay request is no longer processing.',
+            ];
+        }
+
+        return [
+            'ok' => true,
+            'request_id' => $request_id,
+            'status' => $session['status'] ?? 'created',
+        ];
+    });
+}
+
 function _site_export_push_store_response_body(string $session_id, string $request_id, string $tmp_file): array {
     $session = _site_export_push_read_session($session_id);
     if (($session['status'] ?? '') === 'aborted') {
@@ -777,6 +826,28 @@ function _site_export_push_requeue_expired_requests(string $requests_dir, string
         }
         @rename($file, $requests_dir . '/' . basename($file));
     }
+}
+
+function _site_export_push_touch_existing_file(string $path): bool {
+    // touch() creates missing files, which would resurrect an already requeued
+    // or aborted relay lease. Compare the inode before and after so a heartbeat
+    // can only refresh the processing file it observed.
+    clearstatcache(true, $path);
+    $inode = is_file($path) ? fileinode($path) : false;
+    if ($inode === false) {
+        return false;
+    }
+    if (!touch($path)) {
+        return false;
+    }
+    clearstatcache(true, $path);
+    if (fileinode($path) !== $inode) {
+        if (is_file($path) && filesize($path) === 0) {
+            @unlink($path);
+        }
+        return false;
+    }
+    return true;
 }
 
 function _site_export_push_read_session(string $session_id): array {
