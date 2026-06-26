@@ -85,6 +85,19 @@ final class LocalImportFilesystem
         return true === @unlink($local_path);
     }
 
+    public function remove_remote_path_without_following_symlinks(string $path): bool
+    {
+        $local_path = $this->local_path_for_remote_path($path);
+        $parent = dirname($local_path);
+        if ($this->path_traverses_symlink($parent)) {
+            throw new RuntimeException(
+                "Security: Refusing to delete path through symlink: {$path}",
+            );
+        }
+
+        return $this->remove_path_without_following_symlinks($local_path);
+    }
+
     public function path_traverses_symlink(string $path): bool
     {
         $root = $this->filesystem_root_path();

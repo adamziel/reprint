@@ -15,7 +15,6 @@ use Reprint\Importer\Observability\MachineEventEmitter;
 use Reprint\Importer\Protocol\StreamingContext;
 use Reprint\Importer\Session\VolatileFileTracker;
 use Reprint\Importer\Support\PathDisplayFormatter;
-use RuntimeException;
 use function Reprint\Exporter\normalize_path;
 use function Reprint\Exporter\path_is_within_root;
 
@@ -95,7 +94,7 @@ final class FileSyncLocalApplier implements FileSyncStreamObserver, LocalFileCha
 
         try {
             $local_path = $this->local_path_for_remote_path($path);
-        } catch (RuntimeException $e) {
+        } catch (\Throwable $e) {
             $this->audit(
                 "Security: refusing to delete invalid path '{$path}': " . $e->getMessage(),
                 true,
@@ -107,8 +106,16 @@ final class FileSyncLocalApplier implements FileSyncStreamObserver, LocalFileCha
             return;
         }
 
-        if ($this->remove_path_without_following_symlinks($local_path)) {
-            $this->audit("Deleted: {$path}", false);
+        try {
+            if ($this->filesystem->remove_remote_path_without_following_symlinks($path)) {
+                $this->audit("Deleted: {$path}", false);
+                return;
+            }
+        } catch (\Throwable $e) {
+            $this->audit(
+                "Security: refusing to delete invalid path '{$path}': " . $e->getMessage(),
+                true,
+            );
             return;
         }
 
@@ -218,23 +225,7 @@ final class FileSyncLocalApplier implements FileSyncStreamObserver, LocalFileCha
             true,
         );
         if ($path !== "" && $is_file_error) {
-            $local_path = $this->fs_root . $path;
-            if ($context->file_handle && $context->file_path === $local_path) {
-                fclose($context->file_handle);
-                $context->file_handle = null;
-                $context->file_path = null;
-                $context->file_ctime = null;
-                $context->file_bytes_written = 0;
-            }
-
-            if (file_exists($local_path)) {
-                @unlink($local_path);
-            }
-            $this->delete_index_entry($path);
-
-            if ($error_type === "file_changed") {
-                $this->volatile_file_tracker->record($path);
-            }
+            $this->handle_file_error_path($path, $context, $error_type);
         }
 
         $error_progress_message = "Remote error: {$error_type} " . ($path !== "" ? $path : "");
@@ -409,6 +400,39 @@ final class FileSyncLocalApplier implements FileSyncStreamObserver, LocalFileCha
     public function remove_path_without_following_symlinks(string $local_path): bool
     {
         return $this->filesystem->remove_path_without_following_symlinks($local_path);
+    }
+
+    private function handle_file_error_path(
+        string $path,
+        StreamingContext $context,
+        string $error_type
+    ): void {
+        try {
+            $local_path = $this->local_path_for_remote_path($path);
+            if ($context->file_handle && $context->file_path === $local_path) {
+                fclose($context->file_handle);
+                $context->file_handle = null;
+                $context->file_path = null;
+                $context->file_ctime = null;
+                $context->file_bytes_written = 0;
+            }
+
+            if (!$this->filesystem->remove_remote_path_without_following_symlinks($path)) {
+                $this->audit("Failed to delete remote error path: {$path}", true);
+            }
+        } catch (\Throwable $e) {
+            $this->audit(
+                "Security: refusing remote error path '{$path}': " . $e->getMessage(),
+                true,
+            );
+            return;
+        }
+
+        $this->delete_index_entry($path);
+
+        if ($error_type === "file_changed") {
+            $this->volatile_file_tracker->record($path);
+        }
     }
 
     public function path_traverses_symlink(string $path): bool

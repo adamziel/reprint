@@ -253,17 +253,113 @@ class RuntimeFilesTest extends TestCase
             implode("\n", $audit),
         );
     }
+
+    public function testDownloaderRejectsFetchedRuntimeFilePathTraversal(): void
+    {
+        $runtimeDir = $this->stateDir . '/runtime_files';
+        $audit = [];
+        $urls = [];
+
+        $downloader = new RuntimeFilesDownloader(
+            new RuntimeFilesTestStreamClient(
+                $this,
+                $urls,
+                '/../escape.php',
+                "<?php\n// escaped\n",
+            ),
+            new RuntimeFilesTestAuditLogger($audit),
+        );
+
+        $downloaded = $downloader->download(
+            [
+                'runtime' => [
+                    'ini_get_all' => [
+                        'auto_prepend_file' => '/scripts/env.php',
+                        'auto_append_file' => '',
+                    ],
+                ],
+            ],
+            $runtimeDir,
+        );
+
+        $this->assertSame(0, $downloaded);
+        $this->assertFileDoesNotExist($this->stateDir . '/escape.php');
+        $this->assertStringContainsString(
+            'RUNTIME FILES | refusing invalid runtime file path /../escape.php',
+            implode("\n", $audit),
+        );
+    }
+
+    public function testDownloaderRejectsFetchedRuntimeFileThroughSymlinkParent(): void
+    {
+        $runtimeDir = $this->stateDir . '/runtime_files';
+        $outsideDir = $this->tempDir . '/outside';
+        mkdir($outsideDir, 0755);
+        $outside = $outsideDir . '/escape.php';
+        file_put_contents($outside, 'keep');
+        $audit = [];
+        $urls = [];
+
+        $downloader = new RuntimeFilesDownloader(
+            new RuntimeFilesTestStreamClient(
+                $this,
+                $urls,
+                '/linked/escape.php',
+                "<?php\n// escaped\n",
+                function () use ($runtimeDir, $outsideDir): void {
+                    if (!is_dir($runtimeDir)) {
+                        mkdir($runtimeDir, 0755, true);
+                    }
+                    if (!@symlink($outsideDir, $runtimeDir . '/linked')) {
+                        $this->markTestSkipped('Symlinks are not available on this filesystem.');
+                    }
+                },
+            ),
+            new RuntimeFilesTestAuditLogger($audit),
+        );
+
+        $downloaded = $downloader->download(
+            [
+                'runtime' => [
+                    'ini_get_all' => [
+                        'auto_prepend_file' => '/scripts/env.php',
+                        'auto_append_file' => '',
+                    ],
+                ],
+            ],
+            $runtimeDir,
+        );
+
+        $this->assertSame(0, $downloaded);
+        $this->assertSame('keep', file_get_contents($outside));
+        $this->assertStringContainsString(
+            'RUNTIME FILES | refusing runtime file path /linked/escape.php',
+            implode("\n", $audit),
+        );
+    }
 }
 
 final class RuntimeFilesTestStreamClient implements FileSyncStreamClient
 {
     private RuntimeFilesTest $test;
     private $urls;
+    private string $emittedPath;
+    private string $body;
+    private $beforeEmit;
 
-    public function __construct(RuntimeFilesTest $test, array &$urls)
+    public function __construct(
+        RuntimeFilesTest $test,
+        array &$urls,
+        string $emittedPath = '/scripts/env.php',
+        string $body = "<?php\nreturn ['loaded' => true];\n",
+        ?callable $beforeEmit = null
+    )
     {
         $this->test = $test;
         $this->urls =& $urls;
+        $this->emittedPath = $emittedPath;
+        $this->body = $body;
+        $this->beforeEmit = $beforeEmit;
     }
 
     public function build_url(string $endpoint, ?string $cursor, array $params): string
@@ -296,14 +392,18 @@ final class RuntimeFilesTestStreamClient implements FileSyncStreamClient
         $this->test->assertIsArray($post_data);
         $this->test->assertArrayHasKey('file_list', $post_data);
 
+        if ($this->beforeEmit) {
+            ($this->beforeEmit)();
+        }
+
         ($context->on_chunk)([
             'headers' => [
                 'x-chunk-type' => 'file',
-                'x-file-path' => base64_encode('/scripts/env.php'),
+                'x-file-path' => base64_encode($this->emittedPath),
                 'x-first-chunk' => '1',
                 'x-last-chunk' => '1',
             ],
-            'body' => "<?php\nreturn ['loaded' => true];\n",
+            'body' => $this->body,
         ]);
         ($context->on_chunk)([
             'headers' => [
