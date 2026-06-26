@@ -1045,6 +1045,9 @@ class ImportClient
     /** @var string Path to .import-volatile-files.json — files the server marks as frequently-changing. */
     private $volatile_files_file;
 
+    /** @var string Path to .import-local-conflicts.jsonl — tracked local files preserved during delta sync. */
+    private $local_conflicts_file;
+
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
 
@@ -1116,6 +1119,12 @@ class ImportClient
      * Set via --on-fs-root-nonempty, persisted in state so it survives across invocations.
      */
     private $fs_root_nonempty_behavior = 'error';
+
+    /**
+     * What to do when a tracked local file changed after the last successful sync.
+     * Set via --on-local-conflict.
+     */
+    private $local_conflict_behavior = 'preserve-local';
 
     /**
      * Controls which files are downloaded during files-download.
@@ -1237,6 +1246,7 @@ class ImportClient
             $this->state_dir . "/.import-download-list-skipped.jsonl";
         $this->audit_log = $this->state_dir . "/.import-audit.log";
         $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
+        $this->local_conflicts_file = $this->state_dir . "/.import-local-conflicts.jsonl";
         $this->status_file = $this->state_dir . "/.import-status.json";
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
@@ -1500,6 +1510,43 @@ class ImportClient
         );
     }
 
+    private function report_local_conflicts(): void
+    {
+        if (!is_file($this->local_conflicts_file) || filesize($this->local_conflicts_file) === 0) {
+            return;
+        }
+
+        $conflicts = [];
+        $handle = fopen($this->local_conflicts_file, "r");
+        if ($handle) {
+            while (($line = fgets($handle)) !== false) {
+                $record = json_decode($line, true);
+                if (is_array($record) && isset($record["path"])) {
+                    $conflicts[] = $record;
+                }
+            }
+            fclose($handle);
+        }
+
+        if (empty($conflicts)) {
+            return;
+        }
+
+        $count = count($conflicts);
+        $this->progress->show_lifecycle_line("{$count} local file(s) changed since the last sync and were preserved:\n");
+        foreach ($conflicts as $conflict) {
+            $this->progress->show_lifecycle_line("  {$conflict["path"]}\n");
+        }
+        $this->progress->show_lifecycle_line("Re-run with --on-local-conflict=overwrite to replace them with the remote version.\n");
+
+        $this->output_progress([
+            "type" => "local_conflicts",
+            "count" => $count,
+            "conflicts" => $conflicts,
+            "message" => "{$count} local file(s) changed since the last sync and were preserved",
+        ], true);
+    }
+
     /**
      * Emit a preserve-local skip event to both TTY progress line and JSONL.
      */
@@ -1534,6 +1581,15 @@ class ImportClient
                 throw new InvalidArgumentException(
                     "Invalid --on-fs-root-nonempty value: {$this->fs_root_nonempty_behavior}. " .
                         "Valid values: error, preserve-local",
+                );
+            }
+        }
+        if (isset($options["local_conflict_behavior"])) {
+            $this->local_conflict_behavior = $options["local_conflict_behavior"];
+            if (!in_array($this->local_conflict_behavior, ['preserve-local', 'overwrite'], true)) {
+                throw new InvalidArgumentException(
+                    "Invalid --on-local-conflict value: {$this->local_conflict_behavior}. " .
+                        "Valid values: preserve-local, overwrite",
                 );
             }
         }
@@ -2908,6 +2964,7 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
+        $this->report_local_conflicts();
     }
 
     /**
@@ -6364,6 +6421,9 @@ class ImportClient
         $remote_offset = (int) ($diff["remote_offset"] ?? 0);
         $local_after = $diff["local_after"] ?? null;
         $download_mode = $remote_offset > 0 ? "a" : "w";
+        if ($download_mode === "w" && file_exists($this->local_conflicts_file)) {
+            @unlink($this->local_conflicts_file);
+        }
         if ($download_mode === "w") {
             $this->audit_log(
                 "FILE CREATE | {$this->download_list_file} | building download list",
@@ -6449,6 +6509,11 @@ class ImportClient
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-download --only runs.
                 if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
+                    if ($this->preserve_local_conflict($local, null, 'delete')) {
+                        $local_after = $local["path"];
+                        $local = $this->read_index_line($local_handle);
+                        continue;
+                    }
                     $this->delete_local_file_path($local["path"]);
                     $this->delete_index_entry($local["path"]);
                 }
@@ -6462,10 +6527,11 @@ class ImportClient
                     $local["size"] !== $remote["size"] ||
                     $local["type"] !== $remote["type"]
                 ) {
-                    // File is in both indexes but changed on the remote.
-                    // Always re-download — this file is in our local index,
-                    // meaning we synced it before; preserve-local does not
-                    // protect files we own.
+                    if ($this->preserve_local_conflict($local, $remote, 'overwrite')) {
+                        $local_after = $local["path"];
+                        $local = $this->read_index_line($local_handle);
+                        continue;
+                    }
                     $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
                         ? $skipped_handle
                         : $download_handle;
@@ -6505,6 +6571,11 @@ class ImportClient
 
         while ($local !== null) {
             if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
+                if ($this->preserve_local_conflict($local, null, 'delete')) {
+                    $local_after = $local["path"];
+                    $local = $this->read_index_line($local_handle);
+                    continue;
+                }
                 $this->delete_local_file_path($local["path"]);
                 $this->delete_index_entry($local["path"]);
             }
@@ -6849,6 +6920,128 @@ class ImportClient
         }
         // Fallback: match the conventional WordPress uploads path
         return strpos($path, "wp-content/uploads/") !== false;
+    }
+
+    private function preserve_local_conflict(array $local, ?array $remote, string $action): bool
+    {
+        if ($this->local_conflict_behavior === 'overwrite') {
+            return false;
+        }
+        if ($action === 'delete' && !$this->local_index_path_exists($local)) {
+            return false;
+        }
+        if ($this->local_path_matches_index_entry($local)) {
+            return false;
+        }
+
+        $this->record_local_conflict($local, $remote, $action);
+        $this->emit_local_conflict_progress($local["path"]);
+        return true;
+    }
+
+    private function local_index_path_exists(array $entry): bool
+    {
+        $path = $entry["path"] ?? "";
+        if ($path === "") {
+            return false;
+        }
+        try {
+            $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        } catch (RuntimeException $e) {
+            return false;
+        }
+        return file_exists($local_path) || is_link($local_path);
+    }
+
+    private function local_path_matches_index_entry(array $entry): bool
+    {
+        $path = $entry["path"] ?? "";
+        if ($path === "") {
+            return true;
+        }
+        try {
+            $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        } catch (RuntimeException $e) {
+            return false;
+        }
+
+        $type = $entry["type"] ?? "file";
+        if ($type === "file") {
+            if (!is_file($local_path) || is_link($local_path)) {
+                return false;
+            }
+            return filesize($local_path) === (int) $entry["size"] &&
+                filemtime($local_path) === (int) $entry["ctime"];
+        }
+
+        if ($type === "dir") {
+            return is_dir($local_path) && !is_link($local_path);
+        }
+
+        if ($type === "link") {
+            return is_link($local_path);
+        }
+
+        return false;
+    }
+
+    private function record_local_conflict(array $local, ?array $remote, string $action): void
+    {
+        $path = $local["path"];
+        $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        $record = [
+            "path" => $path,
+            "action" => $action,
+            "resolution" => "preserve-local",
+            "synced" => [
+                "ctime" => (int) ($local["ctime"] ?? 0),
+                "size" => (int) ($local["size"] ?? 0),
+                "type" => (string) ($local["type"] ?? "file"),
+            ],
+            "local" => [
+                "mtime" => (file_exists($local_path) || is_link($local_path)) ? (int) filemtime($local_path) : null,
+                "size" => is_file($local_path) && !is_link($local_path) ? (int) filesize($local_path) : null,
+                "type" => $this->local_path_type($local_path),
+            ],
+        ];
+        if ($remote !== null) {
+            $record["remote"] = [
+                "ctime" => (int) ($remote["ctime"] ?? 0),
+                "size" => (int) ($remote["size"] ?? 0),
+                "type" => (string) ($remote["type"] ?? "file"),
+            ];
+        }
+
+        $line = json_encode($record, JSON_UNESCAPED_SLASHES);
+        if ($line !== false) {
+            file_put_contents($this->local_conflicts_file, $line . "\n", FILE_APPEND);
+        }
+        $this->audit_log("LOCAL CONFLICT | {$action} preserved local path: {$path}", true);
+    }
+
+    private function local_path_type(string $path): ?string
+    {
+        if (is_link($path)) {
+            return "link";
+        }
+        if (is_file($path)) {
+            return "file";
+        }
+        if (is_dir($path)) {
+            return "dir";
+        }
+        return null;
+    }
+
+    private function emit_local_conflict_progress(string $path): void
+    {
+        $this->progress->show_progress_line("[conflict] " . $this->display_path($path));
+        $this->output_progress([
+            "type" => "local_conflict",
+            "path" => $path,
+            "resolution" => "preserve-local",
+            "message" => "Local changes preserved: {$path}",
+        ], true);
     }
 
     /**
@@ -11650,6 +11843,16 @@ if (
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-download'],
             'aliases' => ['on-docroot-nonempty'],
+        ],
+        [
+            'name' => 'on-local-conflict',
+            'type' => 'value',
+            'target' => 'local_conflict_behavior',
+            'placeholder' => 'MODE',
+            'valid_values' => ['preserve-local', 'overwrite'],
+            'help' => 'What to do when a tracked local file changed since the last sync (preserve-local|overwrite)',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'files-download'],
         ],
         [
             'name' => 'include-caches',

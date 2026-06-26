@@ -25,6 +25,14 @@ function readJson(path) {
     return JSON.parse(readFileSync(path, 'utf-8'));
 }
 
+function readJsonLines(path) {
+    return readFileSync(path, 'utf-8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+}
+
 describe('Import: pull-files git-pull-like sync', { timeout: 300000 }, () => {
     const site = 'pull-files-gitlike';
     let tempDir;
@@ -77,6 +85,7 @@ describe('Import: pull-files git-pull-like sync', { timeout: 300000 }, () => {
     function resetRemoteFiles(marker) {
         execSync(`sudo rm -rf ${JSON.stringify(remotePath('test-data/pull-files'))}`);
         writeRemoteFile('test-data/pull-files/marker.txt', `${marker}\n`);
+        writeRemoteFile('test-data/pull-files/local-conflict.txt', 'remote conflict original\n');
         writeRemoteFile('test-data/pull-files/removed-after-first.txt', 'present in round 1\n');
     }
 
@@ -98,11 +107,31 @@ describe('Import: pull-files git-pull-like sync', { timeout: 300000 }, () => {
         runPullFiles();
 
         assert.equal(readFileSync(localPath('test-data/pull-files/marker.txt'), 'utf-8'), 'round-1\n');
+        assert.equal(readFileSync(localPath('test-data/pull-files/local-conflict.txt'), 'utf-8'), 'remote conflict original\n');
         assert.equal(readFileSync(localPath('test-data/pull-files/removed-after-first.txt'), 'utf-8'), 'present in round 1\n');
 
         const state = readJson(join(tempDir, '.import-state.json'));
         assert.equal(state.pull_files.stage, 'complete');
         assert.equal(state.pull?.stage ?? null, null, 'pull-files must not advance the full pull cursor');
+    });
+
+    it('preserves tracked files with local edits unless overwrite is requested', () => {
+        writeFileSync(localPath('test-data/pull-files/local-conflict.txt'), 'locally edited content\n');
+        writeRemoteFile('test-data/pull-files/local-conflict.txt', 'remote changed after local edit\n');
+
+        runPullFiles();
+
+        assert.equal(readFileSync(localPath('test-data/pull-files/local-conflict.txt'), 'utf-8'), 'locally edited content\n');
+        const conflicts = readJsonLines(join(tempDir, '.import-local-conflicts.jsonl'));
+        assert.ok(conflicts.some((conflict) => (
+            conflict.path === 'test-data/pull-files/local-conflict.txt' &&
+            conflict.action === 'overwrite' &&
+            conflict.resolution === 'preserve-local'
+        )), 'pull-files should report a structured local conflict');
+
+        runPullFiles(['--on-local-conflict=overwrite']);
+
+        assert.equal(readFileSync(localPath('test-data/pull-files/local-conflict.txt'), 'utf-8'), 'remote changed after local edit\n');
     });
 
     it('re-running pull-files after remote changes updates, adds, and deletes files', () => {
