@@ -284,6 +284,28 @@ PHP, var_export($requestsLog, true)));
         ), $fileIndexRequest['directory'] ?? null);
     }
 
+    public function testAbortDoesNotCompareMissingRemapOptionAgainstPreviousRun(): void
+    {
+        $this->writePreflightState(true);
+        $stateFile = $this->tempDir . '/state/.import-state.json';
+        $state = json_decode(file_get_contents($stateFile), true);
+        $state['command'] = 'files-download';
+        $state['status'] = 'complete';
+        $state['files_remap_fingerprint'] = 'previous-remap-fingerprint';
+        file_put_contents($stateFile, json_encode($state));
+
+        $output = $this->runCli(array(
+            'files-download',
+            'http://fake.invalid/?site-export-api',
+            '--abort',
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $this->assertStringContainsString('"status":"aborted"', $output);
+        $this->assertStringNotContainsString('Cannot change --remap rules', $output);
+    }
+
     public function testOnlyOptionKeepsCommaInsideSourcePath(): void
     {
         // --abort runs after --only resolution, avoiding a network request while

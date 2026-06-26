@@ -216,6 +216,7 @@ class Pull
 
             case 'files-download':
                 $options = $this->validate_and_default_pull_files_options($options, 'files-download');
+                $this->client->prepare_files_download_options($options);
 
                 $this->run_until_complete(function () {
                     $this->client->run_files_sync();
@@ -288,9 +289,6 @@ class Pull
         foreach ($stages as $i => $stage) {
             $this->print_stage_header($stage);
             try {
-                if ($stage === 'files-download') {
-                    $this->client->prepare_files_download_options($options);
-                }
                 $this->run_stage($stage, $options, $i + 1, $total);
             } catch (\Exception $e) {
                 $this->report_failure($stage, $stages, $i, $e);

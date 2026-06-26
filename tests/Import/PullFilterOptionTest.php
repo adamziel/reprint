@@ -10,6 +10,11 @@ class PullFilterFakeClient extends \ImportClient
 {
     private bool $create_skipped_list;
     public int $preflight_calls = 0;
+    public int $prepare_files_download_options_calls = 0;
+    public int $files_sync_calls = 0;
+    public int $db_sync_calls = 0;
+    public int $db_apply_calls = 0;
+    public array $call_order = array();
 
     public function __construct(string $state_dir, string $fs_root, bool $create_skipped_list)
     {
@@ -36,7 +41,8 @@ class PullFilterFakeClient extends \ImportClient
 
     public function run_preflight(): void
     {
-        $this->preflight_calls++;
+        ++$this->preflight_calls;
+        $this->call_order[] = 'preflight';
         $this->mutate_state(function (array $state) {
             $state["preflight"] = [
                 "http_code" => 200,
@@ -57,8 +63,17 @@ class PullFilterFakeClient extends \ImportClient
         });
     }
 
+    public function prepare_files_download_options(array $options, bool $assert_remap_consistency = true): void
+    {
+        ++$this->prepare_files_download_options_calls;
+        $this->call_order[] = 'prepare-files';
+        parent::prepare_files_download_options($options, $assert_remap_consistency);
+    }
+
     public function run_files_sync(): void
     {
+        ++$this->files_sync_calls;
+        $this->call_order[] = 'files-download';
         if ($this->create_skipped_list) {
             file_put_contents(
                 $this->state_dir . '/.import-download-list-skipped.jsonl',
@@ -78,6 +93,8 @@ class PullFilterFakeClient extends \ImportClient
 
     public function run_db_sync(): void
     {
+        ++$this->db_sync_calls;
+        $this->call_order[] = 'db-download';
         file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
         $this->mutate_state(function (array $state) {
             $state["command"] = "db-download";
@@ -89,6 +106,8 @@ class PullFilterFakeClient extends \ImportClient
 
     public function run_db_apply(array $options): void
     {
+        ++$this->db_apply_calls;
+        $this->call_order[] = 'db-apply';
         $this->mutate_state(function (array $state) {
             $state["command"] = "db-apply";
             $state["status"] = "complete";
@@ -120,8 +139,6 @@ class PullBridgeFakeClient extends PullFilterFakeClient
 
 class PullRetryFakeClient extends PullFilterFakeClient
 {
-    public int $files_sync_calls = 0;
-    public int $db_sync_calls = 0;
     private bool $partial_files_once;
     private bool $partial_db_once;
 
@@ -138,7 +155,8 @@ class PullRetryFakeClient extends PullFilterFakeClient
 
     public function run_files_sync(): void
     {
-        $this->files_sync_calls++;
+        ++$this->files_sync_calls;
+        $this->call_order[] = 'files-download';
         if ($this->partial_files_once && $this->files_sync_calls === 1) {
             $this->mutate_state(function (array $state) {
                 $state["command"] = "files-download";
@@ -149,12 +167,19 @@ class PullRetryFakeClient extends PullFilterFakeClient
             return;
         }
 
-        parent::run_files_sync();
+        @unlink($this->state_dir . '/.import-download-list-skipped.jsonl');
+        $this->mutate_state(function (array $state) {
+            $state["command"] = "files-download";
+            $state["status"] = "complete";
+            $state["stage"] = null;
+            return $state;
+        });
     }
 
     public function run_db_sync(): void
     {
-        $this->db_sync_calls++;
+        ++$this->db_sync_calls;
+        $this->call_order[] = 'db-download';
         if ($this->partial_db_once && $this->db_sync_calls === 1) {
             $this->mutate_state(function (array $state) {
                 $state["command"] = "db-download";
@@ -165,7 +190,13 @@ class PullRetryFakeClient extends PullFilterFakeClient
             return;
         }
 
-        parent::run_db_sync();
+        file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
+        $this->mutate_state(function (array $state) {
+            $state["command"] = "db-download";
+            $state["status"] = "complete";
+            $state["stage"] = null;
+            return $state;
+        });
     }
 }
 
@@ -319,6 +350,42 @@ class PullFilterOptionTest extends TestCase
         $this->assertTrue($state["pull"]["skipped_pending"]);
         $this->assertSame('essential-files', $state["filter"]);
         $this->assertSame(1, $client->preflight_calls);
+    }
+
+    public function testPullFilesRunsOnlyPreflightAndFilesStages(): void
+    {
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-files",
+        ]);
+        ob_end_clean();
+
+        $this->assertSame(1, $client->preflight_calls);
+        $this->assertSame(1, $client->prepare_files_download_options_calls);
+        $this->assertSame(1, $client->files_sync_calls);
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertSame(0, $client->db_apply_calls);
+        $this->assertSame(array('preflight', 'prepare-files', 'files-download'), $client->call_order);
+    }
+
+    public function testPullDbRunsOnlyPreflightAndDatabaseDownloadStages(): void
+    {
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-db",
+        ]);
+        ob_end_clean();
+
+        $this->assertSame(1, $client->preflight_calls);
+        $this->assertSame(0, $client->prepare_files_download_options_calls);
+        $this->assertSame(0, $client->files_sync_calls);
+        $this->assertSame(1, $client->db_sync_calls);
+        $this->assertSame(0, $client->db_apply_calls);
+        $this->assertSame(array('preflight', 'db-download'), $client->call_order);
     }
 
     public function testPullFilesCommandRetriesPartialFilesDownload(): void

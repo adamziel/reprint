@@ -1836,7 +1836,7 @@ class ImportClient
         $this->require_preflight();
 
         if ($command === "files-download") {
-            $this->prepare_files_download_options($options);
+            $this->prepare_files_download_options($options, !$abort);
         }
 
         // Handle --abort: clear state for the command and exit immediately.
@@ -1845,11 +1845,7 @@ class ImportClient
         if ($abort) {
             // @TODO: Co-locate abort for each command with the run_*() method
             //        for that command.
-            $abort_command = [
-                "pull-files" => "files-download",
-                "pull-db" => "db-download",
-            ][$command] ?? $command;
-            $this->handle_abort($abort_command);
+            $this->handle_abort($command);
             return;
         }
 
@@ -1897,7 +1893,7 @@ class ImportClient
         }
     }
 
-    public function prepare_files_download_options(array $options): void
+    public function prepare_files_download_options(array $options, bool $assert_remap_consistency = true): void
     {
         // Resolve the `--remap` rules (requires preflight to be available first)
         $remap_raw = $options["remap"] ?? [];
@@ -1914,7 +1910,9 @@ class ImportClient
             $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
         }
 
-        $this->assert_files_remap_consistent();
+        if ($assert_remap_consistency) {
+            $this->assert_files_remap_consistent();
+        }
     }
 
     /**
