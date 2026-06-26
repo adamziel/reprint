@@ -676,6 +676,9 @@ The importer accepts the following commands:
 php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 ```
 
+* `pull` — Pull the full site. Runs `preflight`, `files-download`, and `db-download`, then adds `db-apply`, `flat-docroot`, `apply-runtime`, and runtime start stages when their options are set.
+* `pull-files` — Pull only files. Runs `preflight` and then delegates to `files-download`, including its filtering and delta-sync behavior.
+* `pull-db` — Pull only the database. Runs `preflight` and then delegates to `db-download`, including `--sql-output` and MySQL streaming options.
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
