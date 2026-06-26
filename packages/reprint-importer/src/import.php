@@ -4183,6 +4183,7 @@ class ImportClient
                 "blocked" => 0,
                 "non_writable" => 0,
             ];
+            $component_writability_cache = [];
 
             echo "{\n";
             echo '  "version": 1,' . "\n";
@@ -4198,6 +4199,7 @@ class ImportClient
                     $target_root,
                     $exclude_patterns,
                     $allow_core_files,
+                    $component_writability_cache,
                 );
                 $this->accumulate_files_plan_summary($summary, $entry);
                 if (!empty($entry["selected"]) && $selected_writer !== null) {
@@ -4456,7 +4458,8 @@ class ImportClient
         ?array $last_synced,
         ?string $target_root,
         array $exclude_patterns,
-        bool $allow_core_files
+        bool $allow_core_files,
+        array &$component_writability_cache
     ): array {
         $active = $source ?? $last_synced;
         $source_path = $active["path"];
@@ -4490,7 +4493,13 @@ class ImportClient
             ? $target_root . "/" . $relative_path
             : null;
         $writability = $target_root !== null && $selected
-            ? $this->inspect_files_plan_apply_writability($target_root, $relative_path, $classification, $operation)
+            ? $this->inspect_files_plan_apply_writability(
+                $target_root,
+                $relative_path,
+                $classification,
+                $operation,
+                $component_writability_cache
+            )
             : ["writable" => null, "reason" => null];
 
         if ($writability["writable"] === false) {
@@ -4678,7 +4687,8 @@ class ImportClient
         string $target_root,
         ?string $relative_path,
         array $classification,
-        string $operation
+        string $operation,
+        array &$component_writability_cache
     ): array {
         if ($relative_path === null) {
             return ["writable" => null, "reason" => null];
@@ -4688,13 +4698,23 @@ class ImportClient
         if ($area === "plugin") {
             $component = $this->component_relative_path_from_selection($relative_path, "wp-content/plugins/");
             if ($component !== null) {
-                return $this->inspect_staged_swap_writability($target_root . "/" . $component);
+                $target_path = $target_root . "/" . $component;
+                if (!array_key_exists($target_path, $component_writability_cache)) {
+                    $component_writability_cache[$target_path] =
+                        $this->inspect_staged_swap_writability($target_path);
+                }
+                return $component_writability_cache[$target_path];
             }
         }
         if ($area === "theme") {
             $component = $this->component_relative_path_from_selection($relative_path, "wp-content/themes/");
             if ($component !== null) {
-                return $this->inspect_staged_swap_writability($target_root . "/" . $component);
+                $target_path = $target_root . "/" . $component;
+                if (!array_key_exists($target_path, $component_writability_cache)) {
+                    $component_writability_cache[$target_path] =
+                        $this->inspect_staged_swap_writability($target_path);
+                }
+                return $component_writability_cache[$target_path];
             }
         }
 

@@ -125,6 +125,35 @@ class FilesPlanMaterializeApplyTest extends TestCase
         $this->assertSame('', file_get_contents($selected));
     }
 
+    public function testFilesPlanCachesPluginComponentWritability(): void
+    {
+        $targetRoot = $this->tempDir . '/target-cache';
+        mkdir($targetRoot . '/wp-content/plugins/foo', 0755, true);
+        file_put_contents($targetRoot . '/wp-content/plugins/foo/a.php', 'old-plugin');
+        $client = new \ImportClient('http://example.test/?reprint-api', $this->stateDir, $this->fsRoot);
+        $method = new \ReflectionMethod($client, 'inspect_files_plan_apply_writability');
+        $method->setAccessible(true);
+        $cache = [];
+
+        $first = $method->invokeArgs($client, [
+            $targetRoot,
+            'wp-content/plugins/foo/a.php',
+            ['area' => 'plugin'],
+            'update',
+            &$cache,
+        ]);
+        $this->removeRecursive($targetRoot . '/wp-content/plugins');
+        $second = $method->invokeArgs($client, [
+            $targetRoot,
+            'wp-content/plugins/foo/b.php',
+            ['area' => 'plugin'],
+            'update',
+            &$cache,
+        ]);
+
+        $this->assertSame($first, $second);
+    }
+
     public function testMaterializeDocrootCopiesRealFilesFromFsRootLayout(): void
     {
         mkdir($this->fsRoot . '/var/www/html/wp-admin', 0755, true);

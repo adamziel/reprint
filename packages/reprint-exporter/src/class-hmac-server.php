@@ -105,7 +105,13 @@ final class Site_Export_HMAC_Server {
             return 'HMAC signature verification failed';
         }
 
-        if (!hash_equals($signed_content_hash, $received_content_hash())) {
+        try {
+            $actual_content_hash = $received_content_hash();
+        } catch (RuntimeException $e) {
+            return $e->getMessage();
+        }
+
+        if (!hash_equals($signed_content_hash, $actual_content_hash)) {
             return 'Content hash mismatch: body was modified in transit';
         }
 
@@ -211,8 +217,8 @@ final class Site_Export_HMAC_Server {
             return;
         }
 
-        if (!hash_update_file($context, $tmp_name)) {
-            throw new RuntimeException("Cannot hash uploaded file: {$tmp_name}");
+        if (!@hash_update_file($context, $tmp_name)) {
+            throw new RuntimeException('Cannot hash uploaded file.');
         }
     }
 }

@@ -1,12 +1,13 @@
 /**
  * Test 53: Plugin push relay API binding
  *
- * Verifies the PHAR/client side can fulfill target-owned relay requests over an
- * HTTP push API, which is the binding used by the WordPress plugin session API.
+ * Verifies the PHAR/client side can fulfill target-owned relay requests over the
+ * real WordPress plugin push API entry points.
  */
 import { describe, it, beforeEach, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,7 @@ import { createServer } from 'node:net';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
+const TARGET_SECRET = 'target-secret';
 
 describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
     let tempDir;
@@ -23,18 +25,12 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
     let baseUrl;
 
     beforeEach(async () => {
+        serverOutput = '';
         tempDir = mkdtempSync(join(tmpdir(), 'reprint-push-relay-e2e-'));
         mkdirSync(join(tempDir, 'source', 'wp-content'), { recursive: true });
+        mkdirSync(join(tempDir, 'target'), { recursive: true });
         writeFileSync(join(tempDir, 'source', 'wp-content', 'file.txt'), 'source-file');
-        writeFileSync(join(tempDir, 'request.json'), JSON.stringify({
-            protocol: 1,
-            request_id: 'req-preflight',
-            kind: 'json',
-            endpoint: 'preflight',
-            cursor: null,
-            params: {},
-            post_data: null,
-        }));
+        writeFileSync(join(tempDir, 'secret.php'), `<?php return '${TARGET_SECRET}';\n`);
         writeFileSync(join(tempDir, 'router.php'), routerPhp(tempDir));
         const port = await getFreePort();
         baseUrl = `http://127.0.0.1:${port}/`;
@@ -56,37 +52,33 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
         }
     });
 
-    it('source worker polls target push API and posts the exporter response', () => {
-        execFileSync(PHP_BINARY, [
-            IMPORTER_PATH,
-            'relay-source',
-            `${baseUrl}?reprint-api`,
-            `--relay-url=${baseUrl}?reprint-push-api`,
-            '--relay-session=e2e-session',
-            '--relay-secret=target-secret',
-            `--state-dir=${join(tempDir, 'state')}`,
-            `--fs-root=${join(tempDir, 'state', 'fs-root')}`,
-            `--relay-allow-path=${join(tempDir, 'source')}`,
-            '--relay-idle-timeout=10',
-        ], {
-            timeout: 30000,
-            encoding: 'utf-8',
-            maxBuffer: 5 * 1024 * 1024,
-            env: { ...process.env },
+    it('source worker polls the plugin API and posts an exporter JSON response', async () => {
+        const session = await createPluginSession();
+        writeRelayRequest(session.session_id, {
+            protocol: 1,
+            request_id: 'req-preflight',
+            kind: 'json',
+            endpoint: 'preflight',
+            cursor: null,
+            params: {},
+            post_data: null,
         });
 
-        const responsePath = join(tempDir, 'response.json');
-        assert.ok(existsSync(responsePath), `Expected source worker to post ${responsePath}\n${serverOutput}`);
-        const response = JSON.parse(readFileSync(responsePath, 'utf-8'));
+        runRelaySource(session.session_id);
+
+        const response = readRelayResponse(session.session_id, 'req-preflight');
         assert.equal(response.request_id, 'req-preflight');
         assert.equal(response.endpoint, 'preflight');
         assert.equal(response.kind, 'json');
         assert.equal(response.json_result.json.ok, true);
+        const status = await callPushApi('status', { sessionId: session.session_id });
+        assert.equal(status.relay.responses, 1);
     });
 
-    it('streams request upload sidecars and response bodies through the target API', () => {
+    it('streams request upload sidecars and response bodies through the plugin API', async () => {
+        const session = await createPluginSession();
         const uploadName = 'req-file-file-list.upload';
-        writeFileSync(join(tempDir, 'request.json'), JSON.stringify({
+        writeRelayRequest(session.session_id, {
             protocol: 1,
             request_id: 'req-file',
             kind: 'stream',
@@ -102,44 +94,132 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
                     size: 2,
                 },
             },
-        }));
-        writeFileSync(join(tempDir, uploadName), JSON.stringify([
+        });
+        writeRelayUpload(session.session_id, uploadName, JSON.stringify([
             join(tempDir, 'source', 'wp-content', 'file.txt'),
         ]));
 
+        runRelaySource(session.session_id);
+
+        const response = readRelayResponse(session.session_id, 'req-file');
+        assert.equal(response.request_id, 'req-file');
+        assert.equal(response.endpoint, 'file_fetch');
+        assert.equal(response.kind, 'stream');
+        assert.equal(
+            readFileSync(join(sessionDir(session.session_id), 'relay', 'responses', 'req-file.body'), 'utf-8'),
+            `file-list:${JSON.stringify([join(tempDir, 'source', 'wp-content', 'file.txt')])}`
+        );
+    });
+
+    async function createPluginSession() {
+        return await callPushApi('create', {
+            body: {
+                source_url: `${baseUrl}?reprint-api`,
+                command: 'pull',
+                options: {},
+            },
+        });
+    }
+
+    function writeRelayRequest(sessionId, request) {
+        writeFileSync(
+            join(sessionDir(sessionId), 'relay', 'requests', `${request.request_id}.json`),
+            JSON.stringify(request)
+        );
+    }
+
+    function writeRelayUpload(sessionId, uploadName, body) {
+        writeFileSync(join(sessionDir(sessionId), 'relay', 'uploads', uploadName), body);
+    }
+
+    function readRelayResponse(sessionId, requestId) {
+        const responsePath = join(sessionDir(sessionId), 'relay', 'responses', `${requestId}.json`);
+        assert.ok(existsSync(responsePath), `Expected plugin response metadata at ${responsePath}\n${serverOutput}`);
+        return JSON.parse(readFileSync(responsePath, 'utf-8'));
+    }
+
+    function sessionDir(sessionId) {
+        return join(tempDir, 'push-sessions', sessionId);
+    }
+
+    function runRelaySource(sessionId) {
         execFileSync(PHP_BINARY, [
             IMPORTER_PATH,
             'relay-source',
             `${baseUrl}?reprint-api`,
             `--relay-url=${baseUrl}?reprint-push-api`,
-            '--relay-session=e2e-session',
-            '--relay-secret=target-secret',
+            `--relay-session=${sessionId}`,
+            `--relay-secret=${TARGET_SECRET}`,
             `--state-dir=${join(tempDir, 'state')}`,
             `--fs-root=${join(tempDir, 'state', 'fs-root')}`,
             `--relay-allow-path=${join(tempDir, 'source')}`,
-            '--relay-idle-timeout=10',
+            '--relay-idle-timeout=1',
         ], {
             timeout: 30000,
             encoding: 'utf-8',
             maxBuffer: 5 * 1024 * 1024,
             env: { ...process.env },
         });
+    }
 
-        const response = JSON.parse(readFileSync(join(tempDir, 'response.json'), 'utf-8'));
-        assert.equal(response.request_id, 'req-file');
-        assert.equal(response.endpoint, 'file_fetch');
-        assert.equal(response.kind, 'stream');
-        assert.equal(readFileSync(join(tempDir, 'response-body.bin'), 'utf-8'), `file-list:${JSON.stringify([
-            join(tempDir, 'source', 'wp-content', 'file.txt'),
-        ])}`);
-    });
+    async function callPushApi(endpoint, { sessionId, body } = {}) {
+        const requestBody = body === undefined ? '' : JSON.stringify(body);
+        const url = new URL(baseUrl);
+        url.searchParams.set('reprint-push-api', '1');
+        url.searchParams.set('endpoint', endpoint);
+        if (sessionId) {
+            url.searchParams.set('session_id', sessionId);
+        }
+        const headers = {
+            Accept: 'application/json',
+            ...hmacHeaders(requestBody),
+        };
+        const response = await fetch(url, {
+            method: body === undefined ? 'GET' : 'POST',
+            headers: body === undefined
+                ? headers
+                : { ...headers, 'Content-Type': 'application/json' },
+            body: body === undefined ? undefined : requestBody,
+        });
+        const text = await response.text();
+        const json = JSON.parse(text);
+        assert.equal(response.status, 200, text);
+        assert.equal(json.ok, true, text);
+        return json;
+    }
 });
+
+function hmacHeaders(body) {
+    const nonce = randomBytes(16).toString('hex');
+    const timestamp = (Date.now() / 1000).toFixed(6);
+    const contentHash = createHash('sha256').update(body).digest('hex');
+    const signature = createHmac('sha256', TARGET_SECRET)
+        .update(nonce + timestamp + contentHash)
+        .digest('hex');
+    return {
+        'X-Auth-Signature': signature,
+        'X-Auth-Nonce': nonce,
+        'X-Auth-Timestamp': timestamp,
+        'X-Auth-Content-Hash': contentHash,
+    };
+}
 
 function routerPhp(root) {
     const encodedRoot = JSON.stringify(root);
+    const encodedProjectRoot = JSON.stringify(PROJECT_ROOT);
     return `<?php
 $root = ${encodedRoot};
+$projectRoot = ${encodedProjectRoot};
 $source = $root . '/source';
+define('ABSPATH', $root . '/target/');
+define('SITE_EXPORT_PLUGIN_DIR', $projectRoot . '/reprint-exporter-wp/');
+define('SITE_EXPORT_SECRET_FILE', $root . '/secret.php');
+define('SITE_EXPORT_PUSH_BASE_DIR', $root . '/push-sessions');
+require_once $projectRoot . '/packages/reprint-exporter/src/class-hmac-client.php';
+require_once $projectRoot . '/packages/reprint-exporter/src/class-hmac-server.php';
+require_once $projectRoot . '/reprint-exporter-wp/lib.php';
+require_once $projectRoot . '/reprint-exporter-wp/push.php';
+
 $endpoint = $_GET['endpoint'] ?? '';
 if (isset($_GET['reprint-api'])) {
     if ($endpoint === 'file_fetch') {
@@ -160,55 +240,12 @@ if (isset($_GET['reprint-api'])) {
     ]);
     return;
 }
-if (!isset($_GET['reprint-push-api'])) {
-    http_response_code(404);
+if (isset($_GET[SITE_EXPORT_PUSH_API_PARAM])) {
+    _site_export_handle_push_api_request();
     return;
 }
-header('Content-Type: application/json');
-    if ($endpoint === 'claim') {
-        if (is_file($root . '/response.json')) {
-            echo json_encode(['ok' => true, 'status' => 'complete', 'request' => null]);
-            return;
-        }
-        if (is_file($root . '/request.json')) {
-            $request = json_decode(file_get_contents($root . '/request.json'), true);
-            rename($root . '/request.json', $root . '/processing.json');
-            $uploads = [];
-            foreach (($request['post_data'] ?? []) as $field) {
-                if (($field['type'] ?? '') === 'file') {
-                    $uploads[$field['upload']] = ['size' => filesize($root . '/' . $field['upload'])];
-                }
-            }
-            echo json_encode(['ok' => true, 'status' => 'running', 'request' => $request, 'uploads' => $uploads ?: new stdClass()]);
-            return;
-        }
-        echo json_encode(['ok' => true, 'status' => 'running', 'request' => null]);
-        return;
-    }
-    if ($endpoint === 'request-upload') {
-        $upload = basename($_GET['upload'] ?? '');
-        header('Content-Type: application/octet-stream');
-        readfile($root . '/' . $upload);
-        return;
-    }
-    if ($endpoint === 'response-body') {
-        $body = $_FILES['body']['tmp_name'] ?? null;
-        if ($body) {
-            copy($body, $root . '/response-body.bin');
-        } else {
-            file_put_contents($root . '/response-body.bin', file_get_contents('php://input'));
-        }
-        echo json_encode(['ok' => true]);
-        return;
-    }
-    if ($endpoint === 'response') {
-        $body = file_get_contents('php://input');
-        file_put_contents($root . '/response.json', $body);
-    @unlink($root . '/processing.json');
-    echo json_encode(['ok' => true]);
-    return;
-}
-echo json_encode(['ok' => false, 'error' => 'unexpected endpoint']);
+http_response_code(404);
+echo 'not found';
 `;
 }
 
