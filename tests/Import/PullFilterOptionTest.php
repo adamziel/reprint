@@ -15,6 +15,7 @@ class PullFilterFakeClient extends \ImportClient
     public int $db_sync_calls = 0;
     public int $db_apply_calls = 0;
     public array $call_order = array();
+    public array $progress_events = array();
 
     public function __construct(string $state_dir, string $fs_root, bool $create_skipped_list)
     {
@@ -28,6 +29,7 @@ class PullFilterFakeClient extends \ImportClient
 
     public function output_progress(array $data, bool $force = false): void
     {
+        $this->progress_events[] = $data;
     }
 
     public function write_status_file(?string $error = null): void
@@ -276,6 +278,17 @@ class PullFilterOptionTest extends TestCase
         return new PullPreflightFailureFakeClient($this->stateDir, $this->fs_root, false);
     }
 
+    private function lastProgressEvent(PullFilterFakeClient $client, string $status): array
+    {
+        for ($i = count($client->progress_events) - 1; $i >= 0; $i--) {
+            if (($client->progress_events[$i]['status'] ?? null) === $status) {
+                return $client->progress_events[$i];
+            }
+        }
+
+        $this->fail("Missing {$status} progress event");
+    }
+
     private function readState(): array
     {
         return json_decode(
@@ -432,6 +445,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame(0, $client->db_sync_calls);
         $this->assertSame(0, $client->db_apply_calls);
         $this->assertSame(array('preflight'), $client->call_order);
+        $this->assertSame('pull', $this->lastProgressEvent($client, 'error')['command']);
         $this->assertNull($state["pull"]["stage"] ?? null);
     }
 
@@ -451,6 +465,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame(0, $client->files_sync_calls);
         $this->assertSame(0, $client->db_sync_calls);
         $this->assertSame(array('preflight'), $client->call_order);
+        $this->assertSame('pull-files', $this->lastProgressEvent($client, 'error')['command']);
     }
 
     public function testPullDbStopsWhenPreflightFails(): void
@@ -468,6 +483,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame(0, $client->files_sync_calls);
         $this->assertSame(0, $client->db_sync_calls);
         $this->assertSame(array('preflight'), $client->call_order);
+        $this->assertSame('pull-db', $this->lastProgressEvent($client, 'error')['command']);
     }
 
     public function testPullFilesCommandRetriesPartialFilesDownload(): void

@@ -189,11 +189,11 @@ class Pull
             $this->print_stage_header($stage);
 
             try {
-                if (!$this->run_stage($stage, $options, $i + 1, $total)) {
+                if (!$this->run_stage($command, $stage, $options, $i + 1, $total)) {
                     return;
                 }
             } catch (\Exception $e) {
-                $this->report_failure($stage, $stages, $i, $e);
+                $this->report_failure($command, $stage, $stages, $i, $e);
                 throw $e;
             }
 
@@ -219,12 +219,12 @@ class Pull
         ], true);
     }
 
-    private function run_stage(string $stage, array $options, int $step, int $total): bool
+    private function run_stage(string $command, string $stage, array $options, int $step, int $total): bool
     {
         switch ($stage) {
             case 'preflight':
                 $this->client->run_preflight();
-                if ($this->check_plugin_installed()) {
+                if ($this->check_plugin_installed($command)) {
                     $this->client->exit_code = 1;
                     return false;
                 }
@@ -533,7 +533,7 @@ class Pull
      * Check whether preflight detected that the exporter plugin is not
      * installed. Returns true if so (caller should abort the pipeline).
      */
-    private function check_plugin_installed(): bool
+    private function check_plugin_installed(string $command): bool
     {
         $state = $this->client->state;
         $preflight = $state["preflight"] ?? null;
@@ -571,7 +571,7 @@ class Pull
 
         $this->client->output_progress([
             "status" => "error",
-            "command" => "pull",
+            "command" => $command,
             "failed_stage" => "preflight",
             "error_code" => $error_code,
             "error" => $error ?? "Preflight check failed",
@@ -702,11 +702,11 @@ class Pull
         }
     }
 
-    private function report_failure(string $stage, array $stages, int $i, \Exception $e): void
+    private function report_failure(string $command, string $stage, array $stages, int $i, \Exception $e): void
     {
         $this->client->output_progress([
             "status" => "error",
-            "command" => "pull",
+            "command" => $command,
             "failed_stage" => $stage,
             "completed_stages" => array_slice($stages, 0, $i),
             "error_code" => $this->client->last_error_code,
