@@ -27,6 +27,7 @@ class ImportSessionInfrastructureTest extends TestCase
         $this->assertSame('/tmp/reprint-state/.reprint', $paths->state_root());
         $this->assertSame('/tmp/reprint-state/.reprint/run.json', $paths->state_file());
         $this->assertSame('/tmp/reprint-state/.reprint/run.json', $paths->run_state_file());
+        $this->assertSame('/tmp/reprint-state/.reprint/import.lock', $paths->state_lock_file());
         $this->assertSame('/tmp/reprint-state/.reprint/db-pull/checkpoint.json', $paths->db_pull_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.reprint/db-apply/checkpoint.json', $paths->db_apply_checkpoint_file());
         $this->assertSame('/tmp/reprint-state/.reprint/files-pull/checkpoint.json', $paths->files_pull_checkpoint_file());

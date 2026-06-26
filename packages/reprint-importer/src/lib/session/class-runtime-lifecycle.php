@@ -8,6 +8,7 @@ final class RuntimeLifecycle
 {
     private string $state_dir;
     private string $fs_root;
+    private ImportStateLock $state_lock;
     /** @var callable */
     private $shutdown_handler;
     private bool $prepared = false;
@@ -19,11 +20,13 @@ final class RuntimeLifecycle
     public function __construct(
         string $state_dir,
         string $fs_root,
-        callable $shutdown_handler
+        callable $shutdown_handler,
+        ImportStateLock $state_lock
     ) {
         $this->state_dir = $state_dir;
         $this->fs_root = $fs_root;
         $this->shutdown_handler = $shutdown_handler;
+        $this->state_lock = $state_lock;
     }
 
     public function prepare(): void
@@ -33,8 +36,14 @@ final class RuntimeLifecycle
         }
 
         $this->ensure_directories();
-        $this->install_signal_handlers();
-        $this->prepared = true;
+        $this->state_lock->acquire();
+        try {
+            $this->install_signal_handlers();
+            $this->prepared = true;
+        } catch (\Throwable $e) {
+            $this->state_lock->release();
+            throw $e;
+        }
     }
 
     public function cleanup(): void
@@ -43,8 +52,12 @@ final class RuntimeLifecycle
             return;
         }
 
-        $this->restore_signal_handlers();
-        $this->prepared = false;
+        try {
+            $this->restore_signal_handlers();
+        } finally {
+            $this->state_lock->release();
+            $this->prepared = false;
+        }
     }
 
     private function ensure_directories(): void

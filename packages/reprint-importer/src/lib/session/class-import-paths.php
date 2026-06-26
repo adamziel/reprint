@@ -31,6 +31,11 @@ final class ImportPaths
         return $this->state_root() . "/run.json";
     }
 
+    public function state_lock_file(): string
+    {
+        return $this->state_root() . "/import.lock";
+    }
+
     public function db_pull_checkpoint_file(): string
     {
         return $this->state_root() . "/db-pull/checkpoint.json";

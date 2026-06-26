@@ -20,6 +20,7 @@ use Reprint\Importer\Pull\PullCheckpoint;
 use Reprint\Importer\Session\ImportAbortHandler;
 use Reprint\Importer\Session\ImportPaths;
 use Reprint\Importer\Session\ImportRunState;
+use Reprint\Importer\Session\ImportStateLock;
 use Reprint\Importer\Session\JsonStateStore;
 use Reprint\Importer\Session\PreflightCheckpoint;
 use Reprint\Importer\Session\RuntimeLifecycle;
@@ -86,6 +87,7 @@ final class ImportContext
             $this->state_dir,
             $this->fs_root,
             [$this, "handle_shutdown"],
+            new ImportStateLock($this->paths->state_lock_file()),
         );
         $this->index_store = new IndexStore(
             $this->paths->index_file(),
