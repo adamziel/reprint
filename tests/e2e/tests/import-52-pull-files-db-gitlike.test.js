@@ -9,7 +9,7 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
-    existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
+    existsSync, readFileSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -63,17 +63,19 @@ describe('Import: pull-files git-pull-like sync', { timeout: 300000 }, () => {
 
     function writeRemoteFile(relativePath, content) {
         const path = remotePath(relativePath);
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, content);
+        const tempPath = join(tempDir, `remote-${relativePath.replaceAll('/', '-')}`);
+        writeFileSync(tempPath, content);
+        execSync(`sudo mkdir -p ${JSON.stringify(dirname(path))}`);
+        execSync(`sudo cp ${JSON.stringify(tempPath)} ${JSON.stringify(path)}`);
         execSync(`sudo chown nginx:nginx ${JSON.stringify(path)}`);
     }
 
     function removeRemoteFile(relativePath) {
-        rmSync(remotePath(relativePath), { force: true });
+        execSync(`sudo rm -f ${JSON.stringify(remotePath(relativePath))}`);
     }
 
     function resetRemoteFiles(marker) {
-        rmSync(remotePath('test-data/pull-files'), { recursive: true, force: true });
+        execSync(`sudo rm -rf ${JSON.stringify(remotePath('test-data/pull-files'))}`);
         writeRemoteFile('test-data/pull-files/marker.txt', `${marker}\n`);
         writeRemoteFile('test-data/pull-files/removed-after-first.txt', 'present in round 1\n');
     }
