@@ -108,59 +108,7 @@ class Pull
             }
         }
 
-        $host = parse_url($this->client->remote_url, PHP_URL_HOST) ?? $this->client->remote_url;
-        $bold = "\033[1m";
-        $r = "\033[0m";
-        $this->progress->print_line("\n{$bold}Pulling {$host}{$r}\n");
-
-        $this->client->output_progress([
-            "type" => "lifecycle",
-            "event" => "starting",
-            "command" => "pull",
-            "stages" => $stages,
-            "resume_from" => $start_index,
-            "message" => "Starting pull",
-        ], true);
-
-        $this->client->audit_log(
-            sprintf("PULL | stages=%s | resume_from=%d", implode(",", $stages), $start_index),
-            true,
-        );
-
-        for ($i = 0; $i < $start_index; $i++) {
-            $this->print_skipped($stages[$i]);
-        }
-
-        for ($i = $start_index; $i < $total; $i++) {
-            $stage = $stages[$i];
-            $step = $i + 1;
-
-            $this->print_stage_header($stage);
-
-            try {
-                $this->run_stage($stage, $options, $step, $total);
-            } catch (\Exception $e) {
-                $this->report_failure($stage, $stages, $i, $e);
-                throw $e;
-            }
-
-            $this->client->mark_pull_stage_complete($stage);
-        }
-
-        // The 'start' stage handles its own completion (it needs to save
-        // state before blocking on the server process).
-        if (!in_array('start', $stages, true)) {
-            $this->client->mark_pull_complete();
-            $this->print_summary();
-        }
-
-        $this->client->output_progress([
-            "type" => "lifecycle",
-            "event" => "complete",
-            "command" => "pull",
-            "stages" => $stages,
-            "message" => "Pull complete",
-        ], true);
+        $this->run_pipeline('pull', $stages, $options, $start_index, 'Pulling');
     }
 
     /**
@@ -188,7 +136,7 @@ class Pull
         $this->progress->enable_quiet_lifecycle();
 
         $options = $this->validate_and_default_pull_files_options($options, 'pull-files');
-        $this->run_partial_pipeline('pull-files', ['preflight', 'files-download'], $options);
+        $this->run_pipeline('pull-files', ['preflight', 'files-download'], $options, 0, 'Pull files from');
     }
 
     /**
@@ -199,17 +147,86 @@ class Pull
         $this->normalize_url();
         $this->progress->enable_quiet_lifecycle();
 
-        $this->run_partial_pipeline('pull-db', ['preflight', 'db-download'], []);
+        $this->run_pipeline('pull-db', ['preflight', 'db-download'], [], 0, 'Pull database from');
     }
 
-    private function run_stage(string $stage, array $options, int $step, int $total): void
+    private function run_pipeline(
+        string $command,
+        array $stages,
+        array $options,
+        int $start_index,
+        string $title
+    ): void {
+        $track_pull_stages = $command === 'pull';
+        $total = count($stages);
+        $host = parse_url($this->client->remote_url, PHP_URL_HOST) ?? $this->client->remote_url;
+        $bold = "\033[1m";
+        $r = "\033[0m";
+        $this->progress->print_line("\n{$bold}{$title} {$host}{$r}\n");
+
+        $this->client->output_progress([
+            "type" => "lifecycle",
+            "event" => "starting",
+            "command" => $command,
+            "stages" => $stages,
+            "resume_from" => $start_index,
+            "message" => "Starting {$command}",
+        ], true);
+
+        if ($track_pull_stages) {
+            $this->client->audit_log(
+                sprintf("PULL | stages=%s | resume_from=%d", implode(",", $stages), $start_index),
+                true,
+            );
+        }
+
+        for ($i = 0; $i < $start_index; $i++) {
+            $this->print_skipped($stages[$i]);
+        }
+
+        for ($i = $start_index; $i < $total; $i++) {
+            $stage = $stages[$i];
+            $this->print_stage_header($stage);
+
+            try {
+                if (!$this->run_stage($stage, $options, $i + 1, $total)) {
+                    return;
+                }
+            } catch (\Exception $e) {
+                $this->report_failure($stage, $stages, $i, $e);
+                throw $e;
+            }
+
+            if ($track_pull_stages) {
+                $this->client->mark_pull_stage_complete($stage);
+            }
+        }
+
+        // The 'start' stage handles its own completion (it needs to save
+        // state before blocking on the server process).
+        if ($track_pull_stages && !in_array('start', $stages, true)) {
+            $this->client->mark_pull_complete();
+            $this->print_summary();
+        }
+
+        $complete_message = $command === 'pull' ? 'Pull complete' : "{$command} complete";
+        $this->client->output_progress([
+            "type" => "lifecycle",
+            "event" => "complete",
+            "command" => $command,
+            "stages" => $stages,
+            "message" => $complete_message,
+        ], true);
+    }
+
+    private function run_stage(string $stage, array $options, int $step, int $total): bool
     {
         switch ($stage) {
             case 'preflight':
                 $this->client->run_preflight();
                 if ($this->check_plugin_installed()) {
                     $this->client->exit_code = 1;
-                    return;
+                    return false;
                 }
                 $this->print_done($stage, $this->preflight_summary());
                 break;
@@ -267,42 +284,8 @@ class Pull
                 $this->start_server($options);
                 break;
         }
-    }
 
-    private function run_partial_pipeline(string $command, array $stages, array $options): void
-    {
-        $host = parse_url($this->client->remote_url, PHP_URL_HOST) ?? $this->client->remote_url;
-        $bold = "\033[1m";
-        $r = "\033[0m";
-        $this->progress->print_line("\n{$bold}" . ucfirst(str_replace('-', ' ', $command)) . " from {$host}{$r}\n");
-
-        $this->client->output_progress([
-            "type" => "lifecycle",
-            "event" => "starting",
-            "command" => $command,
-            "stages" => $stages,
-            "resume_from" => 0,
-            "message" => "Starting {$command}",
-        ], true);
-
-        $total = count($stages);
-        foreach ($stages as $i => $stage) {
-            $this->print_stage_header($stage);
-            try {
-                $this->run_stage($stage, $options, $i + 1, $total);
-            } catch (\Exception $e) {
-                $this->report_failure($stage, $stages, $i, $e);
-                throw $e;
-            }
-        }
-
-        $this->client->output_progress([
-            "type" => "lifecycle",
-            "event" => "complete",
-            "command" => $command,
-            "stages" => $stages,
-            "message" => "{$command} complete",
-        ], true);
+        return true;
     }
 
     private function normalize_stage_name(?string $stage): ?string

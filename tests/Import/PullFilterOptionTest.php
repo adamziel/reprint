@@ -63,11 +63,11 @@ class PullFilterFakeClient extends \ImportClient
         });
     }
 
-    public function prepare_files_download_options(array $options, bool $assert_remap_consistency = true): void
+    public function prepare_files_download_options(array $options): void
     {
         ++$this->prepare_files_download_options_calls;
         $this->call_order[] = 'prepare-files';
-        parent::prepare_files_download_options($options, $assert_remap_consistency);
+        parent::prepare_files_download_options($options);
     }
 
     public function run_files_sync(): void
@@ -134,6 +134,26 @@ class PullBridgeFakeClient extends PullFilterFakeClient
     public function run_apply_runtime(array $options): void
     {
         $this->apply_runtime_options = $options;
+    }
+}
+
+class PullPreflightFailureFakeClient extends PullFilterFakeClient
+{
+    public function run_preflight(): void
+    {
+        ++$this->preflight_calls;
+        $this->call_order[] = 'preflight';
+        $this->last_error_code = 'NOT_FOUND';
+        $this->mutate_state(function (array $state) {
+            $state["preflight"] = [
+                "http_code" => 404,
+                "error" => "Exporter not found",
+                "data" => [
+                    "ok" => false,
+                ],
+            ];
+            return $state;
+        });
     }
 }
 
@@ -249,6 +269,11 @@ class PullFilterOptionTest extends TestCase
     private function makeClient(bool $create_skipped_list): PullFilterFakeClient
     {
         return new PullFilterFakeClient($this->stateDir, $this->fs_root, $create_skipped_list);
+    }
+
+    private function makePreflightFailureClient(): PullPreflightFailureFakeClient
+    {
+        return new PullPreflightFailureFakeClient($this->stateDir, $this->fs_root, false);
     }
 
     private function readState(): array
@@ -386,6 +411,63 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame(1, $client->db_sync_calls);
         $this->assertSame(0, $client->db_apply_calls);
         $this->assertSame(array('preflight', 'db-download'), $client->call_order);
+    }
+
+    public function testPullStopsWhenPreflightFails(): void
+    {
+        $client = $this->makePreflightFailureClient();
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->exit_code);
+        $this->assertSame(1, $client->preflight_calls);
+        $this->assertSame(0, $client->prepare_files_download_options_calls);
+        $this->assertSame(0, $client->files_sync_calls);
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertSame(0, $client->db_apply_calls);
+        $this->assertSame(array('preflight'), $client->call_order);
+        $this->assertNull($state["pull"]["stage"] ?? null);
+    }
+
+    public function testPullFilesStopsWhenPreflightFails(): void
+    {
+        $client = $this->makePreflightFailureClient();
+
+        ob_start();
+        $client->run([
+            "command" => "pull-files",
+        ]);
+        ob_end_clean();
+
+        $this->assertSame(1, $client->exit_code);
+        $this->assertSame(1, $client->preflight_calls);
+        $this->assertSame(0, $client->prepare_files_download_options_calls);
+        $this->assertSame(0, $client->files_sync_calls);
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertSame(array('preflight'), $client->call_order);
+    }
+
+    public function testPullDbStopsWhenPreflightFails(): void
+    {
+        $client = $this->makePreflightFailureClient();
+
+        ob_start();
+        $client->run([
+            "command" => "pull-db",
+        ]);
+        ob_end_clean();
+
+        $this->assertSame(1, $client->exit_code);
+        $this->assertSame(1, $client->preflight_calls);
+        $this->assertSame(0, $client->files_sync_calls);
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertSame(array('preflight'), $client->call_order);
     }
 
     public function testPullFilesCommandRetriesPartialFilesDownload(): void
