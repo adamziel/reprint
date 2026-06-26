@@ -142,12 +142,12 @@ class Pull
     /**
      * Run the database-only pull pipeline.
      */
-    public function run_pull_db(): void
+    public function run_pull_db(array $options): void
     {
         $this->normalize_url();
         $this->progress->enable_quiet_lifecycle();
 
-        $this->run_pipeline('pull-db', ['preflight', 'db-download'], [], 0, 'Pull database from');
+        $this->run_pipeline('pull-db', ['preflight', 'db-download'], $options, 0, 'Pull database from');
     }
 
     private function run_pipeline(

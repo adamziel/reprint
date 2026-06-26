@@ -1767,7 +1767,7 @@ class ImportClient
                         $this->pull->run_pull_files($options);
                         break;
                     case "pull-db":
-                        $this->pull->run_pull_db();
+                        $this->pull->run_pull_db($options);
                         break;
                 }
             } catch (\Exception $e) {
