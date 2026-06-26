@@ -1836,10 +1836,9 @@ class ImportClient
         $this->require_preflight();
 
         if ($command === "files-download") {
-            if ($abort) {
-                $this->resolve_files_download_options($options);
-            } else {
-                $this->prepare_files_download_options($options);
+            $this->resolve_files_download_options($options);
+            if (!$abort) {
+                $this->assert_files_remap_consistent();
             }
         }
 
