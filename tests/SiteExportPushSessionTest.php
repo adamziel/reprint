@@ -166,6 +166,46 @@ final class SiteExportPushSessionTest extends TestCase
         ]);
     }
 
+    public function testCreateSupportsPushOnlyCommandsAndFileFilters(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'pull-files',
+            'options' => [
+                'filter' => 'essential-files',
+                'only' => [':wp-content:/themes/theme'],
+                'extra_directory' => '/srv/local/shared',
+            ],
+        ]);
+
+        $session = _site_export_push_read_session($created['session_id']);
+        $this->assertSame('pull-files', $session['command']);
+        $this->assertSame('essential-files', $session['options']['filter']);
+        $this->assertSame([':wp-content:/themes/theme'], $session['options']['only']);
+        $this->assertSame('/srv/local/shared', $session['options']['extra_directory']);
+    }
+
+    public function testLegacyPushOnlyCommandAliasesUseOrchestratedCommands(): void
+    {
+        $files = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'files-pull',
+        ]);
+        $database = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'db-pull',
+        ]);
+
+        $this->assertSame('pull-files', _site_export_push_read_session($files['session_id'])['command']);
+        $this->assertSame('pull-db', _site_export_push_read_session($database['session_id'])['command']);
+    }
+
+    public function testDatabaseOnlyPushDownloadsThenAppliesDatabase(): void
+    {
+        $this->assertSame(['pull-db', 'db-apply'], _site_export_push_import_command_sequence('pull-db'));
+        $this->assertSame(['pull-files'], _site_export_push_import_command_sequence('pull-files'));
+    }
+
     public function testLateWorkerResponseDoesNotOverwriteAbortResponse(): void
     {
         $created = _site_export_push_create_session([
@@ -320,7 +360,7 @@ final class SiteExportPushSessionTest extends TestCase
         $stateDir = _site_export_push_import_state_dir($stateId);
         _site_export_push_write_json_file($stateDir . '/.import-status.json', [
             'status' => 'running',
-            'command' => 'files-pull',
+            'command' => 'files-download',
         ]);
         _site_export_push_mutate_session($sessionId, function (array $session) use ($stateId): array {
             $session['status'] = 'running';
@@ -338,7 +378,7 @@ final class SiteExportPushSessionTest extends TestCase
         });
         _site_export_push_write_json_file($stateDir . '/.import-status.json', [
             'status' => 'running',
-            'command' => 'files-pull',
+            'command' => 'files-download',
         ]);
 
         $complete = _site_export_push_session_status($sessionId);

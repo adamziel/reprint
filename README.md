@@ -122,7 +122,7 @@ php reprint.phar preflight "http://127.0.0.1:8888/?reprint-api" \
   --state-dir="$TARGET_STATE" \
   --fs-root="$TARGET_FILES"
 
-php reprint.phar files-pull "http://127.0.0.1:8888/?reprint-api" \
+php reprint.phar pull-files "http://127.0.0.1:8888/?reprint-api" \
   --secret=TOKEN \
   --transport=relay \
   --relay-dir="$RELAY_DIR" \
@@ -145,10 +145,12 @@ preflight discovers the site's WordPress roots and uses those as the allowlist f
 subsequent file requests.
 
 The target side keeps the normal Reprint interruption and progress behavior:
-`--only` limits selected file paths, `--abort` clears an in-progress command, and
-JSON/progress output still comes from the target importer. The source worker can
-be stopped independently; requests claimed by a crashed worker are requeued after
-the relay timeout so a restarted worker can continue.
+`pull-files` runs only the file stages and accepts the same `--filter`/`--only`
+file selection controls as pull, `pull-db` runs only the database stages,
+`--abort` clears an in-progress command, and JSON/progress output still comes
+from the target importer. The source worker can be stopped independently;
+requests claimed by a crashed worker are requeued after the relay timeout so a
+restarted worker can continue.
 
 #### Plugin-owned push sessions
 
@@ -192,6 +194,11 @@ default it maps the source `:abspath:` to the target `ABSPATH`, uses the target
 site's database constants for `db-apply`, and allows an explicit overwrite of a
 non-empty target document root. Studio should put a product confirmation and any
 selective intent UI in front of this before using it against a valuable site.
+Session creation accepts `command=pull` for a full push, `command=pull-files`
+for file-only pushes with `filter`/`only`/`extra_directory` file selection, and
+`command=pull-db` for database-only pushes. In the plugin-owned target flow,
+`pull-db` downloads the SQL dump and then applies it to the target database in
+the same session.
 
 #### Push planning and staged file apply primitives
 

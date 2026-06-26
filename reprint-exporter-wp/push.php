@@ -300,13 +300,20 @@ function _site_export_push_normalize_command($command): string {
     if (!is_string($command) || $command === '') {
         throw new RuntimeException('Push command must be a non-empty string.');
     }
+    $aliases = [
+        'files-pull' => 'pull-files',
+        'db-pull' => 'pull-db',
+    ];
+    $command = $aliases[$command] ?? $command;
     $allowed = [
         'pull' => true,
+        'pull-files' => true,
+        'pull-db' => true,
         'preflight' => true,
         'files-index' => true,
-        'files-pull' => true,
+        'files-download' => true,
         'db-index' => true,
-        'db-pull' => true,
+        'db-download' => true,
         'db-apply' => true,
     ];
     if (!isset($allowed[$command])) {
@@ -327,6 +334,7 @@ function _site_export_push_normalize_options($options): array {
         'db_query_time_limit' => true,
         'db_unbuffered' => true,
         'deactivate_host_plugins' => true,
+        'extra_directory' => true,
         'filter' => true,
         'follow_symlinks' => true,
         'fragments_per_batch' => true,
@@ -449,7 +457,14 @@ function _site_export_push_run_session(string $session_id): array {
                     $import_state_dir,
                     $target_fs_root
                 );
-                $client->run($import_options);
+                foreach (_site_export_push_import_command_sequence((string) $import_options['command']) as $command) {
+                    $command_options = $import_options;
+                    $command_options['command'] = $command;
+                    $client->run($command_options);
+                    if ((int) $client->exit_code !== 0) {
+                        break;
+                    }
+                }
             } finally {
                 if ($output_buffer_started) {
                     ob_end_clean();
@@ -499,6 +514,16 @@ function _site_export_push_run_session(string $session_id): array {
     }
 
     return _site_export_push_session_status($session_id);
+}
+
+function _site_export_push_import_command_sequence(string $command): array {
+    // In plugin-owned push, pull-db means "push the database to this target".
+    // The importer's pull-db command only downloads db.sql, so the target must
+    // apply it in the same session to complete the database-only push.
+    if ($command === 'pull-db') {
+        return ['pull-db', 'db-apply'];
+    }
+    return [$command];
 }
 
 function _site_export_push_importer_run_result(string $import_state_dir, int $exit_code): array {
@@ -787,7 +812,9 @@ function _site_export_push_import_state_id(array $session, array $import_options
     }
 
     $scope = [
-        'version' => 1,
+        // Version 2 starts fresh from push states created before the importer
+        // tracked remap fingerprints for reusable file indexes.
+        'version' => 2,
         'source_url' => (string) ($session['source_url'] ?? ''),
         'target_fs_root' => $target_fs_root,
         'options' => $state_options,

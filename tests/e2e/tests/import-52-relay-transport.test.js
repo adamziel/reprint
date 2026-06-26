@@ -137,8 +137,8 @@ describe('Import: Relay Transport', { timeout: 300000 }, () => {
     it('pulls selected files through target-authored relay requests', () => {
         const sourceDir = getSiteDir(site);
         const selectedPath = join(sourceDir, 'test-data');
-        const output = runTarget('files-pull', [`--only=${selectedPath}`]);
-        assert.match(output, /files-pull complete/, 'Expected relayed files-pull to complete');
+        const output = runTarget('pull-files', [`--only=${selectedPath}`]);
+        assert.match(output, /pull-files complete/, 'Expected relayed pull-files to complete');
 
         const importedHello = join(
             fsRootDir(tempDir),
@@ -152,8 +152,8 @@ describe('Import: Relay Transport', { timeout: 300000 }, () => {
     });
 
     it('pulls the database through target-authored relay requests', () => {
-        const output = runTarget('db-pull');
-        assert.match(output, /db-pull complete/, 'Expected relayed db-pull to complete');
+        const output = runTarget('pull-db');
+        assert.match(output, /pull-db complete/, 'Expected relayed pull-db to complete');
 
         const sqlFile = join(tempDir, 'db.sql');
         assert.ok(existsSync(sqlFile), 'Expected relayed db.sql to exist');
