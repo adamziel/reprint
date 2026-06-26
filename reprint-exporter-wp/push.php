@@ -515,7 +515,6 @@ function _site_export_push_store_response_body(string $session_id, string $reque
 }
 
 function _site_export_push_store_response_metadata(string $session_id, array $response): array {
-    $session = _site_export_push_read_session($session_id);
     $request_id = isset($response['request_id']) ? _site_export_push_validate_id((string) $response['request_id'], 'request_id') : '';
     if ($request_id === '') {
         throw new RuntimeException('Response metadata is missing request_id.');
@@ -525,27 +524,43 @@ function _site_export_push_store_response_metadata(string $session_id, array $re
     $responses_dir = $session_dir . '/relay/responses';
     $processing_file = $session_dir . '/relay/processing/' . $request_id . '.json';
     _site_export_push_ensure_dir($responses_dir);
-    if (($session['status'] ?? '') === 'aborted') {
+
+    // The session status check and response publish must be ordered with abort
+    // mutations. Otherwise a worker can read "running", an abort can publish
+    // tombstones, and the late success metadata can still win the response race.
+    return _site_export_push_with_session_lock($session_id, function (array $session) use (
+        $responses_dir,
+        $processing_file,
+        $request_id,
+        $response
+    ): array {
+        if (($session['status'] ?? '') === 'aborted') {
+            _site_export_push_publish_response_metadata_once($responses_dir, $request_id, [
+                'request_id' => $request_id,
+                'error' => 'Push session aborted.',
+                'created_at' => gmdate('c'),
+            ]);
+            if (is_file($processing_file)) {
+                @unlink($processing_file);
+            }
+            return ['ok' => true, 'request_id' => $request_id, 'ignored' => true, 'status' => 'aborted'];
+        }
+
+        $body_file = $responses_dir . '/' . $request_id . '.body';
+        if (isset($response['body_file'])) {
+            if (!is_file($body_file)) {
+                throw new RuntimeException('Response metadata arrived before response body.');
+            }
+            $response['body_file'] = $body_file;
+        }
+
+        $published = _site_export_push_publish_response_metadata_once($responses_dir, $request_id, $response);
         if (is_file($processing_file)) {
             @unlink($processing_file);
         }
-        return ['ok' => true, 'request_id' => $request_id, 'ignored' => true, 'status' => 'aborted'];
-    }
 
-    $body_file = $responses_dir . '/' . $request_id . '.body';
-    if (isset($response['body_file'])) {
-        if (!is_file($body_file)) {
-            throw new RuntimeException('Response metadata arrived before response body.');
-        }
-        $response['body_file'] = $body_file;
-    }
-
-    $published = _site_export_push_publish_response_metadata_once($responses_dir, $request_id, $response);
-    if (is_file($processing_file)) {
-        @unlink($processing_file);
-    }
-
-    return ['ok' => true, 'request_id' => $request_id, 'published' => $published];
+        return ['ok' => true, 'request_id' => $request_id, 'published' => $published];
+    });
 }
 
 function _site_export_push_abort_session(string $session_id): array {
@@ -777,18 +792,24 @@ function _site_export_push_write_session(string $session_id, array $session): vo
 }
 
 function _site_export_push_mutate_session(string $session_id, callable $mutate): array {
-    $lock = _site_export_push_acquire_lock(_site_export_push_session_dir($session_id) . '/session.lock', true);
-    if ($lock === null) {
-        throw new RuntimeException("Cannot lock push session: {$session_id}");
-    }
-    try {
-        $session = _site_export_push_read_session($session_id);
+    return _site_export_push_with_session_lock($session_id, function (array $session) use ($session_id, $mutate): array {
         $next = $mutate($session);
         if (!is_array($next)) {
             throw new RuntimeException('Push session mutation must return a session array.');
         }
         _site_export_push_write_session($session_id, $next);
         return $next;
+    });
+}
+
+function _site_export_push_with_session_lock(string $session_id, callable $callback): array {
+    $lock = _site_export_push_acquire_lock(_site_export_push_session_dir($session_id) . '/session.lock', true);
+    if ($lock === null) {
+        throw new RuntimeException("Cannot lock push session: {$session_id}");
+    }
+    try {
+        $session = _site_export_push_read_session($session_id);
+        return $callback($session);
     } finally {
         _site_export_push_release_lock($lock);
     }

@@ -4339,6 +4339,11 @@ class ImportClient
             ? $this->build_staged_file_apply_operations_from_selection($staged_root, $target_root, $selected_files)
             : $this->build_staged_file_apply_operations($staged_root, $target_root);
         $journal = $this->read_apply_journal($journal_file);
+        // The apply journal is intentionally bounded to one operation. If the
+        // Studio selection changes while a swap is half-finished, resuming with
+        // the new selection would skip the stranded prepared/backup paths and
+        // then delete the only recovery hint.
+        $this->assert_apply_journal_matches_operations($journal, $operations);
         $started_maintenance = false;
         $applied = 0;
 
@@ -5273,6 +5278,35 @@ class ImportClient
             throw new RuntimeException("Invalid apply journal JSON: {$journal_file}");
         }
         return $decoded;
+    }
+
+    private function assert_apply_journal_matches_operations(array $journal, array $operations): void
+    {
+        if (empty($journal)) {
+            return;
+        }
+        $journal_operation = $journal["operation"] ?? null;
+        if (!is_array($journal_operation)) {
+            throw new RuntimeException("Invalid apply journal: missing operation.");
+        }
+        foreach ($operations as $operation) {
+            if ($this->apply_operation_matches_journal_operation($operation, $journal_operation)) {
+                return;
+            }
+        }
+        throw new RuntimeException(
+            "Cannot resume apply-staged-files: the journaled operation is not selected by this run. Restore the previous selected-files manifest or recover the target path manually.",
+        );
+    }
+
+    private function apply_operation_matches_journal_operation(array $operation, array $journal_operation): bool
+    {
+        foreach (["type", "source", "target", "prepared", "backup"] as $key) {
+            if (($operation[$key] ?? null) !== ($journal_operation[$key] ?? null)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private function write_apply_journal(string $journal_file, array $operation, string $phase): void

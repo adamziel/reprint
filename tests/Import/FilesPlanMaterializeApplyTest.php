@@ -189,7 +189,16 @@ class FilesPlanMaterializeApplyTest extends TestCase
         file_put_contents($target . '/wp-content/plugins/foo.new/a.php', 'new-plugin');
         file_put_contents($target . '/wp-content/plugins/foo.bak/a.php', 'old-plugin');
         $journal = $this->stateDir . '/resume-apply.json';
-        file_put_contents($journal, json_encode(['phase' => 'swapping']));
+        file_put_contents($journal, json_encode([
+            'phase' => 'swapping',
+            'operation' => [
+                'type' => 'swap_directory',
+                'source' => $staged . '/wp-content/plugins/foo',
+                'target' => $target . '/wp-content/plugins/foo',
+                'prepared' => $target . '/wp-content/plugins/foo.new',
+                'backup' => $target . '/wp-content/plugins/foo.bak',
+            ],
+        ]));
 
         $result = $this->runJsonCommand([
             'command' => 'apply-staged-files',
@@ -205,6 +214,44 @@ class FilesPlanMaterializeApplyTest extends TestCase
         $this->assertFileDoesNotExist($target . '/wp-content/plugins/foo.new');
         $this->assertFileDoesNotExist($target . '/wp-content/plugins/foo.bak');
         $this->assertFileDoesNotExist($target . '/.maintenance');
+    }
+
+    public function testApplyStagedFilesRejectsResumeWhenSelectionNoLongerContainsJournaledOperation(): void
+    {
+        $staged = $this->tempDir . '/staged-resume-changed';
+        $target = $this->tempDir . '/target-resume-changed';
+        mkdir($staged . '/wp-content/plugins/foo', 0755, true);
+        mkdir($target . '/wp-content/plugins/foo.new', 0755, true);
+        mkdir($target . '/wp-content/plugins/foo.bak', 0755, true);
+        file_put_contents($staged . '/wp-content/plugins/foo/a.php', 'new-plugin');
+        file_put_contents($staged . '/index.php', '<?php // changed selection');
+        file_put_contents($target . '/wp-content/plugins/foo.new/a.php', 'new-plugin');
+        file_put_contents($target . '/wp-content/plugins/foo.bak/a.php', 'old-plugin');
+        $journal = $this->stateDir . '/resume-changed-apply.json';
+        file_put_contents($journal, json_encode([
+            'phase' => 'swapping',
+            'operation' => [
+                'type' => 'swap_directory',
+                'source' => $staged . '/wp-content/plugins/foo',
+                'target' => $target . '/wp-content/plugins/foo',
+                'prepared' => $target . '/wp-content/plugins/foo.new',
+                'backup' => $target . '/wp-content/plugins/foo.bak',
+            ],
+        ]));
+        $selected = $this->tempDir . '/resume-changed-selected.jsonl';
+        $this->writeSelectedManifest($selected, [
+            ['/var/www/html/index.php', 'index.php', 'update', 'file'],
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('journaled operation is not selected');
+        $this->runJsonCommand([
+            'command' => 'apply-staged-files',
+            'staged_root' => $staged,
+            'target_root' => $target,
+            'apply_journal' => $journal,
+            'selected_files' => $selected,
+        ]);
     }
 
     public function testApplyStagedFilesRejectsSelectedDirectoriesAndUnsupportedPaths(): void

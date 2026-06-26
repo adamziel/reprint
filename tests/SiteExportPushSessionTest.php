@@ -188,6 +188,33 @@ final class SiteExportPushSessionTest extends TestCase
         $this->assertSame('Push session aborted.', $metadata['error']);
     }
 
+    public function testLateWorkerResponsePublishesAbortTombstoneAfterSessionAbort(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        _site_export_push_write_json_file($sessionDir . '/relay/processing/req-race.json', ['request_id' => 'req-race']);
+        _site_export_push_mutate_session($sessionId, function (array $session): array {
+            $session['status'] = 'aborted';
+            $session['updated_at'] = gmdate('c');
+            return $session;
+        });
+
+        $stored = _site_export_push_store_response_metadata($sessionId, [
+            'request_id' => 'req-race',
+            'endpoint' => 'preflight',
+            'kind' => 'json',
+            'json_result' => ['ok' => true],
+        ]);
+
+        $this->assertTrue($stored['ignored']);
+        $metadata = _site_export_push_read_json_file($sessionDir . '/relay/responses/req-race.json');
+        $this->assertSame('Push session aborted.', $metadata['error']);
+        $this->assertFileDoesNotExist($sessionDir . '/relay/processing/req-race.json');
+    }
+
     public function testRunSessionReportsRunningWhenAnotherRunnerOwnsTheLock(): void
     {
         $created = _site_export_push_create_session([
