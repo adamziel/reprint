@@ -93,7 +93,7 @@ class Pull
         $this->normalize_url();
         $this->progress->enable_quiet_lifecycle();
 
-        $options = $this->validate_and_default_options($options);
+        $options = $this->validate_and_default_command_options('pull', $options);
 
         $this->run_resumable_pipeline(
             'pull',
@@ -128,7 +128,7 @@ class Pull
         $this->normalize_url();
         $this->progress->enable_quiet_lifecycle();
 
-        $options = $this->validate_and_default_pull_files_options($options, 'pull-files');
+        $options = $this->validate_and_default_command_options('pull-files', $options);
         $this->run_resumable_pipeline(
             'pull-files',
             ['preflight', 'files-download'],
@@ -146,7 +146,7 @@ class Pull
         $this->normalize_url();
         $this->progress->enable_quiet_lifecycle();
 
-        $options = $this->validate_and_default_pull_db_options($options);
+        $options = $this->validate_and_default_command_options('pull-db', $options);
         $this->run_resumable_pipeline(
             'pull-db',
             ['preflight', 'db-download', 'db-apply'],
@@ -154,6 +154,20 @@ class Pull
             'pull_db',
             'Pull database from',
         );
+    }
+
+    public function validate_and_default_command_options(string $command, array $options): array
+    {
+        switch ($command) {
+            case 'pull':
+                return $this->validate_and_default_options($options);
+            case 'pull-files':
+                return $this->validate_and_default_pull_files_options($options, 'pull-files');
+            case 'pull-db':
+                return $this->validate_and_default_pull_db_options($options);
+        }
+
+        throw new InvalidArgumentException("Unknown pull pipeline: {$command}");
     }
 
     public function clear_pipeline_state(string $command): void

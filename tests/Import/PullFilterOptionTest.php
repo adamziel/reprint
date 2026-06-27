@@ -793,6 +793,59 @@ class PullFilterOptionTest extends TestCase
         $this->assertTrue($state['pull_db']['has_completed_once']);
     }
 
+    public function testPullRejectsInvalidRuntimeBeforePersistingIt(): void
+    {
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                'command' => 'pull',
+                'runtime' => 'bogus-runtime',
+                'filter' => 'essential-files',
+                'follow_symlinks' => false,
+            ]);
+            $this->fail('Expected pull --runtime=bogus-runtime to be rejected');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString(
+                'Invalid --runtime value',
+                $e->getMessage(),
+            );
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertSame(0, $client->preflight_calls);
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+    }
+
+    public function testPullDbRejectsInvalidTargetEngineBeforePersistingIt(): void
+    {
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                'command' => 'pull-db',
+                'target_engine' => 'postgres',
+                'max_allowed_packet' => 1024,
+            ]);
+            $this->fail('Expected pull-db --target-engine=postgres to be rejected');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString(
+                'Invalid --target-engine value',
+                $e->getMessage(),
+            );
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertSame(0, $client->preflight_calls);
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/db.sql');
+    }
+
     public function testPullDbFailsInsteadOfCompletingWhenSubCommandStopsUnfinished(): void
     {
         $client = new PullUnfinishedDbFakeClient($this->stateDir, $this->fs_root, false);

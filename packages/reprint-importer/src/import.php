@@ -1604,6 +1604,10 @@ class ImportClient
             $options["sql_output"] = "file";
         }
 
+        if (in_array($command, ["pull", "pull-files", "pull-db"], true)) {
+            $options = $this->pull->validate_and_default_command_options($command, $options);
+        }
+
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
         if (isset($options["follow_symlinks"])) {
