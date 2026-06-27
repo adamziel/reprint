@@ -884,7 +884,7 @@ class PullFilterOptionTest extends TestCase
             $this->fail('Expected pull-db to fail when db-download never completes');
         } catch (\RuntimeException $e) {
             $this->assertStringContainsString(
-                'aborting instead of marking it complete',
+                'partial progress after',
                 $e->getMessage(),
             );
         } finally {

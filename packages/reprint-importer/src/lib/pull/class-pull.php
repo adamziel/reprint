@@ -172,7 +172,20 @@ class Pull
 
     public function clear_pipeline_state(string $command): void
     {
-        $state_key = $this->pipeline_state_key($command);
+        switch ($command) {
+            case 'pull':
+                $state_key = 'pull';
+                break;
+            case 'pull-files':
+                $state_key = 'pull_files';
+                break;
+            case 'pull-db':
+                $state_key = 'pull_db';
+                break;
+            default:
+                throw new InvalidArgumentException("Unknown pull pipeline: {$command}");
+        }
+
         $this->client->mutate_state(function (array $state) use ($state_key) {
             $state[$state_key]['stage'] = null;
             $state[$state_key]['has_completed_once'] = true;
@@ -191,13 +204,48 @@ class Pull
         string $state_key,
         string $title
     ): void {
-        $completed_stage = $this->completed_pipeline_stage($state_key);
+        $completed_stage = $this->client->state[$state_key]['stage'] ?? null;
+        if ($completed_stage === 'files-pull') {
+            $completed_stage = 'files-download';
+        } elseif ($completed_stage === 'db-pull') {
+            $completed_stage = 'db-download';
+        }
 
         // A completed high-level command should behave like `git pull`:
         // reset its orchestration cursor and run a fresh delta against the
         // current remote state.
         if ($completed_stage === 'complete') {
-            $this->prepare_completed_pipeline_for_rerun($command, $state_key);
+            switch ($command) {
+                case 'pull':
+                    $this->prepare_repull();
+                    break;
+                case 'pull-files':
+                    $defaults = $this->client->default_state();
+                    $this->client->mutate_state(function (array $state) use ($defaults, $state_key) {
+                        $state[$state_key]['stage'] = null;
+                        $state[$state_key]['files_filter'] = null;
+                        $state[$state_key]['skipped_pending'] = false;
+                        $state[$state_key]['has_completed_once'] = true;
+                        return $this->reset_files_download_state($state, $defaults);
+                    });
+
+                    $this->delete_state_files($this->files_download_state_files());
+
+                    $this->client->audit_log("PULL-FILES | prepared for delta re-pull", true);
+                    break;
+                case 'pull-db':
+                    $defaults = $this->client->default_state();
+                    $this->client->mutate_state(function (array $state) use ($defaults, $state_key) {
+                        $state[$state_key]['stage'] = null;
+                        $state[$state_key]['has_completed_once'] = true;
+                        return $this->reset_database_download_state($state, $defaults);
+                    });
+
+                    $this->delete_state_files($this->database_download_state_files());
+
+                    $this->client->audit_log("PULL-DB | prepared for delta re-pull", true);
+                    break;
+            }
             $completed_stage = null;
         }
 
@@ -257,13 +305,37 @@ class Pull
                 throw $e;
             }
 
-            $this->mark_pipeline_stage_complete($state_key, $stage);
+            if ($state_key === 'pull') {
+                $this->client->mark_pull_stage_complete($stage);
+            } else {
+                $this->client->mutate_state(function (array $state) use ($state_key, $stage) {
+                    $state[$state_key]['stage'] = $stage;
+                    return $state;
+                });
+            }
         }
 
         // The 'start' stage handles its own completion (it needs to save
         // state before blocking on the server process).
         if (!in_array('start', $stages, true)) {
-            $this->mark_pipeline_complete($command, $state_key);
+            if ($state_key === 'pull') {
+                $this->client->mark_pull_complete();
+            } else {
+                $this->client->mutate_state(function (array $state) use ($state_key) {
+                    $state[$state_key]['stage'] = 'complete';
+                    $state[$state_key]['has_completed_once'] = true;
+                    $state['status'] = 'complete';
+                    return $state;
+                });
+                if (in_array($command, ['pull-files', 'pull-db'], true)) {
+                    $this->client->mutate_state(function (array $state) {
+                        $state['command'] = null;
+                        $state['stage'] = null;
+                        $state['cursor'] = null;
+                        return $state;
+                    });
+                }
+            }
             if ($command === 'pull') {
                 $this->print_summary();
             }
@@ -279,69 +351,6 @@ class Pull
         ], true);
     }
 
-    private function completed_pipeline_stage(string $state_key): ?string
-    {
-        $stage = $this->client->state[$state_key]['stage'] ?? null;
-        return $this->normalize_stage_name($stage);
-    }
-
-    private function mark_pipeline_stage_complete(string $state_key, string $stage): void
-    {
-        if ($state_key === 'pull') {
-            $this->client->mark_pull_stage_complete($stage);
-            return;
-        }
-
-        $this->client->mutate_state(function (array $state) use ($state_key, $stage) {
-            $state[$state_key]['stage'] = $stage;
-            return $state;
-        });
-    }
-
-    private function mark_pipeline_complete(string $command, string $state_key): void
-    {
-        if ($state_key === 'pull') {
-            $this->client->mark_pull_complete();
-            return;
-        }
-
-        $this->client->mutate_state(function (array $state) use ($state_key) {
-            $state[$state_key]['stage'] = 'complete';
-            $state[$state_key]['has_completed_once'] = true;
-            $state['status'] = 'complete';
-            return $state;
-        });
-        $this->clear_completed_atomic_command($command);
-    }
-
-    private function set_pipeline_files_state(string $command, string $filter, bool $skipped_pending): void
-    {
-        if ($command === 'pull') {
-            $this->client->set_pull_files_state($filter, $skipped_pending);
-            return;
-        }
-
-        $this->client->mutate_state(function (array $state) use ($filter, $skipped_pending) {
-            $state['pull_files']['files_filter'] = $filter;
-            $state['pull_files']['skipped_pending'] = $skipped_pending;
-            return $state;
-        });
-    }
-
-    private function clear_completed_atomic_command(string $command): void
-    {
-        if (!in_array($command, ['pull-files', 'pull-db'], true)) {
-            return;
-        }
-
-        $this->client->mutate_state(function (array $state) {
-            $state['command'] = null;
-            $state['stage'] = null;
-            $state['cursor'] = null;
-            return $state;
-        });
-    }
-
     private function run_stage(string $command, string $stage, array $options, int $step, int $total): bool
     {
         switch ($stage) {
@@ -355,7 +364,28 @@ class Pull
                 break;
 
             case 'files-download':
-                $this->prepare_files_stage_for_pipeline($command);
+                $owner = $this->client->state['files_pipeline_owner'] ?? null;
+                $state_command = $this->client->state['command'] ?? null;
+                $state_status = $this->client->state['status'] ?? null;
+                $needs_reset =
+                    ($owner !== null && $owner !== $command) ||
+                    ($owner === null && $state_command === 'files-download' && $state_status === 'complete');
+
+                if ($needs_reset) {
+                    $defaults = $this->client->default_state();
+                    $this->client->mutate_state(function (array $state) use ($defaults, $command) {
+                        $state = $this->reset_files_download_state($state, $defaults);
+                        $state['files_pipeline_owner'] = $command;
+                        return $state;
+                    });
+                    $this->delete_state_files($this->files_download_state_files());
+                } elseif ($owner !== $command) {
+                    $this->client->mutate_state(function (array $state) use ($command) {
+                        $state['files_pipeline_owner'] = $command;
+                        return $state;
+                    });
+                }
+
                 $options = $this->validate_and_default_pull_files_options($options, 'files-download');
                 $this->client->prepare_files_download_options($options);
 
@@ -365,7 +395,15 @@ class Pull
                 $skipped_pending =
                     $options['filter'] === 'essential-files' &&
                     $this->client->has_skipped_files_pending();
-                $this->set_pipeline_files_state($command, $options['filter'], $skipped_pending);
+                if ($command === 'pull') {
+                    $this->client->set_pull_files_state($options['filter'], $skipped_pending);
+                } else {
+                    $this->client->mutate_state(function (array $state) use ($options, $skipped_pending) {
+                        $state['pull_files']['files_filter'] = $options['filter'];
+                        $state['pull_files']['skipped_pending'] = $skipped_pending;
+                        return $state;
+                    });
+                }
                 $count = $this->client->index_count();
                 $summary = $count > 0 ? number_format($count) . " files" : null;
                 if ($skipped_pending) {
@@ -377,7 +415,28 @@ class Pull
                 break;
 
             case 'db-download':
-                $this->prepare_db_stage_for_pipeline($command);
+                $owner = $this->client->state['db_pipeline_owner'] ?? null;
+                $state_command = $this->client->state['command'] ?? null;
+                $state_status = $this->client->state['status'] ?? null;
+                $needs_reset =
+                    ($owner !== null && $owner !== $command) ||
+                    ($owner === null && in_array($state_command, ['db-download', 'db-apply'], true) && $state_status === 'complete');
+
+                if ($needs_reset) {
+                    $defaults = $this->client->default_state();
+                    $this->client->mutate_state(function (array $state) use ($defaults, $command) {
+                        $state = $this->reset_database_download_state($state, $defaults);
+                        $state['db_pipeline_owner'] = $command;
+                        return $state;
+                    });
+                    $this->delete_state_files($this->database_download_state_files());
+                } elseif ($owner !== $command) {
+                    $this->client->mutate_state(function (array $state) use ($command) {
+                        $state['db_pipeline_owner'] = $command;
+                        return $state;
+                    });
+                }
+
                 if (!$this->database_stage_already_complete($command, 'db-download')) {
                     $this->run_until_complete(function () {
                         $this->client->run_db_sync();
@@ -417,62 +476,6 @@ class Pull
         return true;
     }
 
-    private function prepare_files_stage_for_pipeline(string $command): void
-    {
-        $owner = $this->client->state['files_pipeline_owner'] ?? null;
-        $state_command = $this->client->state['command'] ?? null;
-        $state_status = $this->client->state['status'] ?? null;
-        $needs_reset =
-            ($owner !== null && $owner !== $command) ||
-            ($owner === null && $state_command === 'files-download' && $state_status === 'complete');
-
-        if ($needs_reset) {
-            $defaults = $this->client->default_state();
-            $this->client->mutate_state(function (array $state) use ($defaults, $command) {
-                $state = $this->reset_files_download_state($state, $defaults);
-                $state['files_pipeline_owner'] = $command;
-                return $state;
-            });
-            $this->delete_state_files($this->files_download_state_files());
-            return;
-        }
-
-        if ($owner !== $command) {
-            $this->client->mutate_state(function (array $state) use ($command) {
-                $state['files_pipeline_owner'] = $command;
-                return $state;
-            });
-        }
-    }
-
-    private function prepare_db_stage_for_pipeline(string $command): void
-    {
-        $owner = $this->client->state['db_pipeline_owner'] ?? null;
-        $state_command = $this->client->state['command'] ?? null;
-        $state_status = $this->client->state['status'] ?? null;
-        $needs_reset =
-            ($owner !== null && $owner !== $command) ||
-            ($owner === null && in_array($state_command, ['db-download', 'db-apply'], true) && $state_status === 'complete');
-
-        if ($needs_reset) {
-            $defaults = $this->client->default_state();
-            $this->client->mutate_state(function (array $state) use ($defaults, $command) {
-                $state = $this->reset_database_download_state($state, $defaults);
-                $state['db_pipeline_owner'] = $command;
-                return $state;
-            });
-            $this->delete_state_files($this->database_download_state_files());
-            return;
-        }
-
-        if ($owner !== $command) {
-            $this->client->mutate_state(function (array $state) use ($command) {
-                $state['db_pipeline_owner'] = $command;
-                return $state;
-            });
-        }
-    }
-
     private function database_stage_already_complete(string $command, string $stage): bool
     {
         if (
@@ -484,15 +487,6 @@ class Pull
         }
 
         return $stage !== 'db-download' || file_exists($this->client->state_dir . '/db.sql');
-    }
-
-    private function normalize_stage_name(?string $stage): ?string
-    {
-        static $legacy_stages = [
-            'files-pull' => 'files-download',
-            'db-pull' => 'db-download',
-        ];
-        return $stage !== null ? ($legacy_stages[$stage] ?? $stage) : null;
     }
 
     /**
@@ -699,31 +693,6 @@ class Pull
         }
     }
 
-    private function pipeline_state_key(string $command): string
-    {
-        switch ($command) {
-            case 'pull': return 'pull';
-            case 'pull-files': return 'pull_files';
-            case 'pull-db': return 'pull_db';
-        }
-        throw new InvalidArgumentException("Unknown pull pipeline: {$command}");
-    }
-
-    private function prepare_completed_pipeline_for_rerun(string $command, string $state_key): void
-    {
-        switch ($command) {
-            case 'pull':
-                $this->prepare_repull();
-                return;
-            case 'pull-files':
-                $this->prepare_pull_files_repull($state_key);
-                return;
-            case 'pull-db':
-                $this->prepare_pull_db_repull($state_key);
-                return;
-        }
-    }
-
     /**
      * Reset sub-command state for a delta re-pull.
      *
@@ -750,36 +719,6 @@ class Pull
         ));
 
         $this->client->audit_log("PULL | prepared for delta re-pull", true);
-    }
-
-    private function prepare_pull_files_repull(string $state_key): void
-    {
-        $defaults = $this->client->default_state();
-        $this->client->mutate_state(function (array $state) use ($defaults, $state_key) {
-            $state[$state_key]['stage'] = null;
-            $state[$state_key]['files_filter'] = null;
-            $state[$state_key]['skipped_pending'] = false;
-            $state[$state_key]['has_completed_once'] = true;
-            return $this->reset_files_download_state($state, $defaults);
-        });
-
-        $this->delete_state_files($this->files_download_state_files());
-
-        $this->client->audit_log("PULL-FILES | prepared for delta re-pull", true);
-    }
-
-    private function prepare_pull_db_repull(string $state_key): void
-    {
-        $defaults = $this->client->default_state();
-        $this->client->mutate_state(function (array $state) use ($defaults, $state_key) {
-            $state[$state_key]['stage'] = null;
-            $state[$state_key]['has_completed_once'] = true;
-            return $this->reset_database_download_state($state, $defaults);
-        });
-
-        $this->delete_state_files($this->database_download_state_files());
-
-        $this->client->audit_log("PULL-DB | prepared for delta re-pull", true);
     }
 
     private function reset_files_download_state(array $state, array $defaults): array
