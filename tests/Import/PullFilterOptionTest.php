@@ -161,6 +161,21 @@ class PullPreflightFailureFakeClient extends PullFilterFakeClient
     }
 }
 
+class PullPartialDbFakeClient extends PullFilterFakeClient
+{
+    public function run_db_sync(): void
+    {
+        ++$this->db_sync_calls;
+        $this->call_order[] = 'db-download';
+        $this->mutate_state(function (array $state) {
+            $state["command"] = "db-download";
+            $state["status"] = "partial";
+            $state["stage"] = "sql";
+            return $state;
+        });
+    }
+}
+
 /**
  * Tests for pull-level file filtering.
  */
@@ -699,6 +714,32 @@ class PullFilterOptionTest extends TestCase
         $this->assertFileDoesNotExist($this->stateDir . '/db.sql');
     }
 
+    public function testPullDbFailsInsteadOfCompletingWhenSubCommandNeverFinishes(): void
+    {
+        $client = new PullPartialDbFakeClient($this->stateDir, $this->fs_root, false);
+
+        try {
+            ob_start();
+            $client->run([
+                'command' => 'pull-db',
+            ]);
+            $this->fail('Expected pull-db to fail when db-download never completes');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString(
+                'aborting instead of marking it complete',
+                $e->getMessage(),
+            );
+        } finally {
+            ob_end_clean();
+        }
+
+        $state = $this->readState();
+        $this->assertSame(1000, $client->db_sync_calls);
+        $this->assertSame(0, $client->db_apply_calls);
+        $this->assertSame('preflight', $state['pull_db']['stage']);
+        $this->assertSame('in_progress', $state['status']);
+    }
+
     public function testPullDbOverridesPersistedSqlOutputMode(): void
     {
         file_put_contents(
@@ -717,6 +758,33 @@ class PullFilterOptionTest extends TestCase
 
         $state = $this->readState();
         $this->assertSame(array('preflight', 'db-download', 'db-apply'), $client->call_order);
+        $this->assertSame('file', $state['sql_output']);
+        $this->assertSame('file', $client->db_apply_options['sql_output'] ?? null);
+        $this->assertFileExists($this->stateDir . '/db.sql');
+    }
+
+    public function testPullOverridesPersistedSqlOutputMode(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                'sql_output' => 'stdout',
+            ]),
+        );
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            'command' => 'pull',
+            'runtime' => 'none',
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(
+            array('preflight', 'prepare-files', 'files-download', 'db-download', 'db-apply'),
+            $client->call_order,
+        );
         $this->assertSame('file', $state['sql_output']);
         $this->assertSame('file', $client->db_apply_options['sql_output'] ?? null);
         $this->assertFileExists($this->stateDir . '/db.sql');

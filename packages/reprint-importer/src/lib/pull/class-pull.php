@@ -16,6 +16,13 @@
  */
 class Pull
 {
+    /**
+     * Server timeouts report partial progress and should be retried, but
+     * a stage that never reaches complete must fail rather than let the
+     * orchestrator mark it complete.
+     */
+    private const MAX_STAGE_RETRIES = 1000;
+
     private ImportClient $client;
     private TerminalProgress $progress;
 
@@ -810,11 +817,11 @@ class Pull
      */
     private function run_until_complete(callable $handler): void
     {
-        for ($attempt = 0; $attempt < 1000; $attempt++) {
+        for ($attempt = 0; $attempt < self::MAX_STAGE_RETRIES; $attempt++) {
             $handler();
             $state = $this->client->state;
             if (($state['status'] ?? null) !== 'partial') {
-                break;
+                return;
             }
             $this->client->mutate_state(function (array $state) {
                 $state['status'] = 'in_progress';
@@ -823,6 +830,11 @@ class Pull
             $this->client->exit_code = 0;
             $this->progress->tick_spinner();
         }
+
+        throw new RuntimeException(
+            'Stage kept reporting partial progress after ' . self::MAX_STAGE_RETRIES .
+            ' retry attempts; aborting instead of marking it complete.'
+        );
     }
 
     /**
