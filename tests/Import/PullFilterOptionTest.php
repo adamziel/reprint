@@ -176,6 +176,21 @@ class PullPartialDbFakeClient extends PullFilterFakeClient
     }
 }
 
+class PullUnfinishedDbFakeClient extends PullFilterFakeClient
+{
+    public function run_db_sync(): void
+    {
+        ++$this->db_sync_calls;
+        $this->call_order[] = 'db-download';
+        $this->mutate_state(function (array $state) {
+            $state["command"] = "db-download";
+            $state["status"] = "in_progress";
+            $state["stage"] = "sql";
+            return $state;
+        });
+    }
+}
+
 /**
  * Tests for pull-level file filtering.
  */
@@ -712,6 +727,32 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame(0, $client->db_sync_calls);
         $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
         $this->assertFileDoesNotExist($this->stateDir . '/db.sql');
+    }
+
+    public function testPullDbFailsInsteadOfCompletingWhenSubCommandStopsUnfinished(): void
+    {
+        $client = new PullUnfinishedDbFakeClient($this->stateDir, $this->fs_root, false);
+
+        try {
+            ob_start();
+            $client->run([
+                'command' => 'pull-db',
+            ]);
+            $this->fail('Expected pull-db to fail when db-download stops unfinished');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString(
+                'unexpected status',
+                $e->getMessage(),
+            );
+        } finally {
+            ob_end_clean();
+        }
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->db_sync_calls);
+        $this->assertSame(0, $client->db_apply_calls);
+        $this->assertSame('preflight', $state['pull_db']['stage']);
+        $this->assertSame('in_progress', $state['status']);
     }
 
     public function testPullDbFailsInsteadOfCompletingWhenSubCommandNeverFinishes(): void

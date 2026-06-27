@@ -10,7 +10,7 @@
  *   renders a Unicode progress bar. Use show_progress_line().
  *
  * - Lifecycle line: a regular line that announces a phase transition,
-     *   e.g. "Starting db-download". Use show_lifecycle_line(). When
+ *   e.g. "Starting db-download". Use show_lifecycle_line(). When
  *   quiet_lifecycle is enabled (typically by an orchestrator like
  *   `pull`), these are suppressed so the orchestrator can provide its
  *   own framing without sub-command noise.

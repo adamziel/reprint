@@ -820,8 +820,15 @@ class Pull
         for ($attempt = 0; $attempt < self::MAX_STAGE_RETRIES; $attempt++) {
             $handler();
             $state = $this->client->state;
-            if (($state['status'] ?? null) !== 'partial') {
+            $status = $state['status'] ?? null;
+            if ($status === 'complete') {
                 return;
+            }
+            if ($status !== 'partial') {
+                throw new RuntimeException(
+                    "Stage stopped with unexpected status " . var_export($status, true) .
+                    "; aborting instead of marking it complete."
+                );
             }
             $this->client->mutate_state(function (array $state) {
                 $state['status'] = 'in_progress';
