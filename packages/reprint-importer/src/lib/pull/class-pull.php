@@ -858,7 +858,7 @@ class Pull
             if ($status !== 'partial') {
                 throw new RuntimeException(
                     "Stage stopped with unexpected status " . var_export($status, true) .
-                    "; aborting instead of marking it complete."
+                    "; aborting."
                 );
             }
             $this->client->mutate_state(function (array $state) {
@@ -871,7 +871,7 @@ class Pull
 
         throw new RuntimeException(
             'Stage kept reporting partial progress after ' . self::MAX_STAGE_RETRIES .
-            ' retry attempts; aborting instead of marking it complete.'
+            ' retry attempts; aborting.'
         );
     }
 
