@@ -402,32 +402,13 @@ class Pull
             ($owner === null && $state_command === 'files-download' && $state_status === 'complete');
 
         if ($needs_reset) {
-            $state_dir = $this->client->state_dir;
             $defaults = $this->client->default_state();
             $this->client->mutate_state(function (array $state) use ($defaults, $command) {
-                $state['command'] = null;
-                $state['status'] = null;
-                $state['cursor'] = null;
-                $state['stage'] = null;
-                $state['current_file'] = null;
-                $state['current_file_bytes'] = null;
-                $state['diff'] = $defaults['diff'];
-                $state['index'] = $defaults['index'];
-                $state['fetch'] = $defaults['fetch'];
-                $state['fetch_skipped'] = $defaults['fetch_skipped'];
+                $state = $this->reset_files_download_state($state, $defaults);
                 $state['files_pipeline_owner'] = $command;
                 return $state;
             });
-
-            foreach ([
-                $state_dir . "/.import-remote-index.jsonl",
-                $state_dir . "/.import-download-list.jsonl",
-                $state_dir . "/.import-download-list-skipped.jsonl",
-            ] as $path) {
-                if (file_exists($path)) {
-                    @unlink($path);
-                }
-            }
+            $this->delete_state_files($this->files_download_state_files());
             return;
         }
 
@@ -449,31 +430,13 @@ class Pull
             ($owner === null && in_array($state_command, ['db-download', 'db-apply'], true) && $state_status === 'complete');
 
         if ($needs_reset) {
-            $state_dir = $this->client->state_dir;
             $defaults = $this->client->default_state();
             $this->client->mutate_state(function (array $state) use ($defaults, $command) {
-                $state['command'] = null;
-                $state['status'] = null;
-                $state['cursor'] = null;
-                $state['stage'] = null;
-                $state['consecutive_timeouts'] = 0;
-                $state['sql_bytes'] = null;
-                $state['db_index'] = $defaults['db_index'];
-                $state['apply'] = $defaults['apply'];
-                $state['sql_output'] = null;
+                $state = $this->reset_database_download_state($state, $defaults);
                 $state['db_pipeline_owner'] = $command;
                 return $state;
             });
-
-            foreach ([
-                $state_dir . "/db.sql",
-                $state_dir . "/db-tables.jsonl",
-                $state_dir . "/.import-domains.json",
-            ] as $path) {
-                if (file_exists($path)) {
-                    @unlink($path);
-                }
-            }
+            $this->delete_state_files($this->database_download_state_files());
             return;
         }
 
@@ -732,116 +695,117 @@ class Pull
     /**
      * Reset sub-command state for a delta re-pull.
      *
-     * Keeps the local file index (so files-download runs in delta mode) and
-     * preflight data, but clears everything else and deletes db.sql /
-     * the remote index so the next pull re-fetches them.
+     * Keeps preflight data and the durable local file index on disk, but
+     * clears the transient stage cursors and batch files so each atomic
+     * stage starts against the current remote state.
      */
     private function prepare_repull(): void
     {
-        $state_dir = $this->client->state_dir;
         $defaults = $this->client->default_state();
         $this->client->mutate_state(function (array $state) use ($defaults) {
             $state['pull']['stage'] = null;
             $state['pull']['files_filter'] = null;
             $state['pull']['skipped_pending'] = false;
             $state['pull']['has_completed_once'] = true;
-            $state['command'] = null;
-            $state['status'] = null;
-            $state['cursor'] = null;
-            $state['stage'] = null;
-            $state['consecutive_timeouts'] = 0;
-            $state['sql_bytes'] = null;
-            $state['current_file'] = null;
-            $state['current_file_bytes'] = null;
-            $state['db_index'] = $defaults['db_index'];
-            $state['diff'] = $defaults['diff'];
-            $state['fetch'] = $defaults['fetch'];
-            $state['fetch_skipped'] = $defaults['fetch_skipped'];
-            $state['apply'] = $defaults['apply'];
-            $state['sql_output'] = null;
+            $state = $this->reset_files_download_state($state, $defaults);
+            $state = $this->reset_database_download_state($state, $defaults);
             return $state;
         });
 
-        foreach ([
-            $state_dir . "/db.sql",
-            $state_dir . "/.import-domains.json",
-            $state_dir . "/.import-remote-index.jsonl",
-            $state_dir . "/.import-download-list.jsonl",
-            $state_dir . "/.import-download-list-skipped.jsonl",
-        ] as $path) {
-            if (file_exists($path)) {
-                @unlink($path);
-            }
-        }
+        $this->delete_state_files(array_merge(
+            $this->files_download_state_files(),
+            $this->database_download_state_files(),
+        ));
 
         $this->client->audit_log("PULL | prepared for delta re-pull", true);
     }
 
     private function prepare_pull_files_repull(string $state_key): void
     {
-        $state_dir = $this->client->state_dir;
         $defaults = $this->client->default_state();
         $this->client->mutate_state(function (array $state) use ($defaults, $state_key) {
             $state[$state_key]['stage'] = null;
             $state[$state_key]['files_filter'] = null;
             $state[$state_key]['skipped_pending'] = false;
             $state[$state_key]['has_completed_once'] = true;
-            $state['command'] = null;
-            $state['status'] = null;
-            $state['cursor'] = null;
-            $state['stage'] = null;
-            $state['current_file'] = null;
-            $state['current_file_bytes'] = null;
-            $state['diff'] = $defaults['diff'];
-            $state['index'] = $defaults['index'];
-            $state['fetch'] = $defaults['fetch'];
-            $state['fetch_skipped'] = $defaults['fetch_skipped'];
-            return $state;
+            return $this->reset_files_download_state($state, $defaults);
         });
 
-        foreach ([
-            $state_dir . "/.import-remote-index.jsonl",
-            $state_dir . "/.import-download-list.jsonl",
-            $state_dir . "/.import-download-list-skipped.jsonl",
-        ] as $path) {
-            if (file_exists($path)) {
-                @unlink($path);
-            }
-        }
+        $this->delete_state_files($this->files_download_state_files());
 
         $this->client->audit_log("PULL-FILES | prepared for delta re-pull", true);
     }
 
     private function prepare_pull_db_repull(string $state_key): void
     {
-        $state_dir = $this->client->state_dir;
         $defaults = $this->client->default_state();
         $this->client->mutate_state(function (array $state) use ($defaults, $state_key) {
             $state[$state_key]['stage'] = null;
             $state[$state_key]['has_completed_once'] = true;
-            $state['command'] = null;
-            $state['status'] = null;
-            $state['cursor'] = null;
-            $state['stage'] = null;
-            $state['consecutive_timeouts'] = 0;
-            $state['sql_bytes'] = null;
-            $state['db_index'] = $defaults['db_index'];
-            $state['apply'] = $defaults['apply'];
-            $state['sql_output'] = null;
-            return $state;
+            return $this->reset_database_download_state($state, $defaults);
         });
 
-        foreach ([
+        $this->delete_state_files($this->database_download_state_files());
+
+        $this->client->audit_log("PULL-DB | prepared for delta re-pull", true);
+    }
+
+    private function reset_files_download_state(array $state, array $defaults): array
+    {
+        $state['command'] = null;
+        $state['status'] = null;
+        $state['cursor'] = null;
+        $state['stage'] = null;
+        $state['current_file'] = null;
+        $state['current_file_bytes'] = null;
+        $state['diff'] = $defaults['diff'];
+        $state['index'] = $defaults['index'];
+        $state['fetch'] = $defaults['fetch'];
+        $state['fetch_skipped'] = $defaults['fetch_skipped'];
+        return $state;
+    }
+
+    private function reset_database_download_state(array $state, array $defaults): array
+    {
+        $state['command'] = null;
+        $state['status'] = null;
+        $state['cursor'] = null;
+        $state['stage'] = null;
+        $state['consecutive_timeouts'] = 0;
+        $state['sql_bytes'] = null;
+        $state['db_index'] = $defaults['db_index'];
+        $state['apply'] = $defaults['apply'];
+        $state['sql_output'] = null;
+        return $state;
+    }
+
+    private function files_download_state_files(): array
+    {
+        $state_dir = $this->client->state_dir;
+        return [
+            $state_dir . "/.import-remote-index.jsonl",
+            $state_dir . "/.import-download-list.jsonl",
+            $state_dir . "/.import-download-list-skipped.jsonl",
+        ];
+    }
+
+    private function database_download_state_files(): array
+    {
+        $state_dir = $this->client->state_dir;
+        return [
             $state_dir . "/db.sql",
             $state_dir . "/db-tables.jsonl",
             $state_dir . "/.import-domains.json",
-        ] as $path) {
+        ];
+    }
+
+    private function delete_state_files(array $paths): void
+    {
+        foreach ($paths as $path) {
             if (file_exists($path)) {
                 @unlink($path);
             }
         }
-
-        $this->client->audit_log("PULL-DB | prepared for delta re-pull", true);
     }
 
     /**

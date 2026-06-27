@@ -246,6 +246,20 @@ class PullFilterOptionTest extends TestCase
         );
     }
 
+    private function writeTransferArtifacts(): void
+    {
+        foreach ([
+            '.import-remote-index.jsonl',
+            '.import-download-list.jsonl',
+            '.import-download-list-skipped.jsonl',
+            'db.sql',
+            'db-tables.jsonl',
+            '.import-domains.json',
+        ] as $file) {
+            file_put_contents($this->stateDir . '/' . $file, "stale\n");
+        }
+    }
+
     public function testPullRejectsSkippedEarlierFilterBeforePersistingIt(): void
     {
         $client = $this->makeClient(false);
@@ -407,6 +421,201 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('complete', $state["pull_db"]["stage"]);
         $this->assertSame('sqlite', $client->db_apply_options["target_engine"] ?? null);
         $this->assertSame('file', $client->db_apply_options["sql_output"] ?? null);
+    }
+
+    public function testPullFilesOwnerTransitionResetsFilesDownloadState(): void
+    {
+        $client = $this->makeClient(false);
+        $client->state = $client->default_state();
+        $defaults = $client->default_state();
+        $client->mutate_state(function (array $state) {
+            $state['files_pipeline_owner'] = 'pull';
+            $state['command'] = 'files-download';
+            $state['status'] = 'complete';
+            $state['cursor'] = 'stale-cursor';
+            $state['stage'] = 'fetch';
+            $state['current_file'] = '/remote/stale.txt';
+            $state['current_file_bytes'] = 123;
+            $state['diff'] = ['remote_offset' => 99, 'local_after' => 'stale'];
+            $state['index'] = ['cursor' => 'stale-index-cursor'];
+            $state['fetch'] = [
+                'offset' => 10,
+                'next_offset' => 20,
+                'batch_file' => 'stale-fetch.jsonl',
+                'cursor' => 'stale-fetch-cursor',
+            ];
+            $state['fetch_skipped'] = [
+                'offset' => 30,
+                'next_offset' => 40,
+                'batch_file' => 'stale-skipped.jsonl',
+                'cursor' => 'stale-skipped-cursor',
+            ];
+            return $state;
+        });
+        $this->writeTransferArtifacts();
+
+        ob_start();
+        $client->run([
+            'command' => 'pull-files',
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame('pull-files', $state['files_pipeline_owner']);
+        $this->assertSame('complete', $state['pull_files']['stage']);
+        $this->assertNull($state['current_file']);
+        $this->assertNull($state['current_file_bytes']);
+        $this->assertSame($defaults['diff'], $state['diff']);
+        $this->assertSame($defaults['index'], $state['index']);
+        $this->assertSame($defaults['fetch'], $state['fetch']);
+        $this->assertSame($defaults['fetch_skipped'], $state['fetch_skipped']);
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-remote-index.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
+    }
+
+    public function testPullDbOwnerTransitionResetsDatabaseDownloadState(): void
+    {
+        $client = $this->makeClient(false);
+        $client->state = $client->default_state();
+        $defaults = $client->default_state();
+        $client->mutate_state(function (array $state) {
+            $state['db_pipeline_owner'] = 'pull';
+            $state['command'] = 'db-download';
+            $state['status'] = 'complete';
+            $state['cursor'] = 'stale-cursor';
+            $state['stage'] = 'stream';
+            $state['consecutive_timeouts'] = 7;
+            $state['sql_bytes'] = 12345;
+            $state['db_index'] = [
+                'file' => 'stale-db-index.jsonl',
+                'tables' => 3,
+                'rows_estimated' => 100,
+                'bytes' => 1000,
+                'updated_at' => '2026-06-27T00:00:00Z',
+            ];
+            $state['apply'] = [
+                'statements_executed' => 4,
+                'bytes_read' => 2048,
+                'rewrite_url' => 'https://stale.example',
+                'target_engine' => 'mysql',
+                'target_db' => 'stale',
+                'target_host' => '127.0.0.1',
+                'target_port' => 3306,
+                'target_user' => 'root',
+                'target_pass' => 'secret',
+                'target_sqlite_path' => null,
+                'remote_paths_removed_from_local_site' => ['/old'],
+            ];
+            return $state;
+        });
+        $this->writeTransferArtifacts();
+
+        ob_start();
+        $client->run([
+            'command' => 'pull-db',
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame('pull-db', $state['db_pipeline_owner']);
+        $this->assertSame('complete', $state['pull_db']['stage']);
+        $this->assertSame(0, $state['consecutive_timeouts']);
+        $this->assertNull($state['sql_bytes']);
+        $this->assertSame($defaults['db_index'], $state['db_index']);
+        $this->assertSame(42, $state['apply']['statements_executed']);
+        $this->assertSame('sqlite', $client->db_apply_options['target_engine'] ?? null);
+        $this->assertFileExists($this->stateDir . '/db.sql');
+        $this->assertFileDoesNotExist($this->stateDir . '/db-tables.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-domains.json');
+    }
+
+    public function testCompletedPullRerunResetsFilesAndDatabaseTransferState(): void
+    {
+        $client = $this->makeClient(false);
+        $client->state = $client->default_state();
+        $defaults = $client->default_state();
+        $client->mutate_state(function (array $state) {
+            $state['pull'] = [
+                'stage' => 'complete',
+                'files_filter' => 'essential-files',
+                'skipped_pending' => true,
+                'has_completed_once' => true,
+            ];
+            $state['command'] = 'db-apply';
+            $state['status'] = 'complete';
+            $state['cursor'] = 'stale-cursor';
+            $state['stage'] = 'apply';
+            $state['current_file'] = '/remote/stale.txt';
+            $state['current_file_bytes'] = 123;
+            $state['diff'] = ['remote_offset' => 99, 'local_after' => 'stale'];
+            $state['index'] = ['cursor' => 'stale-index-cursor'];
+            $state['fetch'] = [
+                'offset' => 10,
+                'next_offset' => 20,
+                'batch_file' => 'stale-fetch.jsonl',
+                'cursor' => 'stale-fetch-cursor',
+            ];
+            $state['fetch_skipped'] = [
+                'offset' => 30,
+                'next_offset' => 40,
+                'batch_file' => 'stale-skipped.jsonl',
+                'cursor' => 'stale-skipped-cursor',
+            ];
+            $state['consecutive_timeouts'] = 7;
+            $state['sql_bytes'] = 12345;
+            $state['db_index'] = [
+                'file' => 'stale-db-index.jsonl',
+                'tables' => 3,
+                'rows_estimated' => 100,
+                'bytes' => 1000,
+                'updated_at' => '2026-06-27T00:00:00Z',
+            ];
+            $state['apply'] = [
+                'statements_executed' => 4,
+                'bytes_read' => 2048,
+                'rewrite_url' => 'https://stale.example',
+                'target_engine' => 'mysql',
+                'target_db' => 'stale',
+                'target_host' => '127.0.0.1',
+                'target_port' => 3306,
+                'target_user' => 'root',
+                'target_pass' => 'secret',
+                'target_sqlite_path' => null,
+                'remote_paths_removed_from_local_site' => ['/old'],
+            ];
+            return $state;
+        });
+        $this->writeTransferArtifacts();
+
+        ob_start();
+        $client->run([
+            'command' => 'pull',
+            'runtime' => 'none',
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame('complete', $state['pull']['stage']);
+        $this->assertSame('none', $state['pull']['files_filter']);
+        $this->assertFalse($state['pull']['skipped_pending']);
+        $this->assertTrue($state['pull']['has_completed_once']);
+        $this->assertNull($state['current_file']);
+        $this->assertNull($state['current_file_bytes']);
+        $this->assertSame($defaults['diff'], $state['diff']);
+        $this->assertSame($defaults['index'], $state['index']);
+        $this->assertSame($defaults['fetch'], $state['fetch']);
+        $this->assertSame($defaults['fetch_skipped'], $state['fetch_skipped']);
+        $this->assertSame(0, $state['consecutive_timeouts']);
+        $this->assertNull($state['sql_bytes']);
+        $this->assertSame($defaults['db_index'], $state['db_index']);
+        $this->assertSame(42, $state['apply']['statements_executed']);
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-remote-index.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
+        $this->assertFileExists($this->stateDir . '/db.sql');
+        $this->assertFileDoesNotExist($this->stateDir . '/db-tables.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-domains.json');
     }
 
     public function testPullDbRejectsStdoutSqlOutputBeforeDownloading(): void
