@@ -1648,6 +1648,17 @@ class ImportClient
             $this->filter = $this->state["filter"];
         }
 
+        if (in_array($command, ["pull", "pull-db"], true)) {
+            $sql_output = $options["sql_output"] ?? "file";
+            if ($sql_output !== "file") {
+                throw new InvalidArgumentException(
+                    "{$command} downloads SQL to the local state directory and then runs db-apply. " .
+                    "Use db-download directly for --sql-output={$sql_output}.",
+                );
+            }
+            $options["sql_output"] = "file";
+        }
+
         // Persist max_allowed_packet in state so it survives across invocations.
         // The client sends this to the server so SQL statements are capped to a
         // size the client's MySQL instance can actually import.

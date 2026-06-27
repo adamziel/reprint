@@ -618,7 +618,34 @@ class PullFilterOptionTest extends TestCase
         $this->assertFileDoesNotExist($this->stateDir . '/.import-domains.json');
     }
 
-    public function testPullDbRejectsStdoutSqlOutputBeforeDownloading(): void
+    public function testPullRejectsStdoutSqlOutputBeforePersistingIt(): void
+    {
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull",
+                "sql_output" => "stdout",
+                "runtime" => "none",
+            ]);
+            $this->fail('Expected pull --sql-output=stdout to be rejected');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString(
+                'Use db-download directly for --sql-output=stdout',
+                $e->getMessage(),
+            );
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertSame(0, $client->preflight_calls);
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/db.sql');
+    }
+
+    public function testPullDbRejectsStdoutSqlOutputBeforePersistingIt(): void
     {
         $client = $this->makeClient(false);
 
@@ -640,6 +667,56 @@ class PullFilterOptionTest extends TestCase
 
         $this->assertSame(0, $client->preflight_calls);
         $this->assertSame(0, $client->db_sync_calls);
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
         $this->assertFileDoesNotExist($this->stateDir . '/db.sql');
+    }
+
+    public function testPullDbRejectsMysqlSqlOutputBeforePersistingIt(): void
+    {
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull-db",
+                "sql_output" => "mysql",
+            ]);
+            $this->fail('Expected pull-db --sql-output=mysql to be rejected');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString(
+                'Use db-download directly for --sql-output=mysql',
+                $e->getMessage(),
+            );
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertSame(0, $client->preflight_calls);
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/db.sql');
+    }
+
+    public function testPullDbOverridesPersistedSqlOutputMode(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                'sql_output' => 'stdout',
+            ]),
+        );
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            'command' => 'pull-db',
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(array('preflight', 'db-download', 'db-apply'), $client->call_order);
+        $this->assertSame('file', $state['sql_output']);
+        $this->assertSame('file', $client->db_apply_options['sql_output'] ?? null);
+        $this->assertFileExists($this->stateDir . '/db.sql');
     }
 }

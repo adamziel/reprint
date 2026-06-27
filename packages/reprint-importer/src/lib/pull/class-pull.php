@@ -578,12 +578,6 @@ class Pull
 
     private function validate_and_default_pull_db_options(array $options): array
     {
-        if (($options['sql_output'] ?? 'file') !== 'file') {
-            throw new InvalidArgumentException(
-                'pull-db downloads SQL to the local state directory and then runs db-apply. ' .
-                'Use db-download directly for --sql-output=' . $options['sql_output'] . '.',
-            );
-        }
         $options['sql_output'] = 'file';
 
         if (empty($options['target_engine'])) {
