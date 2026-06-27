@@ -729,6 +729,70 @@ class PullFilterOptionTest extends TestCase
         $this->assertFileDoesNotExist($this->stateDir . '/db.sql');
     }
 
+    public function testPullDbResumesWhenDbDownloadCompletedBeforePipelineStageWasMarked(): void
+    {
+        file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                'pull_db' => [
+                    'stage' => 'preflight',
+                    'has_completed_once' => false,
+                ],
+                'db_pipeline_owner' => 'pull-db',
+                'command' => 'db-download',
+                'status' => 'complete',
+            ]),
+        );
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            'command' => 'pull-db',
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertSame(1, $client->db_apply_calls);
+        $this->assertSame(array('db-apply'), $client->call_order);
+        $this->assertSame('complete', $state['pull_db']['stage']);
+    }
+
+    public function testPullDbResumesWhenDbApplyCompletedBeforePipelineStageWasMarked(): void
+    {
+        file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                'pull_db' => [
+                    'stage' => 'db-download',
+                    'has_completed_once' => false,
+                ],
+                'db_pipeline_owner' => 'pull-db',
+                'command' => 'db-apply',
+                'status' => 'complete',
+                'apply' => [
+                    'statements_executed' => 42,
+                ],
+            ]),
+        );
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            'command' => 'pull-db',
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(0, $client->db_sync_calls);
+        $this->assertSame(0, $client->db_apply_calls);
+        $this->assertSame(array(), $client->call_order);
+        $this->assertSame('complete', $state['pull_db']['stage']);
+        $this->assertTrue($state['pull_db']['has_completed_once']);
+    }
+
     public function testPullDbFailsInsteadOfCompletingWhenSubCommandStopsUnfinished(): void
     {
         $client = new PullUnfinishedDbFakeClient($this->stateDir, $this->fs_root, false);

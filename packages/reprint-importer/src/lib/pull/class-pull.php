@@ -364,18 +364,22 @@ class Pull
 
             case 'db-download':
                 $this->prepare_db_stage_for_pipeline($command);
-                $this->run_until_complete(function () {
-                    $this->client->run_db_sync();
-                });
+                if (!$this->database_stage_already_complete($command, 'db-download')) {
+                    $this->run_until_complete(function () {
+                        $this->client->run_db_sync();
+                    });
+                }
                 $sql_file = $this->client->state_dir . "/db.sql";
                 $size = file_exists($sql_file) ? $this->format_bytes(filesize($sql_file)) : null;
                 $this->print_done($stage, $size);
                 break;
 
             case 'db-apply':
-                $this->run_until_complete(function () use ($options) {
-                    $this->client->run_db_apply($options);
-                });
+                if (!$this->database_stage_already_complete($command, 'db-apply')) {
+                    $this->run_until_complete(function () use ($options) {
+                        $this->client->run_db_apply($options);
+                    });
+                }
                 $state = $this->client->state;
                 $stmts = (int) ($state["apply"]["statements_executed"] ?? 0);
                 $this->print_done($stage, $stmts > 0 ? number_format($stmts) . " statements" : null);
@@ -453,6 +457,19 @@ class Pull
                 return $state;
             });
         }
+    }
+
+    private function database_stage_already_complete(string $command, string $stage): bool
+    {
+        if (
+            ($this->client->state['db_pipeline_owner'] ?? null) !== $command ||
+            ($this->client->state['command'] ?? null) !== $stage ||
+            ($this->client->state['status'] ?? null) !== 'complete'
+        ) {
+            return false;
+        }
+
+        return $stage !== 'db-download' || file_exists($this->client->state_dir . '/db.sql');
     }
 
     private function normalize_stage_name(?string $stage): ?string
