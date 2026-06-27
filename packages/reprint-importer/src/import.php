@@ -1593,6 +1593,17 @@ class ImportClient
             return;
         }
 
+        if (in_array($command, ["pull", "pull-db"], true)) {
+            $sql_output = $options["sql_output"] ?? "file";
+            if ($sql_output !== "file") {
+                throw new InvalidArgumentException(
+                    "{$command} downloads SQL to the local state directory and then runs db-apply. " .
+                    "Use db-download directly for --sql-output={$sql_output}.",
+                );
+            }
+            $options["sql_output"] = "file";
+        }
+
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
         if (isset($options["follow_symlinks"])) {
@@ -1646,17 +1657,6 @@ class ImportClient
             $this->save_state($this->state);
         } elseif (isset($this->state["filter"])) {
             $this->filter = $this->state["filter"];
-        }
-
-        if (in_array($command, ["pull", "pull-db"], true)) {
-            $sql_output = $options["sql_output"] ?? "file";
-            if ($sql_output !== "file") {
-                throw new InvalidArgumentException(
-                    "{$command} downloads SQL to the local state directory and then runs db-apply. " .
-                    "Use db-download directly for --sql-output={$sql_output}.",
-                );
-            }
-            $options["sql_output"] = "file";
         }
 
         // Persist max_allowed_packet in state so it survives across invocations.

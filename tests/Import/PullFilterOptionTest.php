@@ -626,6 +626,8 @@ class PullFilterOptionTest extends TestCase
             ob_start();
             $client->run([
                 "command" => "pull",
+                "filter" => "essential-files",
+                "follow_symlinks" => false,
                 "sql_output" => "stdout",
                 "runtime" => "none",
             ]);
