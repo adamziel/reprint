@@ -1584,6 +1584,7 @@ class ImportClient
         $valid_commands = [
             "pull",
             "pull-files",
+            "pull-db",
             "files-pull",
             "files-index",
             "files-stats",
@@ -1613,7 +1614,7 @@ class ImportClient
         // High-level pulls persist resume state before they enter the stage
         // runner. Reject invalid options first so a typo does not leave behind
         // state that looks like an interrupted pull.
-        if ($command === "pull") {
+        if (in_array($command, ["pull", "pull-db"], true)) {
             $this->pull->assert_options_valid_before_state_write($command, $options);
         }
 
@@ -1690,7 +1691,7 @@ class ImportClient
             $this->max_allowed_packet = (int) $this->state["max_allowed_packet"];
         }
 
-        if ($command === "pull") {
+        if (in_array($command, ["pull", "pull-db"], true)) {
             $options["sql_output"] = "file";
         }
 
@@ -1781,7 +1782,7 @@ class ImportClient
 
         // Pull-like commands orchestrate preflight and lower-level stages
         // internally, so they run before the normal command dispatch.
-        if (in_array($command, ["pull", "pull-files"], true)) {
+        if (in_array($command, ["pull", "pull-files", "pull-db"], true)) {
             if ($abort) {
                 $this->pull->abort($command);
                 return;
@@ -1793,6 +1794,9 @@ class ImportClient
                         break;
                     case "pull-files":
                         $this->pull->run_pull_files($options);
+                        break;
+                    case "pull-db":
+                        $this->pull->run_pull_db($options);
                         break;
                 }
             } catch (\Exception $e) {
@@ -11590,7 +11594,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'abort',
@@ -11598,7 +11602,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
         ],
         [
             'name' => 'verbose',
@@ -11607,7 +11611,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11710,7 +11714,7 @@ if (
             'placeholder' => 'SIZE',
             'cast' => 'size',
             'help' => 'Client max_allowed_packet (e.g. 16M, 64M)',
-            'commands' => ['db-pull'],
+            'commands' => ['pull-db', 'db-pull'],
         ],
         [
             'name' => 'sql-output',
@@ -11768,7 +11772,7 @@ if (
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
             'help' => 'Target database engine: mysql (default) or sqlite',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-host',
@@ -11776,7 +11780,7 @@ if (
             'target' => 'target_host',
             'placeholder' => 'HOST',
             'help' => 'Target MySQL host (default: 127.0.0.1)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-port',
@@ -11785,7 +11789,7 @@ if (
             'placeholder' => 'PORT',
             'cast' => 'int',
             'help' => 'Target MySQL port (default: 3306)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-user',
@@ -11793,7 +11797,7 @@ if (
             'target' => 'target_user',
             'placeholder' => 'USER',
             'help' => 'Target MySQL user (required for mysql)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-pass',
@@ -11801,7 +11805,7 @@ if (
             'target' => 'target_pass',
             'placeholder' => 'PASS',
             'help' => 'Target MySQL password',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-db',
@@ -11809,7 +11813,7 @@ if (
             'target' => 'target_db',
             'placeholder' => 'NAME',
             'help' => 'Target DB name (required for mysql, optional for sqlite)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'target-sqlite-path',
@@ -11817,7 +11821,7 @@ if (
             'target' => 'target_sqlite_path',
             'placeholder' => 'PATH',
             'help' => 'Target SQLite database file (default: <wp-content>/database/.ht.sqlite)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'rewrite-url',
@@ -11825,7 +11829,7 @@ if (
             'target' => 'rewrite_url',
             'pair_args' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'new-site-url',
@@ -11833,7 +11837,7 @@ if (
             'target' => 'new_site_url',
             'placeholder' => 'URL',
             'help' => 'New site URL (auto-creates --rewrite-url from export URL origin)',
-            'commands' => ['pull', 'db-apply'],
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'remap',
@@ -12397,12 +12401,35 @@ if (
                 "without running the database stages.\n",
             "extra" =>
                 "Examples:\n" .
-                "  reprint pull-files https://example.com \\n" .
+                "  reprint pull-files https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
                 "\n" .
-                "  reprint pull-files https://example.com \\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\n" .
+                "  reprint pull-files https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --only=:wp-content: --only=:wp-plugins:\n",
+        ],
+        "pull-db" => [
+            "level" => "high",
+            "short" => "Pull and apply the database through the high-level pull pipeline",
+            "description" =>
+                "Runs the database side of the pull pipeline:\n" .
+                "\n" .
+                "  1. Preflight — probe the remote site environment\n" .
+                "  2. db-pull — download the SQL dump into --state-dir/db.sql\n" .
+                "  3. db-apply — import the dump into a local database\n" .
+                "\n" .
+                "This gives the database the same retry and resume behavior as pull,\n" .
+                "without running the file or runtime stages.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  reprint pull-db https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --target-engine=sqlite\n" .
+                "\n" .
+                "  reprint pull-db https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --target-user=root --target-db=wp_local \\\n" .
+                "    --new-site-url=http://localhost:8881\n",
         ],
         "install-exporter" => [
             "level" => "high",

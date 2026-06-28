@@ -276,6 +276,26 @@ php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
     --only=:wp-content: --only=:wp-plugins:
 ```
 
+#### Pull only the database.
+
+`pull-db` runs the database side of the high-level pull pipeline:
+
+1. `preflight`
+2. `db-pull`
+3. `db-apply`
+
+Use it when you want the local database to catch up with the remote site without
+touching files or runtime configuration:
+
+```bash
+php reprint.phar pull-db "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+    --target-engine=sqlite
+```
+
+If a different pull-like command is already in progress, finish or abort that
+command first. This avoids reusing partially written state for a different
+pipeline.
+
 #### Step 3 — Download the database.
 
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
@@ -659,6 +679,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
+* `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
