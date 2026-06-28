@@ -223,12 +223,49 @@ PHP, var_export($requestsLog, true)));
             '--fs-root=' . $this->tempDir . '/fs',
         ));
 
-        $result = json_decode($output, true);
+        $result = null;
+        foreach (array_reverse(preg_split('/\R/', trim($output)) ?: []) as $line) {
+            if ($line === '' || $line[0] !== '{') {
+                continue;
+            }
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                $result = $decoded;
+                break;
+            }
+        }
         $this->assertSame(
             'Cannot resolve token ":abspath:": not available in preflight data. Run preflight first.',
             $result['error'] ?? null
         );
         $this->assertStringNotContainsString('"status":"aborted"', $output);
+    }
+
+    public function testPullPreflightFailureReportsOriginalExceptionInCliJson(): void
+    {
+        $output = $this->runCli(array(
+            'pull',
+            'http://fake.invalid/?site-export-api',
+            '--runtime=none',
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $error = null;
+        foreach (array_reverse(preg_split('/\R/', trim($output)) ?: array()) as $line) {
+            if ($line === '' || $line[0] !== '{') {
+                continue;
+            }
+            $decoded = json_decode($line, true);
+            if (is_array($decoded) && isset($decoded['exception'])) {
+                $error = $decoded;
+                break;
+            }
+        }
+
+        $this->assertSame(\RuntimeException::class, $error['exception'] ?? null, "Output:
+{$output}");
+        $this->assertStringNotContainsString('PullFailureReportedException', $output);
     }
 
     public function testRepeatedOnlyOptionsAreUsedByFilesPull(): void

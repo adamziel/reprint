@@ -53,7 +53,7 @@ require_once __DIR__ . '/lib/external-merge-sort.php';
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
-// Pull command — orchestrates the lower-level commands into a pipeline
+// Pull command — orchestrates lower-level commands into a pipeline
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
 /**
@@ -1353,15 +1353,17 @@ class ImportClient
     }
 
     /** Mark a pull pipeline stage as completed in state. */
-    public function mark_pull_stage_complete(string $stage): void
+    public function mark_pull_stage_complete(string $stage, string $pipeline = 'pull'): void
     {
+        $this->state['pull']['pipeline'] = $pipeline;
         $this->state['pull']['stage'] = $stage;
         $this->save_state($this->state);
     }
 
     /** Mark the pull pipeline as fully complete in state. */
-    public function mark_pull_complete(): void
+    public function mark_pull_complete(string $pipeline = 'pull'): void
     {
+        $this->state['pull']['pipeline'] = $pipeline;
         $this->state['pull']['stage'] = 'complete';
         $this->state['pull']['has_completed_once'] = true;
         $this->state['status'] = 'complete';
@@ -1374,6 +1376,29 @@ class ImportClient
         $this->state['pull']['files_filter'] = $filter;
         $this->state['pull']['skipped_pending'] = $skipped_pending;
         $this->save_state($this->state);
+    }
+
+    /**
+     * Resolve file-selection options after preflight is available.
+     */
+    public function prepare_files_pull_options(array $options, bool $assert_remap = true): void
+    {
+        $remap_raw = $options["remap"] ?? [];
+        if (!empty($remap_raw)) {
+            $this->remap_rules = $this->resolve_remap($remap_raw);
+        }
+
+        $only_raw = $options["only"] ?? [];
+        if (is_string($only_raw)) {
+            $only_raw = [$only_raw];
+        }
+        if (!empty($only_raw)) {
+            $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
+        }
+
+        if ($assert_remap) {
+            $this->assert_files_remap_consistent();
+        }
     }
 
     /** True when the skipped-download list exists and still has entries. */
@@ -1517,7 +1542,7 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: files-pull, files-index, db-pull, db-index, preflight, preflight-assert
+     *   - command: Required. One of the entries in $valid_commands below.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      */
@@ -1582,6 +1607,13 @@ class ImportClient
             );
         }
 
+        // High-level pulls persist resume state before they enter the stage
+        // runner. Reject invalid options first so a typo does not leave behind
+        // state that looks like an interrupted pull.
+        if ($command === "pull") {
+            $this->pull->assert_options_valid_before_state_write($command, $options);
+        }
+
         $this->state = $this->load_state();
 
         if ($command === "import-metadata") {
@@ -1624,7 +1656,7 @@ class ImportClient
                 !in_array($next, ["none", "essential-files"], true)
             ) {
                 throw new InvalidArgumentException(
-                    "Invalid --filter value for pull: {$next}. " .
+                    "Invalid --filter value for {$command}: {$next}. " .
                         "Valid values: none, essential-files",
                 );
             }
@@ -1653,6 +1685,10 @@ class ImportClient
             $this->save_state($this->state);
         } elseif (isset($this->state["max_allowed_packet"])) {
             $this->max_allowed_packet = (int) $this->state["max_allowed_packet"];
+        }
+
+        if ($command === "pull") {
+            $options["sql_output"] = "file";
         }
 
         // Persist sql_output_mode in state so it survives across resume invocations.
@@ -1740,8 +1776,8 @@ class ImportClient
             $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
         }
 
-        // pull orchestrates the full pipeline (preflight → files → db → apply)
-        // internally, so it must run before the normal command dispatch.
+        // pull orchestrates preflight and lower-level stages internally,
+        // so it runs before the normal command dispatch.
         if ($command === "pull") {
             if ($abort) {
                 $this->pull->abort();
@@ -1750,6 +1786,13 @@ class ImportClient
             try {
                 $this->pull->run($options);
             } catch (\Exception $e) {
+                if ($e instanceof \PullFailureReportedException) {
+                    $previous = $e->getPrevious();
+                    if ($previous instanceof \Exception) {
+                        throw $previous;
+                    }
+                    throw $e;
+                }
                 $this->output_progress([
                     "status" => "error",
                     "error" => $e->getMessage(),
@@ -1814,19 +1857,8 @@ class ImportClient
         // All other commands require a prior preflight run.
         $this->require_preflight();
 
-        // Resolve the `--remap` rules (requires preflight to be available first)
-        $remap_raw = $options["remap"] ?? [];
-        if (!empty($remap_raw)) {
-            $this->remap_rules = $this->resolve_remap($remap_raw);
-        }
-
-        // Resolve the `--only` file path prefixes (also requires preflight).
-        $only_raw = $options["only"] ?? [];
-        if (is_string($only_raw)) {
-            $only_raw = [$only_raw];
-        }
-        if (!empty($only_raw)) {
-            $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
+        if (in_array($command, ["files-pull", "files-index"], true)) {
+            $this->prepare_files_pull_options($options, $command === "files-pull" && !$abort);
         }
 
         // Handle --abort: clear state for the command and exit immediately.
@@ -1837,10 +1869,6 @@ class ImportClient
             //        for that command.
             $this->handle_abort($command);
             return;
-        }
-
-        if ($command === "files-pull") {
-            $this->assert_files_remap_consistent();
         }
 
         // Dispatch to appropriate command handler
@@ -10838,8 +10866,11 @@ class ImportClient
             ],
             // Pull pipeline state — tracks progress through the composite
             // preflight → files-pull → db-pull → db-apply → ... pipeline.
-            // "stage" is the last completed stage name, or "complete".
+            // "pipeline" is the high-level command that owns "stage";
+            // top-level "command" still tracks the active atomic command.
+            // "stage" is the last completed high-level stage, or "complete".
             "pull" => [
+                "pipeline" => null,
                 "stage" => null,
                 "files_filter" => null,
                 "skipped_pending" => false,
@@ -10905,6 +10936,9 @@ class ImportClient
             $pull = [];
         }
         $pull = array_intersect_key($pull, $defaults["pull"]);
+        if (($pull["pipeline"] ?? null) === null && ($pull["stage"] ?? null) !== null) {
+            $pull["pipeline"] = "pull";
+        }
         $state["pull"] = array_merge($defaults["pull"], $pull);
         return $state;
     }

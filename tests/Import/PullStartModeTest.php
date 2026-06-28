@@ -103,7 +103,7 @@ class PullStartModeTest extends TestCase
     {
         $pull = $this->makePull();
         $reflection = new \ReflectionClass($pull);
-        $method = $reflection->getMethod('validate_and_default_options');
+        $method = $reflection->getMethod('validate_and_default_pull_options');
         $method->setAccessible(true);
 
         $options = $method->invoke($pull, [

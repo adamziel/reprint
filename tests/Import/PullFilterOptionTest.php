@@ -9,6 +9,12 @@ require_once __DIR__ . '/../../importer/import.php';
 class PullFilterFakeClient extends \ImportClient
 {
     private bool $create_skipped_list;
+    public int $preflight_runs = 0;
+    public int $files_sync_runs = 0;
+    public int $db_sync_runs = 0;
+    public int $db_apply_runs = 0;
+    public array $progress_events = [];
+    public array $status_errors = [];
 
     public function __construct(string $state_dir, string $fs_root, bool $create_skipped_list)
     {
@@ -22,10 +28,12 @@ class PullFilterFakeClient extends \ImportClient
 
     public function output_progress(array $data, bool $force = false): void
     {
+        $this->progress_events[] = $data;
     }
 
     public function write_status_file(?string $error = null): void
     {
+        $this->status_errors[] = $error;
     }
 
     public function index_count(): int
@@ -35,6 +43,7 @@ class PullFilterFakeClient extends \ImportClient
 
     public function run_preflight(): void
     {
+        $this->preflight_runs++;
         $this->mutate_state(function (array $state) {
             $state["preflight"] = [
                 "http_code" => 200,
@@ -57,6 +66,14 @@ class PullFilterFakeClient extends \ImportClient
 
     public function run_files_sync(): void
     {
+        if (
+            ($this->state["command"] ?? null) === "files-pull" &&
+            ($this->state["status"] ?? null) === "complete"
+        ) {
+            return;
+        }
+
+        $this->files_sync_runs++;
         if ($this->create_skipped_list) {
             file_put_contents(
                 $this->state_dir . '/.import-download-list-skipped.jsonl',
@@ -76,6 +93,7 @@ class PullFilterFakeClient extends \ImportClient
 
     public function run_db_sync(): void
     {
+        $this->db_sync_runs++;
         file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
         $this->mutate_state(function (array $state) {
             $state["command"] = "db-pull";
@@ -87,11 +105,29 @@ class PullFilterFakeClient extends \ImportClient
 
     public function run_db_apply(array $options): void
     {
+        $this->db_apply_runs++;
         $this->mutate_state(function (array $state) {
             $state["command"] = "db-apply";
             $state["status"] = "complete";
             $state["stage"] = null;
             $state["apply"]["statements_executed"] = 42;
+            return $state;
+        });
+    }
+}
+
+class PullFailingPreflightFakeClient extends PullFilterFakeClient
+{
+    public function run_preflight(): void
+    {
+        $this->preflight_runs++;
+        $this->last_error_code = 'HTTP_ERROR';
+        $this->mutate_state(function (array $state) {
+            $state["preflight"] = [
+                "http_code" => 500,
+                "error" => "Exporter unavailable",
+            ];
+            $state["status"] = "complete";
             return $state;
         });
     }
@@ -199,6 +235,93 @@ class PullFilterOptionTest extends TestCase
         $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
     }
 
+    public function testPullDoesNotAdvancePastFailedPreflight(): void
+    {
+        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->fs_root, false);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull",
+                "runtime" => "none",
+            ]);
+            $this->fail('Expected pull to stop on failed preflight');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('Exporter unavailable', $e->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->preflight_runs);
+        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertNull($state["pull"]["stage"]);
+
+        $error_events = array_values(array_filter(
+            $client->progress_events,
+            static fn (array $event): bool => ($event["status"] ?? null) === "error",
+        ));
+        $this->assertCount(1, $error_events);
+        $this->assertSame("preflight", $error_events[0]["failed_stage"]);
+        $this->assertSame("Exporter unavailable", $error_events[0]["message"]);
+        $status_errors = array_values(array_filter(
+            $client->status_errors,
+            static fn ($error): bool => $error !== null,
+        ));
+        $this->assertSame(["Exporter unavailable"], $status_errors);
+    }
+
+    public function testPullResumesAfterFilesPullCompletedBeforePipelineStageWasMarked(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "command" => "files-pull",
+                "status" => "complete",
+                "stage" => null,
+                "pull" => [
+                    "stage" => "preflight",
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame(1, $client->db_sync_runs);
+        $this->assertSame('pull', $state["pull"]["pipeline"]);
+        $this->assertSame('complete', $state["pull"]["stage"]);
+    }
+
+    public function testInvalidPullOptionsFailBeforeStateIsPersisted(): void
+    {
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull",
+                "runtime" => "not-a-runtime",
+            ]);
+            $this->fail('Expected pull to reject an invalid runtime');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('Invalid --runtime value', $e->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+    }
+
     public function testPullWithEssentialFilesPersistsDeferredFilesState(): void
     {
         $client = $this->makeClient(true);
@@ -275,6 +398,7 @@ class PullFilterOptionTest extends TestCase
                 "stage" => null,
                 "filter" => "skipped-earlier",
                 "pull" => [
+                    "pipeline" => "pull",
                     "stage" => "complete",
                     "files_filter" => "essential-files",
                     "skipped_pending" => true,

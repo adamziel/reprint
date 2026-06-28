@@ -1,7 +1,14 @@
 <?php
 /**
- * The `pull` command — orchestrates the lower-level commands into a
- * single resumable site clone pipeline.
+ * Signals that Pull already emitted the stage-specific error/status output.
+ */
+class PullFailureReportedException extends RuntimeException
+{
+}
+
+/**
+ * The `pull` command — orchestrates lower-level commands into a
+ * resumable pipeline.
  *
  * Each step retries automatically on server timeouts (exit code 2). If
  * the process is interrupted, re-running pull resumes from the last
@@ -86,14 +93,101 @@ class Pull
         $this->normalize_url();
         $this->progress->enable_quiet_lifecycle();
 
-        $options = $this->validate_and_default_options($options);
+        $options = $this->validate_and_default_pull_options($options);
 
-        $stages = $this->stages($options);
-        $total = count($stages);
+        $this->run_pipeline('pull', $this->stages($options), $options, 'Pulling');
+    }
+
+    /**
+     * Handle --abort for the pull command: clear pipeline state but
+     * leave downloaded files in place.
+     */
+    public function abort(): void
+    {
+        $this->prepare_repull();
+        $message = "Pull state cleared. Downloaded files are preserved.";
+        $this->progress->show_lifecycle_line("{$message}\n");
+        $this->client->output_progress([
+            "type" => "lifecycle",
+            "event" => "aborted",
+            "command" => "pull",
+            "message" => $message,
+        ], true);
+    }
+
+    private function run_pipeline(string $command, array $stages, array $options, string $title): void
+    {
+        $this->assert_no_conflicting_pull($command, $stages);
+
         $state = $this->client->state;
-        $completed_stage = $state['pull']['stage'] ?? null;
+        $pull_pipeline = $state['pull']['pipeline'] ?? null;
+        $pull_stage = $state['pull']['stage'] ?? null;
+        // Atomic commands leave state["command"] marked complete. Reuse that
+        // marker only while resuming the same high-level pipeline; otherwise a
+        // prior standalone files-pull/db-pull would make pull skip
+        // the fresh delta it was asked to compute.
+        $can_reuse_atomic_state =
+            $pull_pipeline === $command &&
+            $pull_stage !== null &&
+            $pull_stage !== 'complete';
+        $completed_current_pipeline = $pull_pipeline === $command && $pull_stage === 'complete';
+        if (!$completed_current_pipeline && !$can_reuse_atomic_state && ($state['status'] ?? null) === 'complete') {
+            $state_dir = $this->client->state_dir;
+            $defaults = $this->client->default_state();
 
-        // If the prior pull completed, prepare for a delta re-pull.
+            if (($state['command'] ?? null) === 'files-pull' && in_array('files-pull', $stages, true)) {
+                $this->client->mutate_state(function (array $state) use ($defaults) {
+                    $state['command'] = null;
+                    $state['status'] = null;
+                    $state['cursor'] = null;
+                    $state['stage'] = null;
+                    $state['consecutive_timeouts'] = 0;
+                    $state['current_file'] = null;
+                    $state['current_file_bytes'] = null;
+                    $state['diff'] = $defaults['diff'];
+                    $state['index'] = $defaults['index'];
+                    $state['fetch'] = $defaults['fetch'];
+                    $state['fetch_skipped'] = $defaults['fetch_skipped'];
+                    $state['files_pull_only_fingerprint'] = null;
+                    return $state;
+                });
+                foreach ([
+                    "{$state_dir}/.import-remote-index.jsonl",
+                    "{$state_dir}/.import-download-list.jsonl",
+                    "{$state_dir}/.import-download-list-skipped.jsonl",
+                ] as $path) {
+                    if (file_exists($path)) {
+                        @unlink($path);
+                    }
+                }
+                $state = $this->client->state;
+            } elseif (($state['command'] ?? null) === 'db-pull' && in_array('db-pull', $stages, true)) {
+                $this->client->mutate_state(function (array $state) use ($defaults) {
+                    $state['command'] = null;
+                    $state['status'] = null;
+                    $state['cursor'] = null;
+                    $state['stage'] = null;
+                    $state['consecutive_timeouts'] = 0;
+                    $state['sql_bytes'] = null;
+                    $state['db_index'] = $defaults['db_index'];
+                    return $state;
+                });
+                foreach ([
+                    "{$state_dir}/db.sql",
+                    "{$state_dir}/db-tables.jsonl",
+                    "{$state_dir}/.import-domains.json",
+                ] as $path) {
+                    if (file_exists($path)) {
+                        @unlink($path);
+                    }
+                }
+                $state = $this->client->state;
+            }
+        }
+
+        $total = count($stages);
+        $completed_stage = $pull_pipeline === $command ? $pull_stage : null;
+
         if ($completed_stage === 'complete') {
             $this->prepare_repull();
             $completed_stage = null;
@@ -101,7 +195,7 @@ class Pull
 
         $start_index = 0;
         if ($completed_stage !== null) {
-            $idx = array_search($completed_stage, $stages);
+            $idx = array_search($completed_stage, $stages, true);
             if ($idx !== false) {
                 $start_index = $idx + 1;
             }
@@ -110,19 +204,19 @@ class Pull
         $host = parse_url($this->client->remote_url, PHP_URL_HOST) ?? $this->client->remote_url;
         $bold = "\033[1m";
         $r = "\033[0m";
-        $this->progress->print_line("\n{$bold}Pulling {$host}{$r}\n");
+        $this->progress->print_line("\n{$bold}{$title} {$host}{$r}\n");
 
         $this->client->output_progress([
             "type" => "lifecycle",
             "event" => "starting",
-            "command" => "pull",
+            "command" => $command,
             "stages" => $stages,
             "resume_from" => $start_index,
-            "message" => "Starting pull",
+            "message" => "Starting {$command}",
         ], true);
 
         $this->client->audit_log(
-            sprintf("PULL | stages=%s | resume_from=%d", implode(",", $stages), $start_index),
+            sprintf("%s | stages=%s | resume_from=%d", strtoupper($command), implode(",", $stages), $start_index),
             true,
         );
 
@@ -139,43 +233,56 @@ class Pull
             try {
                 $this->run_stage($stage, $options, $step, $total);
             } catch (\Exception $e) {
-                $this->report_failure($stage, $stages, $i, $e);
-                throw $e;
+                $this->report_failure($command, $stage, $stages, $i, $e);
+                throw new PullFailureReportedException($e->getMessage(), 0, $e);
             }
 
-            $this->client->mark_pull_stage_complete($stage);
+            $this->client->mark_pull_stage_complete($stage, $command);
         }
 
         // The 'start' stage handles its own completion (it needs to save
         // state before blocking on the server process).
         if (!in_array('start', $stages, true)) {
-            $this->client->mark_pull_complete();
+            $this->client->mark_pull_complete($command);
             $this->print_summary();
         }
 
+        $complete_message = $command === 'pull' ? 'Pull complete' : "{$command} complete";
         $this->client->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
-            "command" => "pull",
+            "command" => $command,
             "stages" => $stages,
-            "message" => "Pull complete",
+            "message" => $complete_message,
         ], true);
     }
 
-    /**
-     * Handle --abort for the pull command: clear pipeline state but
-     * leave downloaded files in place.
-     */
-    public function abort(): void
+    private function assert_no_conflicting_pull(string $command, array $stages): void
     {
-        $this->prepare_repull();
-        $this->progress->show_lifecycle_line("Pull state cleared. Downloaded files are preserved.\n");
-        $this->client->output_progress([
-            "type" => "lifecycle",
-            "event" => "aborted",
-            "command" => "pull",
-            "message" => "Pull state cleared",
-        ], true);
+        $pull = $this->client->state['pull'] ?? [];
+        $pull_pipeline = $pull['pipeline'] ?? 'pull';
+        $pull_stage = $pull['stage'] ?? null;
+
+        if ($pull_stage !== null && $pull_stage !== 'complete' && $pull_pipeline !== $command) {
+            throw new RuntimeException(
+                "A {$pull_pipeline} command is already in progress. " .
+                "Finish it, rerun {$pull_pipeline}, or use --abort before running {$command}."
+            );
+        }
+
+        $state_command = $this->client->state['command'] ?? null;
+        $state_status = $this->client->state['status'] ?? null;
+        if (
+            $state_status !== null &&
+            $state_status !== 'complete' &&
+            in_array($state_command, ['files-pull', 'db-pull', 'db-apply'], true) &&
+            !in_array($state_command, $stages, true)
+        ) {
+            throw new RuntimeException(
+                "A {$state_command} command is already in progress. " .
+                "Finish it, rerun {$state_command}, or use --abort before running {$command}."
+            );
+        }
     }
 
     private function run_stage(string $stage, array $options, int $step, int $total): void
@@ -183,15 +290,18 @@ class Pull
         switch ($stage) {
             case 'preflight':
                 $this->client->run_preflight();
-                if ($this->check_plugin_installed()) {
+                $preflight = $this->client->state["preflight"] ?? null;
+                $ok = ($preflight["http_code"] ?? 0) === 200 && !empty($preflight["data"]["ok"]);
+                if (!$ok) {
                     $this->client->exit_code = 1;
-                    return;
+                    throw new RuntimeException($preflight["error"] ?? "Preflight check failed");
                 }
                 $this->print_done($stage, $this->preflight_summary());
                 break;
 
             case 'files-pull':
-                $this->run_until_complete(function () {
+                $this->client->prepare_files_pull_options($options);
+                $this->run_until_complete('files-pull', function () {
                     $this->client->run_files_sync();
                 });
                 $skipped_pending =
@@ -209,18 +319,29 @@ class Pull
                 break;
 
             case 'db-pull':
-                $this->run_until_complete(function () {
-                    $this->client->run_db_sync();
-                });
+                if (
+                    ($this->client->state['command'] ?? null) !== 'db-pull' ||
+                    ($this->client->state['status'] ?? null) !== 'complete' ||
+                    !file_exists($this->client->state_dir . '/db.sql')
+                ) {
+                    $this->run_until_complete('db-pull', function () {
+                        $this->client->run_db_sync();
+                    });
+                }
                 $sql_file = $this->client->state_dir . "/db.sql";
                 $size = file_exists($sql_file) ? $this->format_bytes(filesize($sql_file)) : null;
                 $this->print_done($stage, $size);
                 break;
 
             case 'db-apply':
-                $this->run_until_complete(function () use ($options) {
-                    $this->client->run_db_apply($options);
-                });
+                if (
+                    ($this->client->state['command'] ?? null) !== 'db-apply' ||
+                    ($this->client->state['status'] ?? null) !== 'complete'
+                ) {
+                    $this->run_until_complete('db-apply', function () use ($options) {
+                        $this->client->run_db_apply($options);
+                    });
+                }
                 $state = $this->client->state;
                 $stmts = (int) ($state["apply"]["statements_executed"] ?? 0);
                 $this->print_done($stage, $stmts > 0 ? number_format($stmts) . " statements" : null);
@@ -243,53 +364,39 @@ class Pull
     }
 
     /**
-     * Validate user-provided options and apply defaults.
+     * Reject invalid high-level pull options before ImportClient persists
+     * resume-related state.
      */
-    private function validate_and_default_options(array $options): array
+    public function assert_options_valid_before_state_write(string $command, array $options): void
     {
-        // --runtime and --start-runtime values are validated at CLI parse
-        // time from VALID_TARGET_RUNTIMES. Re-check here for programmatic
-        // callers (e.g. ImportClient::run invoked directly) that bypass
-        // the CLI parser.
-        foreach (['runtime', 'start_runtime'] as $key) {
-            if (!empty($options[$key]) && !in_array($options[$key], VALID_TARGET_RUNTIMES, true)) {
-                $flag = str_replace('_', '-', $key);
-                throw new InvalidArgumentException(
-                    "Invalid --{$flag} value: {$options[$key]}. " .
-                    "Valid runtimes: " . implode(', ', VALID_TARGET_RUNTIMES)
-                );
-            }
+        $sql_output = $options["sql_output"] ?? "file";
+        if ($sql_output !== "file") {
+            throw new InvalidArgumentException(
+                "{$command} downloads SQL to the local state directory before applying it. " .
+                "Use db-pull directly for --sql-output={$sql_output}."
+            );
         }
 
+        $this->assert_runtime_options_valid($options);
+        $options = $this->default_pull_runtime_options($options);
+        if ($options['runtime'] === 'none') {
+            unset($options['runtime']);
+        }
+        $options = $this->default_pull_target_options($options);
+        $this->validate_database_target_options($options);
+    }
+
+    /**
+     * Validate user-provided pull options and apply defaults without saving state.
+     */
+    private function validate_and_default_pull_options(array $options): array
+    {
+        $this->assert_runtime_options_valid($options);
         // Default --runtime to php-builtin so pull always ends with a
         // running local server. Users can override with --runtime=nginx-fpm,
         // --runtime=playground-cli, or --runtime=none to skip runtime
         // generation entirely.
-        if (empty($options['runtime'])) {
-            if (!empty($options['start_runtime']) && $options['start_runtime'] !== 'none') {
-                $options['runtime'] = $options['start_runtime'];
-            } else {
-                $options['runtime'] = 'php-builtin';
-            }
-        }
-
-        if (empty($options['start_runtime'])) {
-            $options['start_runtime'] = $this->default_start_runtime($options['runtime']);
-        }
-        if ($options['start_runtime'] !== 'none') {
-            if (!$this->can_start_runtime($options['start_runtime'])) {
-                throw new InvalidArgumentException(
-                    "Starting runtime {$options['start_runtime']} is not supported yet. " .
-                    "Supported start runtimes: php-builtin, playground-cli, none"
-                );
-            }
-            if ($options['start_runtime'] !== $options['runtime']) {
-                throw new InvalidArgumentException(
-                    "--start-runtime={$options['start_runtime']} requires matching --runtime={$options['start_runtime']}, " .
-                    "or omit --runtime to use {$options['start_runtime']} for both."
-                );
-            }
-        }
+        $options = $this->default_pull_runtime_options($options);
 
         if ($options['runtime'] === 'none') {
             unset($options['runtime']);
@@ -298,35 +405,8 @@ class Pull
         // Default --target-engine to sqlite for php-builtin and
         // playground-cli (no MySQL server needed). nginx-fpm users
         // probably have a server stack — require explicit DB config.
-        if (empty($options['target_engine']) && empty($options['target_user']) && empty($options['target_db'])) {
-            if (($options['runtime'] ?? null) !== 'nginx-fpm') {
-                $options['target_engine'] = 'sqlite';
-            }
-        }
-
-        if (!empty($options['target_engine'])) {
-            $engine = strtolower($options['target_engine']);
-            if (!in_array($engine, ['mysql', 'sqlite'], true)) {
-                throw new InvalidArgumentException(
-                    "Invalid --target-engine value: {$options['target_engine']}. " .
-                    "Valid engines: mysql, sqlite"
-                );
-            }
-        }
-
-        $engine = strtolower($options['target_engine'] ?? '');
-        if ($engine === 'mysql') {
-            if (empty($options['target_user'])) {
-                throw new InvalidArgumentException(
-                    "--target-user is required for MySQL database import."
-                );
-            }
-            if (empty($options['target_db'])) {
-                throw new InvalidArgumentException(
-                    "--target-db is required for MySQL database import."
-                );
-            }
-        }
+        $options = $this->default_pull_target_options($options);
+        $options = $this->validate_database_target_options($options);
 
         if (empty($options['output_dir'])) {
             $options['output_dir'] = $this->client->state_dir . '/runtime';
@@ -350,6 +430,97 @@ class Pull
         // the flattened layout.
         if (!empty($options['flatten_to']) && empty($options['flat_document_root'])) {
             $options['flat_document_root'] = $options['flatten_to'];
+        }
+
+        return $options;
+    }
+
+    private function assert_runtime_options_valid(array $options): void
+    {
+        // --runtime and --start-runtime values are validated at CLI parse
+        // time from VALID_TARGET_RUNTIMES. Re-check here for programmatic
+        // callers (e.g. ImportClient::run invoked directly) that bypass
+        // the CLI parser.
+        foreach (['runtime', 'start_runtime'] as $key) {
+            if (!empty($options[$key]) && !in_array($options[$key], VALID_TARGET_RUNTIMES, true)) {
+                $flag = str_replace('_', '-', $key);
+                throw new InvalidArgumentException(
+                    "Invalid --{$flag} value: {$options[$key]}. " .
+                    "Valid runtimes: " . implode(', ', VALID_TARGET_RUNTIMES)
+                );
+            }
+        }
+
+        $options = $this->default_pull_runtime_options($options);
+        if ($options['start_runtime'] === 'none') {
+            return;
+        }
+        if (!$this->can_start_runtime($options['start_runtime'])) {
+            throw new InvalidArgumentException(
+                "Starting runtime {$options['start_runtime']} is not supported yet. " .
+                "Supported start runtimes: php-builtin, playground-cli, none"
+            );
+        }
+        if ($options['start_runtime'] !== $options['runtime']) {
+            throw new InvalidArgumentException(
+                "--start-runtime={$options['start_runtime']} requires matching --runtime={$options['start_runtime']}, " .
+                "or omit --runtime to use {$options['start_runtime']} for both."
+            );
+        }
+    }
+
+    private function default_pull_runtime_options(array $options): array
+    {
+        if (empty($options['runtime'])) {
+            if (!empty($options['start_runtime']) && $options['start_runtime'] !== 'none') {
+                $options['runtime'] = $options['start_runtime'];
+            } else {
+                $options['runtime'] = 'php-builtin';
+            }
+        }
+
+        if (empty($options['start_runtime'])) {
+            $options['start_runtime'] = $this->default_start_runtime($options['runtime']);
+        }
+
+        return $options;
+    }
+
+    private function default_pull_target_options(array $options): array
+    {
+        if (empty($options['target_engine']) && empty($options['target_user']) && empty($options['target_db'])) {
+            if (($options['runtime'] ?? null) !== 'nginx-fpm') {
+                $options['target_engine'] = 'sqlite';
+            }
+        }
+
+        return $options;
+    }
+
+    private function validate_database_target_options(array $options): array
+    {
+        if (!empty($options['target_engine'])) {
+            $engine = strtolower($options['target_engine']);
+            if (!in_array($engine, ['mysql', 'sqlite'], true)) {
+                throw new InvalidArgumentException(
+                    "Invalid --target-engine value: {$options['target_engine']}. " .
+                    "Valid engines: mysql, sqlite"
+                );
+            }
+            $options['target_engine'] = $engine;
+        }
+
+        if (($options['target_engine'] ?? 'mysql') === 'mysql') {
+            if (empty($options['target_user'])) {
+                throw new InvalidArgumentException(
+                    "--target-user is required for MySQL database import."
+                );
+            }
+            if (empty($options['target_db'])) {
+                throw new InvalidArgumentException(
+                    "--target-db is required for MySQL database import."
+                );
+            }
         }
 
         return $options;
@@ -409,6 +580,7 @@ class Pull
         $state_dir = $this->client->state_dir;
         $defaults = $this->client->default_state();
         $this->client->mutate_state(function (array $state) use ($defaults) {
+            $state['pull']['pipeline'] = 'pull';
             $state['pull']['stage'] = null;
             $state['pull']['files_filter'] = null;
             $state['pull']['skipped_pending'] = false;
@@ -451,13 +623,16 @@ class Pull
      * resetting the status to "in_progress" so the handler enters its
      * resume path (it specifically checks for that value).
      */
-    private function run_until_complete(callable $handler): void
+    private function run_until_complete(string $stage, callable $handler): void
     {
         for ($attempt = 0; $attempt < 1000; $attempt++) {
             $handler();
             $state = $this->client->state;
+            if (($state['status'] ?? null) === 'complete') {
+                return;
+            }
             if (($state['status'] ?? null) !== 'partial') {
-                break;
+                throw new RuntimeException("Stage {$stage} stopped before completing.");
             }
             $this->client->mutate_state(function (array $state) {
                 $state['status'] = 'in_progress';
@@ -466,58 +641,8 @@ class Pull
             $this->client->exit_code = 0;
             $this->progress->tick_spinner();
         }
-    }
 
-    /**
-     * Check whether preflight detected that the exporter plugin is not
-     * installed. Returns true if so (caller should abort the pipeline).
-     */
-    private function check_plugin_installed(): bool
-    {
-        $state = $this->client->state;
-        $preflight = $state["preflight"] ?? null;
-        $ok = ($preflight["http_code"] ?? 0) === 200 && !empty($preflight["data"]["ok"]);
-        if ($ok) {
-            return false;
-        }
-
-        $error = $preflight["error"] ?? null;
-        $error_code = $this->client->last_error_code;
-        $is_not_installed =
-            $error_code === 'NOT_FOUND' ||
-            $error_code === 'HTML_RESPONSE';
-
-        if ($is_not_installed) {
-            $red = "\033[31m";
-            $bold = "\033[1m";
-            $dim = "\033[2m";
-            $cyan = "\033[36m";
-            $r = "\033[0m";
-            $this->progress->print_line("\n{$red}  ✗ The exporter plugin is not installed on this site.{$r}\n\n");
-            $this->progress->print_line("  To set it up, run:\n\n");
-            $this->progress->print_line("    {$cyan}php reprint.phar install-exporter{$r}\n\n");
-            $this->progress->print_line("  {$dim}This will show the download URL and step-by-step instructions.{$r}\n");
-        } else {
-            $red = "\033[31m";
-            $dim = "\033[2m";
-            $r = "\033[0m";
-            $this->progress->print_line("\n{$red}  ✗ Preflight failed{$r}\n");
-            if ($error) {
-                $indented = implode("\n  ", explode("\n", $error));
-                $this->progress->print_line("  {$indented}\n");
-            }
-        }
-
-        $this->client->output_progress([
-            "status" => "error",
-            "command" => "pull",
-            "failed_stage" => "preflight",
-            "error_code" => $error_code,
-            "error" => $error ?? "Preflight check failed",
-            "message" => $error ?? "Preflight check failed",
-        ]);
-
-        return true;
+        throw new RuntimeException("Stage {$stage} kept reporting partial progress after 1000 retry attempts; aborting.");
     }
 
     /**
@@ -641,23 +766,47 @@ class Pull
         }
     }
 
-    private function report_failure(string $stage, array $stages, int $i, \Exception $e): void
+    private function report_failure(string $command, string $stage, array $stages, int $i, \Exception $e): void
     {
+        $message = $stage === 'preflight'
+            ? $e->getMessage()
+            : "Pull failed at {$stage}: " . $e->getMessage();
+
         $this->client->output_progress([
             "status" => "error",
-            "command" => "pull",
+            "command" => $command,
             "failed_stage" => $stage,
             "completed_stages" => array_slice($stages, 0, $i),
             "error_code" => $this->client->last_error_code,
             "error" => $e->getMessage(),
-            "message" => "Pull failed at {$stage}: " . $e->getMessage(),
+            "message" => $message,
         ]);
-        $this->client->write_status_file("Pull failed at {$stage}: " . $e->getMessage());
+        $this->client->write_status_file($message);
 
         $red = "\033[31m";
         $dim = "\033[2m";
         $r = "\033[0m";
         $this->progress->clear_progress_line();
+
+        if ($stage === 'preflight') {
+            $error_code = $this->client->last_error_code;
+            $is_not_installed =
+                $error_code === 'NOT_FOUND' ||
+                $error_code === 'HTML_RESPONSE';
+
+            if ($is_not_installed) {
+                $cyan = "\033[36m";
+                $this->progress->print_line("\n{$red}  ✗ The exporter plugin is not installed on this site.{$r}\n\n");
+                $this->progress->print_line("  To set it up, run:\n\n");
+                $this->progress->print_line("    {$cyan}php reprint.phar install-exporter{$r}\n\n");
+                $this->progress->print_line("  {$dim}This will show the download URL and step-by-step instructions.{$r}\n");
+            } else {
+                $this->progress->print_line("\n{$red}  ✗ Preflight failed{$r}\n");
+                $this->progress->print_line("  " . implode("\n  ", explode("\n", $e->getMessage())) . "\n");
+            }
+            return;
+        }
+
         $this->progress->print_line("  {$red}✗ " . $this->stage_label($stage) . "{$r}\n");
         $this->progress->print_line("    {$dim}" . $e->getMessage() . "{$r}\n\n");
         $this->progress->print_line("  Re-run the same command to resume.\n");
