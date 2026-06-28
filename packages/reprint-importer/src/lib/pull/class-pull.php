@@ -12,9 +12,10 @@ class PullFailureReportedException extends RuntimeException
  *
  * Each step retries automatically on server timeouts (exit code 2). If
  * the process is interrupted, re-running pull resumes from the last
- * completed step. Like `git pull` composes fetch + merge, this composes
- * preflight → files-pull → db-pull → db-apply → flat-docroot →
- * apply-runtime → start.
+ * completed step. Like `git pull` composes fetch + merge, `pull`
+ * composes preflight → files-pull → db-pull → db-apply →
+ * flat-docroot → apply-runtime → start. `pull-files` runs the file
+ * subset.
  *
  * The class holds a reference to ImportClient because each stage
  * delegates to an ImportClient method (run_preflight, run_files_sync,
@@ -99,20 +100,36 @@ class Pull
     }
 
     /**
-     * Handle --abort for the pull command: clear pipeline state but
-     * leave downloaded files in place.
+     * Handle --abort for high-level file pull commands.
+     *
+     * Downloaded site files stay in place; the next run refreshes the
+     * file indexes and fetches a fresh delta.
      */
-    public function abort(): void
+    public function abort(string $command = 'pull'): void
     {
-        $this->prepare_repull();
-        $message = "Pull state cleared. Downloaded files are preserved.";
+        $this->prepare_repull($command);
+        $label = $command === 'pull' ? 'Pull' : $command;
+        $message = "{$label} state cleared. Downloaded files are preserved.";
         $this->progress->show_lifecycle_line("{$message}\n");
         $this->client->output_progress([
             "type" => "lifecycle",
             "event" => "aborted",
-            "command" => "pull",
+            "command" => $command,
             "message" => $message,
         ], true);
+    }
+
+    /**
+     * Run only the file stages from the pull pipeline.
+     */
+    public function run_pull_files(array $options): void
+    {
+        $this->normalize_url();
+        $this->progress->enable_quiet_lifecycle();
+
+        $options = $this->validate_and_default_pull_files_options($options, 'pull-files');
+
+        $this->run_pipeline('pull-files', ['preflight', 'files-pull'], $options, 'Pulling files from');
     }
 
     /**
@@ -142,14 +159,16 @@ class Pull
         $state_command = $state['active_resumable_command']['command_name'] ?? null;
         $state_status = $state['active_resumable_command']['completion_state'] ?? null;
         $completed_stage = $pull_pipeline === $command ? $pull_stage : null;
-        $completed_current_pipeline =
-            $completed_stage !== null &&
+        $completed_pipeline =
+            $pull_pipeline !== null &&
+            $pull_stage !== null &&
             $pipeline_final_stage !== null &&
-            $completed_stage === $pipeline_final_stage;
+            $pull_stage === $pipeline_final_stage;
 
-        if ($completed_current_pipeline) {
-            $this->prepare_repull();
+        if ($completed_pipeline) {
+            $this->prepare_repull($command);
             $completed_stage = null;
+            $pull_pipeline = null;
             $pull_stage = null;
             $state_command = null;
             $state_status = null;
@@ -300,7 +319,9 @@ class Pull
         // state before blocking on the server process).
         if (!in_array('start', $stages, true)) {
             $this->client->mark_pull_complete($command);
-            $this->print_summary();
+            if ($command === 'pull') {
+                $this->print_summary();
+            }
         }
 
         $complete_message = $command === 'pull' ? 'Pull complete' : "{$command} complete";
@@ -594,6 +615,23 @@ class Pull
     }
 
     /**
+     * Validate user-provided pull-files options and apply defaults without saving state.
+     */
+    private function validate_and_default_pull_files_options(array $options, string $command): array
+    {
+        if (!isset($options['filter'])) {
+            $options['filter'] = $this->client->state['filter'] ?? 'none';
+        }
+        if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
+            throw new InvalidArgumentException(
+                "Invalid --filter value for {$command}: {$options['filter']}. " .
+                "Valid values: none, essential-files"
+            );
+        }
+        return $options;
+    }
+
+    /**
      * Selects the runtime that should receive generated runtime files.
      *
      * A requested start runtime also implies runtime generation because there
@@ -656,16 +694,22 @@ class Pull
     /**
      * Reset sub-command state for a delta re-pull.
      *
-     * Keeps the local file index (so files-pull runs in delta mode) and
-     * preflight data, but clears everything else and deletes db.sql /
-     * the remote index so the next pull re-fetches them.
+     * Keeps preflight data and downloaded files in place. `pull` keeps the
+     * local file index so files-pull runs in delta mode, while `pull-files`
+     * clears the in-progress index cursor and --only fingerprint so a new
+     * selection starts from a fresh remote traversal. Database artifacts are
+     * cleared only for the full pull pipeline because pull-files never creates
+     * or consumes them.
      */
-    private function prepare_repull(): void
+    private function prepare_repull(string $command = 'pull'): void
     {
         $state_dir = $this->client->state_dir;
         $defaults = $this->client->default_state();
-        $this->client->mutate_state(function (array $state) use ($defaults) {
-            $state['pull_pipeline']['started_by_command'] = 'pull';
+        $reset_db_state = $command === 'pull';
+        $reset_file_selection_state = $command !== 'pull';
+
+        $this->client->mutate_state(function (array $state) use ($command, $defaults, $reset_db_state, $reset_file_selection_state) {
+            $state['pull_pipeline']['started_by_command'] = $command;
             $state['pull_pipeline']['stage_sequence'] = [];
             $state['pull_pipeline']['last_completed_stage'] = null;
             $state['pull_pipeline']['files_filter'] = null;
@@ -676,31 +720,41 @@ class Pull
             $state['active_resumable_command']['remote_cursor'] = null;
             $state['active_resumable_command']['current_stage'] = null;
             $state['consecutive_timeouts'] = 0;
-            $state['sql_bytes'] = null;
             $state['current_file'] = null;
             $state['current_file_bytes'] = null;
-            $state['db_index'] = $defaults['db_index'];
             $state['diff'] = $defaults['diff'];
             $state['fetch'] = $defaults['fetch'];
             $state['fetch_skipped'] = $defaults['fetch_skipped'];
-            $state['apply'] = $defaults['apply'];
-            $state['sql_output'] = null;
+            if ($reset_file_selection_state) {
+                $state['index'] = $defaults['index'];
+                $state['files_pull_only_fingerprint'] = null;
+            }
+            if ($reset_db_state) {
+                $state['sql_bytes'] = null;
+                $state['db_index'] = $defaults['db_index'];
+                $state['apply'] = $defaults['apply'];
+                $state['sql_output'] = null;
+            }
             return $state;
         });
 
-        foreach ([
-            $state_dir . "/db.sql",
-            $state_dir . "/.import-domains.json",
+        $paths = [
             $state_dir . "/.import-remote-index.jsonl",
             $state_dir . "/.import-download-list.jsonl",
             $state_dir . "/.import-download-list-skipped.jsonl",
-        ] as $path) {
+        ];
+        if ($reset_db_state) {
+            $paths[] = $state_dir . "/db.sql";
+            $paths[] = $state_dir . "/.import-domains.json";
+        }
+
+        foreach ($paths as $path) {
             if (file_exists($path)) {
                 @unlink($path);
             }
         }
 
-        $this->client->audit_log("PULL | prepared for delta re-pull", true);
+        $this->client->audit_log(strtoupper($command) . " | prepared for delta re-pull", true);
     }
 
     /**

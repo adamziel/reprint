@@ -53,7 +53,7 @@ require_once __DIR__ . '/lib/external-merge-sort.php';
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
-// Pull command — orchestrates lower-level commands into a pipeline
+// High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
 /**
@@ -1170,7 +1170,7 @@ class ImportClient
     /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
     private TerminalProgress $progress;
 
-    /** @var Pull Orchestrates the pull command pipeline. */
+    /** @var Pull Orchestrates high-level pull pipelines. */
     private Pull $pull;
 
     /** @var int Cumulative count of index entries written (survives retries). */
@@ -1583,6 +1583,7 @@ class ImportClient
 
         $valid_commands = [
             "pull",
+            "pull-files",
             "files-pull",
             "files-index",
             "files-stats",
@@ -1654,7 +1655,7 @@ class ImportClient
         if (isset($options["filter"])) {
             $next = $options["filter"];
             if (
-                $command === "pull" &&
+                in_array($command, ["pull", "pull-files"], true) &&
                 !in_array($next, ["none", "essential-files"], true)
             ) {
                 throw new InvalidArgumentException(
@@ -1778,15 +1779,22 @@ class ImportClient
             $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
         }
 
-        // pull orchestrates preflight and lower-level stages internally,
-        // so it runs before the normal command dispatch.
-        if ($command === "pull") {
+        // Pull-like commands orchestrate preflight and lower-level stages
+        // internally, so they run before the normal command dispatch.
+        if (in_array($command, ["pull", "pull-files"], true)) {
             if ($abort) {
-                $this->pull->abort();
+                $this->pull->abort($command);
                 return;
             }
             try {
-                $this->pull->run($options);
+                switch ($command) {
+                    case "pull":
+                        $this->pull->run($options);
+                        break;
+                    case "pull-files":
+                        $this->pull->run_pull_files($options);
+                        break;
+                }
             } catch (\Exception $e) {
                 if ($e instanceof \PullFailureReportedException) {
                     $previous = $e->getPrevious();
@@ -11582,7 +11590,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'abort',
@@ -11590,7 +11598,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
         ],
         [
             'name' => 'verbose',
@@ -11599,7 +11607,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11608,7 +11616,7 @@ if (
             'flag_value' => false,
             'help' => 'Do not follow symlinks pointing outside root directories',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull'],
+            'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
             'name' => 'follow-symlinks',
@@ -11625,7 +11633,7 @@ if (
             'placeholder' => 'MODE',
             'help' => 'What to do when fs root is non-empty (error|preserve-local)',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull'],
+            'commands' => ['pull', 'pull-files', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
         ],
         [
@@ -11635,7 +11643,7 @@ if (
             'flag_value' => true,
             'help' => 'Include generated caches, VCS metadata, OS junk and editor scratch files (skipped by default)',
             'help_section' => 'global',
-            'commands' => ['pull', 'files-pull', 'files-index'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'files-index'],
         ],
         [
             'name' => 'adaptive',
@@ -11682,8 +11690,8 @@ if (
             'target' => 'filter',
             'placeholder' => 'MODE',
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
-            'help' => 'Filter which files to download (pull: none|essential-files; files-pull also supports skipped-earlier)',
-            'commands' => ['pull', 'files-pull'],
+            'help' => 'Filter which files to download (pull/pull-files: none|essential-files; files-pull also supports skipped-earlier)',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
             'name' => 'extra-directory',
@@ -11691,7 +11699,7 @@ if (
             'target' => 'extra_directory',
             'placeholder' => 'DIR',
             'help' => 'Additional remote directory to include in the export',
-            'commands' => ['files-pull', 'files-index'],
+            'commands' => ['pull-files', 'files-pull', 'files-index'],
         ],
 
         // ── db-pull options ──────────────────────────────────────
@@ -11834,7 +11842,7 @@ if (
             'pair_args' => 'SOURCE TARGET',
             'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
                 '(a :fs-root: path or an absolute path within --fs-root); repeatable',
-            'commands' => ['files-pull'],
+            'commands' => ['pull-files', 'files-pull'],
         ],
         [
             'name' => 'only',
@@ -11844,7 +11852,7 @@ if (
             'repeatable' => true,
             'help' => 'Restrict the files-pull command to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
                 'repeat for several. Default pulls everything',
-            'commands' => ['files-pull'],
+            'commands' => ['pull-files', 'files-pull'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
@@ -12375,6 +12383,26 @@ if (
                 "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --runtime=playground-cli --start-runtime=none --output-dir=./runtime\n",
+        ],
+        "pull-files" => [
+            "level" => "high",
+            "short" => "Pull files through the high-level pull pipeline",
+            "description" =>
+                "Runs the file side of the pull pipeline:\n" .
+                "\n" .
+                "  1. Preflight — probe the remote site environment\n" .
+                "  2. files-pull — download all files, or a selected subset\n" .
+                "\n" .
+                "This gives files the same retry and resume behavior as pull,\n" .
+                "without running the database stages.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  reprint pull-files https://example.com \\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
+                "\n" .
+                "  reprint pull-files https://example.com \\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\n" .
+                "    --only=:wp-content: --only=:wp-plugins:\n",
         ],
         "install-exporter" => [
             "level" => "high",

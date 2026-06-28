@@ -253,6 +253,29 @@ The three filter values:
 The uploads directory is detected from preflight data (`uploads.basedir`), falling back to
 `wp-content/uploads/` if unavailable.
 
+#### Pull only files.
+
+`pull-files` runs the file side of the high-level pull pipeline:
+
+1. `preflight`
+2. `files-pull`
+
+Use it when you want a `git pull`-style file update without running any
+database stages:
+
+```bash
+php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+```
+
+It accepts the `pull` file filters (`--filter=none` and
+`--filter=essential-files`) plus the same path selection options as
+`files-pull`, including repeated `--only` values:
+
+```bash
+php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+    --only=:wp-content: --only=:wp-plugins:
+```
+
 #### Step 3 — Download the database.
 
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
@@ -635,6 +658,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
+* `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
