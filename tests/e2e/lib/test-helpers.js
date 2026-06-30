@@ -752,5 +752,23 @@ export function assertTreesMatch(sourceDir, importedDir, options = {}) {
     assert.equal(problems.length, 0, `Trees differ: ${problems.join('; ')}`);
 }
 
+/**
+ * Assert that a high-level pull pipeline finished all stages it recorded.
+ */
+export function assertPullPipelineComplete(state, command = 'pull') {
+    const pipeline = state.pull_pipeline;
+    assert.ok(pipeline, 'Expected pull_pipeline state to exist');
+    assert.equal(pipeline.started_by_command, command);
+    assert.equal(pipeline.has_completed_once, true);
+    assert.ok(Array.isArray(pipeline.stage_sequence),
+        'Expected pull_pipeline.stage_sequence to be an array');
+    assert.ok(pipeline.stage_sequence.length > 0,
+        'Expected pull_pipeline.stage_sequence to record at least one stage');
+    assert.equal(
+        pipeline.last_completed_stage,
+        pipeline.stage_sequence[pipeline.stage_sequence.length - 1],
+    );
+}
+
 // Re-export constants
 export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, PHP_BINARY, DB_HOST, DB_USER, DB_PASS };

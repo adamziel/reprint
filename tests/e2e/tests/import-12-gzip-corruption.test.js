@@ -91,8 +91,8 @@ describe('Import: Gzip Corruption', () => {
                 if (existsSync(stateFile)) {
                     const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
                     assert.ok(
-                        state.status === 'complete' || state.status === 'in_progress',
-                        `Expected valid status, got: ${state.status}`
+                        state.active_resumable_command.completion_state === 'complete' || state.active_resumable_command.completion_state === 'in_progress',
+                        `Expected valid status, got: ${state.active_resumable_command.completion_state}`
                     );
                 }
             } else {

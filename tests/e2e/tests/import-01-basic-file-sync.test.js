@@ -43,8 +43,8 @@ describe('Import: Basic File Sync', () => {
         const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.command, 'files-pull');
-        assert.equal(state.status, 'complete');
+        assert.equal(state.active_resumable_command.command_name, 'files-pull');
+        assert.equal(state.active_resumable_command.completion_state, 'complete');
     });
 
     it('fs-root file hashes match source site directory', () => {
@@ -109,6 +109,6 @@ describe('Import: Basic File Sync', () => {
 
         const stateFile = join(tempDir, '.import-state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf8'));
-        assert.equal(state.status, 'complete');
+        assert.equal(state.active_resumable_command.completion_state, 'complete');
     });
 });

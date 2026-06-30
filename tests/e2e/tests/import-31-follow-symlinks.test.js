@@ -214,7 +214,7 @@ describe('Import: Follow Symlinks', () => {
 
     it('state shows complete', () => {
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.status, 'complete');
+        assert.equal(state.active_resumable_command.completion_state, 'complete');
         assert.equal(state.follow_symlinks, true, 'follow_symlinks should be persisted in state');
     });
 

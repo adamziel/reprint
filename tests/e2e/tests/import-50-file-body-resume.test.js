@@ -159,7 +159,7 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
 
         const stateFile = join(tempDir, '.import-state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.status, 'complete', `Expected status=complete after resume, got ${state.status}`);
+        assert.equal(state.active_resumable_command.completion_state, 'complete', `Expected status=complete after resume, got ${state.active_resumable_command.completion_state}`);
     });
 
     it('resumed file matches source byte-for-byte (no gap, no duplication)', () => {

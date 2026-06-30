@@ -15,7 +15,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, assertSiteMirror,
-    fsRootDir,
+    fsRootDir, assertPullPipelineComplete,
     compareDatabases, createMysqlConnection, getDbName,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -75,7 +75,7 @@ describe('Import: Pull Multi-Request', { timeout: 300000 }, () => {
 
     it('state shows pull complete', () => {
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.pull.stage, 'complete');
+        assertPullPipelineComplete(state);
     });
 
     it('file download counter never decreases across requests', () => {

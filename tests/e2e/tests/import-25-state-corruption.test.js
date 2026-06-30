@@ -48,7 +48,7 @@ describe('Import: State Corruption', () => {
 
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-            assert.equal(state.status, 'complete');
+            assert.equal(state.active_resumable_command.completion_state, 'complete');
         });
 
         it('audit log records corruption warning', () => {
@@ -78,8 +78,10 @@ describe('Import: State Corruption', () => {
             tempDir = createTempDir('e2e-state-wrong-cmd');
             // Write valid state but for a different command
             writeFileSync(join(tempDir, '.import-state.json'), JSON.stringify({
-                command: 'db-sync',
-                status: 'complete',
+                active_resumable_command: {
+                    command_name: 'db-pull',
+                    completion_state: 'complete',
+                },
             }));
         });
 
@@ -96,8 +98,8 @@ describe('Import: State Corruption', () => {
 
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-            assert.equal(state.command, 'files-pull', 'Expected command to be updated');
-            assert.equal(state.status, 'complete');
+            assert.equal(state.active_resumable_command.command_name, 'files-pull', 'Expected command to be updated');
+            assert.equal(state.active_resumable_command.completion_state, 'complete');
         });
     });
 
@@ -108,9 +110,11 @@ describe('Import: State Corruption', () => {
             tempDir = createTempDir('e2e-state-restart');
             // Write a partial state to simulate interrupted transfer
             writeFileSync(join(tempDir, '.import-state.json'), JSON.stringify({
-                command: 'files-sync',
-                status: 'in_progress',
-                cursor: 'some-old-cursor',
+                active_resumable_command: {
+                    command_name: 'files-pull',
+                    completion_state: 'in_progress',
+                    remote_cursor: 'some-old-cursor',
+                },
             }));
         });
 
@@ -127,8 +131,8 @@ describe('Import: State Corruption', () => {
 
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-            assert.notEqual(state.status, 'in_progress', 'Expected status to be cleared');
-            assert.ok(!state.cursor, 'Expected cursor to be cleared');
+            assert.notEqual(state.active_resumable_command.completion_state, 'in_progress', 'Expected status to be cleared');
+            assert.ok(!state.active_resumable_command.remote_cursor, 'Expected cursor to be cleared');
         });
 
         it('running after --abort completes fresh sync', () => {
@@ -139,7 +143,7 @@ describe('Import: State Corruption', () => {
 
             const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-            assert.equal(state.status, 'complete');
+            assert.equal(state.active_resumable_command.completion_state, 'complete');
         });
 
         it('files match source after restart', () => {
