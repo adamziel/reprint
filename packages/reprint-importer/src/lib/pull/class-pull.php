@@ -146,7 +146,7 @@ class Pull
         $this->progress->set_mode('pipeline');
 
         if (!isset($options['filter'])) {
-            $options['filter'] = $this->client->state['filter'] ?? 'none';
+            $options['filter'] = $this->client->state->filter ?? 'none';
         }
         if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
             throw new InvalidArgumentException(
@@ -204,15 +204,15 @@ class Pull
         string $title
     ): void {
         $state = $this->client->state;
-        $pull_pipeline = $state['pull_pipeline']['started_by_command'] ?? null;
-        $pull_stage = $state['pull_pipeline']['last_completed_stage'] ?? null;
-        $stage_sequence = $state['pull_pipeline']['stage_sequence'] ?? [];
+        $pull_pipeline = $state->pull_pipeline->started_by_command;
+        $pull_stage = $state->pull_pipeline->last_completed_stage;
+        $stage_sequence = $state->pull_pipeline->stage_sequence;
         if (!is_array($stage_sequence) || $stage_sequence === []) {
             $stage_sequence = $stages;
         }
         $pipeline_final_stage = $stage_sequence[count($stage_sequence) - 1] ?? null;
-        $state_command = $state['active_resumable_command']['command_name'] ?? null;
-        $state_status = $state['active_resumable_command']['completion_state'] ?? null;
+        $state_command = $state->active_resumable_command->command_name;
+        $state_status = $state->active_resumable_command->completion_state;
         $completed_stage = $pull_pipeline === $command ? $pull_stage : null;
         $completed_pipeline =
             $pull_pipeline !== null &&
@@ -268,25 +268,23 @@ class Pull
             // recorded that stage as complete. Clear the direct command
             // checkpoint first so the stage computes a fresh delta.
             $state_dir = $this->client->state_dir;
-            $defaults = $this->client->default_state();
-
             if ($state_command === 'files-pull' && in_array('files-pull', $stages, true)) {
                 // Keep the local file index, but clear transient files-pull
                 // download state so this pipeline computes a fresh
                 // remote-vs-local delta.
-                $this->client->mutate_state(function (array $state) use ($defaults) {
-                    $state['active_resumable_command']['command_name'] = null;
-                    $state['active_resumable_command']['completion_state'] = null;
-                    $state['active_resumable_command']['remote_cursor'] = null;
-                    $state['active_resumable_command']['current_stage'] = null;
-                    $state['consecutive_timeouts'] = 0;
-                    $state['current_file'] = null;
-                    $state['current_file_bytes'] = null;
-                    $state['diff'] = $defaults['diff'];
-                    $state['index'] = $defaults['index'];
-                    $state['fetch'] = $defaults['fetch'];
-                    $state['fetch_skipped'] = $defaults['fetch_skipped'];
-                    $state['files_pull_only_fingerprint'] = null;
+                $this->client->mutate_state(function (ImportState $state) {
+                    $state->active_resumable_command->command_name = null;
+                    $state->active_resumable_command->completion_state = null;
+                    $state->active_resumable_command->remote_cursor = null;
+                    $state->active_resumable_command->current_stage = null;
+                    $state->consecutive_timeouts = 0;
+                    $state->current_file = null;
+                    $state->current_file_bytes = null;
+                    $state->diff = new FileDiffProgressState();
+                    $state->index = new RemoteFileIndexCursorState();
+                    $state->fetch = new DownloadListFetchProgressState();
+                    $state->fetch_skipped = new DownloadListFetchProgressState();
+                    $state->files_pull_only_fingerprint = null;
                     return $state;
                 });
                 foreach ([
@@ -300,14 +298,14 @@ class Pull
                 }
             } elseif ($state_command === 'db-pull' && in_array('db-pull', $stages, true)) {
                 // Discard database dump artifacts from any previous runs.
-                $this->client->mutate_state(function (array $state) use ($defaults) {
-                    $state['active_resumable_command']['command_name'] = null;
-                    $state['active_resumable_command']['completion_state'] = null;
-                    $state['active_resumable_command']['remote_cursor'] = null;
-                    $state['active_resumable_command']['current_stage'] = null;
-                    $state['consecutive_timeouts'] = 0;
-                    $state['sql_bytes'] = null;
-                    $state['db_index'] = $defaults['db_index'];
+                $this->client->mutate_state(function (ImportState $state) {
+                    $state->active_resumable_command->command_name = null;
+                    $state->active_resumable_command->completion_state = null;
+                    $state->active_resumable_command->remote_cursor = null;
+                    $state->active_resumable_command->current_stage = null;
+                    $state->consecutive_timeouts = 0;
+                    $state->sql_bytes = null;
+                    $state->db_index = new DatabaseTableIndexState();
                     return $state;
                 });
                 foreach ([
@@ -402,7 +400,7 @@ class Pull
         switch ($stage) {
             case 'preflight':
                 $this->client->run_preflight();
-                $preflight = $this->client->state["preflight"] ?? null;
+                $preflight = $this->client->state->preflight;
                 $ok = ($preflight["http_code"] ?? 0) === 200 && !empty($preflight["data"]["ok"]);
                 if (!$ok) {
                     $this->client->exit_code = 1;
@@ -449,8 +447,8 @@ class Pull
                 // dump is still present. Without the dump, the following
                 // db-apply stage would have nothing safe to import.
                 if (
-                    ($this->client->state['active_resumable_command']['command_name'] ?? null) !== 'db-pull' ||
-                    ($this->client->state['active_resumable_command']['completion_state'] ?? null) !== 'complete' ||
+                    $this->client->state->active_resumable_command->command_name !== 'db-pull' ||
+                    $this->client->state->active_resumable_command->completion_state !== 'complete' ||
                     !file_exists($this->client->state_dir . '/db.sql')
                 ) {
                     $this->run_until_complete('db-pull', function () {
@@ -473,15 +471,15 @@ class Pull
                 // already reached lower-level completion, accept that result even
                 // when the pipeline checkpoint still needs to be advanced.
                 if (
-                    ($this->client->state['active_resumable_command']['command_name'] ?? null) !== 'db-apply' ||
-                    ($this->client->state['active_resumable_command']['completion_state'] ?? null) !== 'complete'
+                    $this->client->state->active_resumable_command->command_name !== 'db-apply' ||
+                    $this->client->state->active_resumable_command->completion_state !== 'complete'
                 ) {
                     $this->run_until_complete('db-apply', function () use ($options) {
                         $this->client->run_db_apply($options);
                     });
                 }
                 $state = $this->client->state;
-                $stmts = (int) ($state["apply"]["statements_executed"] ?? 0);
+                $stmts = $state->apply->statements_executed;
                 $this->print_done($stage, $stmts > 0 ? number_format($stmts) . " statements" : null);
                 break;
 
@@ -559,7 +557,7 @@ class Pull
         }
 
         if (!isset($options['filter'])) {
-            $options['filter'] = $this->client->state['filter'] ?? 'none';
+            $options['filter'] = $this->client->state->filter;
         }
         if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
             throw new InvalidArgumentException(
@@ -716,6 +714,7 @@ class Pull
 
         return $options;
     }
+
     /**
      * Returns the implicit start mode for a generated runtime.
      */
@@ -756,7 +755,6 @@ class Pull
     private function prepare_repull(string $command): void
     {
         $state_dir = $this->client->state_dir;
-        $defaults = $this->client->default_state();
         switch ($command) {
             case 'pull':
                 $reset_file_transfer_state = true;
@@ -780,34 +778,35 @@ class Pull
                 throw new InvalidArgumentException("Unknown pull command: {$command}");
         }
 
-        $this->client->mutate_state(function (array $state) use ($command, $defaults, $reset_file_transfer_state, $reset_file_selection_state, $reset_db_state) {
-            $state['pull_pipeline']['started_by_command'] = $command;
-            $state['pull_pipeline']['stage_sequence'] = [];
-            $state['pull_pipeline']['last_completed_stage'] = null;
-            $state['pull_pipeline']['files_filter'] = null;
-            $state['pull_pipeline']['skipped_pending'] = false;
-            $state['pull_pipeline']['has_completed_once'] = true;
-            $state['active_resumable_command']['command_name'] = null;
-            $state['active_resumable_command']['completion_state'] = null;
-            $state['active_resumable_command']['remote_cursor'] = null;
-            $state['active_resumable_command']['current_stage'] = null;
-            $state['consecutive_timeouts'] = 0;
+
+        $this->client->mutate_state(function (ImportState $state) use ($command, $reset_file_transfer_state, $reset_file_selection_state, $reset_db_state) {
+            $state->pull_pipeline->started_by_command = $command;
+            $state->pull_pipeline->stage_sequence = [];
+            $state->pull_pipeline->last_completed_stage = null;
+            $state->pull_pipeline->files_filter = null;
+            $state->pull_pipeline->skipped_pending = false;
+            $state->pull_pipeline->has_completed_once = true;
+            $state->active_resumable_command->command_name = null;
+            $state->active_resumable_command->completion_state = null;
+            $state->active_resumable_command->remote_cursor = null;
+            $state->active_resumable_command->current_stage = null;
+            $state->consecutive_timeouts = 0;
             if ($reset_file_transfer_state) {
-                $state['current_file'] = null;
-                $state['current_file_bytes'] = null;
-                $state['diff'] = $defaults['diff'];
-                $state['fetch'] = $defaults['fetch'];
-                $state['fetch_skipped'] = $defaults['fetch_skipped'];
+                $state->current_file = null;
+                $state->current_file_bytes = null;
+                $state->diff = new FileDiffProgressState();
+                $state->fetch = new DownloadListFetchProgressState();
+                $state->fetch_skipped = new DownloadListFetchProgressState();
             }
             if ($reset_file_selection_state) {
-                $state['index'] = $defaults['index'];
-                $state['files_pull_only_fingerprint'] = null;
+                $state->index = new RemoteFileIndexCursorState();
+                $state->files_pull_only_fingerprint = null;
             }
             if ($reset_db_state) {
-                $state['sql_bytes'] = null;
-                $state['db_index'] = $defaults['db_index'];
-                $state['apply'] = $defaults['apply'];
-                $state['sql_output'] = null;
+                $state->sql_bytes = null;
+                $state->db_index = new DatabaseTableIndexState();
+                $state->apply = new DatabaseApplyCommandState();
+                $state->sql_output = null;
             }
             return $state;
         });
@@ -844,14 +843,14 @@ class Pull
         for ($attempt = 0; $attempt < 1000; $attempt++) {
             $handler();
             $state = $this->client->state;
-            if (($state['active_resumable_command']['completion_state'] ?? null) === 'complete') {
+            if ($state->active_resumable_command->completion_state === 'complete') {
                 return;
             }
-            if (($state['active_resumable_command']['completion_state'] ?? null) !== 'partial') {
+            if ($state->active_resumable_command->completion_state !== 'partial') {
                 throw new RuntimeException("Stage {$stage} stopped before completing.");
             }
-            $this->client->mutate_state(function (array $state) {
-                $state['active_resumable_command']['completion_state'] = 'in_progress';
+            $this->client->mutate_state(function (ImportState $state) {
+                $state->active_resumable_command->completion_state = 'in_progress';
                 return $state;
             });
             $this->client->exit_code = 0;
@@ -862,6 +861,7 @@ class Pull
     }
 
     /**
+
      * Start the local server. For php-builtin / playground-cli this
      * runs start.sh via passthru and blocks until the user hits Ctrl-C.
      */
@@ -883,10 +883,10 @@ class Pull
 
         // Mark pull complete BEFORE the server blocks so killing the
         // server (Ctrl-C) doesn't leave the pipeline mid-flight.
-        $this->client->mutate_state(function (array $state) {
-            $state['pull_pipeline']['last_completed_stage'] = 'start';
-            $state['pull_pipeline']['has_completed_once'] = true;
-            $state['active_resumable_command']['completion_state'] = 'complete';
+        $this->client->mutate_state(function (ImportState $state) {
+            $state->pull_pipeline->last_completed_stage = 'start';
+            $state->pull_pipeline->has_completed_once = true;
+            $state->active_resumable_command->completion_state = 'complete';
             return $state;
         });
 
@@ -966,7 +966,7 @@ class Pull
         $this->progress->print_line(
             "\n{$green}{$bold}Done.{$r} {$dim}Files in {$fs_root}{$r}\n"
         );
-        if (!empty($this->client->state['pull_pipeline']['skipped_pending'])) {
+        if ($this->client->state->pull_pipeline->skipped_pending) {
             $this->progress->print_line(
                 "{$dim}Deferred files remain. The skipped download list was preserved on disk for a follow-up sync.{$r}\n"
             );
