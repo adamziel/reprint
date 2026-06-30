@@ -2980,7 +2980,7 @@ class ImportClient
 
             // In pull mode, finalize the scanning line with a checkmark
             // and start the download progress on a fresh line.
-            if ($has_downloads && $this->progress->is_quiet_lifecycle()) {
+            if ($has_downloads && $this->progress->is_mode('pipeline')) {
                 $green = "\033[32m";
                 $dim = "\033[2m";
                 $r = "\033[0m";
@@ -4235,7 +4235,7 @@ class ImportClient
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
 
-        if (!$this->progress->is_quiet_lifecycle()) {
+        if (!$this->progress->is_mode('pipeline')) {
             fwrite(STDERR, "\n");
             fwrite(STDERR, "Runtime: {$runtime}\n");
             fwrite(STDERR, "Source host: {$webhost}\n");
@@ -4725,7 +4725,7 @@ class ImportClient
             "refreshed" => $refreshed,
             "force_replaced" => $forced,
         ];
-        if (!$this->progress->is_quiet_lifecycle()) {
+        if (!$this->progress->is_mode('pipeline')) {
             fwrite($this->progress_fd, json_encode($result) . "\n");
         }
         $this->output_progress(array_merge(["type" => "flat_docroot_complete"], $result));
@@ -5572,7 +5572,7 @@ class ImportClient
                     "message" => "db-apply complete ({$statements_executed} statements executed)",
                 ]);
 
-                if (!$this->progress->is_quiet_lifecycle()) {
+                if (!$this->progress->is_mode('pipeline')) {
                     // Clear the progress line before printing the final message
                     $this->progress->clear_progress_line();
                 }

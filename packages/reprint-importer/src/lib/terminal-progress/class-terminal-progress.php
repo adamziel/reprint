@@ -5,15 +5,15 @@
  * Two categories of output:
  *
  * - Progress line: a single line that overwrites in place. In default
- *   mode it just shows the message; in "quiet lifecycle" mode it also
+ *   mode it just shows the message; in "pipeline progress" mode it also
  *   prepends an animated Braille spinner and (when a fraction is given)
  *   renders a Unicode progress bar. Use show_progress_line().
  *
  * - Lifecycle line: a regular line that announces a phase transition,
  *   e.g. "Starting db-pull". Use show_lifecycle_line(). When
- *   quiet_lifecycle is enabled (typically by an orchestrator like
- *   `pull`), these are suppressed so the orchestrator can provide its
- *   own framing without sub-command noise.
+ *   pipeline progress is enabled (typically by `pull`), these are
+ *   suppressed so the parent command can provide its own framing
+ *   without sub-command noise.
  *
  * Both methods are no-ops when stdout is not a TTY (so machine
  * consumers reading JSONL don't get progress noise interleaved) or
@@ -34,11 +34,11 @@ class TerminalProgress
     private ?int $terminal_width_cache = null;
 
     /**
-     * @var bool When true, suppress lifecycle messages and decorate the
-     * progress line with a spinner / progress bar. Used by orchestrator
-     * commands (e.g. pull) that want to provide their own framing.
+     * @var string Output mode. Pipeline mode suppresses lifecycle messages
+     * and decorates the progress line with a spinner / progress bar. Used by
+     * parent commands (e.g. pull) that want to provide their own framing.
      */
-    private bool $quiet_lifecycle = false;
+    private string $mode = 'default';
 
     /** @var int Spinner frame counter. */
     private int $spinner_tick = 0;
@@ -88,18 +88,21 @@ class TerminalProgress
     }
 
     /**
-     * Enable rich progress mode: lifecycle messages are suppressed,
-     * the progress line gains a spinner/bar prefix, and tick_spinner()
-     * starts animating.
+     * Set the output mode. Pipeline mode suppresses lifecycle messages,
+     * adds a spinner/bar prefix to progress lines, and lets tick_spinner()
+     * animate the active line.
      */
-    public function enable_quiet_lifecycle(): void
+    public function set_mode(string $mode): void
     {
-        $this->quiet_lifecycle = true;
+        if (!in_array($mode, ['default', 'pipeline'], true)) {
+            throw new InvalidArgumentException("Unknown progress mode: {$mode}");
+        }
+        $this->mode = $mode;
     }
 
-    public function is_quiet_lifecycle(): bool
+    public function is_mode(string $mode): bool
     {
-        return $this->quiet_lifecycle;
+        return $this->mode === $mode;
     }
 
     /**
@@ -116,7 +119,7 @@ class TerminalProgress
     /**
      * Show progress in a single refreshing line.
      *
-     * In quiet_lifecycle mode the message is decorated with either a
+     * In pipeline progress mode the message is decorated with either a
      * progress bar (when $fraction is provided) or a Braille spinner.
      * Rate-limited to ~20fps so the terminal can keep up.
      */
@@ -125,7 +128,7 @@ class TerminalProgress
         if (!$this->is_tty || $this->verbose_mode) {
             return;
         }
-        if ($this->quiet_lifecycle) {
+        if ($this->is_mode('pipeline')) {
             // Rate-limit in pull mode to avoid flooding the terminal.
             // Hundreds of updates per second cause visual artifacts
             // because the terminal can't redraw fast enough — \r writes
@@ -150,20 +153,20 @@ class TerminalProgress
     /**
      * Print a lifecycle message announcing a phase transition.
      *
-     * Suppressed when quiet_lifecycle is enabled, so an orchestrator
+     * Suppressed when pipeline progress is enabled, so the parent command
      * can render its own framing without sub-command noise.
      */
     public function show_lifecycle_line(string $message): void
     {
-        if (!$this->is_tty || $this->verbose_mode || $this->quiet_lifecycle) {
+        if (!$this->is_tty || $this->verbose_mode || $this->is_mode('pipeline')) {
             return;
         }
         fwrite($this->progress_fd, $message);
     }
 
     /**
-     * Always print a line (no quiet_lifecycle suppression). Use for
-     * orchestrator-owned output like stage headers / checkmarks.
+     * Always print a line (no pipeline progress suppression). Use for
+     * parent-command output like stage headers / checkmarks.
      */
     public function print_line(string $message): void
     {
@@ -192,7 +195,7 @@ class TerminalProgress
      */
     public function tick_spinner(): void
     {
-        if (!$this->quiet_lifecycle || !$this->is_tty || $this->verbose_mode) {
+        if (!$this->is_mode('pipeline') || !$this->is_tty || $this->verbose_mode) {
             return;
         }
         if ($this->active_label === null && $this->last_progress_message === null) {
