@@ -165,6 +165,24 @@ class DownloadListFetchProgressState
     }
 }
 
+class FilesPullSummaryState
+{
+    /** @var int Number of changed files pulled in the current files-pull run. */
+    public int $files_pulled = 0;
+
+    public static function from_array(array $data): self
+    {
+        $state = new self();
+        $state->files_pulled = (int) ($data['files_pulled'] ?? 0);
+        return $state;
+    }
+
+    public function to_array(): array
+    {
+        return ['files_pulled' => $this->files_pulled];
+    }
+}
+
 class DatabaseApplyCommandState
 {
     /** @var int SQL statements successfully executed. */
@@ -335,6 +353,7 @@ class ImportState
     public ?int $max_allowed_packet = null;
     public ?string $files_remap_fingerprint = null;
     public ?string $files_pull_only_fingerprint = null;
+    public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
     public RemoteFileIndexCursorState $index;
@@ -363,6 +382,7 @@ class ImportState
         $this->index = new RemoteFileIndexCursorState();
         $this->fetch = new DownloadListFetchProgressState();
         $this->fetch_skipped = new DownloadListFetchProgressState();
+        $this->files_pull_summary = new FilesPullSummaryState();
         $this->apply = new DatabaseApplyCommandState();
         $this->tuning = new AdaptiveTuningState();
         $this->pull_pipeline = new PullPipelineCheckpointState();
@@ -384,6 +404,7 @@ class ImportState
         $state->max_allowed_packet = isset($data['max_allowed_packet']) ? (int) $data['max_allowed_packet'] : null;
         $state->files_remap_fingerprint = isset($data['files_remap_fingerprint']) ? (string) $data['files_remap_fingerprint'] : null;
         $state->files_pull_only_fingerprint = isset($data['files_pull_only_fingerprint']) ? (string) $data['files_pull_only_fingerprint'] : null;
+        $state->files_pull_summary = self::files_pull_summary_from($data['files_pull_summary'] ?? []);
         $state->db_index = self::database_table_index_from($data['db_index'] ?? []);
         $state->diff = self::file_diff_progress_from($data['diff'] ?? []);
         $state->index = self::remote_file_index_cursor_from($data['index'] ?? []);
@@ -421,6 +442,7 @@ class ImportState
             'max_allowed_packet' => $this->max_allowed_packet,
             'files_remap_fingerprint' => $this->files_remap_fingerprint,
             'files_pull_only_fingerprint' => $this->files_pull_only_fingerprint,
+            'files_pull_summary' => $this->files_pull_summary->to_array(),
             'db_index' => $this->db_index->to_array(),
             'diff' => $this->diff->to_array(),
             'index' => $this->index->to_array(),
@@ -445,6 +467,11 @@ class ImportState
     private static function resumable_command_checkpoint_from($value): ResumableCommandCheckpointState
     {
         return $value instanceof ResumableCommandCheckpointState ? $value : ResumableCommandCheckpointState::from_array(is_array($value) ? $value : []);
+    }
+
+    private static function files_pull_summary_from($value): FilesPullSummaryState
+    {
+        return $value instanceof FilesPullSummaryState ? $value : FilesPullSummaryState::from_array(is_array($value) ? $value : []);
     }
 
     private static function database_table_index_from($value): DatabaseTableIndexState

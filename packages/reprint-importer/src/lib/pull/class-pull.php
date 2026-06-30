@@ -284,6 +284,7 @@ class Pull
                     $state->index = new RemoteFileIndexCursorState();
                     $state->fetch = new DownloadListFetchProgressState();
                     $state->fetch_skipped = new DownloadListFetchProgressState();
+                    $state->files_pull_summary = new FilesPullSummaryState();
                     $state->files_pull_only_fingerprint = null;
                     return $state;
                 });
@@ -432,12 +433,15 @@ class Pull
                     $options['filter'] === 'essential-files' &&
                     $this->client->has_skipped_files_pending();
                 $this->client->set_pull_files_state($options['filter'], $skipped_pending);
-                $count = $this->client->index_count();
-                $summary = $count > 0 ? number_format($count) . " files" : null;
+                $files_pulled = $this->client->state->files_pull_summary->files_pulled;
+                $pulled_label = $files_pulled === 1 ? 'file' : 'files';
+                $summary = sprintf(
+                    '%s changed %s pulled',
+                    number_format($files_pulled),
+                    $pulled_label,
+                );
                 if ($skipped_pending) {
-                    $summary = $summary !== null
-                        ? $summary . ", deferred files pending"
-                        : "deferred files pending";
+                    $summary .= ", deferred files pending";
                 }
                 $this->print_done($stage, $summary);
                 break;
@@ -797,6 +801,7 @@ class Pull
                 $state->diff = new FileDiffProgressState();
                 $state->fetch = new DownloadListFetchProgressState();
                 $state->fetch_skipped = new DownloadListFetchProgressState();
+                $state->files_pull_summary = new FilesPullSummaryState();
             }
             if ($reset_file_selection_state) {
                 $state->index = new RemoteFileIndexCursorState();
