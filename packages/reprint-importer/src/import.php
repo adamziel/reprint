@@ -10847,12 +10847,14 @@ class ImportClient
                 "next_offset" => 0,
                 "batch_file" => null,
                 "cursor" => null,
+                "batch_entries" => 0,
             ],
             "fetch_skipped" => [
                 "offset" => 0,
                 "next_offset" => 0,
                 "batch_file" => null,
                 "cursor" => null,
+                "batch_entries" => 0,
             ],
             // Crash recovery: track in-progress file downloads
             // If we crash mid-write, we can truncate to the expected size on resume
