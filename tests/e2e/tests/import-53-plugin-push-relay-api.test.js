@@ -16,9 +16,11 @@ import { createServer } from 'node:net';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'importer', 'import.php');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
+const SERVER_PHP_BINARY = process.env.SERVER_PHP_BINARY || 'php';
 const TARGET_SECRET = 'target-secret';
+const RELAY_SOURCE_TIMEOUT_MS = 60000;
 
-describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
+describe('Import: Plugin Push Relay API', { timeout: 90000 }, () => {
     let tempDir;
     let server;
     let serverOutput = '';
@@ -34,14 +36,16 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
         writeFileSync(join(tempDir, 'router.php'), routerPhp(tempDir));
         const port = await getFreePort();
         baseUrl = `http://127.0.0.1:${port}/`;
-        server = spawn(PHP_BINARY, ['-S', `127.0.0.1:${port}`, join(tempDir, 'router.php')], {
+        server = spawn(SERVER_PHP_BINARY, ['-S', `127.0.0.1:${port}`, join(tempDir, 'router.php')], {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: {
                 ...process.env,
                 // The plugin run request blocks while the source worker calls
                 // back into this same test server, so a single built-in-server
-                // worker would deadlock the relay loop.
-                PHP_CLI_SERVER_WORKERS: process.env.PHP_CLI_SERVER_WORKERS || '4',
+                // worker would deadlock the relay loop. Keep the fixture on the
+                // native PHP server even when PHP_BINARY points at Playground,
+                // whose wrapper cannot expose PHP_CLI_SERVER_WORKERS here.
+                PHP_CLI_SERVER_WORKERS: process.env.PHP_CLI_SERVER_WORKERS || '8',
             },
         });
         server.stderr.on('data', (chunk) => {
@@ -200,7 +204,7 @@ describe('Import: Plugin Push Relay API', { timeout: 60000 }, () => {
             `--relay-allow-path=${join(tempDir, 'source')}`,
             '--relay-idle-timeout=1',
         ], {
-            timeout: 30000,
+            timeout: RELAY_SOURCE_TIMEOUT_MS,
             encoding: 'utf-8',
             maxBuffer: 5 * 1024 * 1024,
             env: { ...process.env },
