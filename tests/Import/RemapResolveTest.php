@@ -313,14 +313,14 @@ class RemapResolveTest extends TestCase
         $this->assertSame($this->root . '/site', $rules['/var/www/site']);
     }
 
-    public function testPrepareFilesDownloadOptionsResolvesPullRemap(): void
+    public function testPrepareFilesPullOptionsResolvesPullRemap(): void
     {
         $client = $this->client(array(
             'abspath' => '/var/www/html',
             'content_dir' => '/var/www/html/wp-content',
         ));
 
-        $client->prepare_files_download_options(array(
+        $client->prepare_files_pull_options(array(
             'remap' => array(array(':abspath:', ':fs-root:')),
         ));
 

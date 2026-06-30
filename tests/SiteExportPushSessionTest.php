@@ -360,7 +360,7 @@ final class SiteExportPushSessionTest extends TestCase
         $stateDir = _site_export_push_import_state_dir($stateId);
         _site_export_push_write_json_file($stateDir . '/.import-status.json', [
             'status' => 'running',
-            'command' => 'files-download',
+            'command' => 'files-pull',
         ]);
         _site_export_push_mutate_session($sessionId, function (array $session) use ($stateId): array {
             $session['status'] = 'running';
@@ -378,7 +378,7 @@ final class SiteExportPushSessionTest extends TestCase
         });
         _site_export_push_write_json_file($stateDir . '/.import-status.json', [
             'status' => 'running',
-            'command' => 'files-download',
+            'command' => 'files-pull',
         ]);
 
         $complete = _site_export_push_session_status($sessionId);

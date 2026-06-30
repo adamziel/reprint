@@ -2608,10 +2608,13 @@ class ImportClient
             exit(1);
         }
         $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
-        $this->state["command"] = "preflight";
-        $this->state["status"] = $ok ? "complete" : "error";
-        $this->state["stage"] = null;
-        $this->save_state($this->state);
+        $this->mutate_state(function (ImportState $state) use ($ok) {
+            $state->active_resumable_command->command_name = "preflight";
+            $state->active_resumable_command->completion_state = $ok ? "complete" : "error";
+            $state->active_resumable_command->current_stage = null;
+            $state->active_resumable_command->remote_cursor = null;
+            return $state;
+        });
         $this->write_status_file($ok ? null : "Preflight failed");
         if (defined('IMPORTER_WEB_ENTRY') && IMPORTER_WEB_ENTRY) {
             if (!$ok) {
@@ -5831,7 +5834,7 @@ class ImportClient
 
     private function get_preflight_wp_paths(): array
     {
-        $preflight = $this->state["preflight"]["data"] ?? [];
+        $preflight = $this->import_state()->preflight["data"] ?? [];
         $paths_urls = $preflight["database"]["wp"]["paths_urls"] ?? [];
         $abspath = $this->clean_preflight_path($paths_urls["abspath"] ?? null);
         $uploads = $paths_urls["uploads"] ?? [];
@@ -11684,14 +11687,7 @@ class ImportClient
             $this->ensure_directory($dir, "relay directory");
         }
 
-        if (!empty($this->relay_source_allowed_paths)) {
-            $this->state["relay_source_allowed_paths"] = $this->relay_source_allowed_paths;
-            $this->save_state($this->state);
-        } elseif (isset($this->state["relay_source_allowed_paths"]) && is_array($this->state["relay_source_allowed_paths"])) {
-            $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths(
-                $this->state["relay_source_allowed_paths"],
-            );
-        }
+        $this->persist_or_restore_relay_source_allowed_paths();
 
         $this->audit_log("RELAY_SOURCE | started | source={$this->remote_url}", true);
         $last_work_at = time();
@@ -11752,14 +11748,7 @@ class ImportClient
     {
         $this->require_remote_relay_config();
 
-        if (!empty($this->relay_source_allowed_paths)) {
-            $this->state["relay_source_allowed_paths"] = $this->relay_source_allowed_paths;
-            $this->save_state($this->state);
-        } elseif (isset($this->state["relay_source_allowed_paths"]) && is_array($this->state["relay_source_allowed_paths"])) {
-            $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths(
-                $this->state["relay_source_allowed_paths"],
-            );
-        }
+        $this->persist_or_restore_relay_source_allowed_paths();
 
         $this->audit_log(
             "RELAY_SOURCE_REMOTE | started | source={$this->remote_url} " .
@@ -12714,10 +12703,9 @@ class ImportClient
         if (!empty($this->relay_source_allowed_paths)) {
             return $this->relay_source_allowed_paths;
         }
-        if (isset($this->state["relay_source_allowed_paths"]) && is_array($this->state["relay_source_allowed_paths"])) {
-            $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths(
-                $this->state["relay_source_allowed_paths"],
-            );
+        $stored_paths = $this->import_state()->relay_source_allowed_paths;
+        if (!empty($stored_paths)) {
+            $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths($stored_paths);
         }
         if (empty($this->relay_source_allowed_paths)) {
             throw new RuntimeException(
@@ -12727,13 +12715,33 @@ class ImportClient
         return $this->relay_source_allowed_paths;
     }
 
+    private function persist_or_restore_relay_source_allowed_paths(): void
+    {
+        if (!empty($this->relay_source_allowed_paths)) {
+            $paths = $this->relay_source_allowed_paths;
+            $this->mutate_state(function (ImportState $state) use ($paths) {
+                $state->relay_source_allowed_paths = $paths;
+                return $state;
+            });
+            return;
+        }
+
+        $stored_paths = $this->import_state()->relay_source_allowed_paths;
+        if (!empty($stored_paths)) {
+            $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths($stored_paths);
+        }
+    }
+
     private function remember_relay_source_preflight_paths(array $preflight): void
     {
         $discovered = $this->extract_relay_allowed_paths_from_preflight($preflight);
         $merged = array_merge($this->relay_source_allowed_paths, $discovered);
         $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths($merged);
-        $this->state["relay_source_allowed_paths"] = $this->relay_source_allowed_paths;
-        $this->save_state($this->state);
+        $paths = $this->relay_source_allowed_paths;
+        $this->mutate_state(function (ImportState $state) use ($paths) {
+            $state->relay_source_allowed_paths = $paths;
+            return $state;
+        });
     }
 
     /** @return array<int,string> */
@@ -14358,6 +14366,7 @@ class ImportClient
             "files_pull_summary" => [
                 "files_pulled" => 0,
             ],
+            "relay_source_allowed_paths" => [],
             "db_index" => [
                 "file" => null,
                 "tables" => 0,

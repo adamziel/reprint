@@ -311,9 +311,9 @@ function _site_export_push_normalize_command($command): string {
         'pull-db' => true,
         'preflight' => true,
         'files-index' => true,
-        'files-download' => true,
+        'files-pull' => true,
         'db-index' => true,
-        'db-download' => true,
+        'db-pull' => true,
         'db-apply' => true,
     ];
     if (!isset($allowed[$command])) {
