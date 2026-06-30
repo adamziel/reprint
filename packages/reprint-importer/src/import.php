@@ -2724,6 +2724,7 @@ class ImportClient
                 $this->import_state()->active_resumable_command->completion_state = "in_progress";
                 $this->import_state()->active_resumable_command->current_stage = "fetch-skipped";
                 $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
+                $this->import_state()->files_pull_summary = new FilesPullSummaryState();
                 $this->save_state($this->state);
                 $this->run_files_sync_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
@@ -2838,6 +2839,7 @@ class ImportClient
             $this->import_state()->index = new RemoteFileIndexCursorState();
             $this->import_state()->fetch = new DownloadListFetchProgressState();
             $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+            $this->import_state()->files_pull_summary = new FilesPullSummaryState();
             $this->save_state($this->state);
 
             if ($is_delta) {
@@ -6634,6 +6636,7 @@ class ImportClient
         if ($this->download_list_done !== null) {
             $this->download_list_done += $batch_entries;
         }
+        $this->import_state()->files_pull_summary->files_pulled += $batch_entries;
         $this->files_imported = 0;
 
         $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
@@ -10828,6 +10831,9 @@ class ImportClient
             "max_allowed_packet" => null,
             "files_remap_fingerprint" => null,
             "files_pull_only_fingerprint" => null,
+            "files_pull_summary" => [
+                "files_pulled" => 0,
+            ],
             "db_index" => [
                 "file" => null,
                 "tables" => 0,
@@ -10967,6 +10973,18 @@ class ImportClient
         }
         $fetch = array_intersect_key($fetch, $defaults["fetch"]);
         $state["fetch"] = array_merge($defaults["fetch"], $fetch);
+        $files_pull_summary = $state["files_pull_summary"] ?? [];
+        if (!is_array($files_pull_summary)) {
+            $files_pull_summary = [];
+        }
+        $files_pull_summary = array_intersect_key(
+            $files_pull_summary,
+            $defaults["files_pull_summary"],
+        );
+        $state["files_pull_summary"] = array_merge(
+            $defaults["files_pull_summary"],
+            $files_pull_summary,
+        );
         $tuning = $state["tuning"] ?? [];
         if (!is_array($tuning)) {
             $tuning = [];

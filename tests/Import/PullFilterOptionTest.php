@@ -9,12 +9,16 @@ require_once __DIR__ . '/../../importer/import.php';
 class PullFilterFakeClient extends \ImportClient
 {
     private bool $create_skipped_list;
+    public int $files_pulled = 0;
     public int $preflight_runs = 0;
     public int $files_sync_runs = 0;
     public int $db_sync_runs = 0;
     public int $db_apply_runs = 0;
     public array $progress_events = [];
     public array $status_errors = [];
+
+    /** @var resource|null */
+    private $terminal_progress_stream = null;
 
     public function __construct(string $state_dir, string $fs_root, bool $create_skipped_list)
     {
@@ -34,6 +38,29 @@ class PullFilterFakeClient extends \ImportClient
     public function write_status_file(?string $error = null): void
     {
         $this->status_errors[] = $error;
+    }
+
+    public function captureTerminalProgress(): void
+    {
+        $ref = new \ReflectionClass(\ImportClient::class);
+        $property = $ref->getProperty('progress');
+        $property->setAccessible(true);
+        $progress = $property->getValue($this);
+
+        $this->terminal_progress_stream = fopen('php://temp', 'w+');
+        $progress->set_is_tty(true);
+        $progress->set_progress_fd($this->terminal_progress_stream);
+    }
+
+    public function terminalProgressOutput(): string
+    {
+        if ($this->terminal_progress_stream === null) {
+            return '';
+        }
+
+        rewind($this->terminal_progress_stream);
+        $output = stream_get_contents($this->terminal_progress_stream);
+        return $output === false ? '' : $output;
     }
 
     public function index_count(): int
@@ -87,6 +114,7 @@ class PullFilterFakeClient extends \ImportClient
             $state->active_resumable_command->command_name = "files-pull";
             $state->active_resumable_command->completion_state = "complete";
             $state->active_resumable_command->current_stage = null;
+            $state->files_pull_summary->files_pulled = $this->files_pulled;
             return $state;
         });
     }
@@ -400,6 +428,53 @@ class PullFilterOptionTest extends TestCase
         }
 
         $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+    }
+
+    public function testPullFilesSummaryReportsNoChangedFilesPulled(): void
+    {
+        $client = $this->makeClient(false);
+        $client->captureTerminalProgress();
+
+        $client->run([
+            "command" => "pull-files",
+        ]);
+
+        $output = $client->terminalProgressOutput();
+        $this->assertStringContainsString('0 changed files pulled', $output);
+        $this->assertStringNotContainsString('pull scope compared', $output);
+    }
+
+    public function testPullFilesSummaryReportsChangedFilePulled(): void
+    {
+        $client = $this->makeClient(false);
+        $client->files_pulled = 1;
+        $client->captureTerminalProgress();
+
+        $client->run([
+            "command" => "pull-files",
+            "only" => ["/var/www/html/wp-content/uploads/reprint-demo"],
+        ]);
+
+        $this->assertStringContainsString(
+            '1 changed file pulled',
+            $client->terminalProgressOutput(),
+        );
+    }
+
+    public function testPullFilesSummaryReportsDeferredFilesPending(): void
+    {
+        $client = $this->makeClient(true);
+        $client->captureTerminalProgress();
+
+        $client->run([
+            "command" => "pull-files",
+            "filter" => "essential-files",
+        ]);
+
+        $this->assertStringContainsString(
+            '0 changed files pulled, deferred files pending',
+            $client->terminalProgressOutput(),
+        );
     }
 
     public function testPullFilesRunsOnlyPreflightAndFilesStages(): void
