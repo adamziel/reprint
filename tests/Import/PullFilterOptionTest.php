@@ -580,6 +580,154 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
     }
 
+    public function testPullDbRunsPreflightDownloadAndApplyStages(): void
+    {
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-db",
+            "target_engine" => "sqlite",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->preflight_runs);
+        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame(1, $client->db_sync_runs);
+        $this->assertSame(1, $client->db_apply_runs);
+        $this->assertSame('pull-db', $state["pull_pipeline"]["started_by_command"]);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame('db-apply', $state["active_resumable_command"]["command_name"]);
+        $this->assertSame(42, $state["apply"]["statements_executed"]);
+    }
+
+    public function testPullDbRejectsConflictingInProgressPullFiles(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "active_resumable_command" => [
+                    "command_name" => "files-pull",
+                    "completion_state" => "partial",
+                    "current_stage" => "fetch",
+                ],
+                "pull_pipeline" => [
+                    "started_by_command" => "pull-files",
+                    "stage_sequence" => ["preflight", "files-pull"],
+                    "last_completed_stage" => "preflight",
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull-db",
+                "target_engine" => "sqlite",
+            ]);
+            $this->fail('Expected pull-db to reject an in-progress pull-files command');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('Another command is already in progress: pull-files', $e->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertSame(0, $client->db_sync_runs);
+        $this->assertSame(0, $client->db_apply_runs);
+    }
+
+    public function testPullDbResumesAfterDbPullCompletedBeforePipelineStageWasMarked(): void
+    {
+        file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "active_resumable_command" => [
+                    "command_name" => "db-pull",
+                    "completion_state" => "complete",
+                    "current_stage" => null,
+                ],
+                "pull_pipeline" => [
+                    "started_by_command" => "pull-db",
+                    "stage_sequence" => ["preflight", "db-pull", "db-apply"],
+                    "last_completed_stage" => "preflight",
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-db",
+            "target_engine" => "sqlite",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(0, $client->db_sync_runs);
+        $this->assertSame(1, $client->db_apply_runs);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame('db-apply', $state["active_resumable_command"]["command_name"]);
+    }
+
+    public function testPullDbAfterStandaloneDbPullDownloadsFreshDump(): void
+    {
+        file_put_contents($this->stateDir . '/db.sql', "SELECT stale;\n");
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "active_resumable_command" => [
+                    "command_name" => "db-pull",
+                    "completion_state" => "complete",
+                    "current_stage" => null,
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-db",
+            "target_engine" => "sqlite",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->db_sync_runs);
+        $this->assertSame(1, $client->db_apply_runs);
+        $this->assertSame("SELECT 1;\n", file_get_contents($this->stateDir . '/db.sql'));
+        $this->assertSame('pull-db', $state["pull_pipeline"]["started_by_command"]);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
+    }
+
+    public function testInvalidPullDbOptionsFailBeforeStateIsPersisted(): void
+    {
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull-db",
+                "target_engine" => "not-a-database",
+            ]);
+            $this->fail('Expected pull-db to reject an invalid target engine');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('Invalid --target-engine value', $e->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+    }
+
     public function testPullWithEssentialFilesPersistsDeferredFilesState(): void
     {
         $client = $this->makeClient(true);

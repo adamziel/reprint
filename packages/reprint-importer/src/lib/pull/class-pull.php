@@ -7,15 +7,15 @@ class PullFailureReportedException extends RuntimeException
 }
 
 /**
- * The `pull` command — orchestrates lower-level commands into a
- * resumable pipeline.
+ * High-level pull commands — orchestrate lower-level commands into
+ * resumable pipelines.
  *
  * Each step retries automatically on server timeouts (exit code 2). If
- * the process is interrupted, re-running pull resumes from the last
- * completed step. Like `git pull` composes fetch + merge, `pull`
- * composes preflight → files-pull → db-pull → db-apply →
+ * the process is interrupted, re-running the same high-level command
+ * resumes from the last completed step. Like `git pull` composes fetch +
+ * merge, `pull` composes preflight → files-pull → db-pull → db-apply →
  * flat-docroot → apply-runtime → start. `pull-files` runs the file
- * subset.
+ * subset, and `pull-db` runs the database subset.
  *
  * The class holds a reference to ImportClient because each stage
  * delegates to an ImportClient method (run_preflight, run_files_sync,
@@ -96,20 +96,58 @@ class Pull
 
         $options = $this->validate_and_default_pull_options($options);
 
-        $this->run_pipeline('pull', $this->stages($options), $options, 'Pulling');
+        $this->run_pipeline(
+            'pull',
+            $this->stages($options),
+            $options,
+            'Pulling',
+            [
+                'reset_file_transfer_state' => true,
+                'reset_file_selection_state' => false,
+                'reset_db_state' => true,
+            ]
+        );
     }
 
     /**
-     * Handle --abort for high-level file pull commands.
+     * Handle --abort for high-level pull commands.
      *
-     * Downloaded site files stay in place; the next run refreshes the
-     * file indexes and fetches a fresh delta.
+     * File pipelines keep downloaded site files in place. The database
+     * pipeline removes stale database artifacts so the next pull-db fetches
+     * and applies a fresh dump.
      */
     public function abort(string $command = 'pull'): void
     {
-        $this->prepare_repull($command);
+        switch ($command) {
+            case 'pull-files':
+                $this->prepare_repull($command, [
+                    'reset_file_transfer_state' => true,
+                    'reset_file_selection_state' => true,
+                    'reset_db_state' => false,
+                ]);
+                break;
+
+            case 'pull-db':
+                $this->prepare_repull($command, [
+                    'reset_file_transfer_state' => false,
+                    'reset_file_selection_state' => false,
+                    'reset_db_state' => true,
+                ]);
+                break;
+
+            default:
+                $this->prepare_repull($command, [
+                    'reset_file_transfer_state' => true,
+                    'reset_file_selection_state' => false,
+                    'reset_db_state' => true,
+                ]);
+                break;
+        }
         $label = $command === 'pull' ? 'Pull' : $command;
-        $message = "{$label} state cleared. Downloaded files are preserved.";
+        $message = "{$label} state cleared.";
+        $message .= $command === 'pull-db'
+            ? " Database artifacts will be downloaded again."
+            : " Downloaded files are preserved.";
         $this->progress->show_lifecycle_line("{$message}\n");
         $this->client->output_progress([
             "type" => "lifecycle",
@@ -129,7 +167,40 @@ class Pull
 
         $options = $this->validate_and_default_pull_files_options($options, 'pull-files');
 
-        $this->run_pipeline('pull-files', ['preflight', 'files-pull'], $options, 'Pulling files from');
+        $this->run_pipeline(
+            'pull-files',
+            ['preflight', 'files-pull'],
+            $options,
+            'Pulling files from',
+            [
+                'reset_file_transfer_state' => true,
+                'reset_file_selection_state' => true,
+                'reset_db_state' => false,
+            ]
+        );
+    }
+
+    /**
+     * Run only the database stages from the pull pipeline.
+     */
+    public function run_pull_db(array $options): void
+    {
+        $this->normalize_url();
+        $this->progress->enable_quiet_lifecycle();
+
+        $options = $this->validate_and_default_pull_db_options($options);
+
+        $this->run_pipeline(
+            'pull-db',
+            ['preflight', 'db-pull', 'db-apply'],
+            $options,
+            'Pulling database from',
+            [
+                'reset_file_transfer_state' => false,
+                'reset_file_selection_state' => false,
+                'reset_db_state' => true,
+            ]
+        );
     }
 
     /**
@@ -146,8 +217,13 @@ class Pull
      * lower-level command completed but the pipeline checkpoint was not saved
      * yet.
      */
-    private function run_pipeline(string $command, array $stages, array $options, string $title): void
-    {
+    private function run_pipeline(
+        string $command,
+        array $stages,
+        array $options,
+        string $title,
+        array $repull_reset_state
+    ): void {
         $state = $this->client->state;
         $pull_pipeline = $state['pull_pipeline']['started_by_command'] ?? null;
         $pull_stage = $state['pull_pipeline']['last_completed_stage'] ?? null;
@@ -166,7 +242,10 @@ class Pull
             $pull_stage === $pipeline_final_stage;
 
         if ($completed_pipeline) {
-            $this->prepare_repull($command);
+            $this->prepare_repull(
+                $command,
+                $repull_reset_state,
+            );
             $completed_stage = null;
             $pull_pipeline = null;
             $pull_stage = null;
@@ -208,10 +287,10 @@ class Pull
             // Users can run lower-level commands directly, e.g.
             // `reprint files-pull` or `reprint db-pull`, without going through
             // this pull pipeline. Those commands save their own completion
-            // state in active_resumable_command. That state must not make
-            // `reprint pull` skip its files or database stage: the pipeline
-            // has not recorded that stage as complete. Clear the direct
-            // command checkpoint first so the stage computes a fresh delta.
+            // state in active_resumable_command. That state must not make a
+            // high-level command skip its matching stage: the pipeline has not
+            // recorded that stage as complete. Clear the direct command
+            // checkpoint first so the stage computes a fresh delta.
             $state_dir = $this->client->state_dir;
             $defaults = $this->client->default_state();
 
@@ -440,13 +519,21 @@ class Pull
             );
         }
 
-        $this->assert_runtime_options_valid($options);
-        $options = $this->default_pull_runtime_options($options);
-        if ($options['runtime'] === 'none') {
-            unset($options['runtime']);
+        if ($command === 'pull') {
+            $this->assert_runtime_options_valid($options);
+            $options = $this->default_pull_runtime_options($options);
+            if ($options['runtime'] === 'none') {
+                unset($options['runtime']);
+            }
+            $options = $this->default_pull_target_options($options);
+            $this->validate_database_target_options($options);
+            return;
         }
-        $options = $this->default_pull_target_options($options);
-        $this->validate_database_target_options($options);
+
+        if ($command === 'pull-db') {
+            $options = $this->default_pull_db_target_options($options);
+            $this->validate_database_target_options($options);
+        }
     }
 
     /**
@@ -579,6 +666,26 @@ class Pull
     }
 
     /**
+     * Applies database target defaults for the database-only pull command.
+     */
+    private function default_pull_db_target_options(array $options): array
+    {
+        if (empty($options['target_engine'])) {
+            $has_mysql_target =
+                !empty($options['target_host']) ||
+                !empty($options['target_port']) ||
+                !empty($options['target_user']) ||
+                !empty($options['target_pass']);
+            $has_sqlite_target = !empty($options['target_sqlite_path']);
+            if ($has_sqlite_target || (!$has_mysql_target && empty($options['target_db']))) {
+                $options['target_engine'] = 'sqlite';
+            }
+        }
+
+        return $options;
+    }
+
+    /**
      * Validates database import target options.
      *
      * MySQL imports need a user and database name because Reprint connects to
@@ -629,6 +736,17 @@ class Pull
             );
         }
         return $options;
+    }
+
+    /**
+     * Validate user-provided pull-db options and apply defaults without saving state.
+     */
+    private function validate_and_default_pull_db_options(array $options): array
+    {
+        $options['sql_output'] = 'file';
+        $options = $this->default_pull_db_target_options($options);
+
+        return $this->validate_database_target_options($options);
     }
 
     /**
@@ -694,21 +812,21 @@ class Pull
     /**
      * Reset sub-command state for a delta re-pull.
      *
-     * Keeps preflight data and downloaded files in place. `pull` keeps the
-     * local file index so files-pull runs in delta mode, while `pull-files`
-     * clears the in-progress index cursor and --only fingerprint so a new
-     * selection starts from a fresh remote traversal. Database artifacts are
-     * cleared only for the full pull pipeline because pull-files never creates
-     * or consumes them.
+     * Keeps preflight data and downloaded files in place. The caller chooses
+     * which checkpoint groups to clear because each high-level command owns a
+     * different subset of the full pull pipeline.
      */
-    private function prepare_repull(string $command = 'pull'): void
-    {
+    private function prepare_repull(
+        string $command,
+        array $repull_reset_state
+    ): void {
         $state_dir = $this->client->state_dir;
         $defaults = $this->client->default_state();
-        $reset_db_state = $command === 'pull';
-        $reset_file_selection_state = $command !== 'pull';
+        $reset_file_transfer_state = !empty($repull_reset_state['reset_file_transfer_state']);
+        $reset_file_selection_state = !empty($repull_reset_state['reset_file_selection_state']);
+        $reset_db_state = !empty($repull_reset_state['reset_db_state']);
 
-        $this->client->mutate_state(function (array $state) use ($command, $defaults, $reset_db_state, $reset_file_selection_state) {
+        $this->client->mutate_state(function (array $state) use ($command, $defaults, $reset_file_transfer_state, $reset_file_selection_state, $reset_db_state) {
             $state['pull_pipeline']['started_by_command'] = $command;
             $state['pull_pipeline']['stage_sequence'] = [];
             $state['pull_pipeline']['last_completed_stage'] = null;
@@ -720,11 +838,13 @@ class Pull
             $state['active_resumable_command']['remote_cursor'] = null;
             $state['active_resumable_command']['current_stage'] = null;
             $state['consecutive_timeouts'] = 0;
-            $state['current_file'] = null;
-            $state['current_file_bytes'] = null;
-            $state['diff'] = $defaults['diff'];
-            $state['fetch'] = $defaults['fetch'];
-            $state['fetch_skipped'] = $defaults['fetch_skipped'];
+            if ($reset_file_transfer_state) {
+                $state['current_file'] = null;
+                $state['current_file_bytes'] = null;
+                $state['diff'] = $defaults['diff'];
+                $state['fetch'] = $defaults['fetch'];
+                $state['fetch_skipped'] = $defaults['fetch_skipped'];
+            }
             if ($reset_file_selection_state) {
                 $state['index'] = $defaults['index'];
                 $state['files_pull_only_fingerprint'] = null;
@@ -738,13 +858,15 @@ class Pull
             return $state;
         });
 
-        $paths = [
-            $state_dir . "/.import-remote-index.jsonl",
-            $state_dir . "/.import-download-list.jsonl",
-            $state_dir . "/.import-download-list-skipped.jsonl",
-        ];
+        $paths = [];
+        if ($reset_file_transfer_state) {
+            $paths[] = $state_dir . "/.import-remote-index.jsonl";
+            $paths[] = $state_dir . "/.import-download-list.jsonl";
+            $paths[] = $state_dir . "/.import-download-list-skipped.jsonl";
+        }
         if ($reset_db_state) {
             $paths[] = $state_dir . "/db.sql";
+            $paths[] = $state_dir . "/db-tables.jsonl";
             $paths[] = $state_dir . "/.import-domains.json";
         }
 
