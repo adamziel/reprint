@@ -268,6 +268,32 @@ PHP, var_export($requestsLog, true)));
         $this->assertStringNotContainsString('PullFailureReportedException', $output);
     }
 
+    public function testPullFilesPreflightFailureReportsOriginalExceptionInCliJson(): void
+    {
+        $output = $this->runCli(array(
+            'pull-files',
+            'http://fake.invalid/?site-export-api',
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $error = null;
+        foreach (array_reverse(preg_split('/\R/', trim($output)) ?: array()) as $line) {
+            if ($line === '' || $line[0] !== '{') {
+                continue;
+            }
+            $decoded = json_decode($line, true);
+            if (is_array($decoded) && isset($decoded['exception'])) {
+                $error = $decoded;
+                break;
+            }
+        }
+
+        $this->assertSame(\RuntimeException::class, $error['exception'] ?? null, "Output:
+{$output}");
+        $this->assertStringNotContainsString('PullFailureReportedException', $output);
+    }
+
     public function testRepeatedOnlyOptionsAreUsedByFilesPull(): void
     {
         $this->writePreflightState(true);

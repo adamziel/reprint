@@ -402,6 +402,184 @@ class PullFilterOptionTest extends TestCase
         $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
     }
 
+    public function testPullFilesRunsOnlyPreflightAndFilesStages(): void
+    {
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull-files",
+            "filter" => "essential-files",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->preflight_runs);
+        $this->assertSame(1, $client->files_sync_runs);
+        $this->assertSame(0, $client->db_sync_runs);
+        $this->assertSame(0, $client->db_apply_runs);
+        $this->assertSame('pull-files', $state["pull_pipeline"]["started_by_command"]);
+        $this->assertSame('files-pull', $state["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame('essential-files', $state["pull_pipeline"]["files_filter"]);
+    }
+
+    public function testPullFilesDoesNotAdvancePastFailedPreflight(): void
+    {
+        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->fs_root, false);
+
+        try {
+            ob_start();
+            $client->run(["command" => "pull-files"]);
+            $this->fail('Expected pull-files to stop on failed preflight');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('Exporter unavailable', $e->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->preflight_runs);
+        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertNull($state["pull_pipeline"]["last_completed_stage"]);
+
+        $error_events = array_values(array_filter(
+            $client->progress_events,
+            static fn (array $event): bool => ($event["status"] ?? null) === "error",
+        ));
+        $this->assertCount(1, $error_events);
+        $this->assertSame("preflight", $error_events[0]["failed_stage"]);
+        $this->assertSame("Exporter unavailable", $error_events[0]["message"]);
+    }
+
+    public function testPullFilesResumesAfterFilesPullCompletedBeforePipelineStageWasMarked(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "active_resumable_command" => [
+                    "command_name" => "files-pull",
+                    "completion_state" => "complete",
+                    "current_stage" => null,
+                ],
+                "pull_pipeline" => [
+                    "started_by_command" => "pull-files",
+                    "stage_sequence" => ["preflight", "files-pull"],
+                    "last_completed_stage" => "preflight",
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run(["command" => "pull-files"]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame('files-pull', $state["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame('files-pull', $state["active_resumable_command"]["command_name"]);
+    }
+
+    public function testPullFilesAfterStandaloneFilesPullStartsFreshDelta(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "active_resumable_command" => [
+                    "command_name" => "files-pull",
+                    "completion_state" => "complete",
+                    "current_stage" => null,
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run(["command" => "pull-files"]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->files_sync_runs);
+        $this->assertSame('pull-files', $state["pull_pipeline"]["started_by_command"]);
+        $this->assertSame('files-pull', $state["pull_pipeline"]["last_completed_stage"]);
+    }
+
+    public function testPullAfterFilesPullCompletedBeforePipelineStageWasMarkedDoesNotStealIt(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "active_resumable_command" => [
+                    "command_name" => "files-pull",
+                    "completion_state" => "complete",
+                    "current_stage" => null,
+                ],
+                "pull_pipeline" => [
+                    "started_by_command" => "pull-files",
+                    "stage_sequence" => ["preflight", "files-pull"],
+                    "last_completed_stage" => "preflight",
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull",
+                "runtime" => "none",
+            ]);
+            $this->fail('Expected pull to reject an in-progress pull-files pipeline');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('Another command is already in progress: pull-files', $e->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame(0, $client->db_sync_runs);
+    }
+
+    public function testRerunningCompletedPullFilesStartsFreshFilesDelta(): void
+    {
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run(["command" => "pull-files"]);
+        $client->run(["command" => "pull-files"]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(2, $client->files_sync_runs);
+        $this->assertSame('pull-files', $state["pull_pipeline"]["started_by_command"]);
+        $this->assertSame('files-pull', $state["pull_pipeline"]["last_completed_stage"]);
+    }
+
+    public function testPullAfterCompletedPullFilesStartsFreshFilesDelta(): void
+    {
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run(["command" => "pull-files"]);
+        $client->run([
+            "command" => "pull",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(2, $client->files_sync_runs);
+        $this->assertSame(1, $client->db_sync_runs);
+        $this->assertSame('pull', $state["pull_pipeline"]["started_by_command"]);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
+    }
+
     public function testPullWithEssentialFilesPersistsDeferredFilesState(): void
     {
         $client = $this->makeClient(true);
