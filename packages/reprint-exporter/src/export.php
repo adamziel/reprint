@@ -128,7 +128,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
     /**
      * We're choosing a random boundary without checking for its presence in the content.
      * This may seem to contradict RFC 2046, where it says:
-     * 
+     *
      * > As stated previously, each body part is preceded by a boundary
      * > delimiter line that contains the boundary delimiter.  The boundary
      * > delimiter MUST NOT appear inside any of the encapsulated parts, on a
@@ -136,15 +136,15 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
      * > crucial that the composing agent be able to choose and specify a
      * > unique boundary parameter value that does not contain the boundary
      * > parameter value of an enclosing multipart as a prefix.
-     * > 
+     * >
      * > https://www.rfc-editor.org/rfc/rfc2046.html
      *
      * But in practice, we're okay. We use 128 bits of randomness. The chance of
      * it appearing in the data is about 1 in 2^128 — effectively zero. Curl does
-     * the same here: 
+     * the same here:
      *
      *    https://github.com/curl/curl/blob/462244447e8ba3a53b1ba9f0ba7baa52d8777daa/lib/mime.c#L1179-L1236
-     * 
+     *
      * Also, most chunks declare their Content-Length, so the client may skip the
      * boundary matching entirely and just consume that many bytes.
      */
@@ -1513,6 +1513,8 @@ function endpoint_preflight(array $config): array
             "multisite" => null,
             "constants" => null,
             "constant_names" => null,
+            "wpdb_charset" => null,
+            "wpdb_collation" => null,
             "error" => null,
         ],
         "error" => null,
@@ -1629,6 +1631,15 @@ function endpoint_preflight(array $config): array
 
                 if ($wp_loaded) {
                     try {
+                        $wpdb_global = $GLOBALS["wpdb"] ?? null;
+                        if (is_object($wpdb_global)) {
+                            $wpdb_charset = (string) ($wpdb_global->charset ?? "");
+                            $db["wp"]["wpdb_charset"] = $wpdb_charset !== "" ? $wpdb_charset : null;
+
+                            $wpdb_collation = (string) ($wpdb_global->collate ?? "");
+                            $db["wp"]["wpdb_collation"] = $wpdb_collation !== "" ? $wpdb_collation : null;
+                        }
+
                         $db["wp"]["active_plugins"] = get_option("active_plugins");
                         $db["wp"]["theme_stylesheet"] = get_option("stylesheet");
                         $db["wp"]["theme_template"] = get_option("template");
@@ -2403,7 +2414,7 @@ function stream_file_producer(
     try {
         // @TODO: If an exception is thrown right after the previous chunk header,
         //        it read the fixed Content-Length value and will consume this next
-        //        chunk as data. We should try and backfill the output up to the 
+        //        chunk as data. We should try and backfill the output up to the
         //        previous content-length value if possible.
         if ($abort_payload !== null) {
             $json = json_encode_or_throw($abort_payload);
@@ -2522,31 +2533,31 @@ function normalize_dot_segments(string $path): string
  * Given a path, such as `/srv/wordpress/wp-content/plugins/akismet/assets`, returns
  * a list of all the parent paths that are symlinks. It will check `/srv`,
  * `/srv/wordpress`, `/srv/wordpress/wp-content`, etc.
- * 
+ *
  * For example, given the following filesystem layout:
- * 
+ *
  *     /srv/wordpress/wp-content -> /htdocs/wp-content
  *     /srv/wordpress/wp-content/plugins/akismet -> /wordpress/plugins/akismet/latest
  *     /wordpress/plugins/akismet/latest -> /wordpress/plugins/akismet/5.0.5
- * 
+ *
  * Calling
- * 
+ *
  *     find_parents_symlinks("/srv/wordpress/wp-content/plugins/akismet/assets")
- * 
+ *
  * will return the following symlinks:
- * 
+ *
  * ['path' => '/srv/wordpress/wp-content', 'target' => '/htdocs/wp-content']
  * ['path' => '/htdocs/wp-content/plugins/akismet', 'target' => '/wordpress/plugins/akismet/latest']
  *
  * Note:
- * 
+ *
  * * Every found `path` is a resolved realpath(), which means that all the parents are
  *   regular directories, not symlinks.
  * * It is intentionally not recursive. That last `akismet/latest` -> `akismet/5.0.5`
  *   symlink was not returned. The client is free to recursively request the files from
  *   any additional directories outside of the initial content root based on the parent
  *   symlinks resolved by this function.
- * 
+ *
  * @param string $absolute_path An absolute path to a file or directory.
  * @return array An array of symlinks found in the path.
  * Each array element is an associative array with the following keys:

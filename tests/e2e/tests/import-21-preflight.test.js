@@ -85,6 +85,21 @@ describe('Import: Preflight Endpoint', () => {
         assert.ok(preflight.database.connected, 'Expected DB connected');
     });
 
+    it('reports the charset/collation WordPress connects with from wpdb', () => {
+        assert.ok(preflight.database.wp, 'Expected database.wp section');
+        assert.equal(
+            preflight.database.wp.wpdb_charset,
+            'utf8mb4',
+            `Expected wpdb_charset='utf8mb4', got ${JSON.stringify(preflight.database.wp.wpdb_charset)}`
+        );
+
+        assert.ok(
+            typeof preflight.database.wp.wpdb_collation === 'string' &&
+                preflight.database.wp.wpdb_collation.startsWith('utf8mb4'),
+            `Expected a resolved utf8mb4 collation, got ${JSON.stringify(preflight.database.wp.wpdb_collation)}`
+        );
+    });
+
     it('reports WordPress content info', () => {
         assert.ok(preflight.wp_content, 'Expected wp_content section');
         assert.ok(Array.isArray(preflight.wp_content.roots), 'Expected wp_content roots array');
