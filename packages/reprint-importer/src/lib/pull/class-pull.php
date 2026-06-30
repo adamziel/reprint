@@ -101,7 +101,7 @@ class Pull
     public function run(array $options): void
     {
         $this->normalize_url();
-        $this->progress->enable_quiet_lifecycle();
+        $this->progress->set_mode('pipeline');
 
         $options = $this->validate_and_default_pull_options($options);
 
@@ -143,7 +143,7 @@ class Pull
     public function run_pull_files(array $options): void
     {
         $this->normalize_url();
-        $this->progress->enable_quiet_lifecycle();
+        $this->progress->set_mode('pipeline');
 
         if (!isset($options['filter'])) {
             $options['filter'] = $this->client->state['filter'] ?? 'none';
@@ -169,7 +169,7 @@ class Pull
     public function run_pull_db(array $options): void
     {
         $this->normalize_url();
-        $this->progress->enable_quiet_lifecycle();
+        $this->progress->set_mode('pipeline');
 
         $options['sql_output'] = 'file';
         $options = $this->default_pull_db_target_options($options);
