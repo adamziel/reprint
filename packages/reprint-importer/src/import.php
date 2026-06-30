@@ -5892,7 +5892,7 @@ class ImportClient
         ?string $cursor,
         string $state_key = "fetch"
     ): bool {
-        $fetch_state = $this->download_fetch_state($state_key);
+        $fetch_state = $this->get_download_list_fetch_state($state_key);
         $cursor = $cursor ?? $fetch_state->cursor;
         $complete = false;
         $chunks_since_save = 0;
@@ -5983,7 +5983,7 @@ class ImportClient
                 $chunks_since_save++;
                 $force_save = $is_streaming_close;
                 if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                    $this->download_fetch_state($state_key)->cursor = $cursor;
+                    $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
                     // Track current file for crash recovery
                     if ($context->file_handle && $context->file_path) {
                         // Flush to ensure bytes are on disk before saving state
@@ -6076,7 +6076,7 @@ class ImportClient
             $this->assert_can_retry_consecutive_timeout("file_fetch", $cursor_before, $cursor);
             // Save state so the next invocation resumes from the
             // last cursor instead of crashing with exit code 1.
-            $this->download_fetch_state($state_key)->cursor = $cursor;
+            $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
             $this->finalize_index_updates();
             if ($context->file_handle && $context->file_path) {
                 fflush($context->file_handle);
@@ -6095,7 +6095,7 @@ class ImportClient
             $wall_time,
             $context->response_stats ?? [],
         );
-        $this->download_fetch_state($state_key)->cursor = $cursor;
+        $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
         $this->finalize_index_updates();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
@@ -6575,13 +6575,13 @@ class ImportClient
         // These survive across batches within one invocation and are
         // recomputed on restart from the state file's byte offset.
         if ($this->download_list_total === null) {
-            $offset = $this->download_fetch_state($state_key)->offset;
+            $offset = $this->get_download_list_fetch_state($state_key)->offset;
             $this->download_list_total = $this->count_newlines($list_file);
             $this->download_list_done = $offset > 0
                 ? $this->count_newlines($list_file, $offset)
                 : 0;
         }
-        $fetch_state = $this->download_fetch_state($state_key);
+        $fetch_state = $this->get_download_list_fetch_state($state_key);
         $batch_file = $fetch_state->batch_file;
         $batch_offset = $fetch_state->offset;
         $next_offset = $fetch_state->next_offset;
@@ -6599,7 +6599,7 @@ class ImportClient
             $next_offset = $batch["next_offset"];
             $batch_entries = $batch["entries"];
             $cursor = null;
-            $this->replace_download_fetch_state($state_key, DownloadListFetchProgressState::from_array([
+            $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
                 "offset" => $batch_offset,
                 "next_offset" => $next_offset,
                 "batch_file" => $batch_file,
@@ -6636,7 +6636,7 @@ class ImportClient
         }
         $this->files_imported = 0;
 
-        $this->replace_download_fetch_state($state_key, DownloadListFetchProgressState::from_array([
+        $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
             "offset" => $next_offset,
             "next_offset" => $next_offset,
             "batch_file" => null,
@@ -6647,7 +6647,7 @@ class ImportClient
         return $next_offset >= filesize($list_file);
     }
 
-    private function download_fetch_state(string $state_key): DownloadListFetchProgressState
+    private function get_download_list_fetch_state(string $state_key): DownloadListFetchProgressState
     {
         if ($state_key === "fetch") {
             return $this->import_state()->fetch;
@@ -6658,7 +6658,7 @@ class ImportClient
         throw new InvalidArgumentException("Unknown fetch state key: {$state_key}");
     }
 
-    private function replace_download_fetch_state(string $state_key, DownloadListFetchProgressState $state): void
+    private function set_download_list_fetch_state(string $state_key, DownloadListFetchProgressState $state): void
     {
         if ($state_key === "fetch") {
             $this->import_state()->fetch = $state;
