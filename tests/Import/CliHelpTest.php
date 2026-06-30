@@ -9,7 +9,7 @@ class CliHelpTest extends TestCase
     private function runHelp(string $command): string
     {
         $entry = __DIR__ . '/../../importer/import.php';
-        $cmd = escapeshellarg(PHP_BINARY) . ' -n ' . escapeshellarg($entry) . ' ' . escapeshellarg($command) . ' --help';
+        $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($entry) . ' ' . escapeshellarg($command) . ' --help';
         return shell_exec($cmd . ' 2>&1') ?? '';
     }
 
