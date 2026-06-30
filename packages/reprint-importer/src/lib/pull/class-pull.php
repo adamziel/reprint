@@ -56,8 +56,17 @@ class Pull
         if (!empty($options['flatten_to'])) {
             $stages[] = 'flat-docroot';
         }
-        $runtime = $this->resolve_runtime($options);
-        $start_runtime = $this->resolve_start_runtime($options, $runtime);
+        $runtime = !empty($options['runtime']) ? $options['runtime'] : null;
+        // A requested start runtime also implies runtime generation because
+        // there is no generated server to start otherwise.
+        if ($runtime === null && !empty($options['start_runtime']) && $options['start_runtime'] !== 'none') {
+            $runtime = $options['start_runtime'];
+        }
+        // Without an explicit start option, pull starts only runtimes that this
+        // process knows how to launch directly.
+        $start_runtime = !empty($options['start_runtime'])
+            ? $options['start_runtime']
+            : $this->default_start_runtime($runtime);
         if ($runtime !== null && $runtime !== 'none') {
             $stages[] = 'apply-runtime';
             if (
@@ -100,12 +109,7 @@ class Pull
             'pull',
             $this->stages($options),
             $options,
-            'Pulling',
-            [
-                'reset_file_transfer_state' => true,
-                'reset_file_selection_state' => false,
-                'reset_db_state' => true,
-            ]
+            'Pulling'
         );
     }
 
@@ -118,31 +122,7 @@ class Pull
      */
     public function abort(string $command = 'pull'): void
     {
-        switch ($command) {
-            case 'pull-files':
-                $this->prepare_repull($command, [
-                    'reset_file_transfer_state' => true,
-                    'reset_file_selection_state' => true,
-                    'reset_db_state' => false,
-                ]);
-                break;
-
-            case 'pull-db':
-                $this->prepare_repull($command, [
-                    'reset_file_transfer_state' => false,
-                    'reset_file_selection_state' => false,
-                    'reset_db_state' => true,
-                ]);
-                break;
-
-            default:
-                $this->prepare_repull($command, [
-                    'reset_file_transfer_state' => true,
-                    'reset_file_selection_state' => false,
-                    'reset_db_state' => true,
-                ]);
-                break;
-        }
+        $this->prepare_repull($command);
         $label = $command === 'pull' ? 'Pull' : $command;
         $message = "{$label} state cleared.";
         $message .= $command === 'pull-db'
@@ -165,18 +145,21 @@ class Pull
         $this->normalize_url();
         $this->progress->enable_quiet_lifecycle();
 
-        $options = $this->validate_and_default_pull_files_options($options, 'pull-files');
+        if (!isset($options['filter'])) {
+            $options['filter'] = $this->client->state['filter'] ?? 'none';
+        }
+        if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
+            throw new InvalidArgumentException(
+                "Invalid --filter value for pull-files: {$options['filter']}. " .
+                "Valid values: none, essential-files"
+            );
+        }
 
         $this->run_pipeline(
             'pull-files',
             ['preflight', 'files-pull'],
             $options,
-            'Pulling files from',
-            [
-                'reset_file_transfer_state' => true,
-                'reset_file_selection_state' => true,
-                'reset_db_state' => false,
-            ]
+            'Pulling files from'
         );
     }
 
@@ -188,18 +171,15 @@ class Pull
         $this->normalize_url();
         $this->progress->enable_quiet_lifecycle();
 
-        $options = $this->validate_and_default_pull_db_options($options);
+        $options['sql_output'] = 'file';
+        $options = $this->default_pull_db_target_options($options);
+        $options = $this->validate_database_target_options($options);
 
         $this->run_pipeline(
             'pull-db',
             ['preflight', 'db-pull', 'db-apply'],
             $options,
-            'Pulling database from',
-            [
-                'reset_file_transfer_state' => false,
-                'reset_file_selection_state' => false,
-                'reset_db_state' => true,
-            ]
+            'Pulling database from'
         );
     }
 
@@ -221,8 +201,7 @@ class Pull
         string $command,
         array $stages,
         array $options,
-        string $title,
-        array $repull_reset_state
+        string $title
     ): void {
         $state = $this->client->state;
         $pull_pipeline = $state['pull_pipeline']['started_by_command'] ?? null;
@@ -242,10 +221,7 @@ class Pull
             $pull_stage === $pipeline_final_stage;
 
         if ($completed_pipeline) {
-            $this->prepare_repull(
-                $command,
-                $repull_reset_state,
-            );
+            $this->prepare_repull($command);
             $completed_stage = null;
             $pull_pipeline = null;
             $pull_stage = null;
@@ -432,7 +408,21 @@ class Pull
                     $this->client->exit_code = 1;
                     throw new RuntimeException($preflight["error"] ?? "Preflight check failed");
                 }
-                $this->print_done($stage, $this->preflight_summary());
+                $summary = null;
+                $data = $preflight["data"] ?? null;
+                if (is_array($data)) {
+                    $parts = [];
+                    $wp = $data["database"]["wp"]["wp_version"] ?? null;
+                    if ($wp) {
+                        $parts[] = "WordPress {$wp}";
+                    }
+                    $php = $data["runtime"]["phpversion"] ?? null;
+                    if ($php) {
+                        $parts[] = "PHP {$php}";
+                    }
+                    $summary = $parts ? implode(", ", $parts) : null;
+                }
+                $this->print_done($stage, $summary);
                 break;
 
             case 'files-pull':
@@ -468,7 +458,13 @@ class Pull
                     });
                 }
                 $sql_file = $this->client->state_dir . "/db.sql";
-                $size = file_exists($sql_file) ? $this->format_bytes(filesize($sql_file)) : null;
+                $size = null;
+                if (file_exists($sql_file)) {
+                    $bytes = filesize($sql_file);
+                    if ($bytes !== false) {
+                        $size = $this->format_bytes($bytes);
+                    }
+                }
                 $this->print_done($stage, $size);
                 break;
 
@@ -720,66 +716,6 @@ class Pull
 
         return $options;
     }
-
-    /**
-     * Validate user-provided pull-files options and apply defaults without saving state.
-     */
-    private function validate_and_default_pull_files_options(array $options, string $command): array
-    {
-        if (!isset($options['filter'])) {
-            $options['filter'] = $this->client->state['filter'] ?? 'none';
-        }
-        if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
-            throw new InvalidArgumentException(
-                "Invalid --filter value for {$command}: {$options['filter']}. " .
-                "Valid values: none, essential-files"
-            );
-        }
-        return $options;
-    }
-
-    /**
-     * Validate user-provided pull-db options and apply defaults without saving state.
-     */
-    private function validate_and_default_pull_db_options(array $options): array
-    {
-        $options['sql_output'] = 'file';
-        $options = $this->default_pull_db_target_options($options);
-
-        return $this->validate_database_target_options($options);
-    }
-
-    /**
-     * Selects the runtime that should receive generated runtime files.
-     *
-     * A requested start runtime also implies runtime generation because there
-     * is no generated server to start otherwise.
-     */
-    private function resolve_runtime(array $options): ?string
-    {
-        if (!empty($options['runtime'])) {
-            return $options['runtime'];
-        }
-        if (!empty($options['start_runtime']) && $options['start_runtime'] !== 'none') {
-            return $options['start_runtime'];
-        }
-        return null;
-    }
-
-    /**
-     * Selects the runtime, if any, to launch after generation.
-     *
-     * Without an explicit start option, pull starts only runtimes that this
-     * process knows how to launch directly.
-     */
-    private function resolve_start_runtime(array $options, ?string $runtime): string
-    {
-        if (!empty($options['start_runtime'])) {
-            return $options['start_runtime'];
-        }
-        return $this->default_start_runtime($runtime);
-    }
-
     /**
      * Returns the implicit start mode for a generated runtime.
      */
@@ -812,19 +748,37 @@ class Pull
     /**
      * Reset sub-command state for a delta re-pull.
      *
-     * Keeps preflight data and downloaded files in place. The caller chooses
-     * which checkpoint groups to clear because each high-level command owns a
-     * different subset of the full pull pipeline.
+     * Keeps preflight data in place, then clears only the checkpoint groups
+     * owned by the high-level command being restarted. Keeping that ownership
+     * map here prevents callers from having to know which file/database state
+     * belongs to which pipeline.
      */
-    private function prepare_repull(
-        string $command,
-        array $repull_reset_state
-    ): void {
+    private function prepare_repull(string $command): void
+    {
         $state_dir = $this->client->state_dir;
         $defaults = $this->client->default_state();
-        $reset_file_transfer_state = !empty($repull_reset_state['reset_file_transfer_state']);
-        $reset_file_selection_state = !empty($repull_reset_state['reset_file_selection_state']);
-        $reset_db_state = !empty($repull_reset_state['reset_db_state']);
+        switch ($command) {
+            case 'pull':
+                $reset_file_transfer_state = true;
+                $reset_file_selection_state = false;
+                $reset_db_state = true;
+                break;
+
+            case 'pull-files':
+                $reset_file_transfer_state = true;
+                $reset_file_selection_state = true;
+                $reset_db_state = false;
+                break;
+
+            case 'pull-db':
+                $reset_file_transfer_state = false;
+                $reset_file_selection_state = false;
+                $reset_db_state = true;
+                break;
+
+            default:
+                throw new InvalidArgumentException("Unknown pull command: {$command}");
+        }
 
         $this->client->mutate_state(function (array $state) use ($command, $defaults, $reset_file_transfer_state, $reset_file_selection_state, $reset_db_state) {
             $state['pull_pipeline']['started_by_command'] = $command;
@@ -905,28 +859,6 @@ class Pull
         }
 
         throw new RuntimeException("Stage {$stage} kept reporting partial progress after 1000 retry attempts; aborting.");
-    }
-
-    /**
-     * Build a one-line summary of preflight results for the checkmark.
-     */
-    private function preflight_summary(): ?string
-    {
-        $state = $this->client->state;
-        $data = $state["preflight"]["data"] ?? null;
-        if (!is_array($data)) {
-            return null;
-        }
-        $parts = [];
-        $wp = $data["database"]["wp"]["wp_version"] ?? null;
-        if ($wp) {
-            $parts[] = "WordPress {$wp}";
-        }
-        $php = $data["runtime"]["phpversion"] ?? null;
-        if ($php) {
-            $parts[] = "PHP {$php}";
-        }
-        return $parts ? implode(", ", $parts) : null;
     }
 
     /**
