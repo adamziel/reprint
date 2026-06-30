@@ -14,7 +14,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, assertSiteMirror,
-    fsRootDir, compareDatabases, createMysqlConnection, getDbName,
+    fsRootDir, assertPullPipelineComplete, compareDatabases, createMysqlConnection, getDbName,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -67,7 +67,7 @@ describe('Import: Pull Basic', { timeout: 180000 }, () => {
         const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.pull.stage, 'complete');
+        assertPullPipelineComplete(state);
     });
 
     it('files match source', () => {
@@ -99,6 +99,6 @@ describe('Import: Pull Basic', { timeout: 180000 }, () => {
             `Expected exit 0 on re-pull, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.pull.stage, 'complete');
+        assertPullPipelineComplete(state);
     });
 });

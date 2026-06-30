@@ -55,7 +55,7 @@ describe('Import: Full Round-Trip', () => {
 
         const stateFile = join(tempDir, '.import-state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.status, 'complete');
+        assert.equal(state.active_resumable_command.completion_state, 'complete');
     });
 
     it('db-sync completes', () => {

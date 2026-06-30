@@ -84,9 +84,12 @@ class OnlyFilesPathPrefixTest extends TestCase
     private function writeFilesPullState(array $state): void
     {
         $defaults = array(
-            'command' => 'files-pull',
-            'status' => 'in_progress',
-            'stage' => 'diff',
+            'active_resumable_command' => array(
+                'command_name' => 'files-pull',
+                'completion_state' => 'in_progress',
+                'current_stage' => 'diff',
+                'remote_cursor' => null,
+            ),
             'preflight' => array(
                 'data' => array(
                     'database' => array(
@@ -272,14 +275,14 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->runFilesPullWithOnly(array(':wp-content:/plugins'));
 
         $state = $this->readState();
-        $this->assertSame('complete', $state['status'] ?? null);
+        $this->assertSame('complete', $state['active_resumable_command']['completion_state'] ?? null);
         $this->assertSame(
             $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
             $state['files_pull_only_fingerprint'] ?? null
         );
     }
 
-    public function testRunRecordsOnlyFingerprintForLegacyInProgressFilesPullState(): void
+    public function testRunRecordsOnlyFingerprintForInProgressFilesPullState(): void
     {
         file_put_contents($this->stateDir . '/.import-remote-index.jsonl', '');
         $this->writeFilesPullState(array(
@@ -298,15 +301,17 @@ class OnlyFilesPathPrefixTest extends TestCase
     public function testRunAllowsChangingOnlyPrefixesAfterCompletedFilesPull(): void
     {
         $this->writeFilesPullState(array(
-            'status' => 'complete',
-            'stage' => null,
+            'active_resumable_command' => array(
+                'completion_state' => 'complete',
+                'current_stage' => null,
+            ),
             'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
         $this->runFilesPullWithOnly(array(':wp-uploads:'));
 
         $state = $this->readState();
-        $this->assertSame('complete', $state['status'] ?? null);
+        $this->assertSame('complete', $state['active_resumable_command']['completion_state'] ?? null);
     }
 
     public function testPullOnlyFilesPrefixesReplaceRootsAndIgnoreUnselectedRemap(): void

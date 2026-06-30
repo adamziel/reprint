@@ -96,6 +96,6 @@ describe('Import: Delta Sync with Deletions', () => {
     it('state shows complete after delta', () => {
         const stateFile = join(tempDir, '.import-state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.status, 'complete');
+        assert.equal(state.active_resumable_command.completion_state, 'complete');
     });
 });

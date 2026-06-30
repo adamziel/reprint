@@ -60,7 +60,7 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
         assert.ok(existsSync(stateFile), 'Expected state file to exist');
 
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.status, 'complete', 'Expected status to be complete');
+        assert.equal(state.active_resumable_command.completion_state, 'complete', 'Expected status to be complete');
     });
 
     it('indexed at least 3000 files from remote', () => {

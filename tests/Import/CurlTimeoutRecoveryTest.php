@@ -7,8 +7,9 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Verify that cURL timeouts during download save state and set status to
- * "partial" instead of crashing with a fatal RuntimeException.
+ * Verify that cURL timeouts during download save state and set the
+ * resumable command completion state to "partial" instead of crashing with
+ * a fatal RuntimeException.
  *
  * Each download method (download_sql, download_file_fetch, download_remote_index,
  * download_db_index) is tested by injecting a CurlTimeoutException via a
@@ -64,10 +65,12 @@ class CurlTimeoutRecoveryTest extends TestCase
     private function writeState(array $state): void
     {
         $defaults = [
-            "command" => null,
-            "status" => null,
-            "cursor" => null,
-            "stage" => null,
+            "active_resumable_command" => [
+                "command_name" => null,
+                "completion_state" => null,
+                "current_stage" => null,
+                "remote_cursor" => null,
+            ],
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,
@@ -146,10 +149,12 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testSqlDownloadTimeoutSavesPartialState()
     {
         $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
-            "stage" => "sql",
-            "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "sql",
+                "remote_cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            ],
             "sql_bytes" => 1024,
         ]);
 
@@ -167,11 +172,11 @@ class CurlTimeoutRecoveryTest extends TestCase
         $state = $this->readState();
         $this->assertEquals(
             "partial",
-            $state["status"],
-            "After cURL timeout, status should be 'partial' not an exception"
+            $state["active_resumable_command"]["completion_state"],
+            "After cURL timeout, resumable command completion state should be 'partial' not an exception"
         );
         $this->assertNotNull(
-            $state["cursor"],
+            $state["active_resumable_command"]["remote_cursor"],
             "Cursor should be preserved for resumption"
         );
         $this->assertNotNull(
@@ -187,9 +192,11 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testFileFetchTimeoutSavesPartialState()
     {
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "in_progress",
-            "stage" => "fetch",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
             "fetch" => [
                 "offset" => 0,
                 "next_offset" => 100,
@@ -216,8 +223,8 @@ class CurlTimeoutRecoveryTest extends TestCase
         $state = $this->readState();
         $this->assertEquals(
             "partial",
-            $state["status"],
-            "After cURL timeout during file fetch, status should be 'partial'"
+            $state["active_resumable_command"]["completion_state"],
+            "After cURL timeout during file fetch, resumable command completion state should be 'partial'"
         );
     }
 
@@ -228,9 +235,11 @@ class CurlTimeoutRecoveryTest extends TestCase
         file_put_contents($trackedPath, str_repeat('a', 256));
 
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "in_progress",
-            "stage" => "fetch",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
             "fetch" => [
                 "offset" => 0,
                 "next_offset" => 100,
@@ -288,9 +297,11 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testRemoteIndexTimeoutSavesPartialState()
     {
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "in_progress",
-            "stage" => "index",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "index",
+            ],
             "index" => [
                 "cursor" => base64_encode('{"dir":"/wp-content","offset":500}'),
             ],
@@ -320,8 +331,8 @@ class CurlTimeoutRecoveryTest extends TestCase
         $state = $this->readState();
         $this->assertEquals(
             "partial",
-            $state["status"],
-            "After cURL timeout during index download, status should be 'partial'"
+            $state["active_resumable_command"]["completion_state"],
+            "After cURL timeout during index download, resumable command completion state should be 'partial'"
         );
         $this->assertNotNull(
             $state["index"]["cursor"] ?? null,
@@ -336,10 +347,12 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testDbIndexTimeoutSavesPartialState()
     {
         $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
-            "stage" => "db-index",
-            "cursor" => base64_encode('{"table_offset":5}'),
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "db-index",
+                "remote_cursor" => base64_encode('{"table_offset":5}'),
+            ],
             "db_index" => [
                 "file" => null,
                 "tables" => 3,
@@ -357,8 +370,8 @@ class CurlTimeoutRecoveryTest extends TestCase
         $state = $this->readState();
         $this->assertEquals(
             "partial",
-            $state["status"],
-            "After cURL timeout during db-index, status should be 'partial'"
+            $state["active_resumable_command"]["completion_state"],
+            "After cURL timeout during db-index, resumable command completion state should be 'partial'"
         );
     }
 
@@ -369,10 +382,12 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testRunDbSyncExitsPartialOnSqlTimeout()
     {
         $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
-            "stage" => "sql",
-            "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "sql",
+                "remote_cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            ],
             "sql_bytes" => 0,
             "db_index" => [
                 "file" => $this->stateDir . "/db-tables.jsonl",
@@ -395,8 +410,8 @@ class CurlTimeoutRecoveryTest extends TestCase
         $state = $this->readState();
         $this->assertEquals(
             "partial",
-            $state["status"],
-            "run_db_sync should set status to 'partial' on timeout, not throw"
+            $state["active_resumable_command"]["completion_state"],
+            "run_db_sync should set resumable command completion state to 'partial' on timeout, not throw"
         );
     }
 
@@ -421,8 +436,10 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testTrackConsecutiveTimeoutIncrementsOnNoProgress()
     {
         $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "in_progress",
+            ],
             "consecutive_timeouts" => 0,
         ]);
 
@@ -443,8 +460,10 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testTrackConsecutiveTimeoutResetsOnProgress()
     {
         $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "in_progress",
+            ],
             "consecutive_timeouts" => 2,
         ]);
 
@@ -461,8 +480,10 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testTrackConsecutiveTimeoutThrowsAtMax()
     {
         $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "in_progress",
+            ],
             "consecutive_timeouts" => 2,
         ]);
 
@@ -484,10 +505,12 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testSqlDownloadGivesUpAfterMaxConsecutiveTimeouts()
     {
         $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
-            "stage" => "sql",
-            "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "sql",
+                "remote_cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            ],
             "sql_bytes" => 1024,
             "consecutive_timeouts" => 2,
         ]);
@@ -510,10 +533,12 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testFirstTimeoutIncrementsCounterInState()
     {
         $this->writeState([
-            "command" => "db-pull",
-            "status" => "in_progress",
-            "stage" => "sql",
-            "cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "sql",
+                "remote_cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
+            ],
             "sql_bytes" => 1024,
             "consecutive_timeouts" => 0,
         ]);
@@ -530,7 +555,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $downloadSql->invoke($client);
 
         $state = $this->readState();
-        $this->assertEquals("partial", $state["status"]);
+        $this->assertEquals("partial", $state["active_resumable_command"]["completion_state"]);
         $this->assertEquals(
             1,
             $state["consecutive_timeouts"],
@@ -541,9 +566,11 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testSuccessfulRequestResetsCounter()
     {
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "in_progress",
-            "stage" => "index",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "index",
+            ],
             "index" => [
                 "cursor" => base64_encode('{"dir":"/wp-content","offset":500}'),
             ],

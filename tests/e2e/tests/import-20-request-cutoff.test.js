@@ -83,7 +83,7 @@ describe('Import: Request Cutoff', () => {
 
         const stateFile = join(tempDir, '.import-state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.status, 'complete', `Expected complete status, got ${state.status}`);
+        assert.equal(state.active_resumable_command.completion_state, 'complete', `Expected complete status, got ${state.active_resumable_command.completion_state}`);
     });
 
     it('all file hashes match source after resume', () => {

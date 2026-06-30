@@ -81,8 +81,8 @@ describe('Import: --filter', () => {
 
         it('state shows complete with filter persisted', () => {
             const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-            assert.equal(state.command, 'files-pull');
-            assert.equal(state.status, 'complete');
+            assert.equal(state.active_resumable_command.command_name, 'files-pull');
+            assert.equal(state.active_resumable_command.completion_state, 'complete');
             assert.equal(state.filter, 'essential-files');
         });
 
@@ -171,7 +171,7 @@ describe('Import: --filter', () => {
         it('state preserves filter across resume cycles', () => {
             const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
             assert.equal(state.filter, 'essential-files');
-            assert.equal(state.status, 'complete');
+            assert.equal(state.active_resumable_command.completion_state, 'complete');
         });
 
         it('uploads were NOT downloaded', () => {

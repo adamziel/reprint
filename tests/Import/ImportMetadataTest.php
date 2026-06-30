@@ -104,8 +104,10 @@ class ImportMetadataTest extends TestCase
     public function testImportMetadataDoesNotTreatCompletedSubcommandAsCompletedPull(): void
     {
         $this->writeState([
-            'command' => 'files-pull',
-            'status' => 'complete',
+            'active_resumable_command' => [
+                'command_name' => 'files-pull',
+                'completion_state' => 'complete',
+            ],
         ]);
 
         $metadata = $this->readMetadata();
@@ -115,23 +117,27 @@ class ImportMetadataTest extends TestCase
     }
 
     /**
-     * Verifies old state files with pull.stage=complete still report completion.
+     * Verifies a completed pull pipeline reports completion.
      */
-    public function testImportMetadataReportsCompletedLegacyState(): void
+    public function testImportMetadataReportsCompletedPullState(): void
     {
         $this->writeState([
-            'status' => 'complete',
-            'pull' => [
-                'stage' => 'complete',
+            'active_resumable_command' => [
+                'completion_state' => 'complete',
+            ],
+            'pull_pipeline' => [
+                'stage_sequence' => ['preflight', 'files-pull', 'db-pull', 'db-apply'],
+                'last_completed_stage' => 'db-apply',
                 'files_filter' => 'essential-files',
                 'skipped_pending' => true,
+                'has_completed_once' => true,
             ],
         ]);
 
         $metadata = $this->readMetadata();
 
         $this->assertTrue($metadata['hasCompletedOnce']);
-        $this->assertSame('complete', $metadata['pullStage']);
+        $this->assertSame('db-apply', $metadata['pullStage']);
     }
 
     /**
@@ -140,9 +146,11 @@ class ImportMetadataTest extends TestCase
     public function testImportMetadataReportsPriorCompletionDuringRepull(): void
     {
         $this->writeState([
-            'status' => null,
-            'pull' => [
-                'stage' => null,
+            'active_resumable_command' => [
+                'completion_state' => null,
+            ],
+            'pull_pipeline' => [
+                'last_completed_stage' => null,
                 'files_filter' => null,
                 'skipped_pending' => false,
                 'has_completed_once' => true,

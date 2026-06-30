@@ -72,7 +72,7 @@ describe('Import: Playground CLI runtime', () => {
             `files-sync failed (exit ${result.exitCode})\nstderr: ${result.stderr}`);
 
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.status, 'complete');
+        assert.equal(state.active_resumable_command.completion_state, 'complete');
     });
 
     it('db-sync downloads the SQL dump', () => {

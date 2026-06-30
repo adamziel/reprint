@@ -21,7 +21,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, assertSiteMirror,
-    fsRootDir,
+    fsRootDir, assertPullPipelineComplete,
     compareDatabases, createMysqlConnection, getDbName,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -71,7 +71,7 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
             `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.pull.stage, 'complete');
+        assertPullPipelineComplete(state);
     });
 
     it('--abort clears pull pipeline state', () => {
@@ -83,10 +83,10 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
         assert.equal(result.exitCode, 0,
             `Expected abort exit 0, got ${result.exitCode}`);
 
-        // Pull stage should be cleared
+        // The completed-stage marker should be cleared.
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.pull.stage, null,
-            'Expected pull.stage to be null after abort');
+        assert.equal(state.pull_pipeline.last_completed_stage, null,
+            'Expected pull_pipeline.last_completed_stage to be null after abort');
 
         // Local index should be preserved (for delta sync)
         assert.ok(existsSync(join(tempDir, '.import-index.jsonl')),
@@ -105,7 +105,7 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
             `Expected re-pull exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.pull.stage, 'complete');
+        assertPullPipelineComplete(state);
     });
 
     it('files still match source after re-pull', () => {
@@ -126,8 +126,8 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
     });
 
     it('second re-pull without abort also works (auto delta)', () => {
-        // Running pull again when pull.stage=complete should auto-reset
-        // and perform another delta sync.
+        // Running pull again after it completed all recorded stages should
+        // auto-reset and perform another delta sync.
         const result = runImporter(importUrl(), tempDir, 'pull', {
             secret: getSiteSecret(site),
             skipPreflight: true,
@@ -139,6 +139,6 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
             `Expected auto re-pull exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.pull.stage, 'complete');
+        assertPullPipelineComplete(state);
     });
 });

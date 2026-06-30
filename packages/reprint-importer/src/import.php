@@ -53,7 +53,7 @@ require_once __DIR__ . '/lib/external-merge-sort.php';
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
-// Pull command — orchestrates the lower-level commands into a pipeline
+// Pull command — orchestrates lower-level commands into a pipeline
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
 /**
@@ -1353,27 +1353,54 @@ class ImportClient
     }
 
     /** Mark a pull pipeline stage as completed in state. */
-    public function mark_pull_stage_complete(string $stage): void
+    public function mark_pull_stage_complete(string $stage, string $pipeline = 'pull', array $stage_sequence = []): void
     {
-        $this->state['pull']['stage'] = $stage;
+        $this->state['pull_pipeline']['started_by_command'] = $pipeline;
+        $this->state['pull_pipeline']['last_completed_stage'] = $stage;
+        if ($stage_sequence !== []) {
+            $this->state['pull_pipeline']['stage_sequence'] = $stage_sequence;
+        }
         $this->save_state($this->state);
     }
 
     /** Mark the pull pipeline as fully complete in state. */
-    public function mark_pull_complete(): void
+    public function mark_pull_complete(string $pipeline = 'pull'): void
     {
-        $this->state['pull']['stage'] = 'complete';
-        $this->state['pull']['has_completed_once'] = true;
-        $this->state['status'] = 'complete';
+        $this->state['pull_pipeline']['started_by_command'] = $pipeline;
+        $this->state['pull_pipeline']['has_completed_once'] = true;
+        $this->state['active_resumable_command']['completion_state'] = 'complete';
         $this->save_state($this->state);
     }
 
     /** Record the pull's file filter and whether deferred files remain. */
     public function set_pull_files_state(string $filter, bool $skipped_pending): void
     {
-        $this->state['pull']['files_filter'] = $filter;
-        $this->state['pull']['skipped_pending'] = $skipped_pending;
+        $this->state['pull_pipeline']['files_filter'] = $filter;
+        $this->state['pull_pipeline']['skipped_pending'] = $skipped_pending;
         $this->save_state($this->state);
+    }
+
+    /**
+     * Resolve file-selection options after preflight is available.
+     */
+    public function prepare_files_pull_options(array $options, bool $assert_remap = true): void
+    {
+        $remap_raw = $options["remap"] ?? [];
+        if (!empty($remap_raw)) {
+            $this->remap_rules = $this->resolve_remap($remap_raw);
+        }
+
+        $only_raw = $options["only"] ?? [];
+        if (is_string($only_raw)) {
+            $only_raw = [$only_raw];
+        }
+        if (!empty($only_raw)) {
+            $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
+        }
+
+        if ($assert_remap) {
+            $this->assert_files_remap_consistent();
+        }
     }
 
     /** True when the skipped-download list exists and still has entries. */
@@ -1517,7 +1544,7 @@ class ImportClient
      * Run the import process with explicit command validation.
      *
      * @param array $options Options:
-     *   - command: Required. One of: files-pull, files-index, db-pull, db-index, preflight, preflight-assert
+     *   - command: Required. One of the entries in $valid_commands below.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
      */
@@ -1582,6 +1609,13 @@ class ImportClient
             );
         }
 
+        // High-level pulls persist resume state before they enter the stage
+        // runner. Reject invalid options first so a typo does not leave behind
+        // state that looks like an interrupted pull.
+        if ($command === "pull") {
+            $this->pull->assert_options_valid_before_state_write($command, $options);
+        }
+
         $this->state = $this->load_state();
 
         if ($command === "import-metadata") {
@@ -1624,12 +1658,12 @@ class ImportClient
                 !in_array($next, ["none", "essential-files"], true)
             ) {
                 throw new InvalidArgumentException(
-                    "Invalid --filter value for pull: {$next}. " .
+                    "Invalid --filter value for {$command}: {$next}. " .
                         "Valid values: none, essential-files",
                 );
             }
             $prev = $this->state["filter"] ?? null;
-            $status = $this->state["status"] ?? null;
+            $status = $this->state["active_resumable_command"]["completion_state"] ?? null;
             $is_mid_flight = $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
             if ($is_mid_flight) {
                 throw new RuntimeException(
@@ -1653,6 +1687,10 @@ class ImportClient
             $this->save_state($this->state);
         } elseif (isset($this->state["max_allowed_packet"])) {
             $this->max_allowed_packet = (int) $this->state["max_allowed_packet"];
+        }
+
+        if ($command === "pull") {
+            $options["sql_output"] = "file";
         }
 
         // Persist sql_output_mode in state so it survives across resume invocations.
@@ -1740,8 +1778,8 @@ class ImportClient
             $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
         }
 
-        // pull orchestrates the full pipeline (preflight → files → db → apply)
-        // internally, so it must run before the normal command dispatch.
+        // pull orchestrates preflight and lower-level stages internally,
+        // so it runs before the normal command dispatch.
         if ($command === "pull") {
             if ($abort) {
                 $this->pull->abort();
@@ -1750,6 +1788,13 @@ class ImportClient
             try {
                 $this->pull->run($options);
             } catch (\Exception $e) {
+                if ($e instanceof \PullFailureReportedException) {
+                    $previous = $e->getPrevious();
+                    if ($previous instanceof \Exception) {
+                        throw $previous;
+                    }
+                    throw $e;
+                }
                 $this->output_progress([
                     "status" => "error",
                     "error" => $e->getMessage(),
@@ -1793,7 +1838,7 @@ class ImportClient
             }
             try {
                 $this->run_db_apply($options);
-                $final_status = $this->state["status"] ?? "complete";
+                $final_status = $this->state["active_resumable_command"]["completion_state"] ?? "complete";
                 $this->output_progress(["status" => $final_status, "message" => "db-apply {$final_status}"]);
                 if ($final_status === "partial") {
                     $this->exit_code = 2;
@@ -1814,19 +1859,8 @@ class ImportClient
         // All other commands require a prior preflight run.
         $this->require_preflight();
 
-        // Resolve the `--remap` rules (requires preflight to be available first)
-        $remap_raw = $options["remap"] ?? [];
-        if (!empty($remap_raw)) {
-            $this->remap_rules = $this->resolve_remap($remap_raw);
-        }
-
-        // Resolve the `--only` file path prefixes (also requires preflight).
-        $only_raw = $options["only"] ?? [];
-        if (is_string($only_raw)) {
-            $only_raw = [$only_raw];
-        }
-        if (!empty($only_raw)) {
-            $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
+        if (in_array($command, ["files-pull", "files-index"], true)) {
+            $this->prepare_files_pull_options($options, $command === "files-pull" && !$abort);
         }
 
         // Handle --abort: clear state for the command and exit immediately.
@@ -1837,10 +1871,6 @@ class ImportClient
             //        for that command.
             $this->handle_abort($command);
             return;
-        }
-
-        if ($command === "files-pull") {
-            $this->assert_files_remap_consistent();
         }
 
         // Dispatch to appropriate command handler
@@ -1866,7 +1896,7 @@ class ImportClient
                     break;
             }
 
-            $final_status = $this->state["status"] ?? "complete";
+            $final_status = $this->state["active_resumable_command"]["completion_state"] ?? "complete";
             $this->output_progress(["status" => $final_status, "message" => "{$command} {$final_status}"]);
 
             // Exit code 2 signals "partial progress, call me again" so
@@ -1949,9 +1979,9 @@ class ImportClient
                     "RESTART | Clearing files-index state",
                     true,
                 );
-                $this->state["command"] = "files-index";
-                $this->state["status"] = null;
-                $this->state["stage"] = null;
+                $this->state["active_resumable_command"]["command_name"] = "files-index";
+                $this->state["active_resumable_command"]["completion_state"] = null;
+                $this->state["active_resumable_command"]["current_stage"] = null;
                 $this->state["index"] = $this->default_state()["index"];
                 if (file_exists($this->remote_index_file)) {
                     @unlink($this->remote_index_file);
@@ -2632,10 +2662,10 @@ class ImportClient
      */
     public function run_files_sync(): void
     {
-        $state_command = $this->state["command"] ?? null;
+        $state_command = $this->state["active_resumable_command"]["command_name"] ?? null;
         $current_status =
             $state_command === "files-pull"
-                ? $this->state["status"] ?? null
+                ? $this->state["active_resumable_command"]["completion_state"] ?? null
                 : null;
         $has_progress =
             $state_command === "files-pull" &&
@@ -2673,18 +2703,18 @@ class ImportClient
                     "stage" => "fetch-skipped",
                     "message" => "Downloading previously skipped files",
                 ], true);
-                $this->state["status"] = "in_progress";
-                $this->state["stage"] = "fetch-skipped";
+                $this->state["active_resumable_command"]["completion_state"] = "in_progress";
+                $this->state["active_resumable_command"]["current_stage"] = "fetch-skipped";
                 $this->state["files_pull_only_fingerprint"] = $this->files_pull_only_fingerprint();
                 $this->save_state($this->state);
                 $this->run_files_sync_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
                 // tail finishes, restore the completed status so later filter
                 // changes are judged against the actual lifecycle state.
-                if (($this->state["status"] ?? null) === "partial") {
+                if (($this->state["active_resumable_command"]["completion_state"] ?? null) === "partial") {
                     return;
                 }
-                $this->state["status"] = "complete";
+                $this->state["active_resumable_command"]["completion_state"] = "complete";
                 $this->save_state($this->state);
                 return;
             }
@@ -2750,7 +2780,7 @@ class ImportClient
             $index_size = $this->index_count();
 
 
-            $stage = $this->state["stage"] ?? "index";
+            $stage = $this->state["active_resumable_command"]["current_stage"] ?? "index";
             $this->audit_log(
                 sprintf(
                     "RESUME files-pull | stage=%s | indexed_files=%d",
@@ -2782,9 +2812,9 @@ class ImportClient
                 );
             }
 
-            $this->state["command"] = "files-pull";
-            $this->state["status"] = "in_progress";
-            $this->state["stage"] = "index";
+            $this->state["active_resumable_command"]["command_name"] = "files-pull";
+            $this->state["active_resumable_command"]["completion_state"] = "in_progress";
+            $this->state["active_resumable_command"]["current_stage"] = "index";
             $this->state["files_pull_only_fingerprint"] = $this->files_pull_only_fingerprint();
             $this->state["diff"] = $this->default_state()["diff"];
             $this->state["index"] = $this->default_state()["index"];
@@ -2828,18 +2858,18 @@ class ImportClient
             }
         }
 
-        $this->state["command"] = "files-pull";
-        $this->state["status"] = "in_progress";
+        $this->state["active_resumable_command"]["command_name"] = "files-pull";
+        $this->state["active_resumable_command"]["completion_state"] = "in_progress";
         $this->save_state($this->state);
 
         $this->run_files_sync_pipeline();
 
         // Pipeline returns early with partial status if interrupted
-        if (($this->state["status"] ?? null) === "partial") {
+        if (($this->state["active_resumable_command"]["completion_state"] ?? null) === "partial") {
             return;
         }
 
-        $this->state["status"] = "complete";
+        $this->state["active_resumable_command"]["completion_state"] = "complete";
         $this->save_state($this->state);
 
         $this->progress->clear_progress_line();
@@ -2874,25 +2904,25 @@ class ImportClient
      */
     private function run_files_sync_pipeline(): void
     {
-        $stage = $this->state["stage"] ?? "index";
+        $stage = $this->state["active_resumable_command"]["current_stage"] ?? "index";
 
         if ($stage === "index") {
             $complete = $this->download_remote_index();
             if (!$complete) {
-                $this->state["status"] = "partial";
+                $this->state["active_resumable_command"]["completion_state"] = "partial";
                 $this->save_state($this->state);
                 return;
             }
             if ($this->follow_symlinks) {
                 $this->discover_symlink_targets();
                 if ($this->shutdown_requested) {
-                    $this->state["status"] = "partial";
+                    $this->state["active_resumable_command"]["completion_state"] = "partial";
                     $this->save_state($this->state);
                     return;
                 }
             }
             $this->sort_index_file($this->remote_index_file);
-            $this->state["stage"] = "diff";
+            $this->state["active_resumable_command"]["current_stage"] = "diff";
             $this->state["diff"] = $this->default_state()["diff"];
             if (file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
@@ -2913,7 +2943,7 @@ class ImportClient
         if ($stage === "diff") {
             $complete = $this->diff_indexes_and_build_fetch_list();
             if (!$complete) {
-                $this->state["status"] = "partial";
+                $this->state["active_resumable_command"]["completion_state"] = "partial";
                 $this->save_state($this->state);
                 return;
             }
@@ -2933,7 +2963,7 @@ class ImportClient
             } else {
                 $stage = null;
             }
-            $this->state["stage"] = $stage;
+            $this->state["active_resumable_command"]["current_stage"] = $stage;
             $this->save_state($this->state);
 
             // In pull mode, finalize the scanning line with a checkmark
@@ -2973,7 +3003,7 @@ class ImportClient
                 "fetch",
             );
             if (!$complete) {
-                $this->state["status"] = "partial";
+                $this->state["active_resumable_command"]["completion_state"] = "partial";
                 $this->save_state($this->state);
                 return;
             }
@@ -2994,7 +3024,7 @@ class ImportClient
                 // Essential files are done — mark the sync as complete.
                 // The skipped list stays on disk for a later
                 // --filter=skipped-earlier run.
-                $this->state["stage"] = null;
+                $this->state["active_resumable_command"]["current_stage"] = null;
                 $this->save_state($this->state);
                 $this->audit_log(
                     "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_download_list_file} — run with --filter=skipped-earlier to download them",
@@ -3003,7 +3033,7 @@ class ImportClient
                 $stage = null;
             } elseif ($has_skipped) {
                 // Skipped list exists but filter is "none" — download now.
-                $this->state["stage"] = "fetch-skipped";
+                $this->state["active_resumable_command"]["current_stage"] = "fetch-skipped";
                 $this->save_state($this->state);
                 $stage = "fetch-skipped";
                 $this->audit_log(
@@ -3012,7 +3042,7 @@ class ImportClient
                 );
                 $this->write_status_file();
             } else {
-                $this->state["stage"] = null;
+                $this->state["active_resumable_command"]["current_stage"] = null;
                 $this->save_state($this->state);
                 $stage = null;
             }
@@ -3024,11 +3054,11 @@ class ImportClient
                 "fetch_skipped",
             );
             if (!$complete) {
-                $this->state["status"] = "partial";
+                $this->state["active_resumable_command"]["completion_state"] = "partial";
                 $this->save_state($this->state);
                 return;
             }
-            $this->state["stage"] = null;
+            $this->state["active_resumable_command"]["current_stage"] = null;
             $this->state["fetch_skipped"] = $this->default_state()["fetch_skipped"];
             $this->save_state($this->state);
 
@@ -3058,10 +3088,10 @@ class ImportClient
      */
     private function run_files_index(): void
     {
-        $state_command = $this->state["command"] ?? null;
+        $state_command = $this->state["active_resumable_command"]["command_name"] ?? null;
         $current_status =
             $state_command === "files-index"
-                ? $this->state["status"] ?? null
+                ? $this->state["active_resumable_command"]["completion_state"] ?? null
                 : null;
 
         if ($current_status === "complete") {
@@ -3071,9 +3101,9 @@ class ImportClient
         }
 
         if ($current_status === null) {
-            $this->state["command"] = "files-index";
-            $this->state["status"] = "in_progress";
-            $this->state["stage"] = "index";
+            $this->state["active_resumable_command"]["command_name"] = "files-index";
+            $this->state["active_resumable_command"]["completion_state"] = "in_progress";
+            $this->state["active_resumable_command"]["current_stage"] = "index";
             $this->save_state($this->state);
             $this->audit_log("START files-index", true);
             $this->progress->show_lifecycle_line("Starting files-index\n");
@@ -3101,7 +3131,7 @@ class ImportClient
             ], true);
         }
 
-        $this->state["command"] = "files-index";
+        $this->state["active_resumable_command"]["command_name"] = "files-index";
         $this->save_state($this->state);
 
         $attempts = 0;
@@ -3113,7 +3143,7 @@ class ImportClient
             }
 
             if ($this->shutdown_requested) {
-                $this->state["status"] = "partial";
+                $this->state["active_resumable_command"]["completion_state"] = "partial";
                 $this->save_state($this->state);
                 return;
             }
@@ -3142,8 +3172,8 @@ class ImportClient
         }
 
         $this->sort_index_file($this->remote_index_file);
-        $this->state["status"] = "complete";
-        $this->state["stage"] = null;
+        $this->state["active_resumable_command"]["completion_state"] = "complete";
+        $this->state["active_resumable_command"]["current_stage"] = null;
         $this->save_state($this->state);
 
         $count = 0;
@@ -3527,15 +3557,15 @@ class ImportClient
      */
     public function run_db_sync(): void
     {
-        $state_command = $this->state["command"] ?? null;
+        $state_command = $this->state["active_resumable_command"]["command_name"] ?? null;
         $sql_file = $this->state_dir . "/db.sql";
 
         $has_progress =
             $state_command === "db-pull" &&
-            ($this->state["status"] ?? null) === "in_progress";
+            ($this->state["active_resumable_command"]["completion_state"] ?? null) === "in_progress";
         $current_status =
             $state_command === "db-pull"
-                ? $this->state["status"] ?? null
+                ? $this->state["active_resumable_command"]["completion_state"] ?? null
                 : null;
 
         // Check if already completed
@@ -3559,13 +3589,13 @@ class ImportClient
         }
 
         if ($has_progress) {
-            $stage = $this->state["stage"] ?? "db-index";
+            $stage = $this->state["active_resumable_command"]["current_stage"] ?? "db-index";
             $this->audit_log(
                 sprintf(
                     "RESUME db-pull | stage=%s | cursor=%s",
                     $stage,
-                    !empty($this->state["cursor"])
-                        ? substr($this->state["cursor"], 0, 20) . "..."
+                    !empty($this->state["active_resumable_command"]["remote_cursor"])
+                        ? substr($this->state["active_resumable_command"]["remote_cursor"], 0, 20) . "..."
                         : "none",
                 ),
                 true,
@@ -3581,10 +3611,10 @@ class ImportClient
             ], true);
         } else {
             // Starting fresh
-            $this->state["command"] = "db-pull";
-            $this->state["status"] = "in_progress";
-            $this->state["cursor"] = null;
-            $this->state["stage"] = "db-index";
+            $this->state["active_resumable_command"]["command_name"] = "db-pull";
+            $this->state["active_resumable_command"]["completion_state"] = "in_progress";
+            $this->state["active_resumable_command"]["remote_cursor"] = null;
+            $this->state["active_resumable_command"]["current_stage"] = "db-index";
             $this->state["diff"] = $this->default_state()["diff"];
             $this->state["db_index"] = $this->default_state()["db_index"];
             $this->save_state($this->state);
@@ -3600,11 +3630,11 @@ class ImportClient
             ], true);
         }
 
-        $this->state["command"] = "db-pull";
+        $this->state["active_resumable_command"]["command_name"] = "db-pull";
         $this->save_state($this->state);
 
         // Stage 1: db-index (table metadata for progress estimation)
-        $stage = $this->state["stage"] ?? "db-index";
+        $stage = $this->state["active_resumable_command"]["current_stage"] ?? "db-index";
         if ($stage === "db-index") {
             $this->output_progress([
                 "status" => "starting",
@@ -3615,7 +3645,7 @@ class ImportClient
             $this->download_db_index();
 
             // Timeout during db-index — state already saved, exit partial.
-            if (($this->state["status"] ?? null) === "partial") {
+            if (($this->state["active_resumable_command"]["completion_state"] ?? null) === "partial") {
                 return;
             }
 
@@ -3625,8 +3655,8 @@ class ImportClient
             );
 
             // Transition to sql stage
-            $this->state["stage"] = "sql";
-            $this->state["cursor"] = null;
+            $this->state["active_resumable_command"]["current_stage"] = "sql";
+            $this->state["active_resumable_command"]["remote_cursor"] = null;
             $this->save_state($this->state);
         }
 
@@ -3640,12 +3670,12 @@ class ImportClient
         $this->download_sql();
 
         // Timeout during SQL download — state already saved, exit partial.
-        if (($this->state["status"] ?? null) === "partial") {
+        if (($this->state["active_resumable_command"]["completion_state"] ?? null) === "partial") {
             return;
         }
 
         // Mark as complete
-        $this->state["status"] = "complete";
+        $this->state["active_resumable_command"]["completion_state"] = "complete";
         $this->save_state($this->state);
 
         $this->audit_log("db-pull complete", true);
@@ -3895,15 +3925,13 @@ class ImportClient
      */
     private function build_import_metadata(): array
     {
-        $pull = $this->state["pull"] ?? [];
+        $pull = $this->state["pull_pipeline"] ?? [];
         if (!is_array($pull)) {
             $pull = [];
         }
 
-        $pull_stage = $pull["stage"] ?? null;
-        $has_completed_once =
-            !empty($pull["has_completed_once"]) ||
-            $pull_stage === "complete";
+        $pull_stage = $pull["last_completed_stage"] ?? null;
+        $has_completed_once = !empty($pull["has_completed_once"]);
 
         return [
             "hasCompletedOnce" => $has_completed_once,
@@ -4265,11 +4293,11 @@ class ImportClient
             return true;
         }
 
-        if (($this->state["command"] ?? null) !== "files-pull") {
+        if (($this->state["active_resumable_command"]["command_name"] ?? null) !== "files-pull") {
             return false;
         }
 
-        $status = $this->state["status"] ?? null;
+        $status = $this->state["active_resumable_command"]["completion_state"] ?? null;
         return $status !== null && $status !== "complete";
     }
 
@@ -5151,8 +5179,8 @@ class ImportClient
         }
 
         // Check state for resume
-        $state_command = $this->state["command"] ?? null;
-        $current_status = $state_command === "db-apply" ? ($this->state["status"] ?? null) : null;
+        $state_command = $this->state["active_resumable_command"]["command_name"] ?? null;
+        $current_status = $state_command === "db-apply" ? ($this->state["active_resumable_command"]["completion_state"] ?? null) : null;
 
         if ($current_status === "complete") {
             throw new RuntimeException(
@@ -5184,8 +5212,8 @@ class ImportClient
                 "message" => "Resuming db-apply (executed: {$statements_executed} statements)",
             ], true);
         } else {
-            $this->state["command"] = "db-apply";
-            $this->state["status"] = "in_progress";
+            $this->state["active_resumable_command"]["command_name"] = "db-apply";
+            $this->state["active_resumable_command"]["completion_state"] = "in_progress";
             $this->state["apply"] = $this->default_state()["apply"];
             if (!empty($url_mapping)) {
                 $this->state["apply"]["rewrite_url"] = $url_mapping;
@@ -5468,7 +5496,7 @@ class ImportClient
                 // Save partial progress
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                $this->state["status"] = "partial";
+                $this->state["active_resumable_command"]["completion_state"] = "partial";
                 $this->save_state($this->state);
                 $this->audit_log(
                     sprintf(
@@ -5513,7 +5541,7 @@ class ImportClient
                 // Mark complete
                 $this->state["apply"]["statements_executed"] = $statements_executed;
                 $this->state["apply"]["bytes_read"] = $seek_offset + $query_stream->get_bytes_consumed();
-                $this->state["status"] = "complete";
+                $this->state["active_resumable_command"]["completion_state"] = "complete";
                 $this->save_state($this->state);
 
                 $this->audit_log(
@@ -5755,15 +5783,15 @@ class ImportClient
      */
     private function run_db_index(): void
     {
-        $state_command = $this->state["command"] ?? null;
+        $state_command = $this->state["active_resumable_command"]["command_name"] ?? null;
         $tables_file = $this->state_dir . "/db-tables.jsonl";
 
         $has_cursor =
             $state_command === "db-index" &&
-            !empty($this->state["cursor"] ?? null);
+            !empty($this->state["active_resumable_command"]["remote_cursor"] ?? null);
         $current_status =
             $state_command === "db-index"
-                ? $this->state["status"] ?? null
+                ? $this->state["active_resumable_command"]["completion_state"] ?? null
                 : null;
         $tables_exists = file_exists($tables_file);
 
@@ -5780,10 +5808,10 @@ class ImportClient
         }
 
         if (!$has_cursor) {
-            $this->state["command"] = "db-index";
-            $this->state["status"] = "in_progress";
-            $this->state["cursor"] = null;
-            $this->state["stage"] = null;
+            $this->state["active_resumable_command"]["command_name"] = "db-index";
+            $this->state["active_resumable_command"]["completion_state"] = "in_progress";
+            $this->state["active_resumable_command"]["remote_cursor"] = null;
+            $this->state["active_resumable_command"]["current_stage"] = null;
             $this->state["diff"] = $this->default_state()["diff"];
             $this->state["db_index"] = $this->default_state()["db_index"];
             $this->save_state($this->state);
@@ -5800,7 +5828,7 @@ class ImportClient
             $this->audit_log(
                 sprintf(
                     "RESUME db-index | cursor=%s",
-                    substr($this->state["cursor"], 0, 20) . "...",
+                    substr($this->state["active_resumable_command"]["remote_cursor"], 0, 20) . "...",
                 ),
                 true,
             );
@@ -5813,12 +5841,12 @@ class ImportClient
             ], true);
         }
 
-        $this->state["command"] = "db-index";
+        $this->state["active_resumable_command"]["command_name"] = "db-index";
         $this->save_state($this->state);
 
         $this->download_db_index();
 
-        $this->state["status"] = "complete";
+        $this->state["active_resumable_command"]["completion_state"] = "complete";
         $this->save_state($this->state);
 
         $tables = (int) ($this->state["db_index"]["tables"] ?? 0);
@@ -6042,7 +6070,7 @@ class ImportClient
                 $this->state["current_file"] = $context->file_path;
                 $this->state["current_file_bytes"] = $context->file_bytes_written;
             }
-            $this->state["status"] = "partial";
+            $this->state["active_resumable_command"]["completion_state"] = "partial";
             $this->save_state($this->state);
             return false;
         }
@@ -6286,7 +6314,7 @@ class ImportClient
             $this->assert_can_retry_consecutive_timeout("file_index", $cursor_before, $cursor);
             fclose($handle);
             $this->state["index"] = ["cursor" => $cursor];
-            $this->state["status"] = "partial";
+            $this->state["active_resumable_command"]["completion_state"] = "partial";
             $this->save_state($this->state);
             return false;
         }
@@ -7275,7 +7303,7 @@ class ImportClient
      */
     private function download_sql(): void
     {
-        $cursor = $this->state["cursor"] ?? null;
+        $cursor = $this->state["active_resumable_command"]["remote_cursor"] ?? null;
         $complete = false;
         $mode = $this->sql_output_mode;
 
@@ -7472,7 +7500,7 @@ class ImportClient
                         if ($sql_handle) {
                             fflush($sql_handle);
                         }
-                        $this->state["cursor"] = $cursor;
+                        $this->state["active_resumable_command"]["remote_cursor"] = $cursor;
                         $this->state["sql_bytes"] = $sql_bytes_written;
                         $this->state["sql_statements_counted"] = $sql_statements_counted;
                         $this->save_state($this->state);
@@ -7639,10 +7667,10 @@ class ImportClient
                     if ($sql_handle) {
                         fflush($sql_handle);
                     }
-                    $this->state["cursor"] = $cursor;
+                    $this->state["active_resumable_command"]["remote_cursor"] = $cursor;
                     $this->state["sql_bytes"] = $sql_bytes_written;
                     $this->state["sql_statements_counted"] = $sql_statements_counted;
-                    $this->state["status"] = "partial";
+                    $this->state["active_resumable_command"]["completion_state"] = "partial";
                     $this->save_state($this->state);
                     // Discard any pending SQL buffer — it's incomplete and
                     // will be re-fetched on the next invocation. Setting
@@ -7690,10 +7718,10 @@ class ImportClient
                         if ($sql_handle) {
                             fflush($sql_handle);
                         }
-                        $this->state["cursor"] = $cursor;
+                        $this->state["active_resumable_command"]["remote_cursor"] = $cursor;
                         $this->state["sql_bytes"] = $sql_bytes_written;
                         $this->state["sql_statements_counted"] = $sql_statements_counted;
-                        $this->state["status"] = "partial";
+                        $this->state["active_resumable_command"]["completion_state"] = "partial";
                         $this->save_state($this->state);
                         $curl_timed_out = true;
                         break;
@@ -7713,7 +7741,7 @@ class ImportClient
                     fflush($sql_handle);
                 }
 
-                $this->state["cursor"] = $cursor;
+                $this->state["active_resumable_command"]["remote_cursor"] = $cursor;
                 // Clear sql_bytes when complete, otherwise save current position
                 $this->state["sql_bytes"] = $complete ? null : $sql_bytes_written;
                 $this->save_state($this->state);
@@ -8047,7 +8075,7 @@ class ImportClient
      */
     private function download_db_index(): void
     {
-        $cursor = $this->state["cursor"] ?? null;
+        $cursor = $this->state["active_resumable_command"]["remote_cursor"] ?? null;
         $complete = false;
         $tables_file = $this->state_dir . "/db-tables.jsonl";
 
@@ -8191,7 +8219,7 @@ class ImportClient
                     // with no progress, so we don't retry forever.
                     $this->assert_can_retry_consecutive_timeout("db_index", $cursor_before, $cursor);
                     fflush($handle);
-                    $this->state["cursor"] = $cursor;
+                    $this->state["active_resumable_command"]["remote_cursor"] = $cursor;
                     $this->state["db_index"] = [
                         "file" => $tables_file,
                         "tables" => $tables_written,
@@ -8199,7 +8227,7 @@ class ImportClient
                         "bytes" => $bytes_written,
                         "updated_at" => time(),
                     ];
-                    $this->state["status"] = "partial";
+                    $this->state["active_resumable_command"]["completion_state"] = "partial";
                     $this->save_state($this->state);
                     return;
                 }
@@ -8212,7 +8240,7 @@ class ImportClient
                 );
 
                 fflush($handle);
-                $this->state["cursor"] = $cursor;
+                $this->state["active_resumable_command"]["remote_cursor"] = $cursor;
                 $this->state["db_index"] = [
                     "file" => $tables_file,
                     "tables" => $tables_written,
@@ -10739,7 +10767,7 @@ class ImportClient
         $nonempty = $this->state["fs_root_nonempty_behavior"] ?? "error";
         $max_packet = $this->state["max_allowed_packet"] ?? null;
         $files_remap_fingerprint = $this->state["files_remap_fingerprint"] ?? null;
-        $pull = $this->state["pull"] ?? null;
+        $pull = $this->state["pull_pipeline"] ?? null;
         $this->state = $this->default_state();
         $this->state["preflight"] = $preflight;
         $this->state["version"] = $version;
@@ -10749,17 +10777,21 @@ class ImportClient
         $this->state["max_allowed_packet"] = $max_packet;
         $this->state["files_remap_fingerprint"] = $files_remap_fingerprint;
         if ($pull !== null) {
-            $this->state["pull"] = $pull;
+            $this->state["pull_pipeline"] = $pull;
         }
     }
 
     public function default_state(): array
     {
         return [
-            "command" => null,
-            "status" => null,
-            "cursor" => null,
-            "stage" => null,
+            // Resume checkpoint for the lower-level command currently being
+            // run directly or as a stage inside a pull pipeline.
+            "active_resumable_command" => [
+                "command_name" => null,
+                "completion_state" => null,
+                "current_stage" => null,
+                "remote_cursor" => null,
+            ],
             "preflight" => null,
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,
@@ -10836,11 +10868,12 @@ class ImportClient
                 "config" => [],
                 "state" => [],
             ],
-            // Pull pipeline state — tracks progress through the composite
-            // preflight → files-pull → db-pull → db-apply → ... pipeline.
-            // "stage" is the last completed stage name, or "complete".
-            "pull" => [
-                "stage" => null,
+            // Resume checkpoint for the user-facing pull pipeline command
+            // being orchestrated.
+            "pull_pipeline" => [
+                "started_by_command" => null,
+                "stage_sequence" => [],
+                "last_completed_stage" => null,
                 "files_filter" => null,
                 "skipped_pending" => false,
                 "has_completed_once" => false,
@@ -10856,6 +10889,18 @@ class ImportClient
         $defaults = $this->default_state();
         $state = array_intersect_key($state, $defaults);
         $state = array_merge($defaults, $state);
+        $active_resumable_command = $state["active_resumable_command"] ?? [];
+        if (!is_array($active_resumable_command)) {
+            $active_resumable_command = [];
+        }
+        $active_resumable_command = array_intersect_key(
+            $active_resumable_command,
+            $defaults["active_resumable_command"],
+        );
+        $state["active_resumable_command"] = array_merge(
+            $defaults["active_resumable_command"],
+            $active_resumable_command,
+        );
         $diff = $state["diff"];
         if (!is_array($diff)) {
             $diff = [];
@@ -10900,12 +10945,15 @@ class ImportClient
         }
         $apply = array_intersect_key($apply, $defaults["apply"]);
         $state["apply"] = array_merge($defaults["apply"], $apply);
-        $pull = $state["pull"] ?? [];
+        $pull = $state["pull_pipeline"] ?? [];
         if (!is_array($pull)) {
             $pull = [];
         }
-        $pull = array_intersect_key($pull, $defaults["pull"]);
-        $state["pull"] = array_merge($defaults["pull"], $pull);
+        $pull = array_intersect_key($pull, $defaults["pull_pipeline"]);
+        $state["pull_pipeline"] = array_merge($defaults["pull_pipeline"], $pull);
+        if (!is_array($state["pull_pipeline"]["stage_sequence"])) {
+            $state["pull_pipeline"]["stage_sequence"] = [];
+        }
         return $state;
     }
 
@@ -11171,17 +11219,6 @@ class ImportClient
         $state = $this->normalize_state($state);
         $state = $this->decode_state_paths($state);
 
-        // Migrate legacy command names from older state files.
-        static $legacy_commands = [
-            "files-sync" => "files-pull",
-            "db-sync" => "db-pull",
-            "flat-document-root" => "flat-docroot",
-        ];
-        $state_cmd = $state["command"] ?? null;
-        if ($state_cmd && isset($legacy_commands[$state_cmd])) {
-            $state["command"] = $legacy_commands[$state_cmd];
-        }
-
         return $state;
     }
 
@@ -11224,7 +11261,7 @@ class ImportClient
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run
         $has_cursor =
-            !empty($state["cursor"] ?? null) ||
+            !empty($state["active_resumable_command"]["remote_cursor"] ?? null) ||
             !empty($state["index"]["cursor"] ?? null) ||
             !empty($state["fetch"]["cursor"] ?? null);
         $cursor_info = $has_cursor ? "cursor=saved" : "cursor=none";
@@ -11252,11 +11289,11 @@ class ImportClient
     public function write_status_file(?string $error = null): void
     {
         $state = $this->state ?? [];
-        $command = $state["command"] ?? null;
-        $status = $error !== null ? "error" : ($state["status"] ?? "in_progress");
+        $command = $state["active_resumable_command"]["command_name"] ?? null;
+        $status = $error !== null ? "error" : ($state["active_resumable_command"]["completion_state"] ?? "in_progress");
 
         // Derive phase from the state's stage field
-        $phase = $state["stage"] ?? null;
+        $phase = $state["active_resumable_command"]["current_stage"] ?? null;
 
         $payload = [
             "step" => $this->pipeline_step,
@@ -11316,7 +11353,7 @@ class ImportClient
         // Log final progress before exit
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Files completed in this run
-        $current_command = $this->state["command"] ?? "unknown";
+        $current_command = $this->state["active_resumable_command"]["command_name"] ?? "unknown";
 
         $this->audit_log(
             sprintf(

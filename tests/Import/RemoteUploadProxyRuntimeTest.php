@@ -60,10 +60,12 @@ class RemoteUploadProxyRuntimeTest extends TestCase
     private function writeState(array $state): void
     {
         $defaults = [
-            'command' => null,
-            'status' => null,
-            'cursor' => null,
-            'stage' => null,
+            'active_resumable_command' => [
+                'command_name' => null,
+                'completion_state' => null,
+                'current_stage' => null,
+                'remote_cursor' => null,
+            ],
             'preflight' => [
                 'http_code' => 200,
                 'data' => [
@@ -143,8 +145,10 @@ class RemoteUploadProxyRuntimeTest extends TestCase
     public function testApplyRuntimeAddsProxyWhenSkippedUploadsRemain(): void
     {
         $this->writeState([
-            'command' => 'db-apply',
-            'status' => 'complete',
+            'active_resumable_command' => [
+                'command_name' => 'db-apply',
+                'completion_state' => 'complete',
+            ],
             'filter' => 'essential-files',
         ]);
         file_put_contents(
@@ -181,9 +185,11 @@ class RemoteUploadProxyRuntimeTest extends TestCase
     public function testApplyRuntimeAddsProxyWhileFilesSyncIsIncomplete(): void
     {
         $this->writeState([
-            'command' => 'files-pull',
-            'status' => 'partial',
-            'stage' => 'fetch',
+            'active_resumable_command' => [
+                'command_name' => 'files-pull',
+                'completion_state' => 'partial',
+                'current_stage' => 'fetch',
+            ],
         ]);
 
         $client = $this->makeClient();
@@ -207,8 +213,10 @@ class RemoteUploadProxyRuntimeTest extends TestCase
     public function testApplyRuntimeOmitsProxyAfterFilesSyncCompletes(): void
     {
         $this->writeState([
-            'command' => 'files-pull',
-            'status' => 'complete',
+            'active_resumable_command' => [
+                'command_name' => 'files-pull',
+                'completion_state' => 'complete',
+            ],
             'filter' => 'none',
         ]);
 

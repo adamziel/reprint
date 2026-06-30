@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir, compareDatabases, createMysqlConnection, getDbName,
+    fsRootDir, assertPullPipelineComplete, compareDatabases, createMysqlConnection, getDbName,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -87,9 +87,9 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
         const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(state.pull.stage, 'complete');
-        assert.equal(state.pull.files_filter, 'essential-files');
-        assert.equal(state.pull.skipped_pending, true);
+        assertPullPipelineComplete(state);
+        assert.equal(state.pull_pipeline.files_filter, 'essential-files');
+        assert.equal(state.pull_pipeline.skipped_pending, true);
     });
 
     it('skipped download list remains on disk', () => {

@@ -102,9 +102,11 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
     private function prepareClient(array $pull_only_files_with_path_prefixes): array
     {
         $defaults = [
-            "command" => "files-pull",
-            "status" => "in_progress",
-            "stage" => "diff",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "diff",
+            ],
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",

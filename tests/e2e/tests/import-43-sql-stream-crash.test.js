@@ -133,8 +133,8 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
             const stateFile = join(tempDir, '.import-state.json');
             assert.ok(existsSync(stateFile), 'Expected state file to exist');
             const state = JSON.parse(readFileSync(stateFile, 'utf8'));
-            assert.equal(state.status, 'partial',
-                `Expected status=partial, got ${state.status}`);
+            assert.equal(state.active_resumable_command.completion_state, 'partial',
+                `Expected status=partial, got ${state.active_resumable_command.completion_state}`);
         });
 
         it('audit log records the incomplete response', () => {

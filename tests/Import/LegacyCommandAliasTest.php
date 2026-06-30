@@ -8,7 +8,7 @@ require_once __DIR__ . '/../../importer/import.php';
 
 /**
  * Smoke test: old command names (files-sync, db-sync, flat-document-root)
- * must continue to work via the alias table and state migration.
+ * must continue to work via the alias table.
  */
 class LegacyCommandAliasTest extends TestCase
 {
@@ -99,17 +99,20 @@ class LegacyCommandAliasTest extends TestCase
         ];
     }
 
-    /**
-     * State files written with old command names must be migrated
-     * to new names when loaded.
-     *
-     * @dataProvider legacyStateProvider
-     */
-    public function testStateMigrationFromLegacyCommandName(string $old_name, string $new_name): void
+    public function testLegacyStateFieldsAreIgnored(): void
     {
         file_put_contents(
             $this->stateDir . '/.import-state.json',
-            json_encode(["command" => $old_name, "status" => "in_progress"]),
+            json_encode([
+                "command" => "files-pull",
+                "status" => "in_progress",
+                "cursor" => "legacy-cursor",
+                "stage" => "fetch",
+                "pull" => [
+                    "pipeline" => "pull",
+                    "stage" => "files-pull",
+                ],
+            ]),
         );
 
         $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->fs_root);
@@ -117,19 +120,25 @@ class LegacyCommandAliasTest extends TestCase
         $loadState = $reflection->getMethod('load_state');
         $state = $loadState->invoke($client);
 
-        $this->assertEquals(
-            $new_name,
-            $state["command"],
-            "State with command '{$old_name}' should be migrated to '{$new_name}'",
-        );
+        $this->assertArrayNotHasKey('command', $state);
+        $this->assertArrayNotHasKey('status', $state);
+        $this->assertArrayNotHasKey('cursor', $state);
+        $this->assertArrayNotHasKey('stage', $state);
+        $this->assertArrayNotHasKey('pull', $state);
+        $this->assertSame([
+            "command_name" => null,
+            "completion_state" => null,
+            "current_stage" => null,
+            "remote_cursor" => null,
+        ], $state["active_resumable_command"]);
+        $this->assertSame([
+            "started_by_command" => null,
+            "stage_sequence" => [],
+            "last_completed_stage" => null,
+            "files_filter" => null,
+            "skipped_pending" => false,
+            "has_completed_once" => false,
+        ], $state["pull_pipeline"]);
     }
 
-    public static function legacyStateProvider(): array
-    {
-        return [
-            'files-sync → files-pull' => ['files-sync', 'files-pull'],
-            'db-sync → db-pull' => ['db-sync', 'db-pull'],
-            'flat-document-root → flat-docroot' => ['flat-document-root', 'flat-docroot'],
-        ];
-    }
 }

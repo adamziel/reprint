@@ -68,10 +68,12 @@ class FilesSyncStateTest extends TestCase
     private function writeState(array $state): void
     {
         $defaults = [
-            "command" => null,
-            "status" => null,
-            "cursor" => null,
-            "stage" => null,
+            "active_resumable_command" => [
+                "command_name" => null,
+                "completion_state" => null,
+                "current_stage" => null,
+                "remote_cursor" => null,
+            ],
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,
@@ -158,8 +160,10 @@ class FilesSyncStateTest extends TestCase
     public function testCompletedFilesSyncRefusesToRerun()
     {
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "complete",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "complete",
+            ],
         ]);
 
         [$client, $reflection] = $this->prepareClient();
@@ -168,8 +172,8 @@ class FilesSyncStateTest extends TestCase
         $method->invoke($client);
 
         $state = $this->readState();
-        $this->assertEquals("complete", $state["status"]);
-        $this->assertEquals("files-pull", $state["command"]);
+        $this->assertEquals("complete", $state["active_resumable_command"]["completion_state"]);
+        $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
     }
 
     /**
@@ -179,9 +183,11 @@ class FilesSyncStateTest extends TestCase
     public function testSkippedEarlierTailRestoresCompletedStatus()
     {
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "complete",
-            "stage" => null,
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "complete",
+                "current_stage" => null,
+            ],
             "filter" => "essential-files",
         ]);
         file_put_contents(
@@ -205,9 +211,9 @@ class FilesSyncStateTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertEquals("complete", $state["status"]);
-        $this->assertEquals("files-pull", $state["command"]);
-        $this->assertNull($state["stage"]);
+        $this->assertEquals("complete", $state["active_resumable_command"]["completion_state"]);
+        $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
+        $this->assertNull($state["active_resumable_command"]["current_stage"]);
         $this->assertEquals("skipped-earlier", $state["filter"]);
         $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
     }
@@ -221,8 +227,10 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "complete",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "complete",
+            ],
         ]);
 
         [$client, $reflection] = $this->prepareClient();
@@ -233,8 +241,9 @@ class FilesSyncStateTest extends TestCase
         $state = $this->readState();
         $this->assertNotEquals(
             "complete",
-            $state["status"] ?? null,
-            "After abort, status must not be 'complete' — the next run should start fresh",
+            $state["active_resumable_command"]["completion_state"] ?? null,
+            "After abort, resumable command completion state must not be 'complete' — " .
+            "the next run should start fresh",
         );
     }
 
@@ -248,8 +257,10 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "complete",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "complete",
+            ],
         ]);
 
         // Step 1: abort
@@ -268,10 +279,10 @@ class FilesSyncStateTest extends TestCase
         $state = $this->readState();
         $this->assertNotEquals(
             "complete",
-            $state["status"],
+            $state["active_resumable_command"]["completion_state"],
             "After abort + re-run, the sync should start fresh, not report 'already complete'",
         );
-        $this->assertEquals("files-pull", $state["command"]);
+        $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
     }
 
     // ---------------------------------------------------------------
@@ -301,9 +312,11 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($localFile, 'old content');
 
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "in_progress",
-            "stage" => "diff",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "diff",
+            ],
         ]);
 
         [$client, $reflection] = $this->prepareClient();
@@ -339,9 +352,11 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($localFile, 'local drop-in');
 
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "in_progress",
-            "stage" => "diff",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "diff",
+            ],
         ]);
 
         [$client, $reflection] = $this->prepareClient();
@@ -375,9 +390,11 @@ class FilesSyncStateTest extends TestCase
         file_put_contents($localFile, 'old content');
 
         $this->writeState([
-            "command" => "files-pull",
-            "status" => "in_progress",
-            "stage" => "fetch",
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
         ]);
 
         [$client, $reflection] = $this->prepareClient();

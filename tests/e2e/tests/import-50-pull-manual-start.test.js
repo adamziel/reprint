@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
+    assertPullPipelineComplete,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -61,8 +62,8 @@ describe('Import: Pull start-runtime none', { timeout: 180000 }, () => {
 
     it('marks the pull complete and generates playground runtime files', () => {
         const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
-        assert.equal(state.pull.stage, 'complete');
-        assert.equal(state.status, 'complete');
+        assertPullPipelineComplete(state);
+        assert.equal(state.active_resumable_command.completion_state, 'complete');
 
         assert.ok(existsSync(join(runtimeDir, 'runtime.php')), 'runtime.php should exist');
         assert.ok(existsSync(join(runtimeDir, 'blueprint.json')), 'blueprint.json should exist');
