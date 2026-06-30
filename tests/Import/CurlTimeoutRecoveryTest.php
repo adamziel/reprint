@@ -450,11 +450,11 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         // First call — no progress (same cursor before and after)
         $method->invoke($client, "sql_chunk", "abc", "abc");
-        $this->assertEquals(1, $state->getValue($client)["consecutive_timeouts"]);
+        $this->assertEquals(1, $state->getValue($client)->consecutive_timeouts);
 
         // Second call — still no progress
         $method->invoke($client, "sql_chunk", "abc", "abc");
-        $this->assertEquals(2, $state->getValue($client)["consecutive_timeouts"]);
+        $this->assertEquals(2, $state->getValue($client)->consecutive_timeouts);
     }
 
     public function testTrackConsecutiveTimeoutResetsOnProgress()
@@ -474,7 +474,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         // Cursor advanced — should reset to 0
         $method->invoke($client, "sql_chunk", "abc", "def");
-        $this->assertEquals(0, $state->getValue($client)["consecutive_timeouts"]);
+        $this->assertEquals(0, $state->getValue($client)->consecutive_timeouts);
     }
 
     public function testTrackConsecutiveTimeoutThrowsAtMax()
