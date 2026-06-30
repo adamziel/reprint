@@ -39,10 +39,10 @@ function remote_upload_proxy_code(): string
 		) {
 			$state = json_decode((string) file_get_contents($state_file), true);
 			if (is_array($state)) {
-				$command = $state['command'] ?? null;
-				$status = $state['status'] ?? null;
+				$command = $state['active_resumable_command']['command_name'] ?? null;
+				$status = $state['active_resumable_command']['completion_state'] ?? null;
 				$proxy_enabled =
-					($command === 'files-pull' || $command === 'files-sync') &&
+					$command === 'files-pull' &&
 					$status !== null &&
 					$status !== 'complete';
 			}

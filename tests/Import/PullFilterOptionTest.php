@@ -59,7 +59,7 @@ class PullFilterFakeClient extends \ImportClient
                     ],
                 ],
             ];
-            $state["status"] = "complete";
+            $state["active_resumable_command"]["completion_state"] = "complete";
             return $state;
         });
     }
@@ -67,8 +67,8 @@ class PullFilterFakeClient extends \ImportClient
     public function run_files_sync(): void
     {
         if (
-            ($this->state["command"] ?? null) === "files-pull" &&
-            ($this->state["status"] ?? null) === "complete"
+            ($this->state["active_resumable_command"]["command_name"] ?? null) === "files-pull" &&
+            ($this->state["active_resumable_command"]["completion_state"] ?? null) === "complete"
         ) {
             return;
         }
@@ -84,9 +84,9 @@ class PullFilterFakeClient extends \ImportClient
         }
 
         $this->mutate_state(function (array $state) {
-            $state["command"] = "files-pull";
-            $state["status"] = "complete";
-            $state["stage"] = null;
+            $state["active_resumable_command"]["command_name"] = "files-pull";
+            $state["active_resumable_command"]["completion_state"] = "complete";
+            $state["active_resumable_command"]["current_stage"] = null;
             return $state;
         });
     }
@@ -96,9 +96,9 @@ class PullFilterFakeClient extends \ImportClient
         $this->db_sync_runs++;
         file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
         $this->mutate_state(function (array $state) {
-            $state["command"] = "db-pull";
-            $state["status"] = "complete";
-            $state["stage"] = null;
+            $state["active_resumable_command"]["command_name"] = "db-pull";
+            $state["active_resumable_command"]["completion_state"] = "complete";
+            $state["active_resumable_command"]["current_stage"] = null;
             return $state;
         });
     }
@@ -107,9 +107,9 @@ class PullFilterFakeClient extends \ImportClient
     {
         $this->db_apply_runs++;
         $this->mutate_state(function (array $state) {
-            $state["command"] = "db-apply";
-            $state["status"] = "complete";
-            $state["stage"] = null;
+            $state["active_resumable_command"]["command_name"] = "db-apply";
+            $state["active_resumable_command"]["completion_state"] = "complete";
+            $state["active_resumable_command"]["current_stage"] = null;
             $state["apply"]["statements_executed"] = 42;
             return $state;
         });
@@ -127,7 +127,7 @@ class PullFailingPreflightFakeClient extends PullFilterFakeClient
                 "http_code" => 500,
                 "error" => "Exporter unavailable",
             ];
-            $state["status"] = "complete";
+            $state["active_resumable_command"]["completion_state"] = "complete";
             return $state;
         });
     }
@@ -255,7 +255,7 @@ class PullFilterOptionTest extends TestCase
         $state = $this->readState();
         $this->assertSame(1, $client->preflight_runs);
         $this->assertSame(0, $client->files_sync_runs);
-        $this->assertNull($state["pull"]["stage"]);
+        $this->assertNull($state["pull_pipeline"]["last_completed_stage"]);
 
         $error_events = array_values(array_filter(
             $client->progress_events,
@@ -276,11 +276,14 @@ class PullFilterOptionTest extends TestCase
         file_put_contents(
             $this->stateDir . '/.import-state.json',
             json_encode([
-                "command" => "files-pull",
-                "status" => "complete",
-                "stage" => null,
-                "pull" => [
-                    "stage" => "preflight",
+                "active_resumable_command" => [
+                    "command_name" => "files-pull",
+                    "completion_state" => "complete",
+                    "current_stage" => null,
+                ],
+                "pull_pipeline" => [
+                    "started_by_command" => "pull",
+                    "last_completed_stage" => "preflight",
                 ],
                 "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
             ]),
@@ -298,8 +301,85 @@ class PullFilterOptionTest extends TestCase
         $state = $this->readState();
         $this->assertSame(0, $client->files_sync_runs);
         $this->assertSame(1, $client->db_sync_runs);
-        $this->assertSame('pull', $state["pull"]["pipeline"]);
-        $this->assertSame('complete', $state["pull"]["stage"]);
+        $this->assertSame('pull', $state["pull_pipeline"]["started_by_command"]);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
+    }
+
+    public function testPullResumesSameUnfinishedPipelineWithoutConflict(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "active_resumable_command" => [
+                    "command_name" => "files-pull",
+                    "completion_state" => "in_progress",
+                    "current_stage" => "fetch",
+                ],
+                "pull_pipeline" => [
+                    "started_by_command" => "pull",
+                    "last_completed_stage" => "preflight",
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(1, $client->files_sync_runs);
+        $this->assertSame('pull', $state["pull_pipeline"]["started_by_command"]);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
+    }
+
+    public function testPullRefusesToClearCompletedCommandOwnedByDifferentUnfinishedPipeline(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "active_resumable_command" => [
+                    "command_name" => "db-pull",
+                    "completion_state" => "complete",
+                    "current_stage" => null,
+                ],
+                "pull_pipeline" => [
+                    "started_by_command" => "pull-db",
+                    "last_completed_stage" => null,
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+        file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
+
+        $client = $this->makeClient(false);
+
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull",
+                "runtime" => "none",
+            ]);
+            $this->fail('Expected pull to refuse a different unfinished pipeline');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('Another command is already in progress: pull-db', $e->getMessage());
+            $this->assertStringContainsString('Rerun pull-db to resume it', $e->getMessage());
+            $this->assertStringContainsString('Only use --abort if you want to discard', $e->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+
+        $state = $this->readState();
+        $this->assertSame('pull-db', $state["pull_pipeline"]["started_by_command"]);
+        $this->assertNull($state["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame('db-pull', $state["active_resumable_command"]["command_name"]);
+        $this->assertSame('complete', $state["active_resumable_command"]["completion_state"]);
+        $this->assertFileExists($this->stateDir . '/db.sql');
     }
 
     public function testInvalidPullOptionsFailBeforeStateIsPersisted(): void
@@ -335,10 +415,10 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame('complete', $state["pull"]["stage"]);
-        $this->assertSame('essential-files', $state["pull"]["files_filter"]);
-        $this->assertTrue($state["pull"]["skipped_pending"]);
-        $this->assertTrue($state["pull"]["has_completed_once"]);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame('essential-files', $state["pull_pipeline"]["files_filter"]);
+        $this->assertTrue($state["pull_pipeline"]["skipped_pending"]);
+        $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('essential-files', $state["filter"]);
         $this->assertFileExists($this->stateDir . '/.import-download-list-skipped.jsonl');
     }
@@ -355,10 +435,10 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame('complete', $state["pull"]["stage"]);
-        $this->assertSame('none', $state["pull"]["files_filter"]);
-        $this->assertFalse($state["pull"]["skipped_pending"]);
-        $this->assertTrue($state["pull"]["has_completed_once"]);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame('none', $state["pull_pipeline"]["files_filter"]);
+        $this->assertFalse($state["pull_pipeline"]["skipped_pending"]);
+        $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('none', $state["filter"]);
         $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
     }
@@ -393,13 +473,16 @@ class PullFilterOptionTest extends TestCase
         file_put_contents(
             $this->stateDir . '/.import-state.json',
             json_encode([
-                "command" => "files-pull",
-                "status" => "complete",
-                "stage" => null,
+                "active_resumable_command" => [
+                    "command_name" => "files-pull",
+                    "completion_state" => "complete",
+                    "current_stage" => null,
+                ],
                 "filter" => "skipped-earlier",
-                "pull" => [
-                    "pipeline" => "pull",
-                    "stage" => "complete",
+                "pull_pipeline" => [
+                    "started_by_command" => "pull",
+                    "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
+                    "last_completed_stage" => "db-apply",
                     "files_filter" => "essential-files",
                     "skipped_pending" => true,
                 ],
@@ -418,7 +501,7 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame('complete', $state["pull"]["stage"]);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
         $this->assertSame('essential-files', $state["filter"]);
     }
 }

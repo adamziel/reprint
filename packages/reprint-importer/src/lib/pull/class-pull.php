@@ -115,32 +115,96 @@ class Pull
         ], true);
     }
 
+    /**
+     * Runs a named pull pipeline from the first unfinished stage.
+     *
+     * `state['pull_pipeline']` records orchestration progress: which
+     * user-facing command started the pipeline and which whole stage was last
+     * completed. `state['active_resumable_command']` records the resumable
+     * lower-level command, whether it was invoked directly or as a stage in
+     * this pipeline, including its completion status, internal state, and
+     * remote cursor.
+     *
+     * Keeping those checkpoints separate lets a rerun resume safely when a
+     * lower-level command completed but the pipeline checkpoint was not saved
+     * yet.
+     */
     private function run_pipeline(string $command, array $stages, array $options, string $title): void
     {
-        $this->assert_no_conflicting_pull($command, $stages);
-
         $state = $this->client->state;
-        $pull_pipeline = $state['pull']['pipeline'] ?? null;
-        $pull_stage = $state['pull']['stage'] ?? null;
-        // Atomic commands leave state["command"] marked complete. Reuse that
-        // marker only while resuming the same high-level pipeline; otherwise a
-        // prior standalone files-pull/db-pull would make pull skip
-        // the fresh delta it was asked to compute.
-        $can_reuse_atomic_state =
-            $pull_pipeline === $command &&
-            $pull_stage !== null &&
-            $pull_stage !== 'complete';
-        $completed_current_pipeline = $pull_pipeline === $command && $pull_stage === 'complete';
-        if (!$completed_current_pipeline && !$can_reuse_atomic_state && ($state['status'] ?? null) === 'complete') {
+        $pull_pipeline = $state['pull_pipeline']['started_by_command'] ?? null;
+        $pull_stage = $state['pull_pipeline']['last_completed_stage'] ?? null;
+        $stage_sequence = $state['pull_pipeline']['stage_sequence'] ?? [];
+        if (!is_array($stage_sequence) || $stage_sequence === []) {
+            $stage_sequence = $stages;
+        }
+        $pipeline_final_stage = $stage_sequence[count($stage_sequence) - 1] ?? null;
+        $state_command = $state['active_resumable_command']['command_name'] ?? null;
+        $state_status = $state['active_resumable_command']['completion_state'] ?? null;
+        $completed_stage = $pull_pipeline === $command ? $pull_stage : null;
+        $completed_current_pipeline =
+            $completed_stage !== null &&
+            $pipeline_final_stage !== null &&
+            $completed_stage === $pipeline_final_stage;
+
+        if ($completed_current_pipeline) {
+            $this->prepare_repull();
+            $completed_stage = null;
+            $pull_stage = null;
+            $state_command = null;
+            $state_status = null;
+        }
+
+        $pipeline_has_resume_state =
+            $pull_pipeline !== null &&
+            (
+                $pull_stage !== null ||
+                $state_command !== null ||
+                $state_status !== null
+            );
+
+        if ($pipeline_has_resume_state && $pull_pipeline !== $command) {
+            throw new RuntimeException(
+                "Another command is already in progress: {$pull_pipeline}. " .
+                "Rerun {$pull_pipeline} to resume it. Only use --abort if you want to discard " .
+                "that pipeline's resume state before running {$command}."
+            );
+        }
+
+        $has_direct_command_state = !$pipeline_has_resume_state && $state_status !== null;
+        if (
+            $has_direct_command_state &&
+            $state_status !== 'complete' &&
+            in_array($state_command, ['files-pull', 'db-pull', 'db-apply'], true) &&
+            !in_array($state_command, $stages, true)
+        ) {
+            throw new RuntimeException(
+                "Another command is already in progress: {$state_command}. " .
+                "Rerun {$state_command} to resume it. Only use --abort if you want to discard " .
+                "that command's resume state before running {$command}."
+            );
+        }
+
+        if ($has_direct_command_state && $state_status === 'complete') {
+            // Users can run lower-level commands directly, e.g.
+            // `reprint files-pull` or `reprint db-pull`, without going through
+            // this pull pipeline. Those commands save their own completion
+            // state in active_resumable_command. That state must not make
+            // `reprint pull` skip its files or database stage: the pipeline
+            // has not recorded that stage as complete. Clear the direct
+            // command checkpoint first so the stage computes a fresh delta.
             $state_dir = $this->client->state_dir;
             $defaults = $this->client->default_state();
 
-            if (($state['command'] ?? null) === 'files-pull' && in_array('files-pull', $stages, true)) {
+            if ($state_command === 'files-pull' && in_array('files-pull', $stages, true)) {
+                // Keep the local file index, but clear transient files-pull
+                // download state so this pipeline computes a fresh
+                // remote-vs-local delta.
                 $this->client->mutate_state(function (array $state) use ($defaults) {
-                    $state['command'] = null;
-                    $state['status'] = null;
-                    $state['cursor'] = null;
-                    $state['stage'] = null;
+                    $state['active_resumable_command']['command_name'] = null;
+                    $state['active_resumable_command']['completion_state'] = null;
+                    $state['active_resumable_command']['remote_cursor'] = null;
+                    $state['active_resumable_command']['current_stage'] = null;
                     $state['consecutive_timeouts'] = 0;
                     $state['current_file'] = null;
                     $state['current_file_bytes'] = null;
@@ -160,13 +224,13 @@ class Pull
                         @unlink($path);
                     }
                 }
-                $state = $this->client->state;
-            } elseif (($state['command'] ?? null) === 'db-pull' && in_array('db-pull', $stages, true)) {
+            } elseif ($state_command === 'db-pull' && in_array('db-pull', $stages, true)) {
+                // Discard database dump artifacts from any previous runs.
                 $this->client->mutate_state(function (array $state) use ($defaults) {
-                    $state['command'] = null;
-                    $state['status'] = null;
-                    $state['cursor'] = null;
-                    $state['stage'] = null;
+                    $state['active_resumable_command']['command_name'] = null;
+                    $state['active_resumable_command']['completion_state'] = null;
+                    $state['active_resumable_command']['remote_cursor'] = null;
+                    $state['active_resumable_command']['current_stage'] = null;
                     $state['consecutive_timeouts'] = 0;
                     $state['sql_bytes'] = null;
                     $state['db_index'] = $defaults['db_index'];
@@ -181,18 +245,10 @@ class Pull
                         @unlink($path);
                     }
                 }
-                $state = $this->client->state;
             }
         }
 
         $total = count($stages);
-        $completed_stage = $pull_pipeline === $command ? $pull_stage : null;
-
-        if ($completed_stage === 'complete') {
-            $this->prepare_repull();
-            $completed_stage = null;
-        }
-
         $start_index = 0;
         if ($completed_stage !== null) {
             $idx = array_search($completed_stage, $stages, true);
@@ -237,7 +293,7 @@ class Pull
                 throw new PullFailureReportedException($e->getMessage(), 0, $e);
             }
 
-            $this->client->mark_pull_stage_complete($stage, $command);
+            $this->client->mark_pull_stage_complete($stage, $command, $stages);
         }
 
         // The 'start' stage handles its own completion (it needs to save
@@ -257,34 +313,14 @@ class Pull
         ], true);
     }
 
-    private function assert_no_conflicting_pull(string $command, array $stages): void
-    {
-        $pull = $this->client->state['pull'] ?? [];
-        $pull_pipeline = $pull['pipeline'] ?? 'pull';
-        $pull_stage = $pull['stage'] ?? null;
-
-        if ($pull_stage !== null && $pull_stage !== 'complete' && $pull_pipeline !== $command) {
-            throw new RuntimeException(
-                "A {$pull_pipeline} command is already in progress. " .
-                "Finish it, rerun {$pull_pipeline}, or use --abort before running {$command}."
-            );
-        }
-
-        $state_command = $this->client->state['command'] ?? null;
-        $state_status = $this->client->state['status'] ?? null;
-        if (
-            $state_status !== null &&
-            $state_status !== 'complete' &&
-            in_array($state_command, ['files-pull', 'db-pull', 'db-apply'], true) &&
-            !in_array($state_command, $stages, true)
-        ) {
-            throw new RuntimeException(
-                "A {$state_command} command is already in progress. " .
-                "Finish it, rerun {$state_command}, or use --abort before running {$command}."
-            );
-        }
-    }
-
+    /**
+     * Runs one pipeline stage and prints its completion summary.
+     *
+     * Stages that delegate to lower-level commands rely on those commands for
+     * their own resume state. The pipeline checkpoint is saved by the caller
+     * after this method returns, so a thrown exception leaves the stage
+     * unfinished at the orchestration level.
+     */
     private function run_stage(string $stage, array $options, int $step, int $total): void
     {
         switch ($stage) {
@@ -319,9 +355,12 @@ class Pull
                 break;
 
             case 'db-pull':
+                // A completed db-pull is useful only when the downloaded SQL
+                // dump is still present. Without the dump, the following
+                // db-apply stage would have nothing safe to import.
                 if (
-                    ($this->client->state['command'] ?? null) !== 'db-pull' ||
-                    ($this->client->state['status'] ?? null) !== 'complete' ||
+                    ($this->client->state['active_resumable_command']['command_name'] ?? null) !== 'db-pull' ||
+                    ($this->client->state['active_resumable_command']['completion_state'] ?? null) !== 'complete' ||
                     !file_exists($this->client->state_dir . '/db.sql')
                 ) {
                     $this->run_until_complete('db-pull', function () {
@@ -334,9 +373,12 @@ class Pull
                 break;
 
             case 'db-apply':
+                // Database import is not safe to run twice. If db-apply
+                // already reached lower-level completion, accept that result even
+                // when the pipeline checkpoint still needs to be advanced.
                 if (
-                    ($this->client->state['command'] ?? null) !== 'db-apply' ||
-                    ($this->client->state['status'] ?? null) !== 'complete'
+                    ($this->client->state['active_resumable_command']['command_name'] ?? null) !== 'db-apply' ||
+                    ($this->client->state['active_resumable_command']['completion_state'] ?? null) !== 'complete'
                 ) {
                     $this->run_until_complete('db-apply', function () use ($options) {
                         $this->client->run_db_apply($options);
@@ -435,12 +477,15 @@ class Pull
         return $options;
     }
 
+    /**
+     * Validates runtime options for both CLI and programmatic callers.
+     *
+     * Programmatic callers can invoke ImportClient without the CLI parser, so
+     * pull validates runtime names and start/runtime combinations here before
+     * any resume state is written.
+     */
     private function assert_runtime_options_valid(array $options): void
     {
-        // --runtime and --start-runtime values are validated at CLI parse
-        // time from VALID_TARGET_RUNTIMES. Re-check here for programmatic
-        // callers (e.g. ImportClient::run invoked directly) that bypass
-        // the CLI parser.
         foreach (['runtime', 'start_runtime'] as $key) {
             if (!empty($options[$key]) && !in_array($options[$key], VALID_TARGET_RUNTIMES, true)) {
                 $flag = str_replace('_', '-', $key);
@@ -469,6 +514,13 @@ class Pull
         }
     }
 
+    /**
+     * Applies runtime defaults without mutating persisted state.
+     *
+     * `pull` should produce a runnable local site by default, so it generates
+     * php-builtin runtime files unless the caller selects a runtime, selects a
+     * start runtime, or disables runtime generation explicitly.
+     */
     private function default_pull_runtime_options(array $options): array
     {
         if (empty($options['runtime'])) {
@@ -486,6 +538,14 @@ class Pull
         return $options;
     }
 
+    /**
+     * Applies the database target defaults for generated runtimes.
+     *
+     * php-builtin and playground-cli can run without a local MySQL server, so
+     * pull imports into SQLite by default for those runtimes. nginx-fpm does
+     * not imply a database target because it is normally paired with an
+     * externally managed server.
+     */
     private function default_pull_target_options(array $options): array
     {
         if (empty($options['target_engine']) && empty($options['target_user']) && empty($options['target_db'])) {
@@ -497,6 +557,13 @@ class Pull
         return $options;
     }
 
+    /**
+     * Validates database import target options.
+     *
+     * MySQL imports need a user and database name because Reprint connects to
+     * an existing server. SQLite imports can use the generated default path
+     * when no explicit target path is supplied.
+     */
     private function validate_database_target_options(array $options): array
     {
         if (!empty($options['target_engine'])) {
@@ -526,6 +593,12 @@ class Pull
         return $options;
     }
 
+    /**
+     * Selects the runtime that should receive generated runtime files.
+     *
+     * A requested start runtime also implies runtime generation because there
+     * is no generated server to start otherwise.
+     */
     private function resolve_runtime(array $options): ?string
     {
         if (!empty($options['runtime'])) {
@@ -537,6 +610,12 @@ class Pull
         return null;
     }
 
+    /**
+     * Selects the runtime, if any, to launch after generation.
+     *
+     * Without an explicit start option, pull starts only runtimes that this
+     * process knows how to launch directly.
+     */
     private function resolve_start_runtime(array $options, ?string $runtime): string
     {
         if (!empty($options['start_runtime'])) {
@@ -545,11 +624,17 @@ class Pull
         return $this->default_start_runtime($runtime);
     }
 
+    /**
+     * Returns the implicit start mode for a generated runtime.
+     */
     private function default_start_runtime(?string $runtime): string
     {
         return $this->can_start_runtime($runtime) ? $runtime : 'none';
     }
 
+    /**
+     * Indicates whether pull can launch the generated runtime directly.
+     */
     private function can_start_runtime(?string $runtime): bool
     {
         return in_array($runtime, ['php-builtin', 'playground-cli'], true);
@@ -580,15 +665,16 @@ class Pull
         $state_dir = $this->client->state_dir;
         $defaults = $this->client->default_state();
         $this->client->mutate_state(function (array $state) use ($defaults) {
-            $state['pull']['pipeline'] = 'pull';
-            $state['pull']['stage'] = null;
-            $state['pull']['files_filter'] = null;
-            $state['pull']['skipped_pending'] = false;
-            $state['pull']['has_completed_once'] = true;
-            $state['command'] = null;
-            $state['status'] = null;
-            $state['cursor'] = null;
-            $state['stage'] = null;
+            $state['pull_pipeline']['started_by_command'] = 'pull';
+            $state['pull_pipeline']['stage_sequence'] = [];
+            $state['pull_pipeline']['last_completed_stage'] = null;
+            $state['pull_pipeline']['files_filter'] = null;
+            $state['pull_pipeline']['skipped_pending'] = false;
+            $state['pull_pipeline']['has_completed_once'] = true;
+            $state['active_resumable_command']['command_name'] = null;
+            $state['active_resumable_command']['completion_state'] = null;
+            $state['active_resumable_command']['remote_cursor'] = null;
+            $state['active_resumable_command']['current_stage'] = null;
             $state['consecutive_timeouts'] = 0;
             $state['sql_bytes'] = null;
             $state['current_file'] = null;
@@ -618,24 +704,24 @@ class Pull
     }
 
     /**
-     * Sub-commands return with state["status"]="partial" when a server
-     * timeout drops the connection. This loop retries automatically,
-     * resetting the status to "in_progress" so the handler enters its
-     * resume path (it specifically checks for that value).
+     * Lower-level commands return with completion_state="partial" when a
+     * server timeout drops the connection. This loop retries automatically,
+     * resetting the completion state to "in_progress" so the handler enters
+     * its resume path on the next call.
      */
     private function run_until_complete(string $stage, callable $handler): void
     {
         for ($attempt = 0; $attempt < 1000; $attempt++) {
             $handler();
             $state = $this->client->state;
-            if (($state['status'] ?? null) === 'complete') {
+            if (($state['active_resumable_command']['completion_state'] ?? null) === 'complete') {
                 return;
             }
-            if (($state['status'] ?? null) !== 'partial') {
+            if (($state['active_resumable_command']['completion_state'] ?? null) !== 'partial') {
                 throw new RuntimeException("Stage {$stage} stopped before completing.");
             }
             $this->client->mutate_state(function (array $state) {
-                $state['status'] = 'in_progress';
+                $state['active_resumable_command']['completion_state'] = 'in_progress';
                 return $state;
             });
             $this->client->exit_code = 0;
@@ -690,8 +776,9 @@ class Pull
         // Mark pull complete BEFORE the server blocks so killing the
         // server (Ctrl-C) doesn't leave the pipeline mid-flight.
         $this->client->mutate_state(function (array $state) {
-            $state['pull']['stage'] = 'start';
-            $state['status'] = 'complete';
+            $state['pull_pipeline']['last_completed_stage'] = 'start';
+            $state['pull_pipeline']['has_completed_once'] = true;
+            $state['active_resumable_command']['completion_state'] = 'complete';
             return $state;
         });
 
@@ -717,6 +804,9 @@ class Pull
         $this->client->exit_code = $exit_code;
     }
 
+    /**
+     * Starts a progress line that stage commands can update in place.
+     */
     private function print_stage_header(string $stage): void
     {
         $this->progress->clear_progress_line();
@@ -729,6 +819,9 @@ class Pull
         $this->progress->print_line("\n\r\033[K  {$cyan}⠋{$r} {$label}");
     }
 
+    /**
+     * Finishes the active progress line with the stage result.
+     */
     private function print_done(string $stage, ?string $summary = null): void
     {
         $this->progress->clear_progress_line();
@@ -741,6 +834,9 @@ class Pull
         $this->progress->set_active_label(null);
     }
 
+    /**
+     * Shows a completed stage that is being skipped during resume.
+     */
     private function print_skipped(string $stage): void
     {
         $dim = "\033[2m";
@@ -749,6 +845,9 @@ class Pull
         $this->progress->print_line("  {$dim}✓ {$label}{$r}\n");
     }
 
+    /**
+     * Prints the final summary for pipelines that return to the shell.
+     */
     private function print_summary(): void
     {
         $green = "\033[32m";
@@ -759,13 +858,19 @@ class Pull
         $this->progress->print_line(
             "\n{$green}{$bold}Done.{$r} {$dim}Files in {$fs_root}{$r}\n"
         );
-        if (!empty($this->client->state['pull']['skipped_pending'])) {
+        if (!empty($this->client->state['pull_pipeline']['skipped_pending'])) {
             $this->progress->print_line(
                 "{$dim}Deferred files remain. The skipped download list was preserved on disk for a follow-up sync.{$r}\n"
             );
         }
     }
 
+    /**
+     * Reports a failed stage once before the caller rethrows.
+     *
+     * Preflight failures are formatted separately because a missing exporter
+     * plugin is an actionable setup problem, not a resumable transfer failure.
+     */
     private function report_failure(string $command, string $stage, array $stages, int $i, \Exception $e): void
     {
         $message = $stage === 'preflight'
@@ -812,6 +917,9 @@ class Pull
         $this->progress->print_line("  Re-run the same command to resume.\n");
     }
 
+    /**
+     * Formats a byte count for human-readable stage summaries.
+     */
     private function format_bytes(int $bytes): string
     {
         if ($bytes >= 1073741824) {

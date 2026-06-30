@@ -69,10 +69,12 @@ class RuntimeFilesTest extends TestCase
     private function writeState(array $state): void
     {
         $defaults = [
-            "command" => null,
-            "status" => null,
-            "cursor" => null,
-            "stage" => null,
+            "active_resumable_command" => [
+                "command_name" => null,
+                "completion_state" => null,
+                "current_stage" => null,
+                "remote_cursor" => null,
+            ],
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,
