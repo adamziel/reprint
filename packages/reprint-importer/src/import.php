@@ -11771,7 +11771,7 @@ if (
             'type' => 'value',
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
-            'help' => 'Target database engine: mysql (default) or sqlite',
+            'help' => 'Target database engine: mysql or sqlite',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
@@ -11854,7 +11854,7 @@ if (
             'target' => 'only',
             'placeholder' => 'SOURCE',
             'repeatable' => true,
-            'help' => 'Restrict the files-pull command to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
+            'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
                 'repeat for several. Default pulls everything',
             'commands' => ['pull-files', 'files-pull'],
         ],
@@ -12180,12 +12180,20 @@ if (
         echo "\n";
         echo $info["description"];
 
-        // Collect options tagged for this command.
-        $cmd_options = array_filter($option_defs, function ($d) use ($command) {
+        // Collect options tagged for this command. Required options are also
+        // shown when the command usage names them, so command-specific help
+        // matches what the CLI requires without duplicating every command name
+        // in the option definition.
+        $cmd_options = array_filter($option_defs, function ($d) use ($command, $usage) {
             if (($d['help'] ?? null) === null) {
                 return false;
             }
-            return isset($d['commands']) && in_array($command, $d['commands'], true);
+            if (isset($d['commands']) && in_array($command, $d['commands'], true)) {
+                return true;
+            }
+            return
+                ($d['help_section'] ?? null) === 'required' &&
+                strpos($usage, "--{$d['name']}") !== false;
         });
 
         // Show command-specific options first, then global ones.
@@ -12419,7 +12427,8 @@ if (
                 "  3. db-apply — import the dump into a local database\n" .
                 "\n" .
                 "This gives the database the same retry and resume behavior as pull,\n" .
-                "without running the file or runtime stages.\n",
+                "without running the file or runtime stages. With no MySQL target\n" .
+                "options, pull-db imports into SQLite by default.\n",
             "extra" =>
                 "Examples:\n" .
                 "  reprint pull-db https://example.com \\\n" .
