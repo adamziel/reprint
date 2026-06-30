@@ -1347,17 +1347,16 @@ class ImportClient
         }
     }
 
-    /**
-     * Apply a mutation to the state and persist it. Used by orchestrator
-     * commands (Pull) that need to update multiple fields atomically.
-     */
-    public function mutate_state(callable $mutator): void
+    /** Return the typed in-process import state. */
+    public function get_import_state(): ImportState
     {
-        $state = $mutator($this->import_state());
-        $this->state = $state instanceof ImportState
-            ? $state
-            : ImportState::from_array($this->normalize_state($state));
-        $this->save_state($this->state);
+        return $this->import_state();
+    }
+
+    /** Persist the current typed import state to disk. */
+    public function save_import_state(): void
+    {
+        $this->save_state($this->import_state());
     }
 
     /** Mark a pull pipeline stage as completed in state. */
