@@ -81,6 +81,176 @@ php reprint.phar pull https://example.com --secret=TOKEN \
 
 **All options** — run `php reprint.phar pull --help` for the full list.
 
+
+### Experimental relay export transport
+
+The normal importer connects directly to the exporter on the source site. For
+push-style workflows, the source site may be local or behind a firewall, so the
+target cannot always open that direct connection. Reprint now also has a relay
+transport that keeps the target importer in charge while a source-side worker
+initiates the exporter connection.
+
+In relay mode, the target writes typed exporter requests to a relay directory.
+The source worker polls that directory, executes the request against its local
+exporter URL, and writes the response back for the target importer to consume.
+This is a file-backed proof transport for the push architecture: direct and
+relay requests use the same exporter endpoints and importer sequencing.
+
+Start a source worker from the site that can reach the exporter:
+
+```bash
+RELAY_DIR=/tmp/reprint-relay
+SOURCE_STATE=/tmp/reprint-source-state
+php reprint.phar relay-source "http://127.0.0.1:8888/?reprint-api" \
+  --secret=TOKEN \
+  --relay-dir="$RELAY_DIR" \
+  --state-dir="$SOURCE_STATE" \
+  --fs-root="$SOURCE_STATE/fs" \
+  --relay-allow-path=/absolute/source/path/wp-content/themes/my-theme \
+  --relay-idle-timeout=300
+```
+
+Run the target importer with the relay transport:
+
+```bash
+TARGET_STATE=/tmp/reprint-target-state
+TARGET_FILES=/tmp/reprint-target-files
+php reprint.phar preflight "http://127.0.0.1:8888/?reprint-api" \
+  --secret=TOKEN \
+  --transport=relay \
+  --relay-dir="$RELAY_DIR" \
+  --state-dir="$TARGET_STATE" \
+  --fs-root="$TARGET_FILES"
+
+php reprint.phar pull-files "http://127.0.0.1:8888/?reprint-api" \
+  --secret=TOKEN \
+  --transport=relay \
+  --relay-dir="$RELAY_DIR" \
+  --state-dir="$TARGET_STATE" \
+  --fs-root="$TARGET_FILES" \
+  --only=/absolute/source/path/wp-content/themes/my-theme
+```
+
+`--transport=direct` remains the default and preserves the existing behavior.
+The relay transport currently uses a shared directory so the request protocol is
+simple to inspect and test. A hosted relay can later replace the directory while
+keeping the same target-authored `ExportRequest` shape.
+
+The source worker validates every target-authored request before it calls the
+local exporter. It only accepts Reprint exporter endpoints, it rejects unexpected
+query parameters, and file requests must stay inside the local source allowlist.
+Pass one or more `--relay-allow-path` values to make a local Studio selection the
+source-side authority for a selective push. If no allowlist is passed, a relayed
+preflight discovers the site's WordPress roots and uses those as the allowlist for
+subsequent file requests.
+
+The target side keeps the normal Reprint interruption and progress behavior:
+`pull-files` runs only the file stages and accepts the same `--filter`/`--only`
+file selection controls as pull, `pull-db` runs only the database stages,
+`--abort` clears an in-progress command, and JSON/progress output still comes
+from the target importer. The source worker can be stopped independently;
+requests claimed by a crashed worker are requeued after the relay timeout so a
+restarted worker can continue.
+
+#### Plugin-owned push sessions
+
+The WordPress plugin also exposes the same relay shape over an authenticated
+push-session API. This is the binding used when the remote WordPress site owns
+the target import instead of a CLI process owning a shared relay directory:
+
+1. `?reprint-push-api&endpoint=create` creates a target-owned session and stores
+   its relay files below the target site's uploads directory.
+2. `?reprint-push-api&endpoint=run&session_id=...` runs `ImportClient` on the
+   target site with `--transport=relay`, so the plugin emits the same
+   target-authored exporter requests as the CLI relay transport.
+3. A local source worker runs `relay-source` with `--relay-url` and
+   `--relay-session`; it polls the target plugin, calls the local exporter, and
+   posts response bodies/metadata back.
+4. `?reprint-push-api&endpoint=status&session_id=...` reports session state,
+   importer progress, and relay queue counts. `endpoint=abort` marks the session
+   aborted and writes error responses for pending requests so the target importer
+   unblocks.
+
+All push-session endpoints use the same HMAC headers as `?reprint-api`. The
+source worker may use separate secrets for the local exporter and the target
+push API; pass `--relay-secret` when they differ.
+
+Example source worker for a plugin-owned target session:
+
+```bash
+php reprint.phar relay-source "http://127.0.0.1:8888/?reprint-api" \
+  --secret=LOCAL_EXPORTER_TOKEN \
+  --relay-url="https://target.example.com/?reprint-push-api" \
+  --relay-session="$SESSION_ID" \
+  --relay-secret=TARGET_PUSH_TOKEN \
+  --state-dir=/tmp/reprint-source-state \
+  --fs-root=/tmp/reprint-source-state/fs \
+  --relay-allow-path=/absolute/source/path/wp-content/themes/my-theme \
+  --relay-idle-timeout=300
+```
+
+The initial plugin runner is intentionally low-level and experimental: by
+default it maps the source `:abspath:` to the target `ABSPATH`, uses the target
+site's database constants for `db-apply`, and allows an explicit overwrite of a
+non-empty target document root. Studio should put a product confirmation and any
+selective intent UI in front of this before using it against a valuable site.
+Session creation accepts `command=pull` for a full push, `command=pull-files`
+for file-only pushes with `filter`/`only`/`extra_directory` file selection, and
+`command=pull-db` for database-only pushes. In the plugin-owned target flow,
+`pull-db` downloads the SQL dump and then applies it to the target database in
+the same session.
+
+#### Push planning and staged file apply primitives
+
+The relay transport above keeps the target importer in charge of export
+requests. The following local commands are the lower-level filesystem pieces
+Studio can use to show a dry-run and then apply files with a shorter maintenance
+window:
+
+```bash
+# 1. After files-index, print changed/unchanged/deleted files, policy, and
+#    optional target writability in a Studio-friendly JSON shape.
+php reprint.phar files-plan \
+  --state-dir=./state \
+  --fs-root=./files \
+  --target-root=/srv/htdocs \
+  --exclude='wp-admin/**' \
+  --selected-files=./selected-files.jsonl
+
+# 2. Reassemble the raw fs-root into a real-file WordPress layout. This uses
+#    the same preflight path data as flat-docroot, but writes files/directories
+#    instead of Reprint layout symlinks. Pass the selected-files manifest so
+#    staging contains only the files Studio confirmed.
+php reprint.phar materialize-docroot \
+  --state-dir=./state \
+  --fs-root=./files \
+  --materialize-to=./staged-site \
+  --selected-files=./selected-files.jsonl
+
+# 3. Apply the staged tree to a target document root. Uploads/fonts are copied
+#    before maintenance mode. Plugin/theme directories are prepared as .new
+#    trees, merged with live unselected files, and swapped through .bak while
+#    maintenance mode is enabled. Top-level loose PHP files use the same
+#    .new/.bak swap. The same selected-files manifest remains the source of
+#    truth, so a full staged tree cannot accidentally broaden the apply.
+php reprint.phar apply-staged-files \
+  --state-dir=./state \
+  --staged-root=./staged-site \
+  --target-root=/srv/htdocs \
+  --maintenance-file=/srv/htdocs/.maintenance \
+  --selected-files=./selected-files.jsonl
+```
+
+`files-plan` blocks WordPress core files and `wp-config.php` by default and
+marks loose top-level PHP files as warnings. Pass `--allow-core-files` only when
+the host-specific caller has decided how to handle core upgrades. Deleted files
+are reported in the plan but are not selected by default yet because the staged
+file apply command does not delete target files. The staged apply journal stores
+only the current operation and phase, so interrupted runs can be resumed without
+writing one journal row per file. `--selected-files` is a JSONL manifest of
+selected `files-plan.files[]` entries; Studio may rewrite that file after the
+user changes the selection, and both materialization and apply consume it.
+
 ## Composer packages
 
 The exporter and importer are published as separate Composer packages:
@@ -676,6 +846,9 @@ The importer accepts the following commands:
 php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 ```
 
+* `pull` — Pull the full site. Runs `preflight`, `files-pull`, and `db-pull`, then adds `db-apply`, `flat-docroot`, `apply-runtime`, and runtime start stages when their options are set.
+* `pull-files` — Pull only files. Runs `preflight` and then delegates to `files-pull`, including its filtering and delta-sync behavior.
+* `pull-db` — Pull only the database. Runs `preflight` and then delegates to `db-pull`, including `--sql-output` and MySQL streaming options.
 * `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
@@ -687,7 +860,10 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 * `import-metadata` — Prints local pull lifecycle metadata as JSON, including `hasCompletedOnce`. Requires only `--state-dir`; no network calls are made.
+* `files-plan` — Prints a structured JSON plan for changed files, WordPress-area policy, selected/default-excluded status, and optional target writability checks.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
+* `materialize-docroot` — Reassemble pulled files into a standard WordPress directory layout as real files/directories instead of symlinks.
+* `apply-staged-files` — Apply a materialized staging tree to a target document root using copy-first assets, .new/.bak plugin/theme swaps, top-level PHP swaps, a bounded apply journal, and optional maintenance mode.
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
 All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.

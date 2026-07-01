@@ -1,0 +1,422 @@
+<?php
+
+declare(strict_types=1);
+
+use PHPUnit\Framework\TestCase;
+
+if (!defined('ABSPATH')) {
+    define('ABSPATH', __DIR__ . '/');
+}
+if (!defined('SITE_EXPORT_PLUGIN_DIR')) {
+    define('SITE_EXPORT_PLUGIN_DIR', sys_get_temp_dir() . '/site-export-push-plugin-' . getmypid() . '/');
+}
+if (!defined('SITE_EXPORT_PUSH_BASE_DIR')) {
+    define('SITE_EXPORT_PUSH_BASE_DIR', sys_get_temp_dir() . '/site-export-push-sessions-' . getmypid());
+}
+
+require_once __DIR__ . '/../reprint-exporter-wp/push.php';
+
+final class SiteExportPushSessionTest extends TestCase
+{
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->recursiveDelete(SITE_EXPORT_PUSH_BASE_DIR);
+        if (!is_dir(SITE_EXPORT_PLUGIN_DIR)) {
+            mkdir(SITE_EXPORT_PLUGIN_DIR, 0755, true);
+        }
+        $_FILES = [];
+    }
+
+    protected function tearDown(): void
+    {
+        $_FILES = [];
+        $this->recursiveDelete(SITE_EXPORT_PUSH_BASE_DIR);
+        parent::tearDown();
+    }
+
+    public function testPluginOwnedSessionClaimsTargetAuthoredRequestWithUploadSidecar(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+
+        file_put_contents(
+            $sessionDir . '/relay/uploads/req-test-file-list.json',
+            json_encode(['/srv/source/wp-content/themes/theme/style.css'])
+        );
+        _site_export_push_write_json_file($sessionDir . '/relay/requests/req-test.json', [
+            'protocol' => 1,
+            'request_id' => 'req-test',
+            'kind' => 'stream',
+            'endpoint' => 'file_fetch',
+            'params' => ['directory' => ['/srv/source/wp-content/themes']],
+            'post_data' => [
+                'file_list' => [
+                    'type' => 'file',
+                    'upload' => 'req-test-file-list.json',
+                    'name' => 'file_list',
+                    'mime' => 'application/json',
+                    'size' => 52,
+                ],
+            ],
+        ]);
+
+        $claim = _site_export_push_claim_request($sessionId);
+
+        $this->assertTrue($claim['ok']);
+        $this->assertSame('req-test', $claim['request']['request_id']);
+        $this->assertArrayHasKey('req-test-file-list.json', $claim['uploads']);
+        $this->assertFileDoesNotExist($sessionDir . '/relay/requests/req-test.json');
+        $this->assertFileExists($sessionDir . '/relay/processing/req-test.json');
+    }
+
+    public function testResponseBodyIsStoredBeforeMetadataUnblocksImporter(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        _site_export_push_write_json_file($sessionDir . '/relay/processing/req-body.json', [
+            'request_id' => 'req-body',
+        ]);
+        $body = SITE_EXPORT_PUSH_BASE_DIR . '/body.bin';
+        file_put_contents($body, "multipart-body");
+
+        _site_export_push_store_response_body($sessionId, 'req-body', $body);
+        _site_export_push_store_response_metadata($sessionId, [
+            'request_id' => 'req-body',
+            'endpoint' => 'file_fetch',
+            'kind' => 'stream',
+            'body_file' => '/source/tmp/body',
+            'http_code' => 200,
+        ]);
+
+        $metadata = _site_export_push_read_json_file($sessionDir . '/relay/responses/req-body.json');
+        $this->assertSame($sessionDir . '/relay/responses/req-body.body', $metadata['body_file']);
+        $this->assertSame('multipart-body', file_get_contents($metadata['body_file']));
+        $this->assertFileDoesNotExist($sessionDir . '/relay/processing/req-body.json');
+    }
+
+    public function testLateResponseBodyDoesNotOverwritePublishedBody(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        $firstBody = SITE_EXPORT_PUSH_BASE_DIR . '/first-body.bin';
+        $lateBody = SITE_EXPORT_PUSH_BASE_DIR . '/late-body.bin';
+        file_put_contents($firstBody, 'first');
+        file_put_contents($lateBody, 'late');
+
+        $first = _site_export_push_store_response_body($sessionId, 'req-body', $firstBody);
+        _site_export_push_store_response_metadata($sessionId, [
+            'request_id' => 'req-body',
+            'body_file' => '/source/tmp/body',
+        ]);
+        $late = _site_export_push_store_response_body($sessionId, 'req-body', $lateBody);
+
+        $this->assertTrue($first['published']);
+        $this->assertFalse($late['published']);
+        $this->assertSame('first', file_get_contents($sessionDir . '/relay/responses/req-body.body'));
+    }
+
+    public function testAbortWritesErrorsForPendingAndProcessingRequests(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        _site_export_push_write_json_file($sessionDir . '/relay/requests/req-pending.json', ['request_id' => 'req-pending']);
+        _site_export_push_write_json_file($sessionDir . '/relay/processing/req-processing.json', ['request_id' => 'req-processing']);
+
+        $status = _site_export_push_abort_session($sessionId);
+
+        $this->assertSame('aborted', $status['session']['status']);
+        $this->assertSame('Push session aborted.', _site_export_push_read_json_file($sessionDir . '/relay/responses/req-pending.json')['error']);
+        $this->assertSame('Push session aborted.', _site_export_push_read_json_file($sessionDir . '/relay/responses/req-processing.json')['error']);
+        $this->assertFileDoesNotExist($sessionDir . '/relay/requests/req-pending.json');
+        $this->assertFileDoesNotExist($sessionDir . '/relay/processing/req-processing.json');
+    }
+
+    public function testCreateRejectsUnsupportedCommandsAndOptions(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Unsupported push command');
+
+        _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'apply-staged-files',
+        ]);
+    }
+
+    public function testCreateRejectsUnsupportedOptions(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Unsupported push option');
+
+        _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'options' => ['target_pass' => 'do-not-accept-db-passwords-from-api'],
+        ]);
+    }
+
+    public function testCreateSupportsPushOnlyCommandsAndFileFilters(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'pull-files',
+            'options' => [
+                'filter' => 'essential-files',
+                'only' => [':wp-content:/themes/theme'],
+                'extra_directory' => '/srv/local/shared',
+            ],
+        ]);
+
+        $session = _site_export_push_read_session($created['session_id']);
+        $this->assertSame('pull-files', $session['command']);
+        $this->assertSame('essential-files', $session['options']['filter']);
+        $this->assertSame([':wp-content:/themes/theme'], $session['options']['only']);
+        $this->assertSame('/srv/local/shared', $session['options']['extra_directory']);
+    }
+
+    public function testLegacyPushOnlyCommandAliasesUseOrchestratedCommands(): void
+    {
+        $files = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'files-pull',
+        ]);
+        $database = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'db-pull',
+        ]);
+
+        $this->assertSame('pull-files', _site_export_push_read_session($files['session_id'])['command']);
+        $this->assertSame('pull-db', _site_export_push_read_session($database['session_id'])['command']);
+    }
+
+    public function testDatabaseOnlyPushDownloadsThenAppliesDatabase(): void
+    {
+        $this->assertSame(['pull-db', 'db-apply'], _site_export_push_import_command_sequence('pull-db'));
+        $this->assertSame(['pull-files'], _site_export_push_import_command_sequence('pull-files'));
+    }
+
+    public function testLateWorkerResponseDoesNotOverwriteAbortResponse(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        _site_export_push_write_json_file($sessionDir . '/relay/processing/req-processing.json', ['request_id' => 'req-processing']);
+        _site_export_push_abort_session($sessionId);
+
+        $stored = _site_export_push_store_response_metadata($sessionId, [
+            'request_id' => 'req-processing',
+            'endpoint' => 'preflight',
+            'kind' => 'json',
+            'json_result' => ['ok' => true],
+        ]);
+
+        $this->assertTrue($stored['ignored']);
+        $metadata = _site_export_push_read_json_file($sessionDir . '/relay/responses/req-processing.json');
+        $this->assertSame('Push session aborted.', $metadata['error']);
+    }
+
+    public function testLateWorkerResponsePublishesAbortTombstoneAfterSessionAbort(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        _site_export_push_write_json_file($sessionDir . '/relay/processing/req-race.json', ['request_id' => 'req-race']);
+        _site_export_push_mutate_session($sessionId, function (array $session): array {
+            $session['status'] = 'aborted';
+            $session['updated_at'] = gmdate('c');
+            return $session;
+        });
+
+        $stored = _site_export_push_store_response_metadata($sessionId, [
+            'request_id' => 'req-race',
+            'endpoint' => 'preflight',
+            'kind' => 'json',
+            'json_result' => ['ok' => true],
+        ]);
+
+        $this->assertTrue($stored['ignored']);
+        $metadata = _site_export_push_read_json_file($sessionDir . '/relay/responses/req-race.json');
+        $this->assertSame('Push session aborted.', $metadata['error']);
+        $this->assertFileDoesNotExist($sessionDir . '/relay/processing/req-race.json');
+    }
+
+    public function testHeartbeatRefreshesProcessingRequestLease(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $sessionDir = _site_export_push_session_dir($sessionId);
+        $processingFile = $sessionDir . '/relay/processing/req-heartbeat.json';
+        _site_export_push_write_json_file($processingFile, ['request_id' => 'req-heartbeat']);
+        touch($processingFile, time() - SITE_EXPORT_PUSH_REQUEST_LEASE - 5);
+        clearstatcache(true, $processingFile);
+        $before = filemtime($processingFile);
+
+        $heartbeat = _site_export_push_heartbeat_request($sessionId, [
+            'request_id' => 'req-heartbeat',
+        ]);
+
+        clearstatcache(true, $processingFile);
+        $this->assertTrue($heartbeat['ok']);
+        $this->assertSame('created', $heartbeat['status']);
+        $this->assertGreaterThan($before, filemtime($processingFile));
+    }
+
+    public function testHeartbeatReportsMissingProcessingRequest(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+
+        $heartbeat = _site_export_push_heartbeat_request($created['session_id'], [
+            'request_id' => 'req-missing',
+        ]);
+
+        $this->assertFalse($heartbeat['ok']);
+        $this->assertSame('Relay request is no longer processing.', $heartbeat['error']);
+    }
+
+    public function testHeartbeatDoesNotCreateMissingProcessingRequest(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionDir = _site_export_push_session_dir($created['session_id']);
+
+        _site_export_push_heartbeat_request($created['session_id'], [
+            'request_id' => 'req-missing',
+        ]);
+
+        $this->assertFileDoesNotExist($sessionDir . '/relay/processing/req-missing.json');
+    }
+
+    public function testRunSessionReportsRunningWhenAnotherRunnerOwnsTheLock(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $lock = _site_export_push_acquire_lock(_site_export_push_session_dir($sessionId) . '/run.lock', true);
+
+        try {
+            $status = _site_export_push_run_session($sessionId);
+        } finally {
+            _site_export_push_release_lock($lock);
+        }
+
+        $this->assertSame('running', $status['session']['status']);
+    }
+
+    public function testImportStateIdIgnoresRelayAndOnlySelection(): void
+    {
+        $session = [
+            'source_url' => 'http://local.test/?reprint-api',
+            'command' => 'pull',
+            'options' => ['only' => [':wp-content:/themes'], 'relay_timeout' => 1],
+        ];
+        $sameSession = $session;
+        $sameSession['options'] = ['only' => [':wp-content:/plugins'], 'relay_timeout' => 99];
+
+        $first = _site_export_push_import_options($session, SITE_EXPORT_PUSH_BASE_DIR . '/session-a');
+        $second = _site_export_push_import_options($sameSession, SITE_EXPORT_PUSH_BASE_DIR . '/session-b');
+
+        $this->assertNotSame($first['relay_dir'], $second['relay_dir']);
+        $this->assertSame(
+            _site_export_push_import_state_id($session, $first, '/srv/target'),
+            _site_export_push_import_state_id($sameSession, $second, '/srv/target'),
+        );
+
+        $changed = $first;
+        $changed['remap'] = [['/source', '/other-target']];
+        $this->assertNotSame(
+            _site_export_push_import_state_id($session, $first, '/srv/target'),
+            _site_export_push_import_state_id($session, $changed, '/srv/target'),
+        );
+    }
+
+    public function testSessionStatusReadsPersistentImportStateAndKeepsTerminalSnapshot(): void
+    {
+        $created = _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $sessionId = $created['session_id'];
+        $stateId = str_repeat('a', 32);
+        $stateDir = _site_export_push_import_state_dir($stateId);
+        _site_export_push_write_json_file($stateDir . '/.import-status.json', [
+            'status' => 'running',
+            'command' => 'files-pull',
+        ]);
+        _site_export_push_mutate_session($sessionId, function (array $session) use ($stateId): array {
+            $session['status'] = 'running';
+            $session['import_state_id'] = $stateId;
+            return $session;
+        });
+
+        $running = _site_export_push_session_status($sessionId);
+        $this->assertSame('running', $running['import_status']['status']);
+
+        _site_export_push_mutate_session($sessionId, function (array $session): array {
+            $session['status'] = 'complete';
+            $session['import_status_snapshot'] = ['status' => 'complete', 'command' => 'db-apply'];
+            return $session;
+        });
+        _site_export_push_write_json_file($stateDir . '/.import-status.json', [
+            'status' => 'running',
+            'command' => 'files-pull',
+        ]);
+
+        $complete = _site_export_push_session_status($sessionId);
+        $this->assertSame('complete', $complete['import_status']['status']);
+        $this->assertSame('db-apply', $complete['import_status']['command']);
+    }
+
+    public function testImporterFailureExitCodeMarksSessionErrorFromImportStatus(): void
+    {
+        _site_export_push_create_session([
+            'source_url' => 'http://local.test/?reprint-api',
+        ]);
+        $stateDir = SITE_EXPORT_PUSH_BASE_DIR . '/state-result';
+        _site_export_push_write_json_file($stateDir . '/.import-status.json', [
+            'status' => 'error',
+            'error' => 'Preflight failed',
+        ]);
+
+        $this->assertSame(['status' => 'complete'], _site_export_push_importer_run_result($stateDir, 0));
+        $this->assertSame(['status' => 'partial'], _site_export_push_importer_run_result($stateDir, 2));
+        $this->assertSame(
+            ['status' => 'error', 'error' => 'Preflight failed'],
+            _site_export_push_importer_run_result($stateDir, 1)
+        );
+    }
+
+    private function recursiveDelete(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        foreach (scandir($dir) as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $path = $dir . '/' . $item;
+            is_dir($path) && !is_link($path) ? $this->recursiveDelete($path) : unlink($path);
+        }
+        rmdir($dir);
+    }
+}

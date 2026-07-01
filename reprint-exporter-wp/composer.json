@@ -12,10 +12,18 @@
             "options": {
                 "symlink": false
             }
+        },
+        {
+            "type": "path",
+            "url": "../packages/reprint-importer",
+            "options": {
+                "symlink": false
+            }
         }
     ],
     "require": {
         "php": ">=7.4",
-        "wp-php-toolkit/reprint-exporter": "*@dev"
+        "wp-php-toolkit/reprint-exporter": "*@dev",
+        "wp-php-toolkit/reprint-importer": "*@dev"
     }
 }

@@ -354,6 +354,8 @@ class ImportState
     public ?string $files_remap_fingerprint = null;
     public ?string $files_pull_only_fingerprint = null;
     public FilesPullSummaryState $files_pull_summary;
+    /** @var string[] */
+    public array $relay_source_allowed_paths = [];
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
     public RemoteFileIndexCursorState $index;
@@ -405,6 +407,7 @@ class ImportState
         $state->files_remap_fingerprint = isset($data['files_remap_fingerprint']) ? (string) $data['files_remap_fingerprint'] : null;
         $state->files_pull_only_fingerprint = isset($data['files_pull_only_fingerprint']) ? (string) $data['files_pull_only_fingerprint'] : null;
         $state->files_pull_summary = self::files_pull_summary_from($data['files_pull_summary'] ?? []);
+        $state->relay_source_allowed_paths = self::string_list_from($data['relay_source_allowed_paths'] ?? []);
         $state->db_index = self::database_table_index_from($data['db_index'] ?? []);
         $state->diff = self::file_diff_progress_from($data['diff'] ?? []);
         $state->index = self::remote_file_index_cursor_from($data['index'] ?? []);
@@ -443,6 +446,7 @@ class ImportState
             'files_remap_fingerprint' => $this->files_remap_fingerprint,
             'files_pull_only_fingerprint' => $this->files_pull_only_fingerprint,
             'files_pull_summary' => $this->files_pull_summary->to_array(),
+            'relay_source_allowed_paths' => $this->relay_source_allowed_paths,
             'db_index' => $this->db_index->to_array(),
             'diff' => $this->diff->to_array(),
             'index' => $this->index->to_array(),
@@ -462,6 +466,15 @@ class ImportState
             'tuning' => $this->tuning->to_array(),
             'pull_pipeline' => $this->pull_pipeline->to_array(),
         ];
+    }
+
+    /** @return string[] */
+    private static function string_list_from($value): array
+    {
+        if (!is_array($value)) {
+            return [];
+        }
+        return array_values(array_filter($value, 'is_string'));
     }
 
     private static function resumable_command_checkpoint_from($value): ResumableCommandCheckpointState

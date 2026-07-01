@@ -29,11 +29,129 @@ final class Site_Export_HMAC_Server {
      * contents rather than $body so multipart uploads verify consistently.
      */
     public function verify(array $headers = [], ?string $body = null, array $files = [], ?float $now = null): ?string {
-        $signature = $this->get_header($headers, 'X-Auth-Signature');
-        $nonce = $this->get_header($headers, 'X-Auth-Nonce');
-        $timestamp = $this->get_header($headers, 'X-Auth-Timestamp');
-        $content_hash = $this->get_header($headers, 'X-Auth-Content-Hash');
+        return $this->verify_content_hash_callback(
+            $headers,
+            function () use ($body, $files): string {
+                return $this->compute_received_content_hash($body, $files);
+            },
+            $now
+        );
+    }
 
+    /**
+     * Verify a request when the caller already streamed and hashed the body.
+     *
+     * This keeps large raw uploads out of PHP memory while preserving the same
+     * timestamp, nonce, content-hash, and HMAC checks as verify().
+     */
+    public function verify_content_hash(array $headers, string $received_content_hash, ?float $now = null): ?string {
+        return $this->verify_content_hash_callback(
+            $headers,
+            function () use ($received_content_hash): string {
+                return $received_content_hash;
+            },
+            $now
+        );
+    }
+
+    /**
+     * Verify the signed content hash before the request body is available.
+     *
+     * This verifies the timestamp, nonce, and HMAC signature over the claimed
+     * content hash. Callers that stream large bodies can then hash the body and
+     * compare it with the returned content hash without duplicating header parsing.
+     *
+     * @return array{error:?string,content_hash:?string}
+     */
+    public function verify_signed_content_hash(array $headers, ?float $now = null): array {
+        $auth = $this->collect_auth_headers($headers);
+        $auth_error = $this->verify_auth_headers($auth, $now);
+        if ($auth_error !== null) {
+            return [
+                'error' => $auth_error,
+                'content_hash' => null,
+            ];
+        }
+
+        return [
+            'error' => null,
+            'content_hash' => $auth['content_hash'],
+        ];
+    }
+
+    /**
+     * Validate authentication inputs before reading request bodies.
+     */
+    private function verify_content_hash_callback(array $headers, callable $received_content_hash, ?float $now = null): ?string {
+        $auth = $this->collect_auth_headers($headers);
+        $auth_error = $this->verify_auth_headers($auth, $now);
+        if ($auth_error !== null) {
+            return $auth_error;
+        }
+
+        try {
+            $actual_content_hash = $received_content_hash();
+        } catch (RuntimeException $e) {
+            return $e->getMessage();
+        }
+
+        if (!hash_equals($auth['content_hash'], $actual_content_hash)) {
+            return 'Content hash mismatch: body was modified in transit';
+        }
+
+        return null;
+    }
+
+    /**
+     * Verify the current PHP request when the caller streamed php://input to disk.
+     */
+    public function verify_global_content_hash(string $received_content_hash, ?float $now = null): ?string {
+        return $this->verify_content_hash($this->collect_global_headers(), $received_content_hash, $now);
+    }
+
+    /**
+     * Verify the current PHP request's signed content hash before reading its body.
+     *
+     * @return array{error:?string,content_hash:?string}
+     */
+    public function verify_global_signed_content_hash(?float $now = null): array {
+        return $this->verify_signed_content_hash($this->collect_global_headers(), $now);
+    }
+
+    /**
+     * Verify the current PHP request using superglobals.
+     *
+     * Returns null on success, or an error string on failure.
+     */
+    public function verify_globals(?float $now = null): ?string {
+        $body = file_get_contents('php://input');
+        if ($body === false) {
+            $body = '';
+        }
+
+        return $this->verify($this->collect_global_headers(), $body, $_FILES, $now);
+    }
+
+    private function collect_auth_headers(array $headers): array {
+        return [
+            'signature' => $this->get_header($headers, 'X-Auth-Signature'),
+            'nonce' => $this->get_header($headers, 'X-Auth-Nonce'),
+            'timestamp' => $this->get_header($headers, 'X-Auth-Timestamp'),
+            'content_hash' => $this->get_header($headers, 'X-Auth-Content-Hash'),
+        ];
+    }
+
+    /**
+     * Large multipart uploads can live on slow disks. More importantly,
+     * unauthenticated callers should not be able to force the server to hash
+     * those files before the request has passed timestamp, nonce, and signature
+     * checks.
+     */
+    private function verify_auth_headers(array $auth, ?float $now = null): ?string {
+        $signature = $auth['signature'];
+        $nonce = $auth['nonce'];
+        $timestamp = $auth['timestamp'];
+        $signed_content_hash = $auth['content_hash'];
         if ($signature === null || $signature === '') {
             return 'Missing X-Auth-Signature header';
         }
@@ -43,7 +161,7 @@ final class Site_Export_HMAC_Server {
         if ($timestamp === null || $timestamp === '') {
             return 'Missing X-Auth-Timestamp header';
         }
-        if ($content_hash === null || $content_hash === '') {
+        if ($signed_content_hash === null || $signed_content_hash === '') {
             return 'Missing X-Auth-Content-Hash header';
         }
 
@@ -67,31 +185,12 @@ final class Site_Export_HMAC_Server {
             return 'Nonce must be at least 16 characters';
         }
 
-        $expected_signature = hash_hmac('sha256', $nonce . $timestamp . $content_hash, $this->secret);
+        $expected_signature = hash_hmac('sha256', $nonce . $timestamp . $signed_content_hash, $this->secret);
         if (!hash_equals($expected_signature, $signature)) {
             return 'HMAC signature verification failed';
         }
 
-        $received_hash = hash('sha256', $this->get_received_content($body, $files));
-        if (!hash_equals($content_hash, $received_hash)) {
-            return 'Content hash mismatch: body was modified in transit';
-        }
-
         return null;
-    }
-
-    /**
-     * Verify the current PHP request using superglobals.
-     *
-     * Returns null on success, or an error string on failure.
-     */
-    public function verify_globals(?float $now = null): ?string {
-        $body = file_get_contents('php://input');
-        if ($body === false) {
-            $body = '';
-        }
-
-        return $this->verify($this->collect_global_headers(), $body, $_FILES, $now);
     }
 
     private function collect_global_headers(): array {
@@ -133,20 +232,20 @@ final class Site_Export_HMAC_Server {
         return null;
     }
 
-    private function get_received_content(?string $body, array $files): string {
+    private function compute_received_content_hash(?string $body, array $files): string {
         if (empty($files)) {
-            return $body ?? '';
+            return hash('sha256', $body ?? '');
         }
 
-        $content = '';
-        $this->append_file_contents($content, $files);
-        return $content;
+        $context = hash_init('sha256');
+        $this->append_file_hashes($context, $files);
+        return hash_final($context);
     }
 
     /**
      * Walk a PHP $_FILES-style structure in a deterministic order.
      */
-    private function append_file_contents(string &$content, array $files): void {
+    private function append_file_hashes($context, array $files): void {
         ksort($files);
 
         foreach ($files as $file_info) {
@@ -155,15 +254,15 @@ final class Site_Export_HMAC_Server {
             }
 
             $tmp_name = $file_info['tmp_name'] ?? null;
-            $this->append_tmp_name_contents($content, $tmp_name);
+            $this->append_tmp_name_hash($context, $tmp_name);
         }
     }
 
-    private function append_tmp_name_contents(string &$content, $tmp_name): void {
+    private function append_tmp_name_hash($context, $tmp_name): void {
         if (is_array($tmp_name)) {
             ksort($tmp_name);
             foreach ($tmp_name as $nested_tmp_name) {
-                $this->append_tmp_name_contents($content, $nested_tmp_name);
+                $this->append_tmp_name_hash($context, $nested_tmp_name);
             }
             return;
         }
@@ -172,9 +271,8 @@ final class Site_Export_HMAC_Server {
             return;
         }
 
-        $file_contents = file_get_contents($tmp_name);
-        if ($file_contents !== false) {
-            $content .= $file_contents;
+        if (!@hash_update_file($context, $tmp_name)) {
+            throw new RuntimeException('Cannot hash uploaded file.');
         }
     }
 }

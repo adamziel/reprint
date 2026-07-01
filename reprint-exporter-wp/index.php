@@ -10,6 +10,7 @@
  */
 
 require_once __DIR__ . '/lib.php';
+require_once __DIR__ . '/push.php';
 
 // Intercept export API requests as early as possible.
 // WordPress loads plugin files before firing `plugins_loaded`,
@@ -20,6 +21,11 @@ require_once __DIR__ . '/lib.php';
 // New integrations should use `?reprint-api`.
 if (isset($_GET['reprint-api']) || isset($_GET['site-export-api'])) {
     _site_export_handle_api_request();
+    exit;
+}
+
+if (isset($_GET[SITE_EXPORT_PUSH_API_PARAM])) {
+    _site_export_handle_push_api_request();
     exit;
 }
 
